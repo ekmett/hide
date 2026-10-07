@@ -648,6 +648,7 @@ demandedRows key input logical=case anchor of
           itemSeparator index++itemsFrom (nextItem index)
     itemSeparator index
       | nextItem index>=count=[]
+      | Just (_,lastIndex,_)<-group index,nextItem index<=lastIndex=[]
       | sameSpeaker (recordContent (logicalItemRecord (items V.! index))) (recordContent (logicalItemRecord (items V.! nextItem index)))=[]
       | otherwise=[blankRow]
     sameSpeaker (Reply a _) (Reply b _)=a==b
@@ -668,9 +669,19 @@ demandedRows key input logical=case anchor of
     rowsAt index block=case collapsedGroup index of
       Just (first,lastIndex,ident)->[groupHeading (Just (BodyPoint (recordId (logicalItemRecord (items V.! index))) 0 0)) False first lastIndex ident]
       Nothing->case group index of
-        Just (first,lastIndex,ident) | index==first,block==0->
-          groupHeading Nothing True first lastIndex ident:blockRows key input (items V.! index) block
+        Just (first,lastIndex,ident)->
+          let padding=min 2 (max 0 (displayColumns key-1))
+              rows=indentMember padding (blockRows key {displayColumns=max 1 (displayColumns key-padding)} input (items V.! index) block)
+          in if index==first && block==0 then groupHeading Nothing True first lastIndex ident:rows else rows
         _->blockRows key input (items V.! index) block
+    indentMember padding (PendingRow point mapped actions links shell:rest)=
+      let StyledRow sigils newline messages=mappedStyledRow mapped
+          shift (a,z,lo,hi)=(a+padding,z+padding,lo,hi)
+          decorated=mapped {mappedStyledRow=StyledRow (ConsChars (T.replicate padding " ") Plain sigils) newline
+            (V.map (\(a,z,ident,outgoing)->(a+padding,z+padding,ident,outgoing)) messages),
+            mappedSourceRanges=V.map shift (mappedSourceRanges mapped)}
+      in PendingRow point decorated [(a+padding,z+padding,name,values) | (a,z,name,values)<-actions] links shell:rest
+    indentMember _ []=[]
     groupHeading point expanded first lastIndex ident=
       let calls=[(label,value) | index<-[first..lastIndex],Activity label value _<-[recordContent (logicalItemRecord (items V.! index))]]
           running=length [() | (_,value)<-calls,field "status" value `elem` [Just ("pending"::Text),Just "in_progress"]]
