@@ -54,7 +54,7 @@ checks = do
   let textArea=base {dialog=Just (Dialog "Details" Information [TextArea "Text" True original (Selection 0 0) 0 0] 0 ["OK"] [])}
       areaChanged=textArea {dialog=fmap (\dg->dg {fields=[TextArea "Text" True (newBuffer "other") (Selection 0 0) 0 0]}) (dialog textArea)}
       areaWrapped=textArea {dialog=fmap (\dg->dg {fields=map id (fields dg)}) (dialog textArea)}
-      view=ConversationView (InertBody childBody) "Child" ref Nothing Nothing (0,0) (Selection 0 0)
+      view=ConversationView (InertBody childBody) "Child" ref Nothing Nothing FollowEnd 0 0 Nothing Nothing
       child=base {conversationViews=M.singleton "child" view,editorDrafts=M.singleton ref (EditorDraft opaque (Selection 0 0) True Nothing)}
       childChanged=child {editorDrafts=M.adjust (\draft->draft {editorDraftBuffer=newBuffer "other draft"}) ref (editorDrafts child)}
   areaKey<-renderKey textArea

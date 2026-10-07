@@ -141,7 +141,7 @@ checksWithBody chatBase=do
   -- after it must retain the same positions in text, PNG and access metadata.
   -- CommonMark normalizes accents; retain a decomposed combining cluster in
   -- this styled payload to exercise capture's actual grapheme path as well.
-  let styled=concatMap (\(c,style)->if c=='é' then [('e',style),('\x0301',style)] else [(c,style)])
+  let styled=map (\(text,style)->(T.replace "é" "e\x0301" text,style))
         (renderMarkdown 40 "# ABC界é👩🏽\x200d\&💻❤️\n\npublic")
       withHeading hidden wide run=do
         let semantics=W.TextSemantics W.CopyText Nothing Vec.empty Vec.empty W.ReadableWindow
@@ -151,7 +151,7 @@ checksWithBody chatBase=do
           let view=fromMaybe (error "missing heading window") (activeWindow mounted)
               rows=case W.preparedWindowRows body of W.StyledRows preparedRows->preparedRows; _->error "heading is not styled"
           layout<-prepareTextLayout wide 10 (W.preparedWindowText body) rows
-          let receipt reference=InstalledBody reference (Just (BodyControlReceipt body 10 wide (Just layout) (HostBodyControls Nothing [])))
+          let receipt reference=InstalledBody reference (Just (BodyControlReceipt body 10 wide (Just layout) (HostBodyControls Nothing Nothing Nothing [])))
               heading=mounted {wideSectionTitles=wide,windows=[view {bounds=Rect 2 2 12 12}],
                 conversationViews=M.adjust (\value->case conversationBodyRef value of
                   Just reference->value {conversationBody=receipt reference}

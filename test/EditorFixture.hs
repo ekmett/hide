@@ -50,7 +50,7 @@ withEditorBodyFixture target body original run=C.withRegistry $ \registry->
         reference=case windowContent window of PluginContent actual->actual; _->error "Editor fixture is not a prepared frame"
     run adopted {conversationTarget=target,editingInput=MountedInput,
       conversationViews=M.insert target (ConversationView (InstalledBody reference Nothing) target ref (Just mount)
-        (Just (windowId window)) (scrollRow window,scrollColumn window) (selection window)) (conversationViews adopted)}
+        (Just (windowId window)) FollowEnd 0 (scrollColumn window) Nothing Nothing) (conversationViews adopted)}
 
 -- Compare immutable identities rather than document text, saved roots or Undo.
 sameBufferVersions :: Desktop -> Desktop -> IO Bool

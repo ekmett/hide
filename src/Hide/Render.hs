@@ -128,7 +128,7 @@ data RenderState = RenderState
   } deriving Eq
 
 data DocumentKey = DocumentKey (Maybe (FilePath,Bool)) (Maybe Text) Int Bool (Maybe FilePath) Bool deriving Eq
-data ViewKey = ViewKey (Maybe PluginWindow.WindowRef) (Maybe Unique) Text Editor.DraftRef (Maybe Editor.EditorMount) (Maybe Int) BodyAnchor Int Int (Maybe BodySelection) deriving Eq
+data ViewKey = ViewKey (Maybe PluginWindow.WindowRef) !(Maybe Unique) Text Editor.DraftRef (Maybe Editor.EditorMount) (Maybe Int) !BodyAnchor !Int !Int !(Maybe BodySelection) deriving Eq
 data DraftKey = DraftKey Selection Bool (Maybe Editor.EditorMount) deriving Eq
 data QuestionKey = QuestionKey Int (Maybe Int) Selection Bool deriving Eq
 data FieldKey = InputKey Text Int | SelectedInputKey Text Selection | ComboBoxKey Text Int (Maybe Int) | CheckBoxKey Text Bool | RadioKey Text Int
@@ -166,7 +166,8 @@ renderKey original = do
         case conversationBody value of
           InstalledBody _ receipt->mapM_ (\(BodyControlReceipt prepared _ _ _ _)->payload prepared) receipt
           InertBody prepared->payload prepared
-        pure (ViewKey (conversationBodyRef value) (logicalBodyIdentity <$> conversationLogical value) (conversationName value) (conversationDraftRef value)
+        logicalIdentity<-traverse (evaluate . logicalBodyIdentity) (conversationLogical value)
+        pure (ViewKey (conversationBodyRef value) logicalIdentity (conversationName value) (conversationDraftRef value)
           (conversationEditor value) (conversationEditorFrame value) (conversationAnchor value)
           (conversationRowShift value) (conversationScrollColumn value) (conversationReplySelection value))
       draft value=do
