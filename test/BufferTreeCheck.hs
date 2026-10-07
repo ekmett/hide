@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE MagicHash, OverloadedStrings #-}
 module BufferTreeCheck (checks) where
 
 import EditorFixture (withEditorTextFixture)
@@ -9,6 +9,9 @@ import System.Mem.StableName (makeStableName)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
+import qualified Data.Text.Internal as TI
+import qualified Data.Text.Array as TA
+import GHC.Exts (isTrue#, sameByteArray#)
 import Hide.Buffer
 import qualified Hide.BufferView as View
 import qualified Hide.Model as Model
@@ -77,9 +80,11 @@ storageChecks=do
   let short=fmap snd (snapshotBufferStorage (newBuffer "borrowed\r\n"))
       borrowed=case storageCurrent short of StoredLine _ [text]:_->text; _->error "missing raw physical line"
   shortRestored<-either (error . T.unpack) pure (restoreBufferStorage short)
-  originalPayload<-evaluate borrowed >>= makeStableName
-  restoredPayload<-evaluate (sourceLineRawText (contentSourceLineAt (bufferContent shortRestored) 0)) >>= makeStableName
-  check "short terminated lines retain the borrowed string-table payload" (originalPayload==restoredPayload)
+  originalPayload<-evaluate borrowed
+  restoredPayload<-evaluate (sourceLineRawText (contentSourceLineAt (bufferContent shortRestored) 0))
+  let sameSlice (TI.Text (TA.ByteArray first) start size) (TI.Text (TA.ByteArray second) offset count)=
+        isTrue# (sameByteArray# first second) && start==offset && size==count
+  check "short terminated lines retain the borrowed string-table payload" (sameSlice originalPayload restoredPayload)
   let bad=base {storageCurrent=[StoredLine AddedLine ["replacement"]]}
   check "raw storage rejects forged provenance" (case restoreBufferStorage bad of Left _->True; _->False)
 
