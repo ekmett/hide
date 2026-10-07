@@ -223,6 +223,16 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   check "transient question coordinates restore as a cleared passive selection"
     (all (\view->conversationAnchor view==FollowEnd && conversationReplySelection view==Nothing)
       (M.elems (conversationViews withoutQuestion)))
+  let pendingPath=root </> "pending-scroll.checkpoint"
+      longReply="first paragraph\n\n"<>T.replicate 1000 "A long original reply with inline `code`.\n\n"<>"last paragraph"
+  forM_ [0,500,1000::Int] $ \fraction->do
+    pending<-logicalFixture root "" "Primary" [replyRecord 0 "Agent" longReply]
+      (object ["withinItem" .= (0::Int),"fraction" .= fraction]) Null
+    writeCheckpoint pendingPath pending >>= right
+    restoredPending<-readCheckpoint pendingPath fresh >>= right
+    check "a hidden item-relative scrollbar intent survives without history layout"
+      (conversationAnchor (conversationViews restoredPending M.! "")==conversationAnchor (conversationViews pending M.! "") &&
+       bodyText "" restoredPending=="" && null (windows restoredPending))
   check "recovered background drafts still require discard confirmation" (conversationHasDraft restoredViews && maybe False ((==DiscardDraft).purpose) (dialog (fst (runCommand Quit restoredViews))))
   BS.writeFile sourcePath "external disk edit"
   let baseline=fromJust (documentFile (buffers recovered M.! sourceId))
@@ -268,6 +278,9 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   mutate (alterFirst "conversationViews" (set "anchor" (toJSON (99999::Int,0::Int,0::Int))))
   mutate (alterFirst "conversationViews" (set "anchor" (toJSON (0::Int,99999::Int,0::Int))))
   mutate (alterFirst "conversationViews" (set "anchor" (toJSON (0::Int,0::Int,99999::Int))))
+  mutate (alterFirst "conversationViews" (set "anchor" (object ["withinItem" .= (99999::Int),"fraction" .= (500::Int)])))
+  mutate (alterFirst "conversationViews" (set "anchor" (object ["withinItem" .= (0::Int),"fraction" .= (-1::Int)])))
+  mutate (alterFirst "conversationViews" (set "anchor" (object ["withinItem" .= (0::Int),"fraction" .= (1001::Int)])))
   mutate (alterFirst "conversationViews" (alterFirstBody (set "items" (toJSON [replyRecord 0 "Agent" "first",replyRecord 0 "Agent" "duplicate"]))))
   mutate (alterFirst "conversationViews" (alterFirstBody (set "items" (toJSON [pauseRecord (-1) "invalid primary metadata"]))))
   mutate (alterFirst "conversationViews" (alterFirstBody (alterFirst "items" (set "revision" (toJSON (-1::Int))))))

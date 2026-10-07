@@ -30,7 +30,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Vector as V
 import Hide.ConversationBody (ConversationBody(..), LogicalBody, BodyItemId(..), Record(..), RecordContent(..),
-  BodyPoint(..), BodyAnchor(..), BodySelection(..), logicalBodyItems, logicalItemRecord, logicalBodyIdentity,
+  BodyPoint(..), BodyAnchor(..), BodySelection(..), logicalBodyItems, logicalItemRecord, logicalBodyIdentity, logicalBodyItemIndex,
   restoreLogicalBody, restoreLogicalViewport, validateLogicalPoint)
 import Data.Unique (Unique)
 import Data.Text (Text)
@@ -84,7 +84,13 @@ validateConversationPoints desktop=mapM_ validate (M.elems (conversationViews de
   where
     validate view=case conversationLogical view of
       Nothing->Right ()
-      Just logical->mapM_ (validateLogicalPoint logical) (anchored++selected)
+      Just logical->do
+        case conversationAnchor view of
+          WithinItem ident fraction->unless
+            (fraction>=0 && fraction<=1000 && logicalBodyItemIndex ident logical/=Nothing)
+            (Left "Invalid pending conversation anchor")
+          _->Right ()
+        mapM_ (validateLogicalPoint logical) (anchored++selected)
         where
           anchored=case conversationAnchor view of At point@BodyPoint{}->[point]; _->[]
           selected=case conversationReplySelection view of
@@ -136,7 +142,7 @@ readCheckpoint path baseline=do
       pure (ident,reference,view)
     restoreConversation scope desktop frames (target,ConversationSeed name records buffer selected focused anchored column reply)=do
       logical<-restoreLogicalBody target records
-      let points=case anchored of At point->[point]; FollowEnd->[]
+      let points=case anchored of At point->[point]; _->[]
           endpoints=case reply of Just (BodySelection a z)->[a,z]; Nothing->[]
       mapM_ (either (ioError . userError . T.unpack) pure . validateLogicalPoint logical) (points++endpoints)
       let rectangles=[rectangle | WindowSeed _ (StoredConversation owner) rectangle _<-frames,owner==target]
@@ -334,6 +340,7 @@ pointValue QuestionPoint{}=Null
 anchorValue :: BodyAnchor -> Value
 anchorValue (At point)=pointValue point
 anchorValue FollowEnd=Null
+anchorValue (WithinItem (BodyItemId ident) fraction)=object ["withinItem" .= ident,"fraction" .= fraction]
 selectionBodyValue :: Maybe BodySelection -> Value
 selectionBodyValue (Just (BodySelection a@BodyPoint{} z@BodyPoint{}))=toJSON (pointValue a,pointValue z)
 selectionBodyValue _=Null
@@ -345,6 +352,11 @@ pointParser ids value=do
   pure (BodyPoint (BodyItemId ident) block scalar)
 anchorParser :: S.Set BodyItemId -> Value -> Parser BodyAnchor
 anchorParser _ Null=pure FollowEnd
+anchorParser ids value@Object{}=withObject "pending conversation anchor" (\o->do
+  ident<-o .: "withinItem"
+  fraction<-o .: "fraction" >>= boundedInt 0 1000
+  unless (S.member (BodyItemId ident) ids) (fail "Pending anchor names a missing item")
+  pure (WithinItem (BodyItemId ident) fraction)) value
 anchorParser ids value=At <$> pointParser ids value
 selectionBodyParser :: S.Set BodyItemId -> Value -> Parser (Maybe BodySelection)
 selectionBodyParser _ Null=pure Nothing
