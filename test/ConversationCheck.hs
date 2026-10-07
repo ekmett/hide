@@ -582,6 +582,13 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       check "wide heading resize preserves logical selection and mapped paint"
         (geometry reflowed && conversationReplySelection (retained reflowed)==logicalSelection &&
           maybe False (not . null) (activeWindow reflowed >>= conversationPaintSelection reflowed))
+      let draftCopy=draftAt (newBuffer "draft-copy") (Selection 0 10) reflowed
+          (copiedDraft,draftEffects)=runCommand Copy draftCopy
+          answerCopy=reflowed {chatQuestion=fmap (\q->q {questionFocused=True,questionChoice=Nothing,
+            questionBuffer=newBuffer "answer-copy",questionSelection=Selection 0 11}) (chatQuestion reflowed)}
+          (copiedAnswer,answerEffects)=runCommand Copy answerCopy
+      check "retained transcript selection does not steal draft or question copy"
+        (clipboard copiedDraft=="draft-copy" && null draftEffects && clipboard copiedAnswer=="answer-copy" && null answerEffects)
       let pageOnce=fst (runCommand (CursorPageDown True) reflowed)
           pageTwice=fst (runCommand (CursorPageDown True) pageOnce)
       check "pending page movement retains repeated input"
