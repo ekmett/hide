@@ -2,7 +2,7 @@
 module AgentIntegrationCheck (checks, fixture) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket,onException)
+import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -247,13 +247,9 @@ checks=bracket temporary removePathForcibly $ \root ->
       caller<-captureQuestionCaller conversation primary >>= right
       (questionView,_)<-chatToolAs conversation (Just caller) recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
       let privateAnswer=questionView {chatQuestion=fmap (\q->q {questionBuffer=newBuffer "unsent secret answer",questionSelection=Selection 20 20}) (chatQuestion questionView)}
-      questionProgress<-newIORef (False,False,Nothing::Maybe BodyAnchor,"not ticked"::T.Text)
-      paintedAnswer<-testUntil "live recovered question prompt and input" (\d->do
-        let prompt="Choose privately" `T.isInfixOf` activeText d
-            projected=maybe False (maybe False (const True) . windowQuestion d) (activeWindow d)
-        writeIORef questionProgress (prompt,projected,conversationAnchor <$> M.lookup "" (conversationViews d),status d)
-        pure (prompt && projected)) privateAnswer
-        `onException` (readIORef questionProgress >>= \progress->putStrLn ("Question recovery progress: "++show progress))
+      paintedAnswer<-testUntil "live recovered question prompt and input" (pure . (\d->
+        "Choose privately" `T.isInfixOf` activeText d &&
+        maybe False (maybe False (const True) . windowQuestion d) (activeWindow d))) privateAnswer
       hiddenQuestion<-select liveChild paintedAnswer
       ensure "hidden primary question answer never becomes readable transcript" (all (not . T.isInfixOf "unsent secret answer") (readableBodies hiddenQuestion))
       writeCheckpoint recovery hiddenQuestion >>= right
