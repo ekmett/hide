@@ -246,10 +246,13 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
             if serial==0 then cancelRequestedPaste pasteReads >> pure (s {desktop=fst (applyInput Blur (desktop s))},([],stopped s,acknowledged s,webDirty (desktop s)))
             else if stopped s then pure (s,([],True,acknowledged s,webDirty (desktop s)))
             else if input==SuspendSession && serial>acknowledged s then do
+              -- Capture accepted owner output before suspension; durability
+              -- cannot depend on a display preparation completing first.
+              updated<-tick (desktop s)
               -- A failed checkpoint must leave the daemon alive with its buffers.
-              writeCheckpoint checkpoint (desktop s) >>= either (failure . T.unpack) pure
+              writeCheckpoint checkpoint updated >>= either (failure . T.unpack) pure
               atomically (writeTVar preserveCheckpoint True)
-              pure (s {stopped=True,acknowledged=serial},([],True,serial,webDirty (desktop s)))
+              pure (s {desktop=updated,stopped=True,acknowledged=serial},([],True,serial,webDirty updated))
             else if serial<=acknowledged s then pure (s,(concatMap snd (savedReplies s),stopped s,acknowledged s,webDirty (desktop s))) else do
               (next,requests)<-case input of
                 PasteReply token text->applyRequestedPaste pasteReads token text (desktop s)
