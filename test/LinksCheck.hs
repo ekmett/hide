@@ -18,7 +18,7 @@ import Hide.GuestAccess
 import Hide.Links
 import Hide.Markdown
 import Hide.Model
-import Hide.Syntax (linkSpans)
+import Hide.Syntax (linkSpans,styledContents)
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do
@@ -55,7 +55,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   forM_ [12,40,100] $ \width->forM_ [False,True] $ \outgoing->do
     let styled=renderReply True width outgoing "Some [wide 界 label](https://example.com/path) text."
         spans=linkSpans styled
-        labels=T.concat [T.pack (map fst (take (b-a') (drop a' styled))) | (a',b,_)<-spans]
+        labels=T.concat [T.take (b-a') (T.drop a' (styledContents styled)) | (a',b,_)<-spans]
     check "chat links survive wrapping and right/left alignment" (not (null spans) && all (\(_,_,url)->url=="https://example.com/path") spans && "界" `T.isInfixOf` labels && not ("http" `T.isInfixOf` labels))
   (_,url)<-followLink True d Nothing "https://example.com/a?b=1&c=2"
   check "URL packet goes to frontend" ((url >>= field "url") == Just ("https://example.com/a?b=1&c=2"::T.Text))
