@@ -784,21 +784,37 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       check "old terminal results explicitly expire" (case expired of Left message->"expired" `T.isInfixOf` message; _->False)
       let narrow=initialDesktop (40,12)
       (manyChoices,_)<-questionTool runtime narrow (object ["question" .= ("Choose"::T.Text),"choices" .= (T.replicate 100 "z":["Option "<>T.pack (show n) | n<-[1..11::Int]])])
-      visibleChoice<-tickConversation runtime (fst (handleEvent (V.EvKey V.KDown []) manyChoices))
+      let choiceVisible d=case activeWindow d of
+            Just window | Just prepared<-windowPluginText d window->any (\(a,_,action,values)->
+              action=="question-choice" && last values=="0" &&
+              let row=fst (windowTextPosition d window (W.preparedWindowText prepared) a)
+              in row>=scrollRow window && row<scrollRow window+pluginBodyRows d window) (conversationActions d)
+            _->False
+      visibleChoice<-await runtime "first choice projection" choiceVisible (fst (handleEvent (V.EvKey V.KDown []) manyChoices))
       let active=fromMaybe (error "question window") (activeWindow visibleChoice)
           body=targetBody "" visibleChoice
           choiceRows=[fst (windowTextPosition visibleChoice active (W.preparedWindowText body) a) | (a,_,action,values)<-conversationActions visibleChoice,action=="question-choice",last values=="0"]
       check "keyboard choices stay visible in a small conversation window" (case choiceRows of row:_->row>=scrollRow active && row<scrollRow active+pluginBodyRows visibleChoice active; _->False)
       check "long choice labels wrap without being discarded" (T.count "z" (conversationText visibleChoice)==100)
-      customInput<-tickConversation runtime (fst (handleEvent (V.EvKey V.KUp []) visibleChoice))
-      let browsing=modifyActive (\w->w {scrollRow=0}) customInput
+      let inputRequested=fst (handleEvent (V.EvKey V.KUp []) visibleChoice)
+          bodyFocused=(setComposerInput (composerBuffer inputRequested) (composerSelection inputRequested) False inputRequested)
+            {chatQuestion=fmap (\q->q {questionFocused=False}) (chatQuestion inputRequested)}
+          endSettled d=case (M.lookup "" (conversationViews d),bodyViewportFor d "") of
+            (Just view,Just viewport)->conversationAnchor view==FollowEnd && conversationRowShift view==0 &&
+              conversationCaretIntent view==Nothing && viewportAnchor viewport==FollowEnd
+            _->False
+      endedInput<-await runtime "settled custom input viewport" endSettled (fst (runCommand (CursorDocumentEnd False) bodyFocused))
+      customInput<-tickConversation runtime (setComposerInput (composerBuffer endedInput) (composerSelection endedInput) True endedInput)
+        {chatQuestion=fmap (\q->q {questionFocused=True}) (chatQuestion endedInput)}
+      let customBody=targetBody "" customInput
+          browsing=modifyActive (\w->w {scrollRow=0}) customInput
       retainedScroll<-tickConversation runtime browsing
       check "idle question overlay preserves manual history scrolling"
         (maybe False ((==0).scrollRow) (activeWindow retainedScroll))
       typedInput<-tickConversation runtime (fst (handleEvent (V.EvKey (V.KChar 'x') []) retainedScroll))
       let inputWindow=fromMaybe (error "question input window") (activeWindow typedInput)
           inputBody=targetBody "" typedInput
-          inputSame=body==inputBody
+          inputSame=customBody==inputBody
       check "typing reveals an already-focused answer without reflowing history"
         (inputSame && case questionInputGeometry typedInput inputWindow of
           Just (rect,_,_)->top rect>top (bounds inputWindow) && top rect<top (bounds inputWindow)+1+pluginBodyRows typedInput inputWindow
