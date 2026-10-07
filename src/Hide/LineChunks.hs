@@ -900,9 +900,10 @@ editedFlags original start end inserted tree=nul .|. terminal .|. (trailing `shi
     lastTwo=takeEnd 2 tree
     takeEnd n remaining=case FT.viewr remaining of
       FT.EmptyR->T.empty
-      rest FT.:> piece->let size=rawCharacters (FT.measure piece)
-                           suffix=T.concat (pieceFragmentParts piece (max 0 (size-n)) (min n size)) in
-        if T.length suffix>=n then suffix else takeEnd (n-T.length suffix) rest<>suffix
+      rest FT.:> piece->
+        let size=rawCharacters (FT.measure piece)
+            suffix=T.concat (pieceFragmentParts piece (max 0 (size-n)) (min n size))
+        in if T.length suffix>=n then suffix else takeEnd (n-T.length suffix) rest<>suffix
     terminal | end<size-2=old .&. 6
              | otherwise=(if T.isSuffixOf (T.singleton '\n') lastTwo then 4 else 0) .|. (if T.isSuffixOf (T.pack "\r\n") lastTwo then 2 else 0)
 
