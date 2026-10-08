@@ -66,9 +66,8 @@ from the document you are reading, including links back up to its parent
 folder. Drag across a link to select its text without opening it.
 
 Web links open in your browser. Right-click a linked screenshot and choose
-**Open** to view it; the Files pane offers the same action for Markdown,
-images and PDF files. Opening a file in Files chooses the appropriate editor
-window. In a browser session, external links and images open in a new tab;
+**Open** to view it. In Files, **Open externally** hands a supported file to
+the connected frontend; the ordinary file action chooses its editor window. In a browser session, external links and images open in a new tab;
 if popup blocking prevents that, click **Open link** above the editor.
 Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
 
