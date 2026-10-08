@@ -74,8 +74,9 @@ Keep three responsibilities distinct:
 Plugins run on the session host, including an SSH host or detached daemon. A
 frontend disconnect does not unload them. A browser or Metal client does not need
 the plugin's Haskell package: it receives cell updates, named actions, prepared
-canvas resources and a semantic widget tree from the host. The first canvas view is a retained PNG image; custom rendering remains planned,
-tracked separately from the first command/widget implementation.
+canvas resources and a semantic widget tree from the host. Retained PNG image
+windows provide the first portable canvas path; custom rendering remains a
+separate extension.
 
 ## Packaging and activation
 
