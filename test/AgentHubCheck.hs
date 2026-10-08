@@ -361,3 +361,17 @@ controlChecks directory=do
     emit (ProviderUsage 99 100)
     ended<-statusAgent hub Human child >>= right
     ensure "late capabilities and usage from ended providers are ignored" (field "status" ended==Just ("ended"::T.Text) && field "contextUsage" ended==Just Null)
+    configuredPrimary<-configureAgent hub parent "model" "b"
+    ensure "primary configuration uses the same hub control operation" (configuredPrimary==Right ())
+    waitSignal configuring
+    (primaryReceipt,_)<-agentConfiguration hub parent >>= right
+    setExternalAgentBusy hub parent True
+    _<-steerAgentAt hub primaryReceipt "primary human correction" >>= right
+    primarySteers<-readIORef steers
+    ensure "external primary steering retains the human user seat" (case reverse primarySteers of m:_->messageAuthor m==Human && messageIsUserSeat m; _->False)
+    _<-cancelAgent hub Human parent >>= right
+    expiredSteer<-steerAgentAt hub primaryReceipt "expired correction"
+    ensure "primary cancellation retires captured steering" (left expiredSteer)
+    setExternalAgentBusy hub parent False
+    idlePrimary<-steerAgent hub parent "keep draft"
+    ensure "idle primary steering does not create a new prompt" (left idlePrimary)
