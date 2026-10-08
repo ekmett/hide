@@ -7,6 +7,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:#000;color:#aaa;font:1
 </style>
 <header><button id="fullscreen">Fullscreen / capture keys</button><button id="clipboard-action" hidden>Clipboard</button><button id="open-resource" hidden>Open link</button><a id="download-file" hidden draggable="true" title="Download this snapshot, or drag a copy in Chromium where supported">Download snapshot</a><span id="status">Connecting…</span></header>
 <aside id="semantic-sidebar" class="visually-hidden" role="tree" aria-label="Sidebar" aria-description="Read-only visible sidebar. Arrow keys browse; opening and changing files use the editor controls." tabindex="0" hidden></aside>
+<aside id="semantic-dialog" class="visually-hidden" role="dialog" aria-modal="true" aria-description="Read-only current dialog. Use editor controls to edit or activate." tabindex="0" hidden></aside>
 <aside id="semantic-images" class="visually-hidden" aria-label="Images" hidden></aside>
 <main id="screen"><canvas id="display" tabindex="0" aria-label="Haskell editor"></canvas></main>
 <textarea id="input" aria-label="Editor text input" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
