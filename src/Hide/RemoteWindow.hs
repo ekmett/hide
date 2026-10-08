@@ -202,7 +202,7 @@ parseRemoteCanvas (cols,rows)=withObject "canvas scene" $ \o->do
   let size=cols*rows*2
   unless (T.length encoded<=((size+2) `div` 3)*4) (fail "Oversized canvas mask")
   mask<-either fail pure (B64.decode (TE.encodeUtf8 encoded))
-  unless (BS.length mask==size) (fail "Invalid canvas mask size")
+  unless (BS.length mask==size || (BS.null mask && null surfaces)) (fail "Invalid canvas mask size")
   let owners=IM.fromList [(canvasSlot entry,entry) | entry<-surfaces]
       scan !index !visible
         | index==cols*rows=Right visible
@@ -213,7 +213,7 @@ parseRemoteCanvas (cols,rows)=withObject "canvas scene" $ \o->do
                 scan (index+1) (IM.insertWith merge slot (x,y,x,y) visible)
               _->Left "Canvas mask has no owning viewport"
       merge (a,b,c,d) (e,f,g,h)=(min a e,min b f,max c g,max d h)
-  visible<-either fail pure (scan 0 IM.empty)
+  visible<-if BS.null mask then pure IM.empty else either fail pure (scan 0 IM.empty)
   let images=[object ["id" .= canvasWindow entry,"name" .= canvasName entry,"description" .= canvasDescription entry,
               "bounds" .= (x,y,z-x+1,w-y+1)] | entry<-surfaces, Just (x,y,z,w)<-[IM.lookup (canvasSlot entry) visible]]
       accessibility=BL.toStrict (encode (object ["images" .= images,"size" .= (cols,rows)]))
@@ -239,9 +239,10 @@ emptyCanvasReceiveState :: CanvasReceiveState
 emptyCanvasReceiveState=CanvasReceiveState Nothing M.empty Nothing
 
 -- | Validate owner epoch, declared residency and contiguous upload admission.
--- Issuer IDs are immutable and never reused within an epoch. A release cancels
+-- Issuer IDs always identify the same immutable bytes. A release cancels
 -- the current cursor; late chunks cannot recreate a resource. A fresh explicit
--- begin is another admission, without an unbounded retired-ID ledger.
+-- begin (including the same immutable ID after release) is another admission,
+-- without an unbounded retired-ID ledger.
 admitCanvasControl :: CanvasReceiveState -> Value -> Either String (CanvasReceiveState,CanvasControl)
 admitCanvasControl (CanvasReceiveState epoch live upload) value=do
   control<-parseEither (withObject "canvas control" $ \o->do

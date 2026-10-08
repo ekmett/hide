@@ -79,8 +79,8 @@ static Uint32 command_event, wake_event, dock_event;
 static double wheel_remainder;
 static void pointer(float x, float y, int32_t *event);
 
-/* Immutable image resources belong to the SDL thread. The issuer never reuses
- * IDs within an epoch. Receiver checks are bounded: duplicate live begins fail,
+/* Immutable image resources belong to the SDL thread. An ID always identifies
+ * the same pixels; explicit readmission after release may reuse it. Duplicate live begins fail,
  * and only the exact active upload may accept contiguous chunks; release cancels
  * it, so a late chunk cannot resurrect a texture. */
 #define CANVAS_RESOURCES 64
@@ -98,7 +98,7 @@ static size_t canvas_bytes,canvas_surface_count,canvas_row_used;
 static unsigned char *canvas_row;
 static uint32_t *canvas_mask;
 static int canvas_cols,canvas_rows;
-static bool canvas_committed,canvas_mask_ready;
+static bool canvas_committed,canvas_mask_ready,canvas_empty_mask;
 static SDL_GPUShader *canvas_shader;
 static SDL_GPUBuffer *canvas_mask_buffer;
 static SDL_GPUTransferBuffer *canvas_mask_transfer;
@@ -171,8 +171,13 @@ int thc_canvas_release(const char *epoch,const char *id) {
     CanvasResource *resource=canvas_resource(id); if (resource) canvas_retire(resource); return 1;
 }
 int thc_canvas_scene(const char *epoch,int width,int height,const void *packed,size_t count) {
-    if (!canvas_current(epoch) || width<1 || width>512 || height<1 || height>256 || !packed || count!=(size_t)width*height)
+    if (!canvas_current(epoch) || width<1 || width>512 || height<1 || height>256 || (count && (!packed || count!=(size_t)width*height)))
         return SDL_SetError("Invalid canvas ownership grid");
+    if (!count) {
+        canvas_cols=width;canvas_rows=height;canvas_surface_count=0;canvas_empty_mask=true;canvas_committed=false;
+        return 1;
+    }
+    canvas_empty_mask=false;
     if (!canvas_mask) { canvas_mask=calloc(512u*256u,sizeof(*canvas_mask)); if (!canvas_mask) return SDL_SetError("Cannot allocate canvas grid"); }
     const unsigned char *mask=packed;
     bool changed=width!=canvas_cols || height!=canvas_rows;
@@ -187,7 +192,7 @@ int thc_canvas_scene(const char *epoch,int width,int height,const void *packed,s
     return 1;
 }
 int thc_canvas_surface(const char *id,int slot,int x,int y,int width,int height,double tx,double ty,double tw,double th) {
-    if (!canvas_id(id) || slot<1 || slot>64 || canvas_surface_count>=64 || x<0 || y<0 || width<1 || height<1 ||
+    if (canvas_empty_mask || !canvas_id(id) || slot<1 || slot>64 || canvas_surface_count>=64 || x<0 || y<0 || width<1 || height<1 ||
         x>=canvas_cols || y>=canvas_rows || width>canvas_cols-x || height>canvas_rows-y ||
         !isfinite(tx) || !isfinite(ty) || !isfinite(tw) || !isfinite(th) || fabs(tx)>1e6 || fabs(ty)>1e6 || tw<=0 || th<=0 || tw>1e6 || th>1e6)
         return SDL_SetError("Invalid canvas surface");
@@ -200,6 +205,7 @@ int thc_canvas_surface(const char *id,int slot,int x,int y,int width,int height,
 }
 void thc_canvas_clear(void) { canvas_surface_count=0; canvas_committed=false; }
 int thc_canvas_commit(void) {
+    if (canvas_empty_mask) { canvas_committed=true;return 1; }
     const CanvasSurface *owners[65]={0};
     for (size_t i=0;i<canvas_surface_count;++i) owners[canvas_surfaces[i].slot]=&canvas_surfaces[i];
     for (int y=0;y<canvas_rows;++y) for (int x=0;x<canvas_cols;++x) {

@@ -85,6 +85,10 @@ int main(int argc,char **argv) {
     pixel(image,16+8,32+31,200,100,50); SDL_DestroySurface(image); /* crisp pass follows CRT */
     assert(thc_canvas_begin(epoch,partial,2,2,16)); assert(thc_canvas_chunk(epoch,partial,0,rgba,1));
     assert(thc_canvas_release(epoch,partial)); assert(!thc_canvas_chunk(epoch,partial,1,rgba+1,15)); assert(thc_canvas_release(epoch,partial));
+    thc_crt_filter(0);
+    assert(thc_canvas_scene(epoch,80,25,NULL,0));assert(!thc_canvas_surface(red,1,0,0,8,4,0,0,8,4));assert(thc_canvas_commit());
+    cells();assert(thc_present());image=SDL_LoadBMP(capture);assert(image);pixel(image,16+8,32+16,0,0,170);SDL_DestroySurface(image);
+    thc_crt_filter(0);
     mask[0]=65; assert(!thc_canvas_scene(epoch,80,25,mask,80*25));mask[0]=1;
     assert(thc_canvas_scene(epoch,80,25,mask,80*25)); assert(thc_canvas_surface(red,1,0,0,1,1,0,0,1,1)); assert(!thc_canvas_commit());
     assert(thc_canvas_reset(old)); assert(!thc_canvas_release(epoch,red));

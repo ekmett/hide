@@ -72,6 +72,9 @@ checks = do
     (maybe False (\scene'->canvasMask scene'==mask && map canvasWindow (canvasSurfaces scene')==[91]) (canvasOf validScene))
   check "canvas semantics omit opaque resource IDs and wholly covered surfaces"
     (maybe False (\scene'->not (TE.encodeUtf8 resource `BS.isInfixOf` canvasAccessibility scene') && TE.encodeUtf8 "safe λ <script>.png" `BS.isInfixOf` canvasAccessibility scene') (canvasOf validScene))
+  check "canvas empty scene shorthand clears ownership without a zero grid"
+    (maybe False (\scene'->BS.null (canvasMask scene') && null (canvasSurfaces scene')) (canvasOf (scene [] BS.empty)) &&
+     either (const True) (const False) (frame (scene [surface 1 [0,0,2,2]] BS.empty)))
   check "canvas scene rejects malformed mask bytes, absent owners and duplicate slots"
     (all (either (const True) (const False) . frame)
       [scene [surface 1 [0,0,2,2]] (BS.drop 1 mask),scene [] mask,scene [surface 1 [1,0,2,2]] mask,scene [surface 1 [0,0,2,2],surface 1 [0,0,2,2]] mask])
