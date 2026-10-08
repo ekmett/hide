@@ -2,11 +2,11 @@
 module RemoteWebCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait, waitCatch)
-import Control.Concurrent.STM
+import Control.Concurrent.STM (newTChanIO, atomically, readTChan, writeTChan)
 import Control.Exception (bracket, bracket_)
 import Control.Monad (unless, void)
 import Data.Aeson
-import Data.Aeson.Types (parseEither, withObject)
+import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
@@ -18,7 +18,7 @@ import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import qualified Network.WebSockets as WS
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.IO (stderr, openTempFile, hClose, hFlush)
+import System.IO (stderr, openTempFile, hClose, hFlush, hFileSize, hSeek, SeekMode(AbsoluteSeek), hGetLine)
 import System.Timeout (timeout)
 import Hide.Protocol
 import Hide.Remote (RemotePeer(..))
@@ -46,7 +46,7 @@ checks = do
             payload=BS.pack [0..15]
         withAsync (runRemoteWeb 1 "safe-host" peer) $ \server->do
           feed ([JsonPacket (object ["type" .= ("assets"::T.Text)]),reset,resource ident]++chunk ident 0 (BS.take 4 payload)++[frame True (scene [0,0,2,2])])
-          url<-bounded "browser URL" (awaitURL path)
+          url<-bounded "browser URL" (awaitURL logHandle)
           let address=drop 7 url;(host,portPath)=break (==':') address;(portText,pathText)=break (=='/') (drop 1 portPath)
               client action=WS.runClientWith host (read portText) (pathText++"socket") WS.defaultConnectionOptions [("Origin",B8.pack ("http://"++host++":"++portText))] $ action
               attach action=client action >> threadDelay 50000
@@ -86,18 +86,19 @@ checks = do
                 atomically (mapM_ (writeTChan badQueue . Just) packets)
                 result<-bounded "malformed relay refusal" (waitCatch server)
                 check "late or old-epoch chunk cannot resurrect" (case result of Left err->"canvas" `isInfixOf` show err||"Canvas" `isInfixOf` show err;Right _->False)
-        reject ([reset,resource ident]++chunk ident 0 (BS.take 4 payload)++[release ident,head (chunk ident 4 (BS.drop 4 payload))])
+        reject ([reset,resource ident]++chunk ident 0 (BS.take 4 payload)++[release ident,control "canvas-chunk" ["id" .= ident,"offset" .= (4::Int),"length" .= (12::Int)]])
         reject [reset,JsonPacket (object ["type" .= ("canvas-resource"::T.Text),"epoch" .= T.replicate 48 "d","id" .= ident,"width" .= (2::Int),"height" .= (2::Int),"bytes" .= (16::Int)])]
   putStrLn "remote canvas prefix/completed replay, binary pairs, pan retention and cancellation checks passed"
   where
     check name good=unless good (error name)
     bounded name action=timeout 10000000 action >>= maybe (error (name++" timed out")) pure
-    awaitURL path=do
+    awaitURL handle=do
       hFlush stderr
-      text<-B8.readFile path
-      case [url | line<-lines (B8.unpack text),Just url<-[stripPrefix "Haskell browser: " line]] of
-        url:_->pure url
-        []->threadDelay 10000 >> awaitURL path
+      size<-hFileSize handle
+      if size==0 then threadDelay 10000 >> awaitURL handle else do
+        hSeek handle AbsoluteSeek 0
+        line<-hGetLine handle
+        maybe (error ("Missing browser URL: "++line)) pure (stripPrefix "Haskell browser: " line)
     third (_,_,value)=value
     newReader :: IO (IORef (M.Map T.Text BS.ByteString),IORef [Value],IORef Int)
     newReader=(,,) <$> newIORef M.empty <*> newIORef [] <*> newIORef (0::Int)
