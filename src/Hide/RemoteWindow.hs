@@ -115,7 +115,8 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   unless (maybe True (\value->case value of Object{}->True; _->False) sidebar) (fail "Invalid sidebar semantics")
   let sidebarBytes=maybe BS.empty (BL.toStrict . BL.take 2097153 . encode) (sidebar::Maybe Value)
   unless (BS.length sidebarBytes<=2097152) (fail "Oversized sidebar semantics")
-  modal <- o .:? "semanticDialog" >>= maybe (pure Nothing) (parseRemoteDialog size)
+  haptics <- o .:? "hapticFeedback" .!= False
+  modal <- o .:? "semanticDialog" >>= maybe (pure Nothing) (parseRemoteDialog size haptics)
   bindings <- o .: "bindings"
   unless (length bindings<=8192 && all validBinding bindings) (fail "Invalid binding projection")
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
@@ -180,8 +181,8 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
 -- | Validate a complete bounded read-only modal snapshot on the receiver worker.
 -- A hidden modal remains present with no nodes; absence/dismissal restores the
 -- ordinary surface projection. Structural IDs retain no input capability.
-parseRemoteDialog :: (Int,Int) -> Value -> Parser (Maybe BS.ByteString)
-parseRemoteDialog size@(cols,rows) value=withObject "dialog semantics" (\o->do
+parseRemoteDialog :: (Int,Int) -> Bool -> Value -> Parser (Maybe BS.ByteString)
+parseRemoteDialog size@(cols,rows) haptics value=withObject "dialog semantics" (\o->do
   present<-o .: "present"
   readOnly<-o .: "readOnly"
   (_::Bool)<-o .: "truncated"
@@ -200,7 +201,7 @@ parseRemoteDialog size@(cols,rows) value=withObject "dialog semantics" (\o->do
     (null nodes || M.lookup root records==Just Nothing) &&
     all (\(ident,parent,_)->if ident==root then parent==Nothing else maybe False (parentReachesRoot (5::Int)) parent) entries)
     (fail "Invalid dialog identity, ancestry or text budget")
-  let bytes=BL.toStrict (BL.take 524289 (encode (object ["dialog" .= value,"size" .= size])))
+  let bytes=BL.toStrict (BL.take 524289 (encode (object ["dialog" .= value,"size" .= size,"hapticFeedback" .= haptics])))
   unless (BS.length bytes<=524288) (fail "Oversized dialog semantics")
   pure (if present then Just bytes else Nothing)) value
   where

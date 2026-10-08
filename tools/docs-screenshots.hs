@@ -418,7 +418,7 @@ capture effects scratch output name shown = do
           let Rect x y w h=maybe (Rect 0 1 (treeWidth tree) 1) fst (contextMenu shown)
               indexed=zip [0..] (M.elems (treeRows tree))
               packageRows=case dropWhile (\(_,row)->rowDepth row/=0 || PluginTree.infoLabel (rowInfo row)/="hide") indexed of
-                first:rest->first:takeWhile ((>0).rowDepth.snd) rest
+                rootRow:rest->rootRow:takeWhile ((>0).rowDepth.snd) rest
                 []->[]
               first=case packageRows of (i,_):_->max 1 (2+i-treeScroll tree); []->1
               bottom=max (y+h) (maximum (first:[3+i-treeScroll tree | (i,_)<-packageRows]))

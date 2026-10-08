@@ -203,6 +203,9 @@ static void clearSidebarAccessibility(void) {
 @property(copy) NSArray<HideAXControl *> *children;
 @property(copy) NSDictionary<NSArray *,HideAXControl *> *nodes;
 @property BOOL truncated;
+@property BOOL hapticFeedback;
+- (void)crossedButton:(NSTrackingArea *)area dragging:(BOOL)dragging;
+- (void)requestHapticFeedback;
 @end
 static HideAXDialog *dialogHost;
 static BOOL dialogPresent;
@@ -265,6 +268,39 @@ static NSString *dialogHelp(NSDictionary *record) {
 - (void)retire { self.record=nil;self.children=nil;self.parent=nil;self.host=nil; }
 @end
 @implementation HideAXDialog
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    NSArray<NSTrackingArea *> *previous=self.trackingAreas.copy;
+    NSMutableArray<NSTrackingArea *> *retained=[NSMutableArray new];
+    if (self.hapticFeedback) for (HideAXControl *control in self.nodes.allValues) {
+        if (![control.record[@"role"] isEqual:@"button"]) continue;
+        NSArray *r=control.record[@"bounds"]; double rect[4];
+        if (!thc_accessibility_cell_rect([r[0] intValue],[r[1] intValue],[r[2] intValue],[r[3] intValue],rect)) continue;
+        NSRect frame=NSMakeRect(rect[0],rect[1],rect[2],rect[3]);
+        NSTrackingArea *area=nil;
+        for (NSTrackingArea *candidate in previous)
+            if ([candidate.userInfo[@"id"] isEqual:control.record[@"id"]] && NSEqualRects(candidate.rect,frame)) { area=candidate;break; }
+        if (!area) {
+            area=[[NSTrackingArea alloc] initWithRect:frame options:NSTrackingMouseEnteredAndExited|NSTrackingActiveInKeyWindow
+                owner:self userInfo:@{@"id":control.record[@"id"]}];
+            [self addTrackingArea:area];
+        }
+        [retained addObject:area];
+    }
+    // Editing a field or repainting must not recreate the edge beneath a stationary pointer.
+    for (NSTrackingArea *area in previous) if (![retained containsObject:area]) {
+        [self removeTrackingArea:area];
+    }
+}
+- (void)requestHapticFeedback {
+    [NSHapticFeedbackManager.defaultPerformer performFeedbackPattern:NSHapticFeedbackPatternGeneric performanceTime:NSHapticFeedbackPerformanceTimeNow];
+}
+- (void)crossedButton:(NSTrackingArea *)area dragging:(BOOL)dragging {
+    if (self.hapticFeedback && !dragging && area && [self.trackingAreas containsObject:area]) [self requestHapticFeedback];
+}
+// AppKit owns edge state, including areas created beneath a stationary pointer.
+- (void)mouseEntered:(NSEvent *)event { [self crossedButton:event.trackingArea dragging:NSEvent.pressedMouseButtons!=0]; }
+- (void)mouseExited:(NSEvent *)event { [self crossedButton:event.trackingArea dragging:NSEvent.pressedMouseButtons!=0]; }
 - (BOOL)isFlipped { return YES; }
 - (BOOL)acceptsFirstResponder { return NO; }
 - (NSView *)hitTest:(NSPoint)point { (void)point;return nil; }
@@ -281,12 +317,15 @@ static NSString *dialogHelp(NSDictionary *record) {
 static void clearDialogAccessibility(void) {
     NSView *parent=dialogHost.superview;
     for (HideAXControl *control in dialogHost.nodes.allValues) [control retire];
+    dialogHost.hapticFeedback=NO;[dialogHost updateTrackingAreas];
     dialogHost.children=nil;dialogHost.nodes=nil;dialogHost.record=nil;
     [dialogHost removeFromSuperview];dialogHost=nil;
     if (parent) NSAccessibilityPostNotification(parent,NSAccessibilityLayoutChangedNotification);
 }
 static int updateDialogAccessibility(void *native_window,NSDictionary *wrapper) {
     NSArray *size=wrapper[@"size"];NSDictionary *snapshot=wrapper[@"dialog"];
+    id haptics=wrapper[@"hapticFeedback"] ?: @NO;
+    if (!boolean(haptics)) goto invalid;
     if (![size isKindOfClass:NSArray.class] || size.count!=2 || !integer(size[0],512) || !integer(size[1],256) ||
         [size[0] integerValue]<1 || [size[1] integerValue]<1 || ![snapshot isKindOfClass:NSDictionary.class] ||
         !boolean(snapshot[@"present"]) || !boolean(snapshot[@"readOnly"]) || ![snapshot[@"readOnly"] boolValue] || !boolean(snapshot[@"truncated"])) goto invalid;
@@ -319,7 +358,7 @@ static int updateDialogAccessibility(void *native_window,NSDictionary *wrapper) 
             dialogHost=[[HideAXDialog alloc] initWithFrame:window.contentView.bounds];
             dialogHost.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[window.contentView addSubview:dialogHost];
         }
-        BOOL changed=![root isEqual:dialogHost.record] || dialogHost.truncated!=[snapshot[@"truncated"] boolValue] || dialogHost.nodes.count!=values.count-1;
+        BOOL changed=dialogHost.hapticFeedback!=[haptics boolValue] || ![root isEqual:dialogHost.record] || dialogHost.truncated!=[snapshot[@"truncated"] boolValue] || dialogHost.nodes.count!=values.count-1;
         for (NSDictionary *node in values) if (node!=root && ![node isEqual:dialogHost.nodes[node[@"id"]].record]) changed=YES;
         if (!changed) return 1;
         NSMutableDictionary *nodes=[NSMutableDictionary new],*children=[NSMutableDictionary new];
@@ -334,6 +373,7 @@ static int updateDialogAccessibility(void *native_window,NSDictionary *wrapper) 
         }
         for (NSArray *key in dialogHost.nodes) if (!nodes[key]) [dialogHost.nodes[key] retire];
         dialogHost.record=root;dialogHost.nodes=nodes;dialogHost.children=children[root[@"id"]] ?: @[];dialogHost.truncated=[snapshot[@"truncated"] boolValue];
+        dialogHost.hapticFeedback=[haptics boolValue];[dialogHost updateTrackingAreas];
         NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification);return 1;
     }
 invalid:
@@ -345,7 +385,7 @@ void thc_accessibility_close(void) {
 void thc_accessibility_geometry_changed(void) {
     if (host.rows.count) NSAccessibilityPostNotification(host,NSAccessibilityLayoutChangedNotification);
     if (canvasHost.images.count) NSAccessibilityPostNotification(canvasHost,NSAccessibilityLayoutChangedNotification);
-    if (dialogHost.record) NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification);
+    if (dialogHost.record) { [dialogHost updateTrackingAreas];NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification); }
 }
 int thc_accessibility_update(void *native_window, const char *json, size_t length) {
     if (!NSThread.isMainThread) return 0;

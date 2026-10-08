@@ -15,8 +15,8 @@ import Hide.FrameTiming
 import Hide.Window (nativeMenuEvent,nativeCommands)
 import Hide.Buffer (newBuffer,Selection(..))
 import qualified Hide.Model as Model
-import qualified Data.Map.Strict
 #ifdef WITH_REMOTE
+import qualified Data.Map.Strict
 import Data.Aeson.Types (parseEither)
 import qualified Hide.Protocol as P
 import Hide.Model (initialDesktop, addDocument, Desktop(..))
@@ -136,7 +136,7 @@ checks = do
       dialogValue present nodes=object ["present" .= present,"readOnly" .= True,"truncated" .= False,"nodes" .= nodes]
       dialogFrame value=parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"semanticDialog" .= value]) rows
       modal=dialogValue True [modalRoot,modalInput]
-      wrapper value=object ["dialog" .= value,"size" .= ([80,25]::[Int])]
+      wrapper value=object ["dialog" .= value,"size" .= ([80,25]::[Int]),"hapticFeedback" .= False]
   check "native receiver validates and prepares the complete modal snapshot"
     (case dialogFrame modal of Right value->remoteDialog value==Just (BL.toStrict (encode (wrapper modal))); _->False)
   check "privacy-hidden modal remains present without exposing labels or controls"
@@ -151,6 +151,19 @@ checks = do
       projected=dialogSemantics OwnerSemantics actualModal
   check "actual host modal projection passes the production native receiver"
     (case dialogFrame projected of Right value->remoteDialog value==Just (BL.toStrict (encode (wrapper projected))); _->False)
+
+#ifdef WITH_REMOTE
+  let hapticFrame=Model.prompt "Haptic button" Model.Widgets [] actualModal {Model.hapticFeedback=True}
+  check "native modal carries the configured haptic preference"
+    (case parseRemoteFrame (object (P.frameMetadata "." hapticFrame)) (P.frameRows hapticFrame) of
+      Right value->case remoteDialog value >>= either (const Nothing) Just . eitherDecodeStrict' of
+        Just (Object fields)->KM.lookup "hapticFeedback" fields==Just (Bool True)
+        _->False
+      _->False)
+
+#endif
+  check "native receiver rejects a malformed haptic preference"
+    (either (const True) (const False) (parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"hapticFeedback" .= ("yes"::T.Text)]) rows))
   let editNode updates=case modalInput of Object fields->Object (KM.union (KM.fromList updates) fields); _->error "modal fixture"
       badNodes=[editNode ["role" .= ("action"::T.Text)],editNode ["parent" .= (["dialog","field","0"]::[T.Text])],
         editNode ["value" .= T.replicate 2049 "x"],editNode ["focused" .= (1::Int)],editNode ["bounds" .= ([80,2,1,1]::[Int])],

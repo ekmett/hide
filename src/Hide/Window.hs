@@ -305,7 +305,7 @@ draw font canvasOwner d = allocaArray 16 $ \scratch -> do
     V.Cursor x y -> c_cursor (fromIntegral x) (fromIntegral y)
     _ -> pure ()
   let modal=dialog d/=Nothing
-      dialogBytes=BL.toStrict (encode (object ["dialog" .= dialogSemantics OwnerSemantics d,"size" .= screenSize d]))
+      dialogBytes=BL.toStrict (encode (object ["dialog" .= dialogSemantics OwnerSemantics d,"size" .= screenSize d,"hapticFeedback" .= hapticFeedback d]))
   BS.useAsCStringLen dialogBytes $ \(ptr,len)->check "Update local dialog accessibility" (c_accessibility ptr (fromIntegral len))
   updateNativeCanvas canvasOwner modal (screenSize d) scene
   check "Present window frame" c_present

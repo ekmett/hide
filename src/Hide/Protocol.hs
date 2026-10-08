@@ -322,7 +322,7 @@ frameMetadata :: FilePath -> Desktop -> [Pair]
 frameMetadata cwd d =
   ["title" .= applicationTitle cwd d,"size" .= screenSize d,"mode" .= videoMode d,
    "dirty" .= webDirty d,"cursor" .= cursor,"blink" .= blinkCursor d,
-   "crt" .= crtFilter d,"pixelated" .= pixelateUnicode d,
+   "crt" .= crtFilter d,"pixelated" .= pixelateUnicode d,"hapticFeedback" .= hapticFeedback d,
    "selection" .= (case editableDialogField d of
      Just (TextArea _ True b sel _ _) -> selectedText sel b
      _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /* The SDL window stays hidden and never becomes key or ordered. */
 #import <Cocoa/Cocoa.h>
+#import <objc/runtime.h>
 #include <SDL3/SDL.h>
 #include "../cbits/window.h"
 #include "../cbits/accessibility.h"
@@ -35,6 +36,11 @@ static id findRole(id element,NSString *wanted,NSMutableSet *seen) {
     for (id child in children) { id found=findRole(child,wanted,seen); if (found) return found; }
     return nil;
 }
+@protocol HapticEdges
+- (void)crossedButton:(NSTrackingArea *)area dragging:(BOOL)dragging;
+@end
+static unsigned hapticRequests;
+static void countHapticRequest(id receiver,SEL selector) { (void)receiver;(void)selector;++hapticRequests; }
 static void near(double x,double y) { if (fabs(x-y)>0.000001) { fprintf(stderr,"Expected %.6f, got %.6f\n",y,x); abort(); } }
 int main(int argc,char **argv) {
  @autoreleasepool {
@@ -174,6 +180,29 @@ int main(int argc,char **argv) {
     }
     assert(![dialogHost acceptsFirstResponder] && [dialogHost hitTest:NSMakePoint(2,2)]==nil);
     assert(window.firstResponder==firstResponder && !findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]) && !findRole(window,NSAccessibilityImageRole,[NSMutableSet new]));
+    NSView *dialogView=dialogHost;
+    assert(dialogView.trackingAreas.count==0); // Off unless explicitly enabled.
+    NSMutableDictionary *hapticModal=[modalWrapper mutableCopy];hapticModal[@"hapticFeedback"]=@YES;
+    assert(publish(hapticModal));assert(dialogView.trackingAreas.count==1);
+    NSTrackingArea *edge=dialogView.trackingAreas.firstObject;
+    double edgeRect[4];assert(thc_accessibility_cell_rect(14,11,8,1,edgeRect));
+    assert(NSEqualRects(edge.rect,NSMakeRect(edgeRect[0],edgeRect[1],edgeRect[2],edgeRect[3])));
+    Method feedback=class_getInstanceMethod([dialogView class],NSSelectorFromString(@"requestHapticFeedback"));assert(feedback);
+    IMP originalFeedback=method_setImplementation(feedback,(IMP)countHapticRequest);
+    // Either native edge can arrive first when a dialog opens under the pointer.
+    [(id<HapticEdges>)dialogHost crossedButton:edge dragging:NO];assert(hapticRequests==1);
+    input[@"value"]=@"edit while hovering";assert(publish(hapticModal));
+    assert(dialogView.trackingAreas.firstObject==edge && hapticRequests==1);
+    [(id<HapticEdges>)dialogHost crossedButton:edge dragging:NO];assert(hapticRequests==2);
+    [(id<HapticEdges>)dialogHost crossedButton:edge dragging:YES];assert(hapticRequests==2);
+    [(id<HapticEdges>)dialogHost crossedButton:edge dragging:NO];assert(hapticRequests==3);
+    hapticModal[@"hapticFeedback"]=@NO;assert(publish(hapticModal));assert(dialogView.trackingAreas.count==0);
+    [(id<HapticEdges>)dialogHost crossedButton:edge dragging:NO];assert(hapticRequests==3);
+    hapticModal[@"hapticFeedback"]=@"yes";assert(!publish(hapticModal));
+    method_setImplementation(feedback,originalFeedback);
+    assert(publish(modalWrapper));
+    dialogHost=nil;for (NSView *view in window.contentView.subviews) if ([view isKindOfClass:NSClassFromString(@"HideAXDialog")]) dialogHost=view;
+    inputElement=findRole(window,NSAccessibilityTextFieldRole,[NSMutableSet new]);
     modal[@"truncated"]=@YES;assert(publish(modalWrapper));assert([[dialogHost accessibilityHelp] containsString:@"Some visible content is omitted"]);modal[@"truncated"]=@NO;
     input[@"value"]=@"updated";input[@"bounds"]=@[@2,@4,@5,@2];assert(publish(modalWrapper));
     assert(findRole(window,NSAccessibilityTextFieldRole,[NSMutableSet new])==inputElement && [[inputElement accessibilityValue] isEqual:@"updated"]);

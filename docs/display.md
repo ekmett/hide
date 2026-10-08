@@ -129,6 +129,10 @@ remain intact.
 **Blinking cursor** controls the insertion cursor. The native cursor blinks
 every half second; text terminals use the preference where DECSCUSR is supported.
 
+**Haptic Feedback** requests a click when the pointer enters or leaves a dialog
+button in a native Mac window. It is off by default and follows the trackpad's
+system settings. See [configuration](configuration.md) to enable it at startup.
+
 **CRT filter**, also available as `--crt`, adds scanlines and a vignette.
 The native frontend omits scanlines when the glyph rows are too small to keep
 text legible. **Pixelate Unicode** fits fallback text into bitmap-sized tiles;
