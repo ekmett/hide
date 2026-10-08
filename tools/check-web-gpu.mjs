@@ -101,7 +101,7 @@ try {
  view.setUint16(2,1,true);view.setUint16(4,0,true);adopt([{...imageSurface,rect:[0,0,2,2]}]);
  check(pixel(16,8)==='0,255,0','fractional right scissor boundary lost image texel');
  check(pixel(16,34)==='64,64,64','fractional bottom scissor boundary lost image texel');
- check(pixel(17,8)==='0,0,170','fractional scissor bypassed ownership');check(!gl.isEnabled(gl.SCISSOR_TEST),'image pass leaked scissor state');
+ check(pixel(17,8)==='255,255,255','fractional scissor damaged the ordinary wide-glyph half');check(!gl.isEnabled(gl.SCISSOR_TEST),'image pass leaked scissor state');
  canvas.width=oldWidth;canvas.height=oldHeight;gl.viewport(0,0,oldWidth,oldHeight);drawRows(rows.map((r,y)=>[y,r]));
  maskBytes.fill(0);adopt([imageSurface]);check(pixel(4,2)==='0,0,170','modal/occlusion fallback');check(images.resources.size===1,'occlusion retired live texture');
  images.receive({epoch:imageEpoch,surfaces:[],mask:''},cols,lines);dirty=true;present(performance.now());check(pixel(4,2)==='0,0,170','canonical empty scene did not clear image paint');
