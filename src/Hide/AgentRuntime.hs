@@ -6,7 +6,7 @@
 -- activate only after the session lifetime lock is held. Invalid recovery data is
 -- retained and disables spawning rather than being silently replaced.
 module Hide.AgentRuntime
-  ( AgentRuntime, AgentRequest(..), withAgentRuntime, withAgentRuntimeUsing
+  ( AgentRuntime, AgentRequest(..), PrimaryControl(..), primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
   , syncPrimary, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentReconnect
   ) where
@@ -14,7 +14,7 @@ module Hide.AgentRuntime
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.Async (Async, async, cancel, poll, withAsync)
-import Control.Exception (IOException, bracket, finally, mask, onException, try)
+import Control.Exception (IOException, bracket, finally, mask, onException, try, evaluate)
 import Control.Monad (filterM, forM_, forever, unless, void, when)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither, parseMaybe)
@@ -31,6 +31,7 @@ import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (IOMode(ReadMode), hClose, hFlush, openBinaryTempFile, withBinaryFile)
 import System.IO.Error (catchIOError, isDoesNotExistError)
 import System.Timeout (timeout)
+import System.Mem.StableName (StableName,makeStableName)
 #ifndef mingw32_HOST_OS
 import System.Posix.Files (setFileMode)
 #endif
@@ -48,9 +49,17 @@ import Hide.Session
 -- | A host/UI mailbox request whose reply cell stays filled after completion.
 -- Consumers must reject stale requests already resolved elsewhere.
 data AgentRequest = DeliverPrimary HubMessage (MVar (Either Text Value))
+  | ControlPrimary PrimaryControl
   | CancelPrimary | EndPrimary
   | ProviderPermission AgentId ACPPermission (MVar (Maybe Text))
   | AgentReconnected AgentId (Either Text ())
+-- | One host-only control bound to the exact primary connection. Reply cells
+-- stay filled after cancellation so a drained request cannot be admitted later.
+data PrimaryControl
+  = ConfigurePrimary !(StableName ACP.Client) !Text ![(Text,Text)] !(MVar (Either Text Capabilities))
+  | SteerPrimary !(StableName ACP.Client) !Text !HubMessage !(MVar (Either Text Value))
+  deriving Eq
+
 data AgentRuntime = AgentRuntime
   { agentHub :: AgentHub, agentAccess :: AgentAccess, primaryAgent :: AgentId
   , runtimeState :: MVar RuntimeState, primaryToken :: Text
@@ -66,7 +75,8 @@ data RuntimeState = RuntimeState
   , permissions :: M.Map AgentId [MVar (Maybe Text)]
   , sessions :: M.Map AgentId SessionRecord
   , launches :: M.Map AgentId ACP.Launch
-  , primaryState :: Maybe (FilePath,Text,Capabilities)
+  , primaryState :: Maybe (FilePath,Maybe (StableName ACP.Client),Text,Capabilities)
+  , primaryControl :: Maybe PrimaryControl
   , closed :: Bool, notice :: Maybe Text, checkpointActive :: Bool }
 
 -- | Scope providers, private bridge access, pending replies and checkpoint workers.
@@ -81,7 +91,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
   where
     acquire = mask $ \restore -> do
       access <- newAgentAccess
-      state <- newMVar (RuntimeState [] [] M.empty M.empty M.empty Nothing False Nothing False)
+      state <- newMVar (RuntimeState [] [] M.empty M.empty M.empty Nothing Nothing False Nothing False)
       root <- lookupEnv "THC_EDIT_SESSION" >>= traverse (\sid -> do
         saved <- loadSession sid
         case saved of
@@ -110,7 +120,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
           fresh <- newAgentHubWithLimits limits starter
           pure (fresh,Nothing,Just err)
       let cleanup = closeAgentHub hub
-          driver = primaryDriver state access (tryReadMVar identity) directory "" (Capabilities False False False [])
+          driver = primaryDriver state access (tryReadMVar identity) Nothing directory "" (Capabilities False False False [])
       ident <- (case recovered of
         Nothing -> restore (registerAgent hub "Primary" directory driver) >>= either (ioError . userError . T.unpack) pure
         Just checkpoint -> do
@@ -134,6 +144,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
       void (checkpointAgents runtime) `finally` shutdown runtime
     shutdown runtime = do
       modifyMVar_ (runtimeState runtime) $ \s -> do
+        mapM_ (rejectPrimaryControl "Editor closed.") (primaryControl s)
         forM_ (deliveries s) (\cell -> void (tryPutMVar cell (Left "Editor closed.")))
         forM_ (concat (M.elems (permissions s))) (\cell -> void (tryPutMVar cell Nothing))
         pure s {closed=True,requests=[]}
@@ -152,24 +163,26 @@ drainAgentRequests runtime = modifyMVar (runtimeState runtime) $ \s -> do
   pure (s {requests=[]},ready)
   where
     unresolved (DeliverPrimary _ cell) = isEmptyMVar cell
+    unresolved (ControlPrimary control) = primaryControlWaiting control
     unresolved (ProviderPermission _ _ cell) = isEmptyMVar cell
     unresolved _ = pure True
 
-syncPrimary :: AgentRuntime -> FilePath -> Text -> Capabilities -> Bool -> IO (Either Text ())
-syncPrimary runtime directory key caps busy = do
+syncPrimary :: AgentRuntime -> FilePath -> Maybe ACP.Client -> Text -> Capabilities -> Bool -> IO (Either Text ())
+syncPrimary runtime directory client key caps busy = do
+  connection<-traverse (\value->makeStableName =<< evaluate value) client
   previous <- primaryState <$> readMVar (runtimeState runtime)
-  result <- if previous==Just (directory,key,caps) then pure (Right ()) else do
+  result <- if previous==Just (directory,connection,key,caps) then pure (Right ()) else do
     loaded <- try (configuredLaunch runtime)
     case loaded of
       Left (_::IOException) -> pure (Left "Could not read configured agent provider.")
       Right launch -> do
         updated <- updateExternalAgent (agentHub runtime) (primaryAgent runtime)
-          (primaryDriver (runtimeState runtime) (agentAccess runtime) (pure (Just (primaryAgent runtime))) directory key caps)
+          (primaryDriver (runtimeState runtime) (agentAccess runtime) (pure (Just (primaryAgent runtime))) connection directory key caps)
         case updated of
           Left err -> pure (Left err)
           Right () -> do
             modifyMVar_ (runtimeState runtime) $ \s -> pure s
-              { primaryState=Just (directory,key,caps)
+              { primaryState=Just (directory,connection,key,caps)
               , launches=M.insert (primaryAgent runtime) launch (launches s)
               , sessions=M.adjust (\record -> record {sessionDirectory=directory}) (primaryAgent runtime) (sessions s) }
             pure (Right ())
@@ -212,11 +225,19 @@ activateAgentCheckpoint runtime = modifyMVar_ (runtimeState runtime) $ \s ->
 readLimits :: FilePath -> IO (Either Text HubLimits)
 readLimits directory = fmap (uncurry HubLimits) <$> readAgentLimitsFor directory
 
-primaryDriver :: MVar RuntimeState -> AgentAccess -> IO (Maybe AgentId) -> FilePath -> Text -> Capabilities -> AgentDriver
-primaryDriver state access identity directory key caps = AgentDriver
+primaryDriver :: MVar RuntimeState -> AgentAccess -> IO (Maybe AgentId) -> Maybe (StableName ACP.Client) -> FilePath -> Text -> Capabilities -> AgentDriver
+primaryDriver state access identity connection directory key caps = AgentDriver
   { driverDirectory=directory,driverSessionKey=key,driverCapabilities=caps
-  , driverSteer=const (pure (Left "Steer the primary through the conversation UI."))
-  , driverConfigure=const (pure (Left "Configure the primary provider through the conversation UI."))
+  , driverSteer= \message->case connection of
+      Nothing->pure (Left "Primary provider is disconnected.")
+      Just owner->do
+        reply<-newEmptyMVar
+        requestPrimaryControl state (SteerPrimary owner key message reply) reply
+  , driverConfigure= \settings->case connection of
+      Nothing->pure (Left "Primary provider is disconnected.")
+      Just owner->do
+        reply<-newEmptyMVar
+        requestPrimaryControl state (ConfigurePrimary owner key settings reply) reply
   , driverDeliver= \message -> mask $ \restore -> do
       cell <- newEmptyMVar
       modifyMVar_ state $ \s -> if closed s
@@ -227,6 +248,7 @@ primaryDriver state access identity directory key caps = AgentDriver
         modifyMVar_ state (\s -> pure s
           {deliveries=filter (/=cell) (deliveries s),requests=filter (not . matchingDelivery cell) (requests s)})
   , driverCancel=modifyMVar_ state $ \s -> do
+      mapM_ (rejectPrimaryControl "Agent control cancelled.") (primaryControl s)
       -- A drained delivery may still be executing. Its UI owner releases the
       -- reply only after the underlying prompt settles, preserving Hub's barrier.
       forM_ [cell | DeliverPrimary _ cell <- requests s] (\cell -> void (tryPutMVar cell (Left "Cancelled.")))
@@ -235,6 +257,45 @@ primaryDriver state access identity directory key caps = AgentDriver
       identity >>= mapM_ (revokeAgentAccess access)
       failDeliveries state "Primary agent ended."
       enqueue state EndPrimary }
+
+-- | Admission checks the live provider object, not its reusable session key.
+-- Cancellation before this check refuses the request without protocol IO.
+primaryControlCurrent :: PrimaryControl -> Maybe ACP.Client -> Maybe Text -> IO Bool
+primaryControlCurrent control client session=do
+  waiting<-primaryControlWaiting control
+  case (client,session) of
+    (Just current,Just key) | waiting->do
+      owner<-makeStableName =<< evaluate current
+      pure $ case control of
+        ConfigurePrimary expected sid _ _->owner==expected && key==sid
+        SteerPrimary expected sid _ _->owner==expected && key==sid
+    _->pure False
+
+primaryControlWaiting :: PrimaryControl -> IO Bool
+primaryControlWaiting (ConfigurePrimary _ _ _ reply)=isEmptyMVar reply
+primaryControlWaiting (SteerPrimary _ _ _ reply)=isEmptyMVar reply
+
+rejectPrimaryControl :: Text -> PrimaryControl -> IO ()
+rejectPrimaryControl reason (ConfigurePrimary _ _ _ reply)=void (tryPutMVar reply (Left reason))
+rejectPrimaryControl reason (SteerPrimary _ _ _ reply)=void (tryPutMVar reply (Left reason))
+
+-- | Resolve the primary's outstanding control without completing its running
+-- prompt. Provider cancellation still waits for that prompt's real outcome.
+failPrimaryControl :: AgentRuntime -> Text -> IO ()
+failPrimaryControl runtime reason=withMVar (runtimeState runtime) $ \state->
+  mapM_ (rejectPrimaryControl reason) (primaryControl state)
+
+requestPrimaryControl :: MVar RuntimeState -> PrimaryControl -> MVar (Either Text a) -> IO (Either Text a)
+requestPrimaryControl state control reply=mask $ \restore->do
+  modifyMVar_ state $ \current->
+    if closed current then rejectPrimaryControl "Editor closed." control >> pure current
+    else if primaryControl current/=Nothing then rejectPrimaryControl "An agent operation is already pending." control >> pure current
+    else pure current {primaryControl=Just control,requests=requests current++[ControlPrimary control]}
+  restore (readMVar reply) `finally` do
+    rejectPrimaryControl "Agent control interrupted." control
+    modifyMVar_ state $ \current->pure current
+      {primaryControl=if primaryControl current==Just control then Nothing else primaryControl current
+      ,requests=filter (\request->case request of ControlPrimary queued->queued/=control; _->True) (requests current)}
 
 isDelivery :: AgentRequest -> Bool
 isDelivery DeliverPrimary{} = True
@@ -245,6 +306,7 @@ matchingDelivery _ _ = False
 
 failDeliveries :: MVar RuntimeState -> Text -> IO ()
 failDeliveries state reason = modifyMVar_ state $ \s -> do
+  mapM_ (rejectPrimaryControl reason) (primaryControl s)
   forM_ (deliveries s) (\cell -> void (tryPutMVar cell (Left reason)))
   pure s {requests=filter (not . isDelivery) (requests s)}
 

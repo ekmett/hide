@@ -401,21 +401,21 @@ worker hub@(AgentHub _ _ ref) ident = do
 configureAgent :: AgentHub -> AgentId -> Text -> Text -> IO (Either Text ())
 configureAgent hub ident=configureAgentChecked hub ident Nothing
 
--- | Configure through the ordinary child-control reservation, rejecting a
+-- | Configure through the ordinary agent-control reservation, rejecting a
 -- replaced connection or changed advertisement before any provider call.
 configureAgentAt :: AgentHub -> AgentConfigRef -> Text -> Text -> IO (Either Text ())
 configureAgentAt hub receipt=configureAgentChecked hub (agentConfigAgent receipt) (Just receipt)
 
 configureAgentChecked :: AgentHub -> AgentId -> Maybe AgentConfigRef -> Text -> Text -> IO (Either Text ())
 configureAgentChecked hub ident expected option value=fmap (fmap (const ())) $
-  childControl hub ident "configuration" validate (\_ driver->driverConfigure driver [(option,value)]) commit
+  agentControl hub ident "configuration" validate (\_ driver->driverConfigure driver [(option,value)]) commit
   where
     validate entry=do
       unless (maybe True (==configurationRef entry) expected) (Left "Agent setting expired; reopen its choices.")
       unless (entryPhase entry==Idle && entryCurrent entry==Nothing && Q.null (entryQueue entry))
-        (Left "Wait for the child's replies and queued messages before changing settings.")
+        (Left "Wait for the agent's replies and queued messages before changing settings.")
       unless (length [() | choice<-configChoices (entryCaps entry),configId choice==option,value `elem` map fst (configValues choice)]==1)
-        (Left "This child setting is not currently advertised by the provider.")
+        (Left "This agent setting is not currently advertised by the provider.")
     commit caps=appendEvent "configured" Human (capabilitiesValue caps) . (\entry->entry {entryCaps=caps,entryCapsVersion=entryCapsVersion entry+1})
 
 configurationRef :: Entry -> AgentConfigRef
@@ -448,7 +448,7 @@ steerAgentAt :: AgentHub -> AgentConfigRef -> Text -> IO (Either Text Value)
 steerAgentAt hub receipt=steerAgentChecked hub (agentConfigAgent receipt) (Just receipt)
 
 steerAgentChecked :: AgentHub -> AgentId -> Maybe AgentConfigRef -> Text -> IO (Either Text Value)
-steerAgentChecked hub ident expected text=childControl hub ident "steering" validate
+steerAgentChecked hub ident expected text=agentControl hub ident "steering" validate
   (\entry driver->driverSteer driver (HubMessage 0 Human text (entryParent entry==Nothing)))
   (\_ entry->appendEvent "steered" Human (object ["text" .= text,"userSeat" .= (entryParent entry==Nothing)]) entry)
   where
@@ -456,20 +456,20 @@ steerAgentChecked hub ident expected text=childControl hub ident "steering" vali
       unless (maybe True (==configurationRef entry) expected) (Left "Agent target expired; submit to its current editor.")
       unless (not (T.null (T.strip text)) && T.length text<=65536 && not (T.any (=='\0') text))
         (Left "Steering requires 1–65536 characters without NUL.")
-      unless (supportsSteering (entryCaps entry)) (Left "This child provider does not advertise steering support.")
-      unless (entryPhase entry==Running && entryCurrent entry/=Nothing) (Left "The child has no active turn; use Enter to queue this message.")
+      unless (supportsSteering (entryCaps entry)) (Left "This agent provider does not advertise steering support.")
+      unless (entryPhase entry==Running && (entryCurrent entry/=Nothing || entryExternalBusy entry)) (Left "The agent has no active turn; use Enter to queue this message.")
 
-childControl :: AgentHub -> AgentId -> Text -> (Entry -> Either Text ())
+agentControl :: AgentHub -> AgentId -> Text -> (Entry -> Either Text ())
   -> (Entry -> AgentDriver -> IO (Either Text a)) -> (a -> Entry -> Entry) -> IO (Either Text a)
-childControl (AgentHub _ _ ref) ident kind validate action commit=mask $ \restore->do
+agentControl (AgentHub _ _ ref) ident kind validate action commit=mask $ \restore->do
   reserved<-atomically $ do
     state<-readTVar ref
     case do
-      entry<-maybe (Left "Unknown child agent.") Right (M.lookup ident (hubEntries state))
-      unless (active entry && not (entryExternal entry) && not (hubClosed state)) (Left "Select a connected child agent.")
-      unless (entryControl entry==Nothing && entryPhase entry/=Cancelling) (Left "A child operation is already pending.")
+      entry<-maybe (Left "Unknown agent.") Right (M.lookup ident (hubEntries state))
+      unless (active entry && not (hubClosed state)) (Left "Select a connected agent.")
+      unless (entryControl entry==Nothing && entryPhase entry/=Cancelling) (Left "An agent operation is already pending.")
       validate entry
-      driver<-maybe (Left "Child provider is disconnected.") Right (entryDriver entry)
+      driver<-maybe (Left "Agent provider is disconnected.") Right (entryDriver entry)
       pure (entry,driver) of
         Left err->pure (Left err)
         Right (entry,driver)->do
@@ -494,7 +494,7 @@ childControl (AgentHub _ _ ref) ident kind validate action commit=mask $ \restor
                   next=either (\err->appendEvent (kind<>"_failed") Human (String (boundedError err)) entry) apply result
               writeTVar ref state {hubEntries=M.insert ident next (hubEntries state)}
               pure result
-            _->pure (Left "Child operation ended or was cancelled.")) `finally` release
+            _->pure (Left "Agent operation ended or was cancelled.")) `finally` release
 
 -- | Queue a message with authenticated author and derived user-seat attribution.
 sendAgent :: AgentHub -> Actor -> AgentId -> Text -> IO (Either Text Int)
