@@ -18,44 +18,35 @@ layout(location = 0) out highp vec4 out_var_SV_Target0;
 
 void main()
 {
-    highp vec2 _54 = vertexUV * Canvas.canvasGrid.xy;
-    uvec2 _56 = uvec2(floor(_54));
-    uvec4 _64 = texelFetch(SPIRV_Cross_CombinedcanvasMaskSPIRV_Cross_DummySampler, ivec3(int(_56.x), int(_56.y), 0).xy, 0);
-    uint _65 = _64.x;
-    if ((_65 & 32767u) != uint(Canvas.canvasGrid.z))
+    highp vec2 _61 = vertexUV * Canvas.canvasGrid.xy;
+    uvec2 _63 = uvec2(floor(_61));
+    uvec4 _71 = texelFetch(SPIRV_Cross_CombinedcanvasMaskSPIRV_Cross_DummySampler, ivec3(int(_63.x), int(_63.y), 0).xy, 0);
+    uint _72 = _71.x;
+    if ((_72 & 32767u) != uint(Canvas.canvasGrid.z))
     {
         discard;
     }
-    highp vec2 _78 = (_54 - Canvas.canvasTarget.xy) / Canvas.canvasTarget.zw;
-    bool _85;
-    if (all(greaterThanEqual(_78, vec2(0.0))))
+    highp vec2 _85 = (_61 - Canvas.canvasTarget.xy) / Canvas.canvasTarget.zw;
+    bool _95;
+    if (all(greaterThanEqual(_85, vec2(0.0))))
     {
-        _85 = all(lessThan(_78, vec2(1.0)));
+        _95 = all(lessThan(_85, vec2(1.0)));
     }
     else
     {
-        _85 = false;
+        _95 = false;
     }
-    highp vec3 _95;
-    if (_85)
+    uvec3 _112;
+    if (_95)
     {
-        highp vec4 _91 = textureLod(SPIRV_Cross_CombinedcanvasImagecanvasSampler, _78, 0.0);
-        _95 = _91.xyz * _91.w;
+        uvec4 _105 = uvec4(floor((textureLod(SPIRV_Cross_CombinedcanvasImagecanvasSampler, _85, 0.0) * 255.0) + vec4(0.5)));
+        _112 = (_105.xyz * uvec3(_105.w)) / uvec3(((_72 & 32768u) != 0u) ? 510u : 255u);
     }
     else
     {
-        _95 = vec3(0.0);
+        _112 = uvec3(0u);
     }
-    highp vec3 _101;
-    if ((_65 & 32768u) != 0u)
-    {
-        _101 = _95 * 0.5;
-    }
-    else
-    {
-        _101 = _95;
-    }
-    out_var_SV_Target0 = vec4(_101, 1.0);
+    out_var_SV_Target0 = vec4(vec3(_112) * vec3(0.0039215688593685626983642578125), 1.0);
 }
 
 `;
