@@ -45,31 +45,36 @@ uint particleHash(uint value) {
     value ^= value >> 15; value *= 0x846ca68bu;
     return value ^ (value >> 16);
 }
-float3 powerSparks(float2 position) {
-    float3 light = 0;
+float4 powerSparks(float2 position) {
+    float4 sparks = 0; // premultiplied color and coverage
     // Keep menu/status chrome untouched. Native input supplies only bounded
     // caret metadata; remote typing feedback uses the last displayed position.
-    if (powerMode.x == 0 || position.y < 1 || position.y >= grid.y - 1) return light;
+    if (powerMode.x == 0 || position.y < 1 || position.y >= grid.y - 1) return sparks;
     for (uint burst = 0; burst < HIDE_POWER_BURSTS; ++burst) {
         float4 emission = powerBursts[burst];
         float age = emission.z;
         float2 delta = (position - emission.xy) * float2(8, powerMode.y);
         // Conservative logical-pixel bounds avoid particle work elsewhere.
-        if (age < 0 || abs(delta.x) > 24 || abs(delta.y) > 32) continue;
+        if (age < 0 || abs(delta.x) > 64 || abs(delta.y) > 64) continue;
         float fade = 1 - age * (1000.0 / HIDE_POWER_LIFETIME_MS);
         for (uint particle = 0; particle < HIDE_POWER_PARTICLES; ++particle) {
             uint seed = particleHash(uint(emission.w) * 31u + particle);
-            float2 velocity = float2((float(seed & 1023u) / 511.5 - 1) * 34,
-                -20 - float((seed >> 10) & 1023u) * 0.03);
-            float2 center = velocity * age + float2(0, 50) * age * age;
-            float2 distance = abs(delta - center);
-            float ink = saturate(1.5 - distance.x - distance.y) * fade;
+            float2 velocity = float2((float(seed & 1023u) / 511.5 - 1) * 80,
+                -40 - float((seed >> 10) & 1023u) * 0.06);
+            float2 center = velocity * age + float2(0, 80) * age * age;
+            // A short trail follows the instantaneous velocity. Wider colored
+            // cores and travel beyond the caret make this readable as sparks.
+            float2 trail = -(velocity + float2(0, 160) * age) * 0.04;
+            float2 offset = delta - center;
+            float along = saturate(dot(offset, trail) / max(dot(trail, trail), 0.01));
+            float2 distance = abs(offset - trail * along);
+            float ink = saturate(2.5 - distance.x - distance.y) * fade * (1 - 0.65 * along);
             float3 tint = particle % 3 == 0 ? float3(1, 0.65, 0.12) :
                 particle % 3 == 1 ? float3(0.15, 0.85, 1) : float3(1, 0.25, 0.65);
-            light = max(light, tint * ink);
+            sparks = float4(tint * ink, ink) + sparks * (1 - ink);
         }
     }
-    return light;
+    return sparks;
 }
 #endif
 float4 main(float4 color : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target0 {
@@ -122,7 +127,10 @@ float4 main(float4 color : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target0 {
     if (caretMouse.z >= 0 && all(cellPosition == uint2(caretMouse.zw))) value = mouseColor(value);
     float3 painted = rgb(value);
 #ifndef HIDE_WEBGL
-    painted = saturate(painted + powerSparks(position));
+    // Source-over preserves colored particles over bright backgrounds; additive
+    // light disappears on white paint and only recolors existing dark glyphs.
+    float4 sparks = powerSparks(position);
+    painted = painted * (1 - sparks.a) + sparks.rgb;
 #endif
     if (viewport.z != 0) {
         float2 n = uv * 2 - 1;

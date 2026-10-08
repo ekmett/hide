@@ -94,47 +94,74 @@ static void pixel_is(SDL_Surface *image,int x,int y,Uint8 r,Uint8 g,Uint8 b);
 #ifndef HIDE_BASELINE
 static void power_mode_pixels(const char *capture) {
     uint16_t blank[16]={0};
-    assert(thc_begin());
-    for (int y=0;y<25;++y) for (int x=0;x<80;++x)
-        thc_glyph(x,y,1,8,blank,0xffffff,0x0000aa,0,0,1);
-    thc_cursor_blink(0); thc_cursor(20,10); thc_power_mode(1);
-    assert(thc_present());
-    SDL_Surface *baseline=SDL_LoadBMP(capture); assert(baseline);
-    uint64_t atlas_before,bytes,batches,grid_before;
-    thc_atlas_stats(&atlas_before,&bytes,&batches); thc_grid_stats(&grid_before,&bytes);
-    thc_power_mode_burst();
-    SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
-    int32_t event[6]; assert(thc_wait(event) && event[0]==17);
-    SDL_Delay(65); assert(thc_present());
-    SDL_Surface *burst=SDL_LoadBMP(capture); assert(burst);
-    int changed=0;
-    for (int y=0;y<baseline->h;++y) for (int x=0;x<baseline->w;++x) {
-        Uint8 r,g,b,a,rr,gg,bb,aa;
-        assert(SDL_ReadSurfacePixel(baseline,x,y,&r,&g,&b,&a));
-        assert(SDL_ReadSurfacePixel(burst,x,y,&rr,&gg,&bb,&aa));
-        if (r!=rr || g!=gg || b!=bb) {
-            ++changed;
-            assert(x>=20*16-48 && x<(21*16+48));
-            assert(y>=10*32-64 && y<(11*32+64));
+    /* Colored particles must remain visible over light as well as dark paint.
+     * Capture both ages before inspecting pixels, so CPU scanning cannot consume
+     * the animation lifetime. Moving coverage distinguishes travel from tint/fade. */
+    for (int light=0;light<2;++light) {
+        assert(thc_begin());
+        for (int y=0;y<25;++y) for (int x=0;x<80;++x)
+            thc_glyph(x,y,1,8,blank,0xffffff,light?0xffffff:0x0000aa,0,0,1);
+        thc_cursor_blink(0); thc_cursor(20,10); thc_power_mode(1);
+        assert(thc_present());
+        SDL_Surface *baseline=SDL_LoadBMP(capture); assert(baseline);
+        uint64_t atlas_before,bytes,batches,grid_before;
+        thc_atlas_stats(&atlas_before,&bytes,&batches); thc_grid_stats(&grid_before,&bytes);
+        thc_power_mode_burst();
+        SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+        int32_t event[6]; assert(thc_wait(event) && event[0]==17);
+        SDL_Delay(65); assert(thc_present());
+        SDL_Surface *early=SDL_LoadBMP(capture); assert(early);
+        SDL_Delay(120); assert(thc_wait(event) && event[0]==17);
+        assert(thc_present());
+        SDL_Surface *late=SDL_LoadBMP(capture); assert(late);
+        int visible=0,min_x=early->w,min_y=early->h,max_x=-1,max_y=-1;
+        for (int y=0;y<baseline->h;++y) for (int x=0;x<baseline->w;++x) {
+            Uint8 r,g,b,a,rr,gg,bb,aa;
+            assert(SDL_ReadSurfacePixel(baseline,x,y,&r,&g,&b,&a));
+            assert(SDL_ReadSurfacePixel(early,x,y,&rr,&gg,&bb,&aa));
+            if (r!=rr || g!=gg || b!=bb) {
+                assert(x>=20*16-128 && x<(21*16+128));
+                assert(y>=10*32-128 && y<(11*32+128));
+            }
+            if (abs((int)r-rr)>=64 || abs((int)g-gg)>=64 || abs((int)b-bb)>=64) {
+                ++visible;
+                min_x=SDL_min(min_x,x); max_x=SDL_max(max_x,x);
+                min_y=SDL_min(min_y,y); max_y=SDL_max(max_y,y);
+            }
         }
+        if (visible<64) fprintf(stderr,"Power Mode on %s paint: only %d contrasting pixels\n",light?"light":"dark",visible);
+        assert(visible>=64);
+        int travelled=0;
+        for (int y=0;y<baseline->h;++y) for (int x=0;x<baseline->w;++x) {
+            Uint8 r,g,b,a,rr,gg,bb,aa;
+            assert(SDL_ReadSurfacePixel(baseline,x,y,&r,&g,&b,&a));
+            assert(SDL_ReadSurfacePixel(late,x,y,&rr,&gg,&bb,&aa));
+            if (r!=rr || g!=gg || b!=bb) {
+                assert(x>=20*16-128 && x<(21*16+128));
+                assert(y>=10*32-128 && y<(11*32+128));
+            }
+            if ((x<min_x-2 || x>max_x+2 || y<min_y-2 || y>max_y+2) &&
+                (abs((int)r-rr)>=64 || abs((int)g-gg)>=64 || abs((int)b-bb)>=64)) ++travelled;
+        }
+        if (travelled<8) fprintf(stderr,"Power Mode on %s paint: only %d pixels travelled beyond the early burst\n",light?"light":"dark",travelled);
+        assert(travelled>=8);
+        SDL_DestroySurface(early); SDL_DestroySurface(late);
+        thc_power_mode(0); assert(thc_present());
+        SDL_Surface *disabled=SDL_LoadBMP(capture); assert(disabled);
+        assert(baseline->pitch==disabled->pitch && baseline->h==disabled->h);
+        assert(!memcmp(baseline->pixels,disabled->pixels,(size_t)baseline->pitch*baseline->h));
+        SDL_DestroySurface(disabled);
+        thc_power_mode(1); thc_power_mode_burst(); SDL_Delay(620); assert(thc_present());
+        SDL_Surface *expired=SDL_LoadBMP(capture); assert(expired);
+        assert(!memcmp(baseline->pixels,expired->pixels,(size_t)baseline->pitch*baseline->h));
+        SDL_DestroySurface(expired); SDL_DestroySurface(baseline);
+        uint64_t atlas_after,grid_after;
+        thc_atlas_stats(&atlas_after,&bytes,&batches); thc_grid_stats(&grid_after,&bytes);
+        assert(atlas_before==atlas_after && grid_before==grid_after);
+        SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+        assert(thc_wait(event) && event[0]==0);
     }
-    assert(changed>0);
-    SDL_DestroySurface(burst);
-    thc_power_mode(0); assert(thc_present());
-    SDL_Surface *disabled=SDL_LoadBMP(capture); assert(disabled);
-    assert(baseline->pitch==disabled->pitch && baseline->h==disabled->h);
-    assert(!memcmp(baseline->pixels,disabled->pixels,(size_t)baseline->pitch*baseline->h));
-    SDL_DestroySurface(disabled);
-    thc_power_mode(1); thc_power_mode_burst(); SDL_Delay(620); assert(thc_present());
-    SDL_Surface *expired=SDL_LoadBMP(capture); assert(expired);
-    assert(!memcmp(baseline->pixels,expired->pixels,(size_t)baseline->pitch*baseline->h));
-    SDL_DestroySurface(expired); SDL_DestroySurface(baseline);
-    uint64_t atlas_after,grid_after;
-    thc_atlas_stats(&atlas_after,&bytes,&batches); thc_grid_stats(&grid_after,&bytes);
-    assert(atlas_before==atlas_after && grid_before==grid_after);
-    SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
-    assert(thc_wait(event) && event[0]==0);
-    puts("Power Mode shader: visible local sparks, expiry, disable, retained atlas/grid and idle wake passed");
+    puts("Power Mode shader: contrasting sparks, travel, expiry, disable, retained atlas/grid and idle wake passed");
 }
 #endif
 static void script_scene(int script) {

@@ -15,16 +15,19 @@ host's acceptance of input. The short-lived sparks use screen coordinates and
 are clipped at the menu/status rows, rather than anchored to document text.
 
 Four bursts of eight particles live for 600 ms in fixed SDL-thread storage. The
-HLSL cell shader analytically computes their trajectories; the native build
-packages validated SPIR-V and translated Metal source. Animation wake kind 17
-presents the retained glyph atlas and cell buffer. It does not reconstruct a
+HLSL cell shader analytically computes their trajectories and short trails.
+Colored coverage keeps the sparks visible on light and dark backgrounds; adding
+light alone would vanish over white paint and tint only existing dark glyphs.
+The native build packages validated SPIR-V and translated Metal source. Animation
+wake kind 17 presents the retained glyph atlas and cell buffer. It does not reconstruct a
 Haskell scene, resend a session frame, or upload a new cell grid. Once the final
 burst expires, one presentation clears it and the ordinary idle timeout resumes.
 
 `tools/check-native.sh` checks the bounded burst state on every run. Its GPU leg
-(`HIDE_TEST_GPU=vulkan` or `metal`) also checks visible sparks, exact disabled and
-expired pixels, local extent, unchanged atlas/grid upload counts, and return to
-idle. A shader compile or Metal translation alone is not device validation.
+(`HIDE_TEST_GPU=vulkan` or `metal`) also checks contrasting sparks on light and
+dark paint, travel between frames, exact disabled and expired pixels, local
+extent, unchanged atlas/grid upload counts, and return to idle. A shader compile
+or Metal translation alone is not device validation.
 
 The native atlas fixture can emit a private SDL heap-allocation receipt with
 `HIDE_TEST_ALLOCATIONS=1`. It compares 32 actual retained presentations with
