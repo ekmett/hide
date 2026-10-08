@@ -529,6 +529,18 @@ imageChecks=do
 #else
     captured `seq` hiddenCapture `seq` pure ()
 #endif
+    let reference=case windowContent <$> activeWindow dragging of Just (PluginContent value)->value; _->error "missing image reference"
+        refresh body desktop=W.refreshWindow reference body >>= maybe (fail "image refresh expired") (\update->adoptWindowUpdate P.HumanMenu update desktop)
+    sameImage<-refresh public dragging
+    replacementImage<-prepare W.ReadableWindow
+    changedImage<-refresh replacementImage sameImage
+    check "same image refresh retains panning but new resource cancels the captured gesture"
+      (drag sameImage==drag dragging && drag changedImage==Nothing)
+    newInstance<-W.openWindow scope replacementImage >>= maybe (fail "image replacement expired") pure
+    let (replacementDrag,_)=handleEvent (V.EvMouseDown 3 7 V.BLeft []) changedImage
+    replacedImage<-replaceWindowUpdate P.HumanMenu reference newInstance replacementDrag
+    check "new instance cancels panning even when it shares the same image bytes"
+      (drag replacementDrag/=Nothing && drag replacedImage==Nothing)
   retired<-W.withWindowScope $ \scope->open scope public (initialDesktop (40,18))
   inactive<-tickPluginWindows retired
   check "scope retirement drops retained pixel/PNG bytes and keeps the inert text"

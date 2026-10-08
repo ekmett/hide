@@ -363,6 +363,7 @@ cellRowsForLayers layers size=fst (cellRowsAndOwnership layers size)
 -- | Compose fallback cells and canvas ownership in one front-to-back pass.
 -- Ordinary cells have slot zero; only accepted writes within CellCanvas acquire
 -- its slot. Halos set bit 15 and post-composition privacy masks clear ownership.
+-- With no canvas layer, ownership is empty rather than a grid of zero slots.
 cellRowsAndOwnership :: [CellLayer] -> (Int,Int) -> (Vec.Vector (Vec.Vector CellSpan),BS.ByteString)
 cellRowsAndOwnership layers size=let (cells,ownership)=composeCellGrid layers size
   in (rowsFromCells cells size,ownership)
@@ -470,7 +471,7 @@ composeCellGrid layers (w,h)=runST $ do
   mapM_ (uncurry mask) [(paint,regions) | CellMask paint regions<-layers]
   cells<-Vec.unsafeFreeze grid
   ownership<-UV.unsafeFreeze owners
-  let bytes | not canvasPresent=BS.replicate (2*w*h) 0
+  let bytes | not canvasPresent=BS.empty
             | otherwise=fst (BS.unfoldrN (2*w*h) (\i->let value=ownership UV.! (i `div` 2)
              in Just (fromIntegral (if even i then value .&. 255 else value `shiftR` 8),i+1)) 0)
   pure (cells,bytes)

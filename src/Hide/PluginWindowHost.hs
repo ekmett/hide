@@ -35,7 +35,9 @@ adoptWindowUpdate origin update desktop
               if present then pure () else W.retireWindowRef reference
               pure desktop {status="Image window budget reached (64 windows / 64 MiB decoded)."}
           | present->pure desktop {pluginWindows=M.insert reference prepared (pluginWindows desktop),
-              windows=map (clamp reference prepared) (windows desktop)}
+              windows=map (clamp reference prepared) (windows desktop),
+              drag=if (M.lookup reference (pluginWindows desktop) >>= W.preparedWindowImage)==W.preparedWindowImage prepared
+                then drag desktop else cancelImagePan reference desktop}
           | otherwise->pure (addPluginWindow reference prepared desktop)
   where present=M.member (W.updateWindowRef update) (pluginWindows desktop)
 
@@ -64,11 +66,19 @@ replaceWindowUpdate origin old update desktop
             W.retireWindowRef old
             mapM_ E.retireEditorMount [mount | w<-windows desktop,windowContent w==PluginContent old,Just mount<-[windowEditorMount w]]
             pure desktop {pluginWindows=M.insert reference prepared (M.delete old (pluginWindows desktop)),
-              retiredPluginWindows=S.delete old (retiredPluginWindows desktop),windows=map (replace reference prepared) (windows desktop)}
+              retiredPluginWindows=S.delete old (retiredPluginWindows desktop),windows=map (replace reference prepared) (windows desktop),
+              drag=cancelImagePan old desktop}
   where
     replace reference prepared w | windowContent w==PluginContent old=w {windowContent=PluginContent reference,windowEditorMount=Nothing,
       selection=Selection 0 0,scrollRow=0,scrollColumn=0,rowsInteraction=initialRowsInteraction prepared,imageViewport=fitCanvasView}
     replace _ _ w=w
+
+-- A captured gesture belongs to the admitted image. A same-resource refresh
+-- keeps it; changing the resource or replacing its instance cancels it.
+cancelImagePan :: W.WindowRef -> Desktop -> Maybe Drag
+cancelImagePan reference desktop=case drag desktop of
+  Just (ImagePanning wid _ _ _) | any (\w->windowId w==wid && windowContent w==PluginContent reference) (windows desktop)->Nothing
+  captured->captured
 
 -- Scalar scope checks are bounded by the 256-view admission limit. Retirement
 -- leaves a selectable read-only snapshot; no stale plugin request can revive it.
