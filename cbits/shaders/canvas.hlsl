@@ -22,11 +22,14 @@ float4 main(float4 color : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target0 {
 #endif
     if ((owner & 32767u) != uint(canvasGrid.z)) discard;
     float2 imageUV = (position - canvasTarget.xy) / canvasTarget.zw;
-    float3 painted = 0;
+    uint3 painted = 0;
+    uint divisor = (owner & 32768u) ? 510u : 255u;
     if (all(imageUV >= 0) && all(imageUV < 1)) {
         float4 sample = canvasImage.SampleLevel(canvasSampler, imageUV, 0);
-        painted = sample.rgb * sample.a; // straight RGBA over the black canvas
+        // NEAREST preserves source texels. Recover their RGBA8 integers before
+        // alpha/shadow division so CPU capture and every GPU round identically.
+        uint4 rgba = uint4(floor(sample * 255.0 + 0.5));
+        painted = rgba.rgb * rgba.a / divisor;
     }
-    if (owner & 32768u) painted *= 0.5;
-    return float4(painted, 1);
+    return float4(float3(painted) / 255.0, 1);
 }
