@@ -25,6 +25,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
 import System.IO (Handle, hFlush)
+import Hide.Accessibility (SemanticAudience(OwnerSemantics), sidebarSemantics)
 import Hide.GuestAccess
 import Hide.Model hiding (Paste)
 import qualified Hide.Model as Model
@@ -283,6 +284,7 @@ frameMetadata cwd d =
      _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
    "wordstar" .= wordStar d,"fileExportView" .= fileExportView d,
+   "semanticSidebar" .= sidebarSemantics OwnerSemantics d,
    "bindingsActive" .= (bindingInputAvailable d && maybe False (const True) (effectiveBindings d)),
    "bindings" .= (focusedBindingChords d),
    "editorWindows" .= [object ["id" .= ident,"title" .= title,"selected" .= selected,"enabled" .= enabled] | (ident,title,selected,enabled)<-editorWindowEntries d],
