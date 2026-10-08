@@ -7,6 +7,8 @@ import {spawn} from 'node:child_process';
 const browser=process.env.HIDE_TEST_BROWSER||(process.platform==='darwin'?'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome':'chromium');
 const source=await fs.readFile('assets/web/editor.js','utf8');
 const shader=await fs.readFile('assets/web/cell-shader.js','utf8');
+const imageShader=await fs.readFile('assets/web/canvas-shader.js','utf8');
+const imageConsumer=await fs.readFile('assets/web/canvas-images.js','utf8');
 const checks=String.raw`
 try {
  glyphs=new Map([['A',[8,Array(16).fill(0x9000)]],['H',[16,Array(16).fill(0x00ff)]]]);
@@ -76,13 +78,32 @@ try {
  for(let i=0;i<520;++i)atlasEntry('e',i,false,128,64,0);
  check(atlasSize>2048,'GPU atlas growth did not occur');dirty=true;present(performance.now());
  check(pixel(0,0)==='255,255,255','growth changed earlier tile rectangle');
+ const imageEpoch='a'.repeat(48),resourceId='b'.repeat(48);
+ images.control({type:'canvas-reset',epoch:imageEpoch});
+ images.control({type:'canvas-resource',epoch:imageEpoch,id:resourceId,width:2,height:2,bytes:16});
+ const imageBytes=new Uint8Array([255,0,0,255,0,255,0,255,0,0,255,255,255,255,255,128]);
+ images.control({type:'canvas-chunk',epoch:imageEpoch,id:resourceId,offset:0,length:4});images.binary(imageBytes.slice(0,4).buffer);
+ const maskBytes=new Uint8Array(cols*lines*2),view=new DataView(maskBytes.buffer);
+ for(const [x,y,slot] of [[0,0,1],[1,0,1],[0,1,1],[1,1,32769],[2,0,1]])view.setUint16((y*cols+x)*2,slot,true);
+ const imageSurface={id:1,resource:resourceId,rect:[0,0,3,2],target:[0,0,2,2],slot:1,name:'safe λ.png',description:'2 by 2 RGBA'};
+ const adopt=surfaces=>{images.receive({epoch:imageEpoch,surfaces,mask:btoa(String.fromCharCode(...maskBytes))},cols,lines);dirty=true;present(performance.now());};
+ adopt([imageSurface]);check(pixel(4,2)==='0,0,170','unfinished resource replaced fallback');
+ images.control({type:'canvas-chunk',epoch:imageEpoch,id:resourceId,offset:4,length:12});images.binary(imageBytes.slice(4).buffer);dirty=true;present(performance.now());
+ check(pixel(4,2)==='255,0,0','image top-left orientation '+pixel(4,2));check(pixel(12,2)==='0,255,0','image top-right orientation');
+ check(pixel(4,10)==='0,0,255','image bottom-left orientation');check(pixel(12,10)==='64,64,64','straight alpha and halo dim '+pixel(12,10));
+ check(pixel(20,2)==='0,0,0','canvas black outside target');check(pixel(28,2)==='0,0,170','mask preserves ordinary neighbor');
+ adopt([{...imageSurface,target:[1,0,4,4]}]);check(pixel(4,2)==='0,0,0','pan black padding');check(images.resources.size===1&&images.bytes===16,'pan retransmitted pixels');
+ // A front surface takes exactly one ordinary character cell, even over a wide glyph.
+ view.setUint16(2,2,true);adopt([imageSurface,{...imageSurface,id:2,slot:2,target:[1,0,2,2]}]);check(pixel(12,2)==='255,0,0','overlap ownership');check(pixel(4,2)==='255,0,0','overlap damaged adjacent owner');
+ maskBytes.fill(0);adopt([imageSurface]);check(pixel(4,2)==='0,0,170','modal/occlusion fallback');check(images.resources.size===1,'occlusion retired live texture');
+ images.control({type:'canvas-release',epoch:imageEpoch,id:resourceId});check(images.bytes===0&&images.resources.size===0,'release retained RGBA');
  check(gl.getError()===gl.NO_ERROR,'GL final error');
- document.body.textContent='PASS WebGL2 generated HLSL execution: foreground/background, full-origin half clip, warm atlas/grid reuse, bounded row upload, mouse/cursor, cell underline/strike and one-cell script ink without new atlas tiles; '+JSON.stringify(atlasStats)+'; '+gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL);
+ document.body.textContent='PASS WebGL2 generated HLSL execution: foreground/background, full-origin half clip, warm atlas/grid reuse, bounded row upload, mouse/cursor, cell underline/strike and one-cell script ink without new atlas tiles; PNG orientation/alpha/halo, ownership overlap, black padding, fallback, pan/occlusion retention and release; '+JSON.stringify(atlasStats)+'; '+gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL);
 } catch(error){document.body.textContent='FAIL '+error.stack;}
 `;
 const fixture=await fs.mkdtemp(path.join(os.tmpdir(),'hide-web-gpu-'));
 try {
- const html='<html><body>'+['screen','status','input','fullscreen','clipboard-action','open-resource'].map(id=>`<div id="${id}"></div>`).join('')+'<canvas id="display"></canvas><script>window.requestAnimationFrame=()=>0;</script><script>'+shader+'</script><script>'+source.slice(0,source.indexOf('function command(name)'))+'</script><script>'+checks+'</script></body></html>';
+ const html='<html><body>'+['screen','status','input','fullscreen','clipboard-action','open-resource','semantic-images'].map(id=>`<div id="${id}"></div>`).join('')+'<canvas id="display"></canvas><script>window.requestAnimationFrame=()=>0;</script><script>'+shader+imageShader+imageConsumer+'</script><script>'+source.slice(0,source.indexOf('function command(name)'))+'</script><script>'+checks+'</script></body></html>';
  const file=path.join(fixture,'fixture.html');await fs.writeFile(file,html);
  const args=['--headless=new','--no-first-run','--no-default-browser-check',`--user-data-dir=${path.join(fixture,'profile')}`,'--dump-dom',`file://${file}`];
  if(process.env.HIDE_TEST_ANGLE)args.unshift(`--use-angle=${process.env.HIDE_TEST_ANGLE}`);

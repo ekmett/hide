@@ -65,7 +65,7 @@ const sockets=[],noOp=()=>{};
 Object.assign(context,{URL,ArrayBuffer,location:{href:'http://localhost/'},navigator:{platform:'MacIntel'},
  WebSocket:class {constructor(){sockets.push(this);}close(){this.onclose({code:1000,reason:''});}},
  closed:false,ready:false,glyphs:new Map(),tiles:new Map(),atlasEntries:new Map(),socket:null,
- downloadInfo:null,frame:null,mode:3,rows:[],unsaved:false,clipboard:'',mouse:[-1,-1],dirty:false,
+ images:{chunk:null,clear:noOp,receive:noOp,describe:noOp},downloadInfo:null,frame:null,mode:3,rows:[],unsaved:false,clipboard:'',mouse:[-1,-1],dirty:false,
  systemTheme:{matches:false},performance:{now:()=>0},console:{info:noOp},setTimeout:noOp,
  clearClipboardRequest:noOp,decodeRows:rows=>rows,updateTitle:noOp,guardLeave:noOp,allocate:()=>true,
  drawRows:noOp,resize:noOp});
