@@ -130,7 +130,7 @@ data State = State
   , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value)
   , toolExpansions :: S.Set (Text,ToolExpansion)
   , agentControls :: M.Map Text (Maybe DraftReceipt,Async (Either Text ()))
-  , agentCancels :: M.Map Text (Async (Either Text ()))
+  , childCancels :: M.Map Text (Async (Either Text ()))
   , fileCaptures :: [FileCapture], retiringRequests :: [(Int,Async ())]
   , promptPreparation :: Maybe PromptPreparation
   , creatingAgent :: Maybe (Async (Either Text (AH.AgentId,Int)))
@@ -174,7 +174,7 @@ withConversationAt consoles root action = W.withWindowScope $ \scope->Command.wi
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
     , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,directoryAgents=[],agentDelivery=Nothing
-    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,agentCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
+    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
 
@@ -196,7 +196,7 @@ closeConversation (ConversationState _ ref consoles _) = do
   mapM_ cancel (creatingAgent s)
   mapM_ (\(FileCapture _ worker) -> cancel worker) (fileCaptures s)
   mapM_ (wait . snd) (retiringRequests s)
-  mapM_ cancel (agentCancels s)
+  mapM_ cancel (childCancels s)
   mapM_ (cancel . snd) (agentControls s)
   mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
   mapM_ A.stopClient (connection s)
@@ -252,62 +252,6 @@ conversationEffects runtime@(ConversationState _ ref _ _) fallback original effe
           pure (quit,opened {status="Edit [editor.agent] context; save to apply with the next query or steer."})
     apply (_,d) (AgentAction action values) = do
       updated<-perform runtime action values d
-      syncConversationAgent runtime
-      pure (False,updated)
-    apply (_,d) effect = fallback d [effect]
-
--- Sidebar requests are fixed human operations, adopted after host hit/lifetime
--- validation. Dialog purposes carry the exact ID instead of a directory index.
-applyAgentSidebar :: ConversationState -> AgentSidebarRequest -> Desktop -> IO Desktop
-applyAgentSidebar runtime@(ConversationState _ ref _ agents) request d=case request of
-  ShowAgent ident | ident==AR.primaryAgent agents->perform runtime "show" [] d
-                  | otherwise->showAgentHistory runtime ident d
-  ConfigureAgent receipt option value->
-    startAgentControl runtime (AH.agentConfigAgent receipt) Nothing (AH.configureAgentAt hub receipt option value) d
-  RenameAgentTo ident name->do
-    result<-AH.renameAgent hub AH.Human ident name
-    pure d {status=either id (const "Agent renamed.") result}
-  CreateAgent workspace _ _ | workspace/=startingDirectory d->pure d {status="Agent workspace changed; reopen the form."}
-  CreateAgent workspace name task->do
-    state<-readIORef ref
-    case creatingAgent state of
-      Just _->pure d {status="An agent is already starting."}
-      Nothing->mask $ \restore->do
-        let spec=AH.SpawnSpec name task workspace AH.Shared AH.Fresh Nothing Nothing
-        worker<-async (restore (AH.spawnAgentWithTask hub AH.Human spec))
-        modifyIORef' ref (\current->current {creatingAgent=Just worker})
-        pure d {status="Starting agent…"}
-  _->pure d {status="Completion owner is unavailable."}
-  where hub=AR.agentHub agents
-
-pollAgentCreation :: ConversationState -> Desktop -> IO Desktop
-pollAgentCreation (ConversationState _ ref _ _) d=do
-  state<-readIORef ref
-  case creatingAgent state of
-    Nothing->pure d
-    Just worker->poll worker >>= \completed->case completed of
-      Nothing->pure d
-      Just outcome->do
-        modifyIORef' ref (\current->current {creatingAgent=Nothing})
-        pure d {status=either (const "Agent creation interrupted.") (either id (const "Agent created; task queued.")) outcome}
-
-perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
-perform (ConversationState _ ref _ _) "focus" [] d=do
-  modifyIORef' ref (\state -> state {deferredApproval=False})
-  pure d
-perform (ConversationState _ ref _ _) "toggle-tool-run" [ident] d=do
-  state<-readIORef ref
-  let target=conversationTarget d
-      next=toggleExpansion target (RunExpansion ident) state
-      records=if T.null target then transcript next else M.findWithDefault [] target (childRecords next)
-  writeIORef ref next
-  keepConversationPosition d <$> paintView target False next {transcript=records} d
-perform runtime action values d
-  | action=="cancel"=do
-      let agents=conversationAgents runtime
-          ident=if T.null (conversationTarget d) then AR.primaryAgent agents else AH.AgentId (conversationTarget d)
-      cleared<-cancelQuestion runtime "Question cancelled." d
-      startAgentCancellation runtime ident cleared
   | action `elem` ["show","new"] = do
       prepared<-ensureConversationEditor runtime "" "Primary" d
       performPrimary runtime action values (selectConversationView "" "Primary" prepared)
@@ -429,6 +373,8 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)),not (primaryBusy s) ->
       submitPrimaryPrompt runtime s Nothing prompt (selectionFlag=="true",fileFlag=="true",diagnosticFlag=="true") d
     ("cancel",_) -> do
+      let agents=conversationAgents runtime
+      AH.cancelExternalAgentControls (AR.agentHub agents) (AR.primaryAgent agents)
       AR.failPrimaryControl (conversationAgents runtime) "Agent control cancelled."
       let child (_,ChildPermission{})=True
           child _=False
@@ -493,7 +439,7 @@ busy s=not (M.null (pending s)) || not (isNothing (queuedPrompt s)) || not (isNo
 -- Public input stays pending across the worker-to-provider mailbox gap. Hub
 -- admission uses protocol busy state so a control cannot block its own arrival.
 primaryBusy :: State -> Bool
-primaryBusy s=busy s || M.member "" (agentControls s) || M.member "" (agentCancels s)
+primaryBusy s=busy s || M.member "" (agentControls s)
 
 start :: ConversationState -> Maybe Text -> Desktop -> IO Desktop
 start (ConversationState _ ref _ _) resume d = do
@@ -1604,7 +1550,12 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
     "send" | M.member target (agentControls state) -> pure d {status="Wait for the child operation before sending."}
     "send" -> send hub ident text Nothing
     "set-config" | [option,value]<-values -> startControl Nothing (AH.configureAgent hub ident option value)
-    "cancel" -> startAgentCancellation runtime ident d
+    "cancel" -> case M.lookup target (childCancels state) of
+      Just _ -> pure d {status="Cancellation requested."}
+      Nothing -> do
+        worker<-async (AH.cancelAgent hub AH.Human ident)
+        modifyIORef' ref (\s->s {childCancels=M.insert target worker (childCancels s),queuedQueries=filter ((/=target).queryTarget) (queuedQueries s)})
+        pure d {status="Cancellation requested."}
     "copy" -> pure (copyClipboard False (if M.member target (childRecords state) then rawTranscript records else maybe "" (\body->W.copyPreparedSelection body 0 (contentLength (W.preparedWindowText body))) (conversationBodySnapshot target d)) d) {status="Conversation copied with sender attribution."}
     "toggle-activity" | [activityId]<-values -> do
       let next=toggleExpansion target (ActivityExpansion activityId) state
@@ -1633,17 +1584,6 @@ startAgentControl (ConversationState _ ref _ agents) ident submitted operation d
     pure d {agentReplying=agentReplying d || target==conversationTarget d,contextMenu=Nothing,
       status=case Editor.submissionSlot <$> submitted of Nothing->"Updating agent settings..."; Just Editor.DefaultEditor->"Preparing query; draft kept until accepted."; Just Editor.AlternateEditor->"Steering agent; draft kept until accepted."}
 
-startAgentCancellation :: ConversationState -> AH.AgentId -> Desktop -> IO Desktop
-startAgentCancellation (ConversationState _ ref _ agents) ident d=mask_ $ do
-  state<-readIORef ref
-  let target=if ident==AR.primaryAgent agents then "" else AH.agentIdText ident
-  case M.lookup target (agentCancels state) of
-    Just _->pure d {status="Cancellation requested."}
-    Nothing->do
-      worker<-asyncWithUnmask (\unmask->unmask (AH.cancelAgent (AR.agentHub agents) AH.Human ident))
-      modifyIORef' ref (\s->s {agentCancels=M.insert target worker (agentCancels s),queuedQueries=filter ((/=target).queryTarget) (queuedQueries s)})
-      pure d {status="Cancellation requested."}
-
 refreshChildConversation :: ConversationState -> Desktop -> IO Desktop
 refreshChildConversation (ConversationState _ ref _ agents) d=do
   state<-readIORef ref
@@ -1659,13 +1599,13 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
       applyControl desktop _=pure desktop
   controlled<-foldM applyControl d controls
   modifyIORef' ref (\current->current {agentControls=foldr M.delete (agentControls current) controlsDone})
-  completed<-forM (M.toList (agentCancels state)) $ \(target,worker)->do
+  completed<-forM (M.toList (childCancels state)) $ \(target,worker)->do
     result<-poll worker
     pure (target,result)
   let finished=[target | (target,Just _)<-completed]
-      cancellation=[either (const "Agent cancellation failed.") (either id (const (if T.null target then "Cancellation requested." else "Child reply cancelled."))) result | (target,Just result)<-completed,target==conversationTarget d]
+      cancellation=[either (const "Child cancellation failed.") (either id (const "Child reply cancelled.")) result | (target,Just result)<-completed,target==conversationTarget d]
       original=case cancellation of text:_->controlled {status=text}; _->controlled
-  modifyIORef' ref (\s->s {agentCancels=foldr M.delete (agentCancels s) finished})
+  modifyIORef' ref (\s->s {childCancels=foldr M.delete (childCancels s) finished})
   if T.null (conversationTarget original) then pure original else do
     let target=conversationTarget original
         hub=AR.agentHub agents
@@ -1966,7 +1906,7 @@ pollQueuedChildEditor :: ConversationState -> Desktop -> IO Desktop
 pollQueuedChildEditor runtime@(ConversationState _ ref _ _) d=mask_ $ do
   state<-readIORef ref
   case [(submitted,context,editor) | EditorQuery submitted context@(ChatEditorContext target _ _ _) editor<-queuedQueries state,
-        not (T.null target),M.notMember target (agentControls state),M.notMember target (agentCancels state)] of
+        not (T.null target),M.notMember target (agentControls state),M.notMember target (childCancels state)] of
     (submitted,context,editor):_->do
       modifyIORef' ref (\s->s {queuedQueries=filter (not.isQueuedEditor submitted) (queuedQueries s)})
       startChildEditor runtime submitted context editor d
@@ -1979,7 +1919,7 @@ pollQueuedChildEditor runtime@(ConversationState _ ref _ _) d=mask_ $ do
 -- captured before first connect follows only that queue's initial connection.
 prepareQueuedEditor :: ConversationState -> State -> Desktop -> IO Desktop
 prepareQueuedEditor runtime@(ConversationState _ ref _ _) state d
-  | M.member "" (agentControls state) || M.member "" (agentCancels state)=pure d
+  | M.member "" (agentControls state)=pure d
   | not (isNothing (queuedPrompt state))=sendQueued runtime d
   | otherwise=case [(submitted,captured,editor) | EditorQuery submitted captured@(ChatEditorContext target _ _ _) editor<-queuedQueries state,T.null target] of
       (submitted,captured,editor):_->mask $ \_->do

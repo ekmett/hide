@@ -372,6 +372,10 @@ controlChecks directory=do
     _<-cancelAgent hub Human parent >>= right
     expiredSteer<-steerAgentAt hub primaryReceipt "expired correction"
     ensure "primary cancellation retires captured steering" (left expiredSteer)
+    (beforeOwnerCancel,_)<-agentConfiguration hub parent >>= right
+    cancelExternalAgentControls hub parent
+    ownerReceiptCurrent<-agentConfigurationCurrent hub beforeOwnerCancel
+    ensure "owner-native primary cancellation retires captured controls" (not ownerReceiptCurrent)
     setExternalAgentBusy hub parent False
     idlePrimary<-steerAgent hub parent "keep draft"
     ensure "idle primary steering does not create a new prompt" (left idlePrimary)

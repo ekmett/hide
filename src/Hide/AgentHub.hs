@@ -10,7 +10,7 @@ module Hide.AgentHub
   ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, AgentConfigRef, agentConfigAgent, agentConfiguration, agentConfigurationCurrent, agentControlPending, configureAgentAt, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
   , Capabilities(..), ConfigChoice(..), parseCapabilities, filterPrivateCapabilities
-  , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
+  , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, cancelExternalAgentControls, renameAgent
   , configureAgent, steerAgent, steerAgentAt, listAgents, statusAgent, sendAgent, sendAgentAt, waitAgent, cancelAgent, endAgent
   , historyAgent, searchAgentHistory, recordAgentEvent, snapshotHub, restoreHub, restoreHubWithLimits
   ) where
@@ -328,6 +328,17 @@ setExternalAgentBusy (AgentHub _ _ ref) ident busy=atomically $ modifyTVar' ref 
              then updated {entryPhase=restingPhase updated} else updated
       | otherwise=entry
 
+-- | The external prompt owner cancels its UI/protocol turn synchronously.
+-- Retire captured controls first; this grants no authority and does not cancel
+-- unrelated hub deliveries or manufacture a later UI cancellation callback.
+cancelExternalAgentControls :: AgentHub -> AgentId -> IO ()
+cancelExternalAgentControls (AgentHub _ _ ref) ident=atomically $ modifyTVar' ref $ \state->state
+  {hubEntries=M.adjust (\entry->if entryExternal entry && active entry then retireControls entry else entry) ident (hubEntries state)}
+
+retireControls :: Entry -> Entry
+retireControls entry=entry {entryCancelVersion=entryCancelVersion entry+1,
+  entryControl=fmap (\(token,_)->(token,"cancelled")) (entryControl entry)}
+
 -- The host's prompt seat outlives individual hub deliveries and cancellations.
 restingPhase :: Entry -> Phase
 restingPhase entry=if entryExternalBusy entry then Running else Idle
@@ -588,8 +599,8 @@ cancelAgent (AgentHub _ _ ref) actor ident = mask $ \restore -> do
       Right entry
         | entryPhase entry == Cancelling -> pure (Right Nothing)
         | otherwise -> do
-            let next = cancelPending "Agent prompt cancelled." entry
-                  {entryPhase = Cancelling, entryCancelPending = True,entryCancelVersion=entryCancelVersion entry+1,entryControl=fmap (\(token,_)->(token,"cancelled")) (entryControl entry)}
+            let next = cancelPending "Agent prompt cancelled." (retireControls entry)
+                  {entryPhase = Cancelling, entryCancelPending = True}
             writeTVar ref state
               {hubEntries = M.insert ident (appendEvent "cancelled" actor Null next) (hubEntries state)}
             pure (Right (Just (mapM_ driverCancel (entryDriver entry))))

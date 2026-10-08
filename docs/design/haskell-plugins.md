@@ -738,10 +738,13 @@ and session key; a new connection invalidates old controls even when it reuses
 the same key. Provider acknowledgements complete the control. Only an `injected`
 steering outcome consumes the submitted draft; cancellation, rejection and
 uncertain ownership retain it. Cancellation and shutdown terminally resolve
-pending control replies, and a drained request cannot become live again.
+pending control replies, and a drained request cannot become live again. Primary
+Cancel keeps its existing synchronous conversation owner: it retires hub control
+receipts before cancelling that turn, so a delayed callback cannot cancel a new
+question. Cancelling turns refuse further steering until their terminal reply.
 
 These remain host-only operations: agent tools cannot manufacture human steering
-or change their controlling user's model. Primary prompt preparation, ACP file
+or change their controlling user's model. Primary query/cancel ownership, prompt preparation, ACP file
 and terminal requests, and provider startup/recovery still belong to Conversation;
 the full separate-package agent integration remains unfinished.
 
