@@ -17,7 +17,7 @@ module Hide.Accessibility
   ) where
 
 import Data.Aeson (Value, object, (.=))
-import Data.List (sortOn)
+import qualified Data.List as List (foldl',sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe (isJust)
 import qualified Data.Sequence as S
@@ -47,7 +47,7 @@ sidebarSemantics audience d=case sideTree d of
   Just tree
     | covered || listWidth<=0 || visible<=0->snapshot (revision tree) (layout tree) 0 0 0 []
     | otherwise->snapshot (revision tree) (layout tree) start visible (M.size (treeRows tree))
-        (host tree:map (node tree) (sortOn (stateAddress . snd) (M.toList accepted)))
+        (host tree:map (node tree) (List.sortOn (stateAddress . snd) (M.toList accepted)))
     where
       start=max 0 (treeScroll tree)
       visible=min 256 (min (max 0 (rows-2-bottom)) (treeContentRows d))
@@ -56,7 +56,7 @@ sidebarSemantics audience d=case sideTree d of
       positions=M.fromList [(key,(index,2+index-start)) | (index,row)<-listing,NodeRow key<-[rowKey row]]
       -- Check only prepared ancestry for viewport rows. Whole-tree equality or
       -- scans would read unrelated payloads and lose the viewport bound.
-      accepted=foldl' (include tree) M.empty (map (keyOf . rowHit . snd) listing)
+      accepted=List.foldl' (include tree) M.empty (map (keyOf . rowHit . snd) listing)
       include current retained key=case reverse (hitTrace key current) of
         []->retained
         trace@(top:_)

@@ -12,6 +12,7 @@ import Control.Exception (evaluate)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as S
 import Data.Foldable (toList)
+import qualified Data.List as List (foldl')
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Maybe (fromMaybe)
@@ -203,7 +204,7 @@ adoptPage request nodes next tree
     foreignNode (info,_,_)=let key=NodeKey ref (infoId info) in key==parent || case M.lookup key (treeNodes tree) of
       Just previous->stateParent previous/=Just parent || requestCursor request/=Nothing
       Nothing->False
-    (adopted,nextWireId)=foldl' insert (treeNodes tree,treeNextWireId tree) nodes
+    (adopted,nextWireId)=List.foldl' insert (treeNodes tree,treeNextWireId tree) nodes
     insert (values,serial) (info,action,actions)=
       let key=NodeKey ref (infoId info)
           previous=M.lookup key values
