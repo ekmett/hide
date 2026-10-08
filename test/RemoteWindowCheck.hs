@@ -6,6 +6,7 @@ import Data.Aeson
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as B64
 import Hide.RemoteWindow
 import Hide.FrameTiming
 import Hide.Window (nativeMenuEvent,nativeCommands)
@@ -37,6 +38,44 @@ checks = do
       row = toJSON [(0::Int,0xffffff::Int,0::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int,False,0::Int,2::Int)])]
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta
+  let epoch=T.replicate 48 "a"
+      otherEpoch=T.replicate 48 "b"
+      resource=T.replicate 48 "c"
+      reset=object ["type" .= ("canvas-reset"::T.Text),"epoch" .= epoch]
+      begin w h bytes=object ["type" .= ("canvas-resource"::T.Text),"epoch" .= epoch,"id" .= resource,"width" .= (w::Int),"height" .= (h::Int),"bytes" .= (bytes::Int)]
+      chunk owner offset bytes=object ["type" .= ("canvas-chunk"::T.Text),"epoch" .= owner,"id" .= resource,"offset" .= (offset::Int),"length" .= (bytes::Int)]
+      release=object ["type" .= ("canvas-release"::T.Text),"epoch" .= epoch,"id" .= resource]
+      step state control=either error fst (admitCanvasControl state control)
+      state0=step emptyCanvasReceiveState reset
+      uploading=step state0 (begin 2 2 16)
+      partial=step uploading (chunk epoch 0 3)
+      retired=step partial release
+      rejects state=either (const True) (const False) . admitCanvasControl state
+  check "canvas receive cursor rejects absent/old epoch and malformed dimensions"
+    (rejects emptyCanvasReceiveState (begin 2 2 16) && rejects uploading (chunk otherEpoch 0 3) && rejects state0 (begin 4096 4096 67108864) && rejects state0 (begin 2 2 15))
+  check "canvas receive cursor rejects duplicate live begins and noncontiguous chunks"
+    (rejects uploading (begin 2 2 16) && rejects partial (chunk epoch 2 4) && rejects partial (chunk epoch 3 14) && rejects partial (chunk epoch 3 0))
+  check "canvas release cancels cursor, duplicate release is harmless and late chunks cannot resurrect"
+    (rejects retired (chunk epoch 3 13) && not (rejects retired release) && rejects (step partial reset) (chunk epoch 3 13))
+  let finished=step partial (chunk epoch 3 13)
+      (_,header)=either error id (admitCanvasControl uploading (chunk epoch 0 3))
+  check "canvas exact binary pairs cannot become ordinary cell frames"
+    (validateCanvasChunk header (BS.pack [0,255,1])==Right () && either (const True) (const False) (validateCanvasChunk header (BS.pack [0,255])) && rejects finished (chunk epoch 16 1))
+  let mask=BS.pack ([1,0,1,128,0,0]++replicate (80*25*2-6) 0)
+      surface slot viewport=object ["id" .= (91::Int),"resource" .= resource,"slot" .= (slot::Int),"rect" .= (viewport::[Int]),
+        "target" .= ([0,0,2,2]::[Double]),"name" .= ("safe λ <script>.png"::T.Text),"description" .= ("PNG, 2 by 2 pixels"::T.Text)]
+      scene surfaces bytes=object ["epoch" .= epoch,"surfaces" .= surfaces,"mask" .= TE.decodeUtf8 (B64.encode bytes)]
+      frame value=parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"canvas" .= value]) rows
+      validScene=scene [surface 1 [0,0,2,2]] mask
+  check "canvas frame retains a complete bounded scene and exact little endian dim mask"
+    (case frame validScene of Right value->case remoteCanvas value of Just scene'->canvasMask scene'==mask && map canvasWindow (canvasSurfaces scene')==[91]; _->False; _->False)
+  check "canvas semantics omit opaque resource IDs and wholly covered surfaces"
+    (case frame validScene of Right value->case remoteCanvas value of Just scene'->not (TE.encodeUtf8 resource `BS.isInfixOf` canvasAccessibility scene') && TE.encodeUtf8 "safe λ <script>.png" `BS.isInfixOf` canvasAccessibility scene'; _->False; _->False)
+  check "canvas scene rejects malformed mask bytes, absent owners and duplicate slots"
+    (all (either (const True) (const False) . frame)
+      [scene [surface 1 [0,0,2,2]] (BS.drop 1 mask),scene [] mask,scene [surface 1 [1,0,2,2]] mask,scene [surface 1 [0,0,2,2],surface 1 [0,0,2,2]] mask])
+  check "canvas occlusion retains resource surface but omits image AX element"
+    (case frame (scene [surface 1 [0,0,2,2]] (BS.replicate (80*25*2) 0)) of Right value->case remoteCanvas value of Just scene'->not ("91" `BS.isInfixOf` canvasAccessibility scene') && length (canvasSurfaces scene')==1; _->False; _->False)
   let windowMeta=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"editorWindows" .= [object ["id" .= (71::Int),"title" .= ("Main.hs"::T.Text),"selected" .= True,"enabled" .= True]]]
       dockFrame=either error id (parseRemoteFrame windowMeta rows)
   check "actual remote native Dock event carries stable host target" (remoteDockWindowInput dockFrame 8 [16,71,8]==Just (object ["type" .= ("focus-window"::T.Text),"id" .= (71::Int)]))

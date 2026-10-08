@@ -18,17 +18,17 @@ static int publish(NSDictionary *value) {
     NSData *json=[NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
     return thc_accessibility(json.bytes,json.length);
 }
-static id findOutline(id element,NSMutableSet *seen) {
+static id findRole(id element,NSString *wanted,NSMutableSet *seen) {
     if (!element || [seen containsObject:element]) return nil;
     [seen addObject:element];
     /* AppKit's window children include legacy reparenting proxies. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     id role=[element respondsToSelector:@selector(accessibilityRole)]?[element accessibilityRole]:[element accessibilityAttributeValue:NSAccessibilityRoleAttribute];
-    if ([role isEqual:NSAccessibilityOutlineRole]) return element;
+    if ([role isEqual:wanted]) return element;
     NSArray *children=[element respondsToSelector:@selector(accessibilityChildren)]?[element accessibilityChildren]:[element accessibilityAttributeValue:NSAccessibilityChildrenAttribute];
 #pragma clang diagnostic pop
-    for (id child in children) { id found=findOutline(child,seen); if (found) return found; }
+    for (id child in children) { id found=findRole(child,wanted,seen); if (found) return found; }
     return nil;
 }
 static void near(double x,double y) { if (fabs(x-y)>0.000001) { fprintf(stderr,"Expected %.6f, got %.6f\n",y,x); abort(); } }
@@ -50,7 +50,7 @@ int main(int argc,char **argv) {
     NSDictionary *file=node(fileId,provider,@"treeitem",@"safe λ <script>.hs",@[@1,@3,@22,@1],NSNull.null,1,2);
     NSDictionary *snapshot=@{@"revision":@1,@"layout":@[@(cols),@(rows),@24,@0,@1,@1,@0],@"visibleStart":@0,@"visibleCount":@2,@"logicalRows":@2,@"readOnly":@YES,@"nodes":@[root,folder,file]};
     assert(publish(snapshot));
-    assert(findOutline(window,[NSMutableSet new]));
+    assert(findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]));
     id tree=nil;for (NSView *view in window.contentView.subviews) if ([view isKindOfClass:NSClassFromString(@"HideAXHost")]) tree=view;
     assert(tree);
     assert([[tree accessibilityLabel] isEqual:@"Sidebar"]);
@@ -93,16 +93,35 @@ int main(int argc,char **argv) {
     NSMutableDictionary *later=[file mutableCopy];later[@"index"]=@65535;
     replacement[@"nodes"]=@[root,folder,later];replacement[@"logicalRows"]=@65536;
     assert(publish(replacement));assert([[tree accessibilityRows][1] accessibilityIndex]==65535);
-    replacement[@"logicalRows"]=@65537;assert(!publish(replacement));assert(!findOutline(window,[NSMutableSet new]));
+    replacement[@"logicalRows"]=@65537;assert(!publish(replacement));assert(!findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]));
     assert(![oldFolder isAccessibilityElement] && ![oldFolder accessibilityLabel]);
     for (NSDictionary *bad in @[
         @{@"bounds":@[@(cols),@0,@1,@1]},@{@"name":[@"x" stringByPaddingToLength:257 withString:@"x" startingAtIndex:0]},@{@"parent":fileId},@{@"selected":@1}
     ]) {
         assert(publish(snapshot));NSMutableDictionary *invalidFile=[file mutableCopy];[invalidFile addEntriesFromDictionary:bad];
-        replacement=[snapshot mutableCopy];replacement[@"nodes"]=@[root,folder,invalidFile];assert(!publish(replacement));assert(!findOutline(window,[NSMutableSet new]));
+        replacement=[snapshot mutableCopy];replacement[@"nodes"]=@[root,folder,invalidFile];assert(!publish(replacement));assert(!findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]));
     }
-    assert(publish(snapshot));assert(!thc_accessibility("x",2097153));assert(!findOutline(window,[NSMutableSet new])); // Oversize is refused before reading bytes.
-    assert(publish(snapshot));assert(thc_accessibility(NULL,0));assert(!findOutline(window,[NSMutableSet new]));
+    assert(publish(snapshot));assert(!thc_accessibility("x",2097153));assert(!findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new])); // Oversize is refused before reading bytes.
+    assert(publish(snapshot));assert(thc_accessibility(NULL,0));assert(!findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]));
+    assert(publish(snapshot));
+    NSDictionary *picture=@{@"id":@91,@"name":@"safe λ <script>.png",@"description":@"PNG image, 2 by 2 pixels",@"bounds":@[@1,@3,@22,@1]};
+    NSDictionary *canvas=@{@"size":@[@(cols),@(rows)],@"images":@[picture]};
+    assert(publish(canvas));
+    id image=findRole(window,NSAccessibilityImageRole,[NSMutableSet new]);assert(image);
+    assert([[image accessibilityLabel] isEqual:picture[@"name"]] && [[image accessibilityHelp] isEqual:picture[@"description"]]);
+    actual=[image accessibilityFrame];near(actual.origin.x,expected.origin.x);near(actual.origin.y,expected.origin.y);
+    assert(![image isAccessibilityFocused] && ![image isAccessibilitySelectorAllowed:@selector(accessibilityPerformPress)] &&
+        ![image isAccessibilitySelectorAllowed:@selector(setAccessibilityFocused:)]);
+    id imageGroup=[image accessibilityParent];assert(![imageGroup acceptsFirstResponder] && [imageGroup hitTest:NSMakePoint(2,2)]==nil);
+    NSMutableDictionary *moved=[picture mutableCopy];moved[@"bounds"]=@[@2,@4,@5,@2];
+    assert(publish(@{@"size":@[@(cols),@(rows)],@"images":@[moved]}));assert(findRole(window,NSAccessibilityImageRole,[NSMutableSet new])==image);
+    assert(publish(@{@"size":@[@(cols),@(rows)],@"images":@[]}));
+    assert(!findRole(window,NSAccessibilityImageRole,[NSMutableSet new]) && ![image isAccessibilityElement] && ![image accessibilityLabel]);
+    assert(findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new])); // Image clear leaves the independent sidebar intact.
+    assert(publish(canvas));
+    assert(!publish(@{@"size":@[@(cols),@(rows)],@"images":@[picture,picture]}));assert(!findRole(window,NSAccessibilityImageRole,[NSMutableSet new]));
+    assert(publish(canvas));assert(thc_accessibility(NULL,0));
+    assert(!findRole(window,NSAccessibilityImageRole,[NSMutableSet new]) && !findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]));
     assert(!window.visible && !window.keyWindow);
     printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only selectors and retirement checks passed\n",backend,(double)pw/ww);
     thc_close();

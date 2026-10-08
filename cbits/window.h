@@ -33,8 +33,9 @@ int thc_canvas_begin(const char *epoch, const char *id, int width, int height, s
 /* Chunk returns 2 on completion, 1 while incomplete, 0 on error. */
 int thc_canvas_chunk(const char *epoch, const char *id, size_t offset, const void *bytes, size_t length);
 int thc_canvas_release(const char *epoch, const char *id);
-int thc_canvas_scene(const char *epoch, int cols, int rows, const uint16_t *mask, size_t count);
+int thc_canvas_scene(const char *epoch, int cols, int rows, const void *little_endian_mask, size_t cells);
 int thc_canvas_surface(const char *id, int slot, int x, int y, int width, int height, double tx, double ty, double tw, double th);
+void thc_canvas_clear(void);
 int thc_canvas_commit(void);
 void thc_canvas_stats(uint64_t *uploads, uint64_t *bytes, uint64_t *masks, uint64_t *retained);
 /* The next glyph retains its full origin/width; only these visible cells draw. */

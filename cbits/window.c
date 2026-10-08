@@ -170,16 +170,18 @@ int thc_canvas_release(const char *epoch,const char *id) {
     if (!canvas_current(epoch) || !canvas_id(id)) return SDL_SetError("Invalid canvas release");
     CanvasResource *resource=canvas_resource(id); if (resource) canvas_retire(resource); return 1;
 }
-int thc_canvas_scene(const char *epoch,int width,int height,const uint16_t *mask,size_t count) {
-    if (!canvas_current(epoch) || width<1 || width>512 || height<1 || height>256 || !mask || count!=(size_t)width*height)
+int thc_canvas_scene(const char *epoch,int width,int height,const void *packed,size_t count) {
+    if (!canvas_current(epoch) || width<1 || width>512 || height<1 || height>256 || !packed || count!=(size_t)width*height)
         return SDL_SetError("Invalid canvas ownership grid");
     if (!canvas_mask) { canvas_mask=calloc(512u*256u,sizeof(*canvas_mask)); if (!canvas_mask) return SDL_SetError("Cannot allocate canvas grid"); }
+    const unsigned char *mask=packed;
     bool changed=width!=canvas_cols || height!=canvas_rows;
     for (size_t i=0;i<count;++i) {
-        if ((mask[i]&32767u)>64 || (!((mask[i]&32767u)) && mask[i])) return SDL_SetError("Invalid canvas ownership slot");
-        if (canvas_mask[i]!=mask[i]) changed=true;
+        unsigned value=mask[i*2]|((unsigned)mask[i*2+1]<<8);
+        if ((value&32767u)>64 || (!(value&32767u) && value)) return SDL_SetError("Invalid canvas ownership slot");
+        if (canvas_mask[i]!=value) changed=true;
     }
-    for (size_t i=0;i<count;++i) canvas_mask[i]=mask[i];
+    for (size_t i=0;i<count;++i) canvas_mask[i]=mask[i*2]|((unsigned)mask[i*2+1]<<8);
     canvas_cols=width; canvas_rows=height; canvas_surface_count=0; canvas_committed=false;
     if (changed) canvas_mask_ready=false;
     return 1;
@@ -196,6 +198,7 @@ int thc_canvas_surface(const char *id,int slot,int x,int y,int width,int height,
     surface->target[0]=(float)tx; surface->target[1]=(float)ty; surface->target[2]=(float)tw; surface->target[3]=(float)th;
     return 1;
 }
+void thc_canvas_clear(void) { canvas_surface_count=0; canvas_committed=false; }
 int thc_canvas_commit(void) {
     const CanvasSurface *owners[65]={0};
     for (size_t i=0;i<canvas_surface_count;++i) owners[canvas_surfaces[i].slot]=&canvas_surfaces[i];

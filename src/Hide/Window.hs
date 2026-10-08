@@ -9,6 +9,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
   , c_accessibility, c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
+  , installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
   , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
@@ -93,6 +94,14 @@ foreign import ccall unsafe "thc_error" c_error :: IO CString
 foreign import ccall unsafe "thc_backend" c_backend :: IO CString
 foreign import ccall unsafe "thc_size" c_size :: Ptr CInt -> Ptr CInt -> IO ()
 foreign import ccall unsafe "thc_begin" c_begin :: IO CInt
+foreign import ccall unsafe "thc_canvas_reset" c_canvas_reset :: CString -> IO CInt
+foreign import ccall unsafe "thc_canvas_begin" c_canvas_begin :: CString -> CString -> CInt -> CInt -> CSize -> IO CInt
+foreign import ccall unsafe "thc_canvas_chunk" c_canvas_chunk :: CString -> CString -> CSize -> CString -> CSize -> IO CInt
+foreign import ccall unsafe "thc_canvas_release" c_canvas_release :: CString -> CString -> IO CInt
+foreign import ccall unsafe "thc_canvas_scene" c_canvas_scene :: CString -> CInt -> CInt -> CString -> CSize -> IO CInt
+foreign import ccall unsafe "thc_canvas_surface" c_canvas_surface :: CString -> CInt -> CInt -> CInt -> CInt -> CInt -> CDouble -> CDouble -> CDouble -> CDouble -> IO CInt
+foreign import ccall unsafe "thc_canvas_commit" c_canvas_commit :: IO CInt
+foreign import ccall unsafe "thc_canvas_clear" c_canvas_clear :: IO ()
 foreign import ccall unsafe "thc_clip" c_clip :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> Word32 -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_unicode" c_unicode :: CInt -> CInt -> CInt -> CString -> Word32 -> Word32 -> Word32 -> CInt -> CInt -> IO CInt
@@ -135,6 +144,20 @@ check context action = do
 -- | Lend a temporary NUL-terminated UTF-8 C string for the callback only.
 utf8 :: T.Text -> (CString -> IO a) -> IO a
 utf8 text = BS.useAsCString (TE.encodeUtf8 text)
+
+-- | Commit one validated small scene on the SDL thread. The packed mask is
+-- copied/widened by C; borrowed strings and bytes never survive these calls.
+-- Retained image resources are admitted separately and remain invisible until
+-- their bounded upload finishes. Slots confer no host input authority.
+installNativeCanvas :: T.Text -> (Int,Int) -> BS.ByteString
+  -> [(T.Text,Int,(Int,Int,Int,Int),(Double,Double,Double,Double))] -> IO ()
+installNativeCanvas epoch (cols,rows) mask surfaces=do
+  utf8 epoch $ \owner->BS.useAsCString mask $ \packed->
+    check "Commit canvas mask" (c_canvas_scene owner (fromIntegral cols) (fromIntegral rows) packed (fromIntegral (BS.length mask `div` 2)))
+  forM_ surfaces $ \(resource,slot,(x,y,w,h),(a,b,c,d))->utf8 resource $ \ident->
+    check "Commit canvas surface" (c_canvas_surface ident (fromIntegral slot) (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral h)
+      (realToFrac a) (realToFrac b) (realToFrac c) (realToFrac d))
+  check "Commit canvas scene" c_canvas_commit
 
 nativeMenus :: IO ()
 nativeMenus=nativeMenusFor (initialDesktop (80,25))
