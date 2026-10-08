@@ -71,6 +71,7 @@ static int mouse_x = -1, mouse_y = -1;
 static char *input_text;
 static char *clipboard_text;
 static bool left_down;
+static Uint32 held_mouse_buttons;
 static bool suppress_option_text;
 static bool blink_cursor = true, cursor_present, cursor_drawn;
 static int cursor_x = -1, cursor_y = -1;
@@ -293,7 +294,7 @@ void thc_close(void) {
     thc_file_drag_close();
 #endif
     clear_pointer();
-    left_down = false;
+    left_down = false; held_mouse_buttons = 0;
     suppress_option_text = false;
     cursor_present = false; cursor_x = cursor_y = -1;
     thc_canvas_reset(NULL);
@@ -454,8 +455,8 @@ int thc_scale(int direction) {
 }
 
 void thc_file_drag_ended(void) {
-    left_down=false;
-    SDL_CaptureMouse(false);
+    left_down=false; held_mouse_buttons &= ~SDL_BUTTON_LMASK;
+    if (!held_mouse_buttons) SDL_CaptureMouse(false);
     float x,y; SDL_GetMouseState(&x,&y);
     SDL_Event event={0}; event.type=SDL_EVENT_MOUSE_BUTTON_UP;
     event.button.windowID=SDL_GetWindowID(window); event.button.button=SDL_BUTTON_LEFT;
@@ -982,7 +983,7 @@ int thc_wait(int32_t *out) {
             out[0] = 13; out[1] = modifiers(SDL_GetModState()); return delivered(&e,out);
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             thc_cancel_file_drag();
-            clear_pointer(); left_down = false; suppress_option_text = false;
+            clear_pointer(); left_down = false; held_mouse_buttons = 0; suppress_option_text = false;
             SDL_CaptureMouse(false); out[0] = 7; return delivered(&e,out);
         case SDL_EVENT_KEY_DOWN: {
             suppress_option_text = false;
@@ -1029,14 +1030,19 @@ int thc_wait(int32_t *out) {
             if (!input_text) return 0;
             out[0] = 2; return delivered(&e,out);
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
-            if (e.button.button != SDL_BUTTON_LEFT && e.button.button != SDL_BUTTON_RIGHT) break;
-            if (e.button.button == SDL_BUTTON_LEFT) { left_down = true; SDL_CaptureMouse(true); }
+            if (e.button.button != SDL_BUTTON_LEFT && e.button.button != SDL_BUTTON_MIDDLE && e.button.button != SDL_BUTTON_RIGHT) break;
+            held_mouse_buttons |= SDL_BUTTON_MASK(e.button.button);
+            left_down = (held_mouse_buttons & SDL_BUTTON_LMASK) != 0;
+            SDL_CaptureMouse(true);
             out[0] = 3; out[3] = e.button.clicks; out[5] = e.button.button;
             pointer(e.button.x, e.button.y, out); return delivered(&e,out);
         case SDL_EVENT_MOUSE_BUTTON_UP:
-            if (e.button.button != SDL_BUTTON_LEFT) break;
-            left_down = false; SDL_CaptureMouse(false);
-            out[0] = 4; pointer(e.button.x, e.button.y, out); return delivered(&e,out);
+            if (e.button.button != SDL_BUTTON_LEFT && e.button.button != SDL_BUTTON_MIDDLE && e.button.button != SDL_BUTTON_RIGHT) break;
+            held_mouse_buttons &= ~SDL_BUTTON_MASK(e.button.button);
+            left_down = (held_mouse_buttons & SDL_BUTTON_LMASK) != 0;
+            if (!held_mouse_buttons) SDL_CaptureMouse(false);
+            out[0] = 4; out[5] = e.button.button;
+            pointer(e.button.x, e.button.y, out); return delivered(&e,out);
         case SDL_EVENT_MOUSE_MOTION: {
             latest_motion(&e);
             int old_x = mouse_x, old_y = mouse_y;

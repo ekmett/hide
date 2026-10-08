@@ -356,6 +356,29 @@ static void check_geometry(int lines, int cell_height) {
     SDL_zero(e); e.type = SDL_EVENT_QUIT; assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 3 && out[5] == SDL_BUTTON_RIGHT && out[1] == 1);
     SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
+    SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_UP; e.button.button = SDL_BUTTON_RIGHT;
+    assert(SDL_PushEvent(&e));
+    assert(thc_wait(out) && out[0] == 4 && out[5] == SDL_BUTTON_RIGHT);
+    const Uint8 buttons[] = {SDL_BUTTON_MIDDLE, SDL_BUTTON_LEFT, SDL_BUTTON_RIGHT};
+    for (size_t i=0;i<sizeof(buttons);++i) {
+        SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_DOWN; e.button.button = buttons[i];
+        assert(SDL_PushEvent(&e));
+        assert(thc_wait(out) && out[0] == 3 && out[5] == buttons[i]);
+    }
+    /* Releasing other buttons must preserve the existing left-drag state. */
+    for (size_t i=0;i<sizeof(buttons);i+=2) {
+        SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_UP; e.button.button = buttons[i];
+        assert(SDL_PushEvent(&e));
+        assert(thc_wait(out) && out[0] == 4 && out[5] == buttons[i]);
+    }
+    SDL_zero(e); e.type = SDL_EVENT_MOUSE_MOTION; e.motion.x=39; e.motion.y=799;
+    assert(SDL_PushEvent(&e));
+    assert(thc_wait(out) && out[0] == 3);
+    SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_UP; e.button.button = SDL_BUTTON_LEFT;
+    assert(SDL_PushEvent(&e));
+    assert(thc_wait(out) && out[0] == 4 && out[5] == SDL_BUTTON_LEFT);
+
+    SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
     SDL_zero(e); e.type = SDL_EVENT_WINDOW_MOUSE_LEAVE;
     assert(SDL_PushEvent(&e));
     assert(thc_wait(out) && out[0] == 12 && out[1] == -1 && out[2] == -1);
