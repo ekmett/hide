@@ -68,7 +68,6 @@ import qualified Hide.Plugin.Command as Command
 import Hide.PluginWindowHost (installEditorDraft,applyEditorUpdate,adoptWindowUpdate)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
-import qualified Hide.TextLayout as Layout
 import System.Environment (lookupEnv)
 import Hide.Syntax (Style(..),styledText)
 
@@ -764,9 +763,8 @@ adoptConversationBodies runtime results desktop=do
                       view<-M.lookup target (conversationViews current)
                       InstalledBody _ (Just (BodyControlReceipt _ _ _ _ oldControls))<-pure (conversationBody view)
                       hostBodyQuestionToken oldControls
-                    next=presented
                 when (T.null target) (modifyIORef' (case runtime of ConversationState _ owner _ _->owner) (\state->state {lastQuestion=bodyQuestionToken key}))
-                pure (if previousQuestion/=bodyQuestionToken key then ensureQuestionVisible next else next)
+                pure (if previousQuestion/=bodyQuestionToken key then ensureQuestionVisible presented else presented)
 
 receive :: ConversationState -> Desktop -> A.Event -> IO Desktop
 receive runtime@(ConversationState _ ref consoles _) d event = do
@@ -1256,9 +1254,6 @@ draftCurrent submitted d=maybe (pure False) (versionCurrent (Editor.submissionVe
 clearSubmittedDraft :: Maybe DraftReceipt -> Desktop -> IO Desktop
 clearSubmittedDraft Nothing d=pure d
 clearSubmittedDraft (Just submitted) d=applyEditorUpdate submitted (Editor.clearEditorDraft submitted) d
-
-focusComposer :: Desktop -> Desktop
-focusComposer d=setComposerInput (composerBuffer d) (composerSelection d) True d
 
 parseAgentSettings :: Value -> [AgentSetting]
 parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOptions" value))
@@ -1824,7 +1819,7 @@ ensureEditorWithState opening state target name original=do
     else pure binding
   let mount=Editor.editorMount nextBinding
   opened<-case conversationBodyRef view of
-    Just reference | bodyLive->do
+    Just _ | bodyLive->do
       admitted<-if activate && not live then atomically (Editor.claimEditorMount mount) else pure live
       let mounted=if admitted then installEditorDraft mount Nothing seeded else seeded
       pure mounted {conversationViews=M.adjust (\v->v {conversationEditor=if admitted then Just mount else conversationEditor v}) target (conversationViews mounted)}
