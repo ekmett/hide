@@ -242,7 +242,7 @@ listingChecks path=do
   withPermissionsAt path builtinTools $ \owner->withBufferReadCommands $ \commands->do
     let reader=bufferReader owner (pure (Right ()))
         opaque=current {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc)
-          {saved=error "listing forced saved source",undoStack=error "listing forced Undo",redoStack=error "listing forced Redo"},
+          {cachedContents=error "listing forced source contents",saved=error "listing forced saved source",undoStack=error "listing forced Undo",redoStack=error "listing forced Redo"},
           documentHighlight=error "listing forced highlights"}) (buffers current)}
     withAsync (P.listBuffers reader) $ \worker->do
       queued worker
