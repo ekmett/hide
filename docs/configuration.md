@@ -345,6 +345,32 @@ For dependencies shared by the project, prefer a checked-in build configuration.
 This editor's `cabal.project` already discovers Ghostty installed under
 `.deps/ghostty`; see [Installation](install.md#bundled-ghostty-discovery).
 
+## Terminal file drag helper
+
+Saved-file export in the terminal delegates to an optional installed helper.
+hide searches `PATH` for [ripdrag](https://github.com/nik012003/ripdrag), then
+[dragon-drop](https://github.com/mwh/dragon). These helpers open a graphical
+window from which you drag the file to another application. A graphical display
+is required; installing a helper is unnecessary for ordinary editing.
+
+To select a helper explicitly, set `THC_EDIT_FILE_DRAG_HELPER` before starting
+hide:
+
+```sh
+THC_EDIT_FILE_DRAG_HELPER=/path/to/dragon hide .
+```
+
+The value names one executable, with no arguments, shell expansion or quoting
+syntax. hide passes `--and-exit` and one canonical absolute file path as separate
+arguments. A renamed compatible helper can use the same override. The bare name
+`dragon` is not discovered automatically because other applications use it.
+An empty override disables helper export. An unavailable executable or failed
+helper reports an error in hide; closing the helper cancels the interaction.
+
+This host-owned override cannot be changed through agent environment tools or
+project environment settings. The helper runs on the editor's host; it does not
+transfer a remote server file to the connecting machine.
+
 ## Agent context
 
 Use `[editor.agent].context` in either file for guidance you want supplied to
