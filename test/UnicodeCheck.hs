@@ -26,6 +26,8 @@ checks = do
       segments=["λ","e\x301","👩🏽\x200d\&💻","🇨🇦","終","\r\n","x"]
       source="prefix"<>T.concat segments<>"suffix"
       fragment=T.dropEnd 6 (T.drop 6 source)
+  let (_,emptyMask)=cellRowsAndOwnership [CellImage (V.string V.defAttr "ordinary")] (40,18)
+  check "ordinary composition carries no canvas mask bytes" (BS.null emptyMask)
   check "scalar widths retain controls, combining, wide and display overrides"
     (map scalarWidth ['a','é','│','\0','\x301','\x200d','界','⌥','⌘','\xf024b','\xf0770','\xfe0f','\x20e3','\x1f1e6']==[1,1,1,0,0,0,2,2,2,2,2,2,2,2])
   check "cluster width remains the maximum scalar display width"
