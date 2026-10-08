@@ -17,7 +17,7 @@ module Hide.Accessibility
   ) where
 
 import Data.Aeson (Value, object, (.=))
-import Data.List (foldl')
+import Data.List (sortOn)
 import qualified Data.Map.Strict as M
 import Data.Maybe (isJust)
 import qualified Data.Sequence as S
@@ -47,7 +47,7 @@ sidebarSemantics audience d=case sideTree d of
   Just tree
     | covered || listWidth<=0 || visible<=0->snapshot (revision tree) (layout tree) 0 0 0 []
     | otherwise->snapshot (revision tree) (layout tree) start visible (M.size (treeRows tree))
-        (host tree:map (node tree) (M.toAscList accepted))
+        (host tree:map (node tree) (sortOn (stateAddress . snd) (M.toList accepted)))
     where
       start=max 0 (treeScroll tree)
       visible=min 256 (min (max 0 (rows-2-bottom)) (treeContentRows d))
