@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, CPP, OverloadedStrings #-}
+{-# LANGUAGE CPP, OverloadedStrings #-}
 -- | Local browser bridge for a persistent remote peer.
 --
 -- The peer remains attached while browsers disconnect. Reconstructed rows and
@@ -36,7 +36,7 @@ data Cache = Cache
 
 -- One current cursor and immutable completed resources. Byte admission includes
 -- the entire unfinished resource; replay uses its retained contiguous prefix.
-data CanvasResource = CanvasResource !Value !BS.ByteString
+data CanvasResource = CanvasResource !Value !Int ![BS.ByteString]
 data CanvasUpload = CanvasUpload !Value !T.Text !Int !Int ![BS.ByteString]
 data CanvasCache = CanvasCache
   { canvasEpoch :: !(Maybe T.Text), canvasResources :: !(M.Map T.Text CanvasResource)
@@ -67,7 +67,7 @@ canvasControl current value = parseEither (withObject "canvas control" $ \o->do
           Nothing->fail "Canvas chunk without resource"
         pure (current,Just (CanvasBytes value ident offset bytes))
       "canvas-release"->do
-        let retired=case M.lookup ident (canvasResources current) of Just (CanvasResource _ bytes)->BS.length bytes;Nothing->0
+        let retired=case M.lookup ident (canvasResources current) of Just (CanvasResource _ bytes _)->bytes;Nothing->0
             (upload,released)=case canvasUpload current of Just (CanvasUpload _ active bytes _ _) | active==ident->(Nothing,bytes);_->(canvasUpload current,0)
         pure (current {canvasResources=M.delete ident (canvasResources current),canvasUpload=upload,canvasBytes=canvasBytes current-retired-released},Nothing)
       _->fail "Unknown canvas control") value
@@ -78,20 +78,18 @@ canvasChunk current ident offset count bytes = case canvasUpload current of
     | active==ident && received==offset && BS.length bytes==count ->
       let next=received+count in
       if next==total then
-        let !payload=BS.concat (reverse (bytes:chunks)) in
-        Right current {canvasResources=M.insert ident (CanvasResource header payload) (canvasResources current),canvasUpload=Nothing}
+        Right current {canvasResources=M.insert ident (CanvasResource header total (reverse (bytes:chunks))) (canvasResources current),canvasUpload=Nothing}
       else Right current {canvasUpload=Just (CanvasUpload header active total next (bytes:chunks))}
   _->Left "Invalid canvas chunk bytes"
 
 canvasReplay :: CanvasCache -> [WirePacket]
 canvasReplay current =
   [JsonPacket (object ["type" .= ("canvas-reset"::T.Text),"epoch" .= epoch]) | Just epoch<-[canvasEpoch current]] ++
-  concat [JsonPacket header:chunks header 0 (split bytes) | CanvasResource header bytes<-M.elems (canvasResources current)] ++
+  concat [JsonPacket header:chunks header 0 bytes | CanvasResource header _ bytes<-M.elems (canvasResources current)] ++
   case canvasUpload current of
     Nothing->[]
     Just (CanvasUpload header _ _ _ prefix)->JsonPacket header:chunks header 0 (reverse prefix)
   where
-    split bytes | BS.null bytes=[] | otherwise=let (front,rest)=BS.splitAt 262144 bytes in front:split rest
     chunks _ _ []=[]
     chunks header offset (bytes:rest)=
       let fields=case header of Object o->o;_->KM.empty
