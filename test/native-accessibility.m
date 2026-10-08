@@ -14,6 +14,10 @@ static NSDictionary *node(NSArray *ident,NSArray *parent,NSString *role,NSString
         @"childrenKnown":@1,@"generation":@1,@"level":@(level),@"posInSet":@(level?1:0),@"setSize":@1,
         @"index":index<0?(id)NSNull.null:@(index)};
 }
+static NSMutableDictionary *dialogNode(NSArray *ident,NSArray *parent,NSString *role,NSString *name,id value,NSArray *rectangle) {
+    return [@{@"id":ident,@"parent":parent ?: (id)NSNull.null,@"role":role,@"name":name,@"value":value,
+        @"bounds":rectangle,@"focused":@NO,@"checked":NSNull.null,@"selected":NSNull.null,@"expanded":NSNull.null,@"multiline":@NO} mutableCopy];
+}
 static int publish(NSDictionary *value) {
     NSData *json=[NSJSONSerialization dataWithJSONObject:value options:0 error:nil];
     return thc_accessibility(json.bytes,json.length);
@@ -122,6 +126,58 @@ int main(int argc,char **argv) {
     assert(!publish(@{@"size":@[@(cols),@(rows)],@"images":@[picture,picture]}));assert(!findRole(window,NSAccessibilityImageRole,[NSMutableSet new]));
     assert(publish(canvas));assert(thc_accessibility(NULL,0));
     assert(!findRole(window,NSAccessibilityImageRole,[NSMutableSet new]) && !findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]));
+    assert(publish(snapshot));assert(publish(canvas));
+    id firstResponder=window.firstResponder;
+    NSArray *dialogId=@[@"dialog"],*inputId=@[@"dialog",@"field",@"0"],*checkId=@[@"dialog",@"field",@"1"];
+    NSMutableDictionary *modalRoot=dialogNode(dialogId,nil,@"dialog",@"Options λ",NSNull.null,@[@0,@1,@30,@12]);
+    NSMutableDictionary *input=dialogNode(inputId,dialogId,@"textbox",@"Name",@"plain <script> text",@[@1,@3,@22,@1]);input[@"focused"]=@YES;
+    NSMutableDictionary *tick=dialogNode(checkId,dialogId,@"checkbox",@"Enabled",NSNull.null,@[@1,@5,@12,@1]);tick[@"checked"]=@YES;
+    NSArray *listId=@[@"dialog",@"field",@"2"],*choiceId=@[@"dialog",@"field",@"2",@"option",@"0"];
+    NSMutableDictionary *list=dialogNode(listId,dialogId,@"listbox",@"Choices",NSNull.null,@[@1,@6,@12,@3]);
+    NSMutableDictionary *choice=dialogNode(choiceId,listId,@"option",@"Selected item",NSNull.null,@[@1,@7,@12,@1]);choice[@"selected"]=@YES;
+    NSMutableDictionary *modal=[@{@"present":@YES,@"readOnly":@YES,@"truncated":@NO,@"nodes":@[modalRoot,input,tick,list,choice]} mutableCopy];
+    NSDictionary *modalWrapper=@{@"size":@[@(cols),@(rows)],@"dialog":modal};
+    assert(publish(modalWrapper));
+    id dialogHost=nil;for (NSView *view in window.contentView.subviews) if ([view isKindOfClass:NSClassFromString(@"HideAXDialog")]) dialogHost=view;
+    assert(dialogHost && [[dialogHost accessibilitySubrole] isEqual:NSAccessibilityDialogSubrole]);
+    assert([[dialogHost accessibilityLabel] isEqual:@"Options λ"] && [[dialogHost accessibilityChildren] count]==3);
+    id inputElement=findRole(window,NSAccessibilityTextFieldRole,[NSMutableSet new]);assert(inputElement);
+    assert([[inputElement accessibilityLabel] isEqual:@"Name"] && [[inputElement accessibilityValue] isEqual:@"plain <script> text"]);
+    assert([[inputElement accessibilityHelp] containsString:@"Focused in editor"] && ![inputElement isAccessibilityFocused]);
+    actual=[inputElement accessibilityFrame];near(actual.origin.x,expected.origin.x);near(actual.origin.y,expected.origin.y);
+    near(actual.size.width,expected.size.width);near(actual.size.height,expected.size.height);
+    id checkbox=findRole(window,NSAccessibilityCheckBoxRole,[NSMutableSet new]);assert([[checkbox accessibilityValue] isEqual:@YES]);
+    id listing=findRole(window,NSAccessibilityListRole,[NSMutableSet new]);assert(listing && [[listing accessibilityChildren] count]==1);
+    assert([[[listing accessibilityChildren] firstObject] accessibilityParent]==listing);
+    assert([[[listing accessibilitySelectedChildren] firstObject] isAccessibilitySelected]);
+    for (id element in @[dialogHost,inputElement,checkbox,listing]) {
+        assert(![element isAccessibilitySelectorAllowed:@selector(accessibilityPerformPress)] &&
+            ![element isAccessibilitySelectorAllowed:@selector(setAccessibilityValue:)] &&
+            ![element isAccessibilitySelectorAllowed:@selector(setAccessibilityFocused:)]);
+    }
+    assert(![dialogHost acceptsFirstResponder] && [dialogHost hitTest:NSMakePoint(2,2)]==nil);
+    assert(window.firstResponder==firstResponder && !findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]) && !findRole(window,NSAccessibilityImageRole,[NSMutableSet new]));
+    input[@"value"]=@"updated";input[@"bounds"]=@[@2,@4,@5,@2];assert(publish(modalWrapper));
+    assert(findRole(window,NSAccessibilityTextFieldRole,[NSMutableSet new])==inputElement && [[inputElement accessibilityValue] isEqual:@"updated"]);
+    input[@"value"]=NSNull.null;assert(publish(modalWrapper));
+    assert(![inputElement accessibilityValue] && ![inputElement isAccessibilitySelectorAllowed:@selector(accessibilityValue)]);
+    assert(publish(snapshot));assert(publish(canvas)); // Lower snapshots cannot reappear through an active modal.
+    assert(!findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]) && !findRole(window,NSAccessibilityImageRole,[NSMutableSet new]));
+    NSDictionary *emptyModal=@{@"present":@YES,@"readOnly":@YES,@"truncated":@NO,@"nodes":@[]};
+    assert(publish(@{@"size":@[@(cols),@(rows)],@"dialog":emptyModal}));
+    assert(![inputElement isAccessibilityElement] && ![inputElement accessibilityValue] && ![inputElement accessibilityParent]);
+    assert(publish(snapshot));assert(!findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]));
+    NSDictionary *dismissed=@{@"present":@NO,@"readOnly":@YES,@"truncated":@NO,@"nodes":@[]};
+    assert(publish(@{@"size":@[@(cols),@(rows)],@"dialog":dismissed}));
+    assert(publish(snapshot));assert(publish(canvas));assert(findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]) && findRole(window,NSAccessibilityImageRole,[NSMutableSet new]));
+    for (NSDictionary *bad in @[@{@"role":@"action"},@{@"parent":inputId},@{@"value":[@"x" stringByPaddingToLength:2049 withString:@"x" startingAtIndex:0]},@{@"focused":@1},@{@"bounds":@[@(cols),@1,@1,@1]}]) {
+        NSMutableDictionary *invalid=[input mutableCopy];[invalid addEntriesFromDictionary:bad];
+        modal[@"nodes"]=@[modalRoot,invalid];assert(!publish(modalWrapper));
+        assert(![inputElement isAccessibilityElement]);
+    }
+    modal[@"nodes"]=@[modalRoot,input,input];assert(!publish(modalWrapper));
+    modal[@"present"]=@NO;modal[@"nodes"]=@[modalRoot];assert(!publish(modalWrapper));
+    assert(thc_accessibility(NULL,0));assert(window.firstResponder==firstResponder);
     assert(!window.visible && !window.keyWindow);
     printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only selectors and retirement checks passed\n",backend,(double)pw/ww);
     thc_close();

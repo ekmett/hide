@@ -3,9 +3,11 @@ module RemoteWindowCheck (checks) where
 import Control.Monad (unless)
 import Data.List (elemIndex)
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Base64 as B64
 import Hide.RemoteWindow
 import Hide.FrameTiming
@@ -13,7 +15,6 @@ import Hide.Window (nativeMenuEvent,nativeCommands)
 import qualified Hide.Model as Model
 import qualified Data.Map.Strict
 #ifdef WITH_REMOTE
-import qualified Data.ByteString.Lazy as BL
 import Data.Aeson.Types (parseEither)
 import qualified Hide.Protocol as P
 import Hide.Buffer (newBuffer)
@@ -119,6 +120,39 @@ checks = do
   check "native semantic transport rejects oversized and nonobject snapshots"
     (all (either (const True) (const False) . (\value->parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"semanticSidebar" .= value]) rows))
       [String "bad",object ["name" .= T.replicate 2097153 "a"]])
+
+  let dialogId=["dialog"]::[T.Text]
+      modalNode :: [T.Text] -> Maybe [T.Text] -> T.Text -> T.Text -> Maybe T.Text -> Value
+      modalNode ident parent role name value=object
+        ["id" .= ident,"parent" .= parent,"role" .= role,"name" .= name,"value" .= value,
+         "bounds" .= ([1,2,20,1]::[Int]),"focused" .= True,"checked" .= (Nothing::Maybe Bool),
+         "selected" .= (Nothing::Maybe Bool),"expanded" .= (Nothing::Maybe Bool),"multiline" .= False]
+      modalRoot=modalNode dialogId (Nothing::Maybe [T.Text]) ("dialog"::T.Text) ("Options"::T.Text) (Nothing::Maybe T.Text)
+      modalInput=modalNode ["dialog","field","0"] (Just dialogId) "textbox" "Name" (Just "safe <script>")
+      dialogValue :: Bool -> [Value] -> Value
+      dialogValue present nodes=object ["present" .= present,"readOnly" .= True,"truncated" .= False,"nodes" .= nodes]
+      dialogFrame value=parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"semanticDialog" .= value]) rows
+      modal=dialogValue True [modalRoot,modalInput]
+      wrapper value=object ["dialog" .= value,"size" .= ([80,25]::[Int])]
+  check "native receiver validates and prepares the complete modal snapshot"
+    (case dialogFrame modal of Right value->remoteDialog value==Just (BL.toStrict (encode (wrapper modal))); _->False)
+  check "privacy-hidden modal remains present without exposing labels or controls"
+    (case dialogFrame (dialogValue True ([]::[Value])) of Right value->remoteDialog value/=Nothing; _->False)
+  check "missing and dismissed dialog metadata retire native modal state"
+    (all (\result->case result of Right value->remoteDialog value==Nothing; _->False)
+      [parseRemoteFrame meta rows,dialogFrame (dialogValue False ([]::[Value]))])
+  let editNode updates=case modalInput of Object fields->Object (KM.union (KM.fromList updates) fields); _->error "modal fixture"
+      badNodes=[editNode ["role" .= ("action"::T.Text)],editNode ["parent" .= (["dialog","field","0"]::[T.Text])],
+        editNode ["value" .= T.replicate 2049 "x"],editNode ["focused" .= (1::Int)],editNode ["bounds" .= ([80,2,1,1]::[Int])],
+        editNode ["id" .= (["dialog","field",T.replicate 25 "0"]::[T.Text])],editNode ["name" .= ("bad\0name"::T.Text)]]
+  check "native modal parser rejects malformed roles states geometry identities and cycles"
+    (all (either (const True) (const False) . dialogFrame . dialogValue True . (modalRoot:) . (:[])) badNodes)
+  check "native modal parser rejects duplicate nodes nonempty dismissals and node overflow"
+    (all (either (const True) (const False) . dialogFrame)
+      [dialogValue True [modalRoot,modalInput,modalInput],dialogValue False [modalRoot],dialogValue True (replicate 257 modalRoot)])
+  let budgetNodes=[modalNode ["dialog","body",T.pack (show i)] (Just dialogId) "text" (T.replicate 256 "x") (Just (T.replicate 2048 "y")) | i<-[0..14::Int]]
+  check "native modal parser bounds total text independently of node count"
+    (either (const True) (const False) (dialogFrame (dialogValue True (modalRoot:budgetNodes))))
 
   let menuMeta fields=object (["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]) ]++fields)
       states metadata=either (const []) remoteMenus (parseRemoteFrame metadata rows)

@@ -13,6 +13,7 @@ static BOOL text(id value, NSUInteger limit, BOOL nonempty) {
     NSUInteger count=0;
     for (NSUInteger i=0;i<[value length];++i) {
         unichar c=[value characterAtIndex:i];
+        if (!c) return NO;
         if (CFStringIsSurrogateHighCharacter(c)) {
             if (++i==[value length] || !CFStringIsSurrogateLowCharacter([value characterAtIndex:i])) return NO;
         } else if (CFStringIsSurrogateLowCharacter(c)) return NO;
@@ -180,17 +181,171 @@ invalid:
     clearCanvasAccessibility(); return 0;
 }
 
-void thc_accessibility_close(void) {
-    clearCanvasAccessibility();
+static void clearSidebarAccessibility(void) {
     NSView *parent=host.superview;
     for (HideAXRow *row in host.rows) [row retire];
     host.rows=nil; host.nodes=nil; host.record=nil;
     [host removeFromSuperview]; host=nil;
     if (parent) NSAccessibilityPostNotification(parent,NSAccessibilityLayoutChangedNotification);
 }
+/* A complete current-modal snapshot. Structural IDs preserve reading location
+ * only; neither values nor visibility introduce actions or OS input focus. */
+@class HideAXDialog;
+@interface HideAXControl : NSAccessibilityElement
+@property(weak) HideAXDialog *host;
+@property(weak) id parent;
+@property(copy) NSDictionary *record;
+@property(copy) NSArray<HideAXControl *> *children;
+- (void)retire;
+@end
+@interface HideAXDialog : NSView
+@property(copy) NSDictionary *record;
+@property(copy) NSArray<HideAXControl *> *children;
+@property(copy) NSDictionary<NSArray *,HideAXControl *> *nodes;
+@property BOOL truncated;
+@end
+static HideAXDialog *dialogHost;
+static BOOL dialogPresent;
+static NSArray *dialogRoles(void) { return @[@"dialog",@"text",@"textbox",@"checkbox",@"radiogroup",@"radio",@"listbox",@"option",@"combobox",@"button"]; }
+static BOOL dialogIdentity(id value) {
+    if (![value isKindOfClass:NSArray.class] || ![value count] || [value count]>5 || ![value[0] isEqual:@"dialog"]) return NO;
+    for (NSString *part in value) {
+        if (!text(part,24,YES)) return NO;
+        if ([@[@"dialog",@"field",@"body",@"button",@"option"] containsObject:part]) continue;
+        if ([part rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789"] invertedSet]].location!=NSNotFound) return NO;
+    }
+    return YES;
+}
+static NSUInteger scalarCount(NSString *value) {
+    NSUInteger count=value.length;
+    for (NSUInteger i=0;i<value.length;++i) if (CFStringIsSurrogateLowCharacter([value characterAtIndex:i])) --count;
+    return count;
+}
+static NSString *dialogHelp(NSDictionary *record) {
+    return [record[@"focused"] boolValue] ? @"Read-only snapshot. Focused in editor." : @"Read-only snapshot; use editor controls to change this dialog.";
+}
+@implementation HideAXControl
+- (BOOL)isAccessibilityElement { return self.record!=nil; }
+- (NSAccessibilityRole)accessibilityRole {
+    NSString *role=self.record[@"role"];
+    if ([role isEqual:@"text"]) return NSAccessibilityStaticTextRole;
+    if ([role isEqual:@"textbox"]) return [self.record[@"multiline"] boolValue] ? NSAccessibilityTextAreaRole : NSAccessibilityTextFieldRole;
+    if ([role isEqual:@"checkbox"]) return NSAccessibilityCheckBoxRole;
+    if ([role isEqual:@"radio"]) return NSAccessibilityRadioButtonRole;
+    if ([role isEqual:@"radiogroup"]) return NSAccessibilityRadioGroupRole;
+    if ([role isEqual:@"listbox"]) return NSAccessibilityListRole;
+    if ([role isEqual:@"option"]) return NSAccessibilityRowRole;
+    if ([role isEqual:@"combobox"]) return NSAccessibilityComboBoxRole;
+    return NSAccessibilityButtonRole;
+}
+- (NSString *)accessibilityLabel { return self.record[@"name"]; }
+- (id)accessibilityValue {
+    NSString *role=self.record[@"role"];
+    id value=[role isEqual:@"checkbox"] || [role isEqual:@"radio"] ? self.record[@"checked"] : self.record[@"value"];
+    return value==NSNull.null ? nil : value;
+}
+- (id)accessibilityParent { return self.parent; }
+- (NSArray *)accessibilityChildren { return self.children; }
+- (NSArray *)accessibilitySelectedChildren {
+    NSMutableArray *selected=[NSMutableArray new];
+    for (HideAXControl *child in self.children) if (child.record[@"selected"]!=NSNull.null && [child.record[@"selected"] boolValue]) [selected addObject:child];
+    return selected;
+}
+- (NSRect)accessibilityFrame { return screenFrame(self.host,self.record[@"bounds"]); }
+- (BOOL)isAccessibilitySelected { return self.record[@"selected"]!=NSNull.null && [self.record[@"selected"] boolValue]; }
+- (BOOL)isAccessibilityExpanded { return self.record[@"expanded"]!=NSNull.null && [self.record[@"expanded"] boolValue]; }
+- (BOOL)isAccessibilityFocused { return NO; }
+- (NSString *)accessibilityHelp { return self.record ? dialogHelp(self.record) : nil; }
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
+    if ((selector==@selector(accessibilityValue) && !self.accessibilityValue) ||
+        (selector==@selector(isAccessibilitySelected) && self.record[@"selected"]==NSNull.null) ||
+        (selector==@selector(isAccessibilityExpanded) && self.record[@"expanded"]==NSNull.null)) return NO;
+    return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector];
+}
+- (void)retire { self.record=nil;self.children=nil;self.parent=nil;self.host=nil; }
+@end
+@implementation HideAXDialog
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return NO; }
+- (NSView *)hitTest:(NSPoint)point { (void)point;return nil; }
+- (BOOL)isAccessibilityElement { return self.record!=nil; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityGroupRole; }
+- (NSAccessibilitySubrole)accessibilitySubrole { return NSAccessibilityDialogSubrole; }
+- (NSString *)accessibilityLabel { return self.record[@"name"]; }
+- (NSString *)accessibilityHelp { return self.truncated ? @"Read-only dialog snapshot. Some visible controls are omitted." : @"Read-only dialog snapshot; use editor controls to change this dialog."; }
+- (NSRect)accessibilityFrame { return screenFrame(self,self.record[@"bounds"]); }
+- (NSArray *)accessibilityChildren { return self.children; }
+- (BOOL)isAccessibilityFocused { return NO; }
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector { return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector]; }
+@end
+static void clearDialogAccessibility(void) {
+    NSView *parent=dialogHost.superview;
+    for (HideAXControl *control in dialogHost.nodes.allValues) [control retire];
+    dialogHost.children=nil;dialogHost.nodes=nil;dialogHost.record=nil;
+    [dialogHost removeFromSuperview];dialogHost=nil;
+    if (parent) NSAccessibilityPostNotification(parent,NSAccessibilityLayoutChangedNotification);
+}
+static int updateDialogAccessibility(void *native_window,NSDictionary *wrapper) {
+    NSArray *size=wrapper[@"size"];NSDictionary *snapshot=wrapper[@"dialog"];
+    if (![size isKindOfClass:NSArray.class] || size.count!=2 || !integer(size[0],512) || !integer(size[1],256) ||
+        [size[0] integerValue]<1 || [size[1] integerValue]<1 || ![snapshot isKindOfClass:NSDictionary.class] ||
+        !boolean(snapshot[@"present"]) || !boolean(snapshot[@"readOnly"]) || ![snapshot[@"readOnly"] boolValue] || !boolean(snapshot[@"truncated"])) goto invalid;
+    @autoreleasepool {
+        NSArray *values=snapshot[@"nodes"];
+        if (![values isKindOfClass:NSArray.class] || values.count>256 || (![snapshot[@"present"] boolValue] && values.count)) goto invalid;
+        NSMutableDictionary<NSArray *,NSDictionary *> *records=[NSMutableDictionary new];NSDictionary *root=nil;NSUInteger budget=0;
+        for (NSDictionary *node in values) {
+            if (![node isKindOfClass:NSDictionary.class] || !dialogIdentity(node[@"id"]) || ![dialogRoles() containsObject:node[@"role"]] ||
+                !text(node[@"name"],256,NO) || !(node[@"value"]==NSNull.null || text(node[@"value"],2048,NO)) || node[@"bounds"]==NSNull.null ||
+                !bounds(node[@"bounds"],[size[0] integerValue],[size[1] integerValue]) || !boolean(node[@"focused"]) || !boolean(node[@"multiline"]) ||
+                !nullableBoolean(node[@"checked"]) || !nullableBoolean(node[@"selected"]) || !nullableBoolean(node[@"expanded"]) || records[node[@"id"]]) goto invalid;
+            budget+=scalarCount(node[@"name"])+(node[@"value"]==NSNull.null ? 0 : scalarCount(node[@"value"]));if (budget>32768) goto invalid;
+            records[node[@"id"]]=node;
+            if ([node[@"id"] isEqual:@[@"dialog"]] && [node[@"role"] isEqual:@"dialog"] && node[@"parent"]==NSNull.null) root=node;
+            else if ([node[@"role"] isEqual:@"dialog"] || !dialogIdentity(node[@"parent"])) goto invalid;
+        }
+        if (values.count && !root) goto invalid;
+        for (NSDictionary *node in values) if (node!=root) {
+            NSDictionary *parent=records[node[@"parent"]];NSUInteger depth=0;
+            while (parent && parent!=root && depth<5) { ++depth;parent=records[parent[@"parent"]]; }
+            if (parent!=root) goto invalid;
+        }
+        dialogPresent=[snapshot[@"present"] boolValue];
+        if (dialogPresent) { clearSidebarAccessibility();clearCanvasAccessibility(); }
+        if (!values.count) { clearDialogAccessibility();return 1; }
+        NSWindow *window=(__bridge NSWindow *)native_window;
+        if (dialogHost && dialogHost.window!=window) clearDialogAccessibility();
+        if (!dialogHost) {
+            dialogHost=[[HideAXDialog alloc] initWithFrame:window.contentView.bounds];
+            dialogHost.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[window.contentView addSubview:dialogHost];
+        }
+        BOOL changed=![root isEqual:dialogHost.record] || dialogHost.truncated!=[snapshot[@"truncated"] boolValue] || dialogHost.nodes.count!=values.count-1;
+        for (NSDictionary *node in values) if (node!=root && ![node isEqual:dialogHost.nodes[node[@"id"]].record]) changed=YES;
+        if (!changed) return 1;
+        NSMutableDictionary *nodes=[NSMutableDictionary new],*children=[NSMutableDictionary new];
+        for (NSDictionary *node in values) if (node!=root) {
+            NSArray *key=node[@"id"];HideAXControl *control=dialogHost.nodes[key] ?: [HideAXControl new];
+            control.record=node;control.host=dialogHost;nodes[key]=control;
+            NSArray *parent=node[@"parent"];if (!children[parent]) children[parent]=[NSMutableArray new];[children[parent] addObject:control];
+        }
+        for (NSArray *key in nodes) {
+            HideAXControl *control=nodes[key];control.parent=[control.record[@"parent"] isEqual:root[@"id"]] ? dialogHost : nodes[control.record[@"parent"]];
+            control.children=children[key] ?: @[];
+        }
+        for (NSArray *key in dialogHost.nodes) if (!nodes[key]) [dialogHost.nodes[key] retire];
+        dialogHost.record=root;dialogHost.nodes=nodes;dialogHost.children=children[root[@"id"]] ?: @[];dialogHost.truncated=[snapshot[@"truncated"] boolValue];
+        NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification);return 1;
+    }
+invalid:
+    clearDialogAccessibility();clearSidebarAccessibility();clearCanvasAccessibility();dialogPresent=YES;return 0;
+}
+void thc_accessibility_close(void) {
+    clearDialogAccessibility();dialogPresent=NO;clearCanvasAccessibility();clearSidebarAccessibility();
+}
 void thc_accessibility_geometry_changed(void) {
     if (host.rows.count) NSAccessibilityPostNotification(host,NSAccessibilityLayoutChangedNotification);
     if (canvasHost.images.count) NSAccessibilityPostNotification(canvasHost,NSAccessibilityLayoutChangedNotification);
+    if (dialogHost.record) NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification);
 }
 int thc_accessibility_update(void *native_window, const char *json, size_t length) {
     if (!NSThread.isMainThread) return 0;
@@ -198,6 +353,8 @@ int thc_accessibility_update(void *native_window, const char *json, size_t lengt
     if (!native_window || !json || length>2097152) goto invalid;
     @autoreleasepool {
         NSDictionary *snapshot=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:json length:length] options:0 error:nil];
+        if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"dialog"]) return updateDialogAccessibility(native_window,snapshot);
+        if (dialogPresent) return 1;
         if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"images"]) return updateCanvasAccessibility(native_window,snapshot);
         if (![snapshot isKindOfClass:NSDictionary.class] || !boolean(snapshot[@"readOnly"]) || ![snapshot[@"readOnly"] boolValue] || !integer(snapshot[@"revision"],9007199254740991)) goto invalid;
         NSArray *layout=snapshot[@"layout"],*values=snapshot[@"nodes"];
