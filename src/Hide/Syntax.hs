@@ -488,9 +488,9 @@ presentationItems text styled=go 0 text (map (\i->(itemSourceText i,itemOverflow
           | start>offset && styleOverflowExtent style/=Nothing=Just start
           | otherwise=markerBefore limit more
         markerBefore _ []=Nothing
-    dropRanges offset ranges@((_,end,_):rest)
+    dropRanges offset remaining@((_,end,_):rest)
       | end<=offset=dropRanges offset rest
-      | otherwise=ranges
+      | otherwise=remaining
     dropRanges _ []=[]
     skip _ []=[]
     skip n pending@((glyph,overflow):rest)
@@ -535,9 +535,9 @@ styledSigils runs
     ordinaryRun text style rest=ConsChars text style rest
     -- Captured overflow fragments own exact original extents, including a
     -- fragment beginning inside a freshly segmented padding/ZWJ item.
-    marked=build 0 0 text (presentationItems text runs) ranges
-    text=styledContents runs
-    ranges=V.toList (sourceRowRanges (prepareSourceRow text runs))
+    marked=build 0 0 fullText (presentationItems fullText runs) ranges
+    fullText=styledContents runs
+    ranges=V.toList (sourceRowRanges (prepareSourceRow fullText runs))
     build !_ !_ _ [] _=Nil
     build !offset !col raw ((glyph,overflow):rest) styles=
       let current=dropRanges offset styles
@@ -563,9 +563,9 @@ styledSigils runs
           (glyph,False):rest | T.length glyph==1,T.all (\c->c>=' ' && c/='\DEL') glyph,
             T.all ((==1) . scalarWidth) glyph->gather limit (offset+1) rest
           _->(offset,pending)
-    dropRanges offset ranges@(range:rest)
+    dropRanges offset remaining@(range:rest)
       | sourceRangeCharEnd range<=offset=dropRanges offset rest
-      | otherwise=ranges
+      | otherwise=remaining
     dropRanges _ []=[]
 
 -- | Outermost explicit script annotation, preserved through existing color,

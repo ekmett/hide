@@ -126,7 +126,7 @@ prepare (Capture (ident,target,width,wide) text MarkdownSource)=do
 prepare (Capture (ident,target,width,False) _ (DocumentStyles chars))
   | not (any (styleLayoutMetadata . snd) chars)=pure (ident,WindowPresentationUnneeded target width False)
 prepare (Capture (ident,target,width,wide) text styled)=do
-  layout<-prepareTextLayout wide width text (case styled of DocumentStyles chars->indexedHighlightRows chars; PluginStyles rows->rows; MarkdownSource->error "Unprepared Markdown source")
+  layout<-prepareTextLayout wide width text (case styled of DocumentStyles chars->indexedHighlightRows chars; PluginStyles rows->rows)
   pure (ident,WindowPresentation target width wide layout)
 
 -- | Prepare deterministic snapshots using the same owner, outside an input lock.

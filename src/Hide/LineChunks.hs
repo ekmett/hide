@@ -898,8 +898,8 @@ editedFlags original start end inserted tree=nul .|. terminal .|. (trailing `shi
     takeEnd n remaining=case FT.viewr remaining of
       FT.EmptyR->T.empty
       rest FT.:> piece->
-        let size=rawCharacters (FT.measure piece)
-            suffix=T.concat (pieceFragmentParts piece (max 0 (size-n)) (min n size))
+        let pieceSize=rawCharacters (FT.measure piece)
+            suffix=T.concat (pieceFragmentParts piece (max 0 (pieceSize-n)) (min n pieceSize))
         in if T.length suffix>=n then suffix else takeEnd (n-T.length suffix) rest<>suffix
     terminal | end<size-2=old .&. 6
              | otherwise=(if T.isSuffixOf (T.singleton '\n') lastTwo then 4 else 0) .|. (if T.isSuffixOf (T.pack "\r\n") lastTwo then 2 else 0)
@@ -1010,9 +1010,9 @@ buildPieces initial source candidates=items first 0 0 [] 0 0 0 (-1) 0 initial in
         _->Nothing
       _->Nothing
     pack text byte start pieces n count prefix suffix incoming outgoing receipt=
-      let source=borrowedConcat (reverse (slice text start byte:pieces))
+      let chunkText=borrowedConcat (reverse (slice text start byte:pieces))
           advance=if prefix<0 then Add suffix else Tab prefix suffix
-      in Chunk (leafMeasure source n count advance) source incoming outgoing receipt
+      in Chunk (leafMeasure chunkText n count advance) chunkText incoming outgoing receipt
     items !text !byte !start !pieces !stored !n !count !tabPrefix !tabSuffix !cursor !incoming !receipt !offset !haveCut following pending=
       let position=offset+n; pending'=advanceCandidates position pending
           scalarLimit=case pending' of Just (boundary,_)->max 1 (boundary-position); Nothing->maxBound

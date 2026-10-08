@@ -459,12 +459,12 @@ questionLayers :: Desktop -> Window -> [V.Image]
 questionLayers d w=case windowPluginText d w of
   Nothing->[]
   Just prepared->
-    [place (left (bounds w)+1) (top (bounds w)+1+row-scrollRow w)
+    [place (left (bounds w)+1) (top (bounds w)+1+rowNumber-scrollRow w)
       (V.cropRight columns (V.translateX (column-scrollColumn w)
         (styledImage (darkAppearance d) (const False) Nothing False (Selection 0 0) offset chars)))
     | (offset,chars)<-questionOverlayRows d w
-    , let (row,column)=windowTextPosition d w (PluginWindow.preparedWindowText prepared) offset
-    , row>=scrollRow w,row<scrollRow w+pluginBodyRows d w]
+    , let (rowNumber,column)=windowTextPosition d w (PluginWindow.preparedWindowText prepared) offset
+    , rowNumber>=scrollRow w,rowNumber<scrollRow w+pluginBodyRows d w]
     where columns=max 0 (width (bounds w)-2)
 
 -- The same host buttons and border geometry are shared by source and plugin text.
@@ -547,14 +547,14 @@ pluginWindowLayers canvas d active w prepared=
       in detailLayers++map CellImage (listImages++[place (x+1) (top detailRect-1) (label frame " Details " V.<|>V.charFill frame '─' (max 0 (ww-11)) 1)])
       | Just layout<-windowPresentation d w =
       [styledLayoutRow (darkAppearance d) selectable active (selection w) paintSelection
-        (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) row
-      | n<-[scrollRow w..scrollRow w+pluginBodyRows d w-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
+        (Rect (x+1) (y+1+n-scrollRow w) (max 0 (ww-2)) 1) (scrollColumn w) preparedRow
+      | n<-[scrollRow w..scrollRow w+pluginBodyRows d w-1],Just preparedRow<-[TextLayout.layoutRows layout Vec.!? n]]
       | PluginWindow.PlainRows plain<-rows =plainLayers (pluginTextRect d w) text plain active
       | otherwise=[CellImage (place (x+1) (y+1) body)]
     plainLayers rect content plain focused=
       [sourceCellRow (darkAppearance d) Nothing focused (selection w) (contentLineOffset content n)
-        (Rect (left rect) (top rect+n-scrollRow w) (width rect) 1) (scrollColumn w) row
-      | n<-[scrollRow w..scrollRow w+height rect-1],Just row<-[plain Vec.!? n]]
+        (Rect (left rect) (top rect+n-scrollRow w) (width rect) 1) (scrollColumn w) preparedRow
+      | n<-[scrollRow w..scrollRow w+height rect-1],Just preparedRow<-[plain Vec.!? n]]
     body=V.vertCat [line n | n<-[scrollRow w..scrollRow w+pluginBodyRows d w-1]]
     line n=V.cropRight (max 0 (ww-2)) (lineImage V.<|> V.charFill edit ' ' (max 0 (ww-2)) 1)
       where
@@ -643,8 +643,8 @@ windowLayers _ d active original =
           _->"Preparing Markdown view..."))),CellImage (place (x+1) (y+1) (V.charFill base ' ' contentWidth contentHeight))]
       | Just layout<-windowPresentation d w =
       [styledLayoutRow (darkAppearance d) selectable active (selection w) Nothing
-        (Rect (x+1) (y+1+n-scrollRow w) contentWidth 1) (scrollColumn w) row
-      | n<-[scrollRow w..scrollRow w+contentHeight-1],Just row<-[TextLayout.layoutRows layout Vec.!? n]]
+        (Rect (x+1) (y+1+n-scrollRow w) contentWidth 1) (scrollColumn w) preparedRow
+      | n<-[scrollRow w..scrollRow w+contentHeight-1],Just preparedRow<-[TextLayout.layoutRows layout Vec.!? n]]
       ++[CellImage (place (x+1) (y+1) (V.charFill base ' ' contentWidth contentHeight))]
       | bufferView w==CurrentView,syntaxDocument doc,Nothing<-inlineOption =
       [sourceCellRow (darkAppearance d) (lineColor n) active (selection w) (bufferLineOffset b n)
@@ -675,26 +675,26 @@ windowLayers _ d active original =
           Nothing -> renderLine (n-inlineRowDelta option)
       _ -> renderLine n
     inlineChunk _ _ _ text True=styledText (TerminalStyle 0xaaaaaa 0x0000aa 0) text
-    inlineChunk option rowIndex chunkIndex text False=highlight offset (runs text ranges)
+    inlineChunk option rowIndex chunkIndex text False=paintSelection offset (runs text ranges)
       where
         offset | rowIndex==0 && chunkIndex==0 = bufferLineOffset b (optionFirstRow option)
                | otherwise = proposalEnd (optionProposal option)
-        (sourceRow,sourceColumn)=bufferLineColumn b offset
-        ranges=case documentSourceRows doc >>= (Vec.!? sourceRow) of
-          Just row->[(sourceRangeCharEnd range-max sourceColumn (sourceRangeCharStart range),sourceRangeStyle range)
-            | range<-Vec.toList (sourceRowRanges row),sourceRangeCharEnd range>sourceColumn]
+        (sourceRowIndex,sourceColumn)=bufferLineColumn b offset
+        ranges=case documentSourceRows doc >>= (Vec.!? sourceRowIndex) of
+          Just tokens->[(sourceRangeCharEnd range-max sourceColumn (sourceRangeCharStart range),sourceRangeStyle range)
+            | range<-Vec.toList (sourceRowRanges tokens),sourceRangeCharEnd range>sourceColumn]
           Nothing->[]
         runs remaining _ | T.null remaining=[]
         runs remaining []=styledText Plain remaining
         runs remaining ((count,style):rest)=let (part,after)=T.splitAt count remaining
                                            in styledText style part++runs after rest
-        highlight _ []=[]
-        highlight position ((part,style):rest)=
+        paintSelection _ []=[]
+        paintSelection position ((part,style):rest)=
           let n=T.length part
               a=max 0 (min n (lo-position)); z=max a (min n (hi-position))
               (before,tailText)=T.splitAt a part; (chosen,after)=T.splitAt (z-a) tailText
           in (if active then styledText style before++styledText (TerminalStyle 0x0000aa 0xaaaaaa 0) chosen++styledText style after
-              else styledText style part)++highlight (position+n) rest
+              else styledText style part)++paintSelection (position+n) rest
         (lo,hi)=ordered (selection w)
     -- Docs: docs/editing.md (buffer views). Shared compact projections skip
     -- unchanged subtrees; only these visible rows request source text.
@@ -785,10 +785,10 @@ splitStyled=map fst . splitStyledText
 -- character boundaries; exceptional graphemes keep one complete source target
 -- and the advance already resolved by sourceSigils, including tab stops.
 styledSourceImage :: Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Int -> Int -> SourceRow -> V.Image
-styledSourceImage dark override active sel start left columns row=
+styledSourceImage dark override active sel start left columns tokens=
   V.translateX (column-left) (V.horizCat spans)
   where
-    (column,spans)=sourceCellSpans image dark override active sel start left columns row
+    (column,spans)=sourceCellSpans image dark override active sel start left columns tokens
     image (CellText paint text)=I.HorizText paint (TL.fromStrict text) (T.length text) (T.length text)
     image (CellGlyph paint text advance _ _)=I.HorizText paint (TL.fromStrict text) advance (T.length text)
     image (CellScript _ _ _ _)=V.emptyImage -- Source Sigils never contain scripted presentation.
@@ -796,20 +796,20 @@ styledSourceImage dark override active sel start left columns row=
 -- Source images, direct source rows and plain plugin rows share paint and selection cuts.
 -- The compositor owns clipping; glyphs retain their complete semantic identity.
 sourceCellRow :: Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Rect -> Int -> SourceRow -> CellLayer
-sourceCellRow dark override active sel start (Rect x y columns _) left row=
+sourceCellRow dark override active sel start (Rect x y columns _) left tokens=
   CellRow (x+column-left) y x (x+columns) (Vec.fromList spans)
-  where (column,spans)=sourceCellSpans id dark override active sel start left columns row
+  where (column,spans)=sourceCellSpans id dark override active sel start left columns tokens
 
 -- Project at emission so image callers do not retain an intermediate span list.
 {-# INLINE sourceCellSpans #-}
 sourceCellSpans :: (CellSpan -> a) -> Bool -> Maybe V.Attr -> Bool -> Selection -> Int -> Int -> Int -> SourceRow -> (Int,[a])
-sourceCellSpans project dark override active sel start left columns row=(column,draw (start+char) sigils)
+sourceCellSpans project dark override active sel start left columns tokens=(column,draw (start+char) sigils)
   where
-    (char,column,sigils)=sourceSigilsWindow left columns row
+    (char,column,sigils)=sourceSigilsWindow left columns tokens
     (lo,hi)=ordered sel
     color style=maybe normal (\paint->paint {V.attrStyle=V.attrStyle normal}) override
       where normal=syntaxAttr dark style
-    selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
+    selectionPaint paint=paint `V.withForeColor` blue `V.withBackColor` gray
     ordinary paint text=[project (CellText paint text) | not (T.null text)]
     draw _ Nil=[]
     draw offset (ConsChars text style rest)=
@@ -818,12 +818,12 @@ sourceCellSpans project dark override active sel start left columns row=(column,
           a=max 0 (min n (lo-offset)); z=max a (min n (hi-offset))
           (before,tailText)=T.splitAt a text
           (chosen,after)=T.splitAt (z-a) tailText
-          highlighted=ordinary paint before++ordinary (selected paint) chosen++ordinary paint after
+          highlighted=ordinary paint before++ordinary (selectionPaint paint) chosen++ordinary paint after
       in (if active && z>a then highlighted else ordinary paint text)++draw (offset+n) rest
     draw offset (ConsSigil glyph style advance rest)=
       let original=graphemeText glyph
           n=T.length original
-          paint=if active && offset<hi && offset+n>lo then selected (color style) else color style
+          paint=if active && offset<hi && offset+n>lo then selectionPaint (color style) else color style
           shown | T.any (\c->c<' ' || c=='\DEL') original=T.map (\c->if c<' ' || c=='\DEL' then '·' else c) original
                 | otherwise=graphemeDisplayText glyph
           occupied | advance<=0=[]
@@ -845,7 +845,7 @@ styledSigilsImage dark selectable override active sel logicalSelection start=V.h
     intersects a z=any (\(first,lastOffset)->a<lastOffset && first<z) selectedRanges
     color style=maybe normal (\paint->paint {V.attrStyle=V.attrStyle normal}) override
       where normal=syntaxAttr dark style
-    selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
+    selectionPaint paint=paint `V.withForeColor` blue `V.withBackColor` gray
     image paint text advance=[I.HorizText paint (TL.fromStrict text) advance (T.length text) | not (T.null text)]
     draw _ Nil=[]
     draw offset (ConsChars text style rest)=
@@ -853,15 +853,15 @@ styledSigilsImage dark selectable override active sel logicalSelection start=V.h
           a=max 0 (min n (lo-offset)); z=max a (min n (hi-offset))
           (before,tailText)=T.splitAt a text; (chosen,after)=T.splitAt (z-a) tailText
           pieces | active && selectable style,Just ranges<-logicalSelection=
-              concat [image (if intersects (offset+first) (offset+lastOffset) then selected paint else paint) value (lastOffset-first)
+              concat [image (if intersects (offset+first) (offset+lastOffset) then selectionPaint paint else paint) value (lastOffset-first)
                 | (first,lastOffset,value)<-selectionRunPieces n (\value->max 0 (min n (value-offset))) ranges text]
                  | active && selectable style && z>a=
-            image paint before a++image (selected paint) chosen (z-a)++image paint after (n-z)
+            image paint before a++image (selectionPaint paint) chosen (z-a)++image paint after (n-z)
                  | otherwise=image paint text n
       in pieces++draw (offset+n) rest
     draw offset (ConsSigil glyph style advance rest)=
       let original=graphemeText glyph; n=T.length original
-          paint=if active && selectable style && intersects offset (offset+n) then selected (color style) else color style
+          paint=if active && selectable style && intersects offset (offset+n) then selectionPaint (color style) else color style
           shown | original=="\r"=""
                 | original=="\t"=T.replicate advance " "
                 | graphemeOverflow glyph=graphemeDisplayText glyph
@@ -873,10 +873,10 @@ styledSigilsImage dark selectable override active sel logicalSelection start=V.h
 -- horizontal glyph slice is visited; padding is a separate baseline layer.
 -- Script metadata never passes through a Vty attribute or image round trip.
 styledLayoutRow :: Bool -> (Style -> Bool) -> Bool -> Selection -> Maybe [(Int,Int)] -> Rect -> Int -> TextLayout.LayoutRow -> CellLayer
-styledLayoutRow dark selectable active sel logicalSelection (Rect x y columns _) left row=
+styledLayoutRow dark selectable active sel logicalSelection (Rect x y columns _) left layoutRow=
   CellRow (x+origin-left) y x (x+columns) (Vec.fromList (concatMap spans (Vec.toList visible)))
   where
-    visible=TextLayout.layoutVisibleGlyphs left columns row
+    visible=TextLayout.layoutVisibleGlyphs left columns layoutRow
     origin=maybe left TextLayout.layoutColumn (visible Vec.!? 0)
     (lo,hi)=ordered sel
     selectedRanges=fromMaybe [(lo,hi)] logicalSelection
@@ -892,8 +892,8 @@ styledLayoutRow dark selectable active sel logicalSelection (Rect x y columns _)
         a=TextLayout.layoutStart glyph; z=TextLayout.layoutEnd glyph
         step=TextLayout.layoutRunStep glyph
         n=if step>0 then TextLayout.layoutAdvance glyph `div` step else 0
-        selected paint=paint `V.withForeColor` blue `V.withBackColor` gray
-        paintAt first lastOffset=if active && selectable style && any (\(lo,hi)->first<hi && lastOffset>lo) selectedRanges then selected normal else normal
+        selectionPaint paint=paint `V.withForeColor` blue `V.withBackColor` gray
+        paintAt rangeStart rangeEnd=if active && selectable style && any (\(selectionStart,selectionEnd)->rangeStart<selectionEnd && rangeEnd>selectionStart) selectedRanges then selectionPaint normal else normal
         cut value | z<=a=0
                   | otherwise=max 0 (min n (((value-a)*n+z-a-1) `div` (z-a)))
         first=cut lo; lastOffset=max first (cut hi)
@@ -904,15 +904,15 @@ styledLayoutRow dark selectable active sel logicalSelection (Rect x y columns _)
             concat [piece (paintAt (a+begin*(z-a) `div` n) (a+(end*(z-a)+n-1) `div` n)) value
               | (begin,end,value)<-selectionRunPieces n cut ranges text]
                  | active && selectable style && lastOffset>first=
-            piece normal before++piece (selected normal) chosen++piece normal after
+            piece normal before++piece (selectionPaint normal) chosen++piece normal after
                  | otherwise=piece normal text
         characters index remaining=case T.uncons remaining of
           Nothing->[]
           Just (_,rest)->
             let char=T.take 1 remaining
-                first=a+index*(z-a) `div` n
-                lastOffset=a+((index+1)*(z-a)+n-1) `div` n
-                paint=paintAt first lastOffset
+                charStart=a+index*(z-a) `div` n
+                charEnd=a+((index+1)*(z-a)+n-1) `div` n
+                paint=paintAt charStart charEnd
                 cell=case TextLayout.layoutScript glyph of
                   Just script->CellScript paint char 1 script
                   Nothing->CellGlyph paint char step 0 step
@@ -923,7 +923,7 @@ styledLayoutRow dark selectable active sel logicalSelection (Rect x y columns _)
 selectionRunPieces :: Int -> (Int -> Int) -> [(Int,Int)] -> Text -> [(Int,Int,Text)]
 selectionRunPieces count cut ranges text=go 0 text (drop 1 endpoints)
   where
-    endpoints=map head (group (sort (0:count:concat [[cut a,cut z] | (a,z)<-ranges])))
+    endpoints=[first | first:_<-group (sort (0:count:concat [[cut a,cut z] | (a,z)<-ranges]))]
     go _ _ []=[]
     go start remaining (end:rest)=
       let (part,after)=T.splitAt (end-start) remaining
@@ -931,7 +931,7 @@ selectionRunPieces count cut ranges text=go 0 text (drop 1 endpoints)
 
 -- One paint owner for ordinary and prepared semantic glyphs.
 syntaxAttr :: Bool -> Style -> V.Attr
-syntaxAttr dark style=paint style
+syntaxAttr dark initialStyle=paint initialStyle
   where
     paint style=let (base,bold,italic)=fontTraits style in
       foldl V.withStyle (baseAttr base) ([V.bold | bold]++[V.italic | italic])
@@ -1127,8 +1127,8 @@ dialogLayers d dg =
                                in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) (label inputColor value) V.<|> V.charFill inputColor ' ' fw 1)]
           SelectedInput name value sel ->
             let offset=if focus dg==i then max 0 (displayColumn value (caret sel)-fw+1) else 0
-                (a,z)=ordered sel
-                text=label inputColor (T.take a value) V.<|> label (if focus dg==i then selected else inputColor) (T.take (z-a) (T.drop a value)) V.<|> label inputColor (T.drop z value)
+                (first,lastOffset)=ordered sel
+                text=label inputColor (T.take first value) V.<|> label (if focus dg==i then selected else inputColor) (T.take (lastOffset-first) (T.drop first value)) V.<|> label inputColor (T.drop lastOffset value)
             in V.vertCat [row paper fw name,V.cropRight fw (V.translateX (negate offset) text V.<|> V.charFill inputColor ' ' fw 1)]
           ComboBox name choices chosen _ -> V.vertCat [row paper fw name,
             row inputColor (fw-2) (fromMaybe "" (atMay choices chosen)) V.<|> label (attr blue scrollCyan) " ▼"]
@@ -1185,9 +1185,9 @@ snapshotHtml d = "<!doctype html><meta charset='utf-8'><title>Haskell</title><st
     spanHtml (CellScript a text natural script)=colored a
       ("<span style='font-weight:inherit;display:inline-block;position:relative;width:1ch;height:1em;vertical-align:bottom'><span style='font-weight:inherit;position:absolute;left:0;top:"<>
        (if script==Superscript then "0" else "0.5em")<>";width:"<>T.pack (show natural)<>"ch;line-height:1em;transform:scale(0.5);transform-origin:top left'>"<>escape text<>"</span></span>")
-    colored a contents="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>
+    colored a markup="<span style='color:"<>color (V.attrForeColor a)<>";background:"<>color (V.attrBackColor a)<>
       (if V.styleMask a .&. V.bold/=0 then ";font-weight:bold" else "")<>
-      (if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>decoration a<>"'>"<>contents<>"</span>"
+      (if V.styleMask a .&. V.italic/=0 then ";font-style:italic" else "")<>decoration a<>"'>"<>markup<>"</span>"
     body advance text | [(g,2)]<-displayClusters advance text,clusterWidth g<2 = "<span style='display:inline-block;width:2ch'><span style='display:inline-block;transform:scaleX(2);transform-origin:left'>"<>escape g<>"</span></span>"
                       | otherwise=escape text
     decoration a=case [name | (flag,name)<-[(V.underline,"underline"),(V.strikethrough,"line-through")],V.styleMask a .&. flag/=0] of

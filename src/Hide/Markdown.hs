@@ -41,7 +41,7 @@ instance C.IsInline Inline where
   escapedChar = C.str . T.singleton
   emph = decorate ItalicStyle . tint Constructor
   strong = decorate BoldStyle . tint Keyword
-  link url _ (Inline chars) = Inline (fmap (\(c,s,span)->(c,LinkStyle url (if s==Plain then Literal else s),span)) chars)
+  link url _ (Inline chars) = Inline (fmap (\(c,s,sourceSpan)->(c,LinkStyle url (if s==Plain then Literal else s),sourceSpan)) chars)
   image url title label = C.str "[image: " <> C.link url title label <> C.str "]"
   code = Inline . Seq.fromList . paint Literal
   rawInline _ = C.str
@@ -165,7 +165,7 @@ normalize (Blocks blocks)=go blocks
     canonicalBlock (Pre runs)=(Pre (assign 0 runs),textOf runs)
     canonicalBlock (Code info source runs)=(Code info source (assign 0 runs),source)
     canonicalBlock (Table aligns header body)=
-      let (_,rows)=mapAccum 0 (header:body)
+      let (_,preparedRows)=mapAccum 0 (header:body)
           prepareRow start cells=mapAccumCells start cells
           mapAccum offset []=(offset,[])
           mapAccum offset (row:rest)=
@@ -179,7 +179,7 @@ normalize (Blocks blocks)=go blocks
                 (finish,more)=mapAccumCells (offset+count+1) rest
             in (if null rest then offset+count else finish,assign offset normalized:more)
           text=T.intercalate "\n" [T.intercalate "\t" (map (textOf . normalizeProse) row) | row<-header:body]
-      in case rows of first:rest->(Table aligns first rest,text); []->(Table aligns [] [],text)
+      in case preparedRows of first:rest->(Table aligns first rest,text); []->(Table aligns [] [],text)
     canonicalBlock (Indent prefix children)=
       let normalized=normalize children
           (_,prepared)=foldl (\(offset,found) (MarkdownBlock block text gap)->
@@ -241,10 +241,10 @@ paint :: Style -> T.Text -> Styled
 paint style text=[(text,style,Nothing) | not (T.null text)]
 
 tint :: Style -> Inline -> Inline
-tint style (Inline chars) = Inline (fmap (\(c,old,span)->(c,if old==Plain then style else old,span)) chars)
+tint style (Inline chars) = Inline (fmap (\(c,old,sourceSpan)->(c,if old==Plain then style else old,sourceSpan)) chars)
 
 decorate :: (Style -> Style) -> Inline -> Inline
-decorate style (Inline chars)=Inline (fmap (\(c,old,span)->(c,style old,span)) chars)
+decorate style (Inline chars)=Inline (fmap (\(c,old,sourceSpan)->(c,style old,sourceSpan)) chars)
 
 textOf :: Styled -> T.Text
 textOf = styledContents . plainRuns
@@ -268,7 +268,7 @@ render wide width (Blocks blocks) = concatMap block blocks
           shell=shellBlock info
           base=CodeStyle shell Plain
           line xs=paint Plain (T.replicate margin " ") ++ paint base (T.replicate padding " ") ++
-            [(c,CodeStyle shell style,span) | (c,style,span)<-xs] ++ paint base (T.replicate (max 0 (panelWidth-padding-columns wide xs)) " ")
+            [(c,CodeStyle shell style,sourceSpan) | (c,style,sourceSpan)<-xs] ++ paint base (T.replicate (max 0 (panelWidth-padding-columns wide xs)) " ")
           content=concatMap (wrapExact wide inner) (rows (stripFinalNewline (expandTabs chars)))
       in [(line xs, (,source) <$> executableShell info) | xs<-[]:content++[[]]]
     block (Table aligns header body)=plainRows (renderTable wide width aligns header body)
@@ -300,7 +300,7 @@ renderTable wide width aligns header body
     rowLines isHeader cells=
       let wrapped=zipWith (wrapWords wide) sizes (take count (cells++repeat []))
           height=maximum (1:map length wrapped)
-          line j=paint Comment "│"++concat [paint Plain " "++pad alignment n (if isHeader then [(c,headerStyle s,span) | (c,s,span)<-part] else part)++paint Comment " │"
+          line j=paint Comment "│"++concat [paint Plain " "++pad alignment n (if isHeader then [(c,headerStyle s,sourceSpan) | (c,s,sourceSpan)<-part] else part)++paint Comment " │"
             | (n,alignment,parts)<-zip3 sizes (aligns++repeat DefaultAlignedCol) wrapped, let part=case drop j parts of x:_->x; _->[]]
       in map line [0..height-1]
     headerStyle (OverflowFragment n style)=OverflowFragment n (headerStyle style)
@@ -315,8 +315,8 @@ rows=splitRows
 
 stripFinalNewline :: Styled -> Styled
 stripFinalNewline chars=case reverse chars of
-  (text,style,span):rest | "\n" `T.isSuffixOf` text->
-    reverse ([(T.dropEnd 1 text,style,fmap (\(a,z,n)->(a,z-1,n-1)) span) | T.length text>1]++rest)
+  (text,style,sourceSpan):rest | "\n" `T.isSuffixOf` text->
+    reverse ([(T.dropEnd 1 text,style,fmap (\(a,z,n)->(a,z-1,n-1)) sourceSpan) | T.length text>1]++rest)
   _->chars
 
 wrapWords :: Bool -> Int -> Styled -> [Styled]
@@ -357,7 +357,7 @@ boundedParts chars=go (presentationItems (textOf chars) (plainRuns chars)) chars
     mark True part@((_,style,_):_)
       | styleOverflowExtent style==Nothing=
         let (first,after)=splitRuns 1 part
-        in [(t,OverflowFragment (lengthOf part) s,span) | (t,s,span)<-first]++after
+        in [(t,OverflowFragment (lengthOf part) s,sourceSpan) | (t,s,sourceSpan)<-first]++after
     mark _ part=part
 
 wrapExact :: Bool -> Int -> Styled -> [Styled]
@@ -421,11 +421,11 @@ compactRuns ((text,style,source):rest)
   | T.null text=compactRuns rest
   | otherwise=gather text source rest
   where
-    gather current span ((next,other,following):more)
-      | T.null next=gather current span more
+    gather current sourceSpan ((next,other,following):more)
+      | T.null next=gather current sourceSpan more
       | style==other,styleOverflowExtent style==Nothing,Just joined<-joinAdjacent current next,
-        Just combined<-merge span following=gather joined combined more
-    gather current span remaining=(current,style,span):compactRuns remaining
+        Just combined<-merge sourceSpan following=gather joined combined more
+    gather current sourceSpan remaining=(current,style,sourceSpan):compactRuns remaining
     merge Nothing Nothing=Just Nothing
     merge (Just (a,z,n)) (Just (b,end,m)) | z==b=Just (Just (a,end,n+m))
                                        | a==b && z==end=Just (Just (a,z,n+m))

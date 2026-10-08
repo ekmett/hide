@@ -96,8 +96,8 @@ prepareMappedTextLayout wide requested styled=do
           covered=[(a+(max offset lo-lo)*(z-a) `div` (hi-lo),
             a+((min end hi-lo)*(z-a)+hi-lo-1) `div` (hi-lo))
             | (lo,hi,a,z)<-takeWhile (\(lo,_,_,_)->lo<end) current,hi>lo,offset<hi]
-          (a,z)=case covered of []->(nearest,nearest); _->(minimum (map fst covered),maximum (map snd covered))
-      in (g,graphemeDisplayText item,graphemeOverflow item,graphemeWidth item,a,z,style,False):
+          (sourceStart,sourceEnd)=case covered of []->(nearest,nearest); _->(minimum (map fst covered),maximum (map snd covered))
+      in (g,graphemeDisplayText item,graphemeOverflow item,graphemeWidth item,sourceStart,sourceEnd,style,False):
         glyphs end nearest current rest
     advanceMap offset _ ((_,hi,_,z):rest) | hi<=offset=advanceMap offset z rest
     advanceMap _ boundary spans=(boundary,spans)
@@ -110,10 +110,10 @@ prepareMappedTextLayout wide requested styled=do
               used=min n count
               (part,after)=T.splitAt used g
               end=a+(used*(z-a)+n-1) `div` n
-              advance=used*step
-              run=LayoutGlyph part part a end col advance shownStyle (if script/=Nothing then 1 else used) script step
+              runAdvance=used*step
+              run=LayoutGlyph part part a end col runAdvance shownStyle (if script/=Nothing then 1 else used) script step
               next=if T.null after then rest else (after,after,False,n-used,a+used*(z-a) `div` n,z,style,True):rest
-          in wrap (run:current) (col+advance) start next
+          in wrap (run:current) (col+runAdvance) start next
       | otherwise=wrap (LayoutGlyph g drawn a z col advance shownStyle natural script 0:current) (col+advance) start rest
       where
         widened=wide && sectionTitle style && requestedScript==Nothing
@@ -151,8 +151,8 @@ layoutVisibleGlyphs requested width row
     left=max 0 requested
     right=left+min (maxBound-left) width
     candidate=lastBefore count (\i->layoutColumn (glyphs V.! i)<=left)
-    first=glyphs V.! candidate
-    start=if layoutColumn first+layoutAdvance first<=left then candidate+1 else candidate
+    firstGlyph=glyphs V.! candidate
+    start=if layoutColumn firstGlyph+layoutAdvance firstGlyph<=left then candidate+1 else candidate
     end=lastBefore count (\i->layoutColumn (glyphs V.! i)<right)+1
 
     clip glyph
