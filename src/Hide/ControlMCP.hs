@@ -47,10 +47,9 @@ controlTool apply d name args=case parseEither parse args of
             Left err -> pure (d,pure (Left err))
             Right value -> pure (updated,pure (Right (case settingsValue updated of Object o -> Object (KM.insert "startupDefaults" value o); result -> result)))
   Right (Right events) -> do
-    (wasStopped,started)<-settleMouse d
-    (updated,count,stopped,err)<-foldM run (beginGuestInput started,0::Int,wasStopped,Nothing) events
+    (updated,count,stopped,err)<-foldM run (beginGuestInput d,0::Int,False,Nothing) events
     (stoppedOnRelease,settled)<-settleMouse updated
-    pure (if count==0 then started else endGuestInput d settled,pure (Right (object ["appliedEvents" .= count,"exitRequested" .= (stopped || stoppedOnRelease),"error" .= err,"clipboard" .= T.take 131072 (clipboard updated),"settings" .= settingsValue settled])))
+    pure (if count==0 then d else endGuestInput d settled,pure (Right (object ["appliedEvents" .= count,"exitRequested" .= (stopped || stoppedOnRelease),"error" .= err,"clipboard" .= T.take 131072 (clipboard updated),"settings" .= settingsValue settled])))
   where
     settleMouse current=let (released,effects)=cancelTerminalDrag current in
       if null effects then pure (False,released) else apply released effects
@@ -90,7 +89,10 @@ controlTool apply d name args=case parseEither parse args of
       case admitted of
         Left err -> pure (current,count,False,Just err)
         Right (changed,effects) -> do
-          (stopped,updated)<-apply changed {browserFrontend=browserFrontend current} effects
+          -- Refused batches leave the human gesture untouched. The first
+          -- accepted event settles it before acquiring any guest gesture.
+          let priorRelease=if count==0 then snd (cancelTerminalDrag d) else []
+          (stopped,updated)<-apply changed {browserFrontend=browserFrontend current} (priorRelease++effects)
           pure (updated,count+1,stopped,Nothing)
 
 parseSettings :: Desktop -> Value -> Parser Desktop

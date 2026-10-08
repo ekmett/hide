@@ -64,6 +64,10 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
     humanMouseEffects<-readIORef observed
     check "guest batch settles an existing human terminal capture" (drag isolated==Nothing && mouseActions humanMouseEffects==[Terminal.TerminalMouseRelease])
     writeIORef observed []
+    (untouched,_)<-input human [object ["type" .= ("mouse"::T.Text),"action" .= ("up"::T.Text),"x" .= (-1::Int),"y" .= (-1::Int)]]
+    deniedEffects<-readIORef observed
+    check "fully refused guest batch preserves the human terminal capture" (drag untouched==drag human && null deniedEffects)
+    writeIORef observed []
     (same,readSettings)<-call shaped "editor_settings" (object [])
     checkUnchanged "reading settings preserves window geometry and focus" same shaped (success readSettings)
     (stillSame,_)<-settings shaped []
