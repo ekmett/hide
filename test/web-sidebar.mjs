@@ -49,8 +49,11 @@ assert.equal(items()[0].getAttribute('aria-busy'),'true');assert.match(items()[0
 // A visible state row has no exported placeholder text; its offscreen parent still explains loading.
 receive({...snapshot,nodes:[root]});assert.equal(sidebarAccess.hidden,true);
 receive({...snapshot,nodes:[]});assert.equal(sidebarAccess.hidden,true);assert.equal(items().length,0);
+receive({...snapshot,visibleStart:65535,visibleCount:1,logicalRows:65536,nodes:[root,{...folder,bounds:null},{...file,index:65535}]});
+assert.equal(sidebarAccess.hidden,false);assert.equal(items().length,2); // Node and state rows share the cached row budget.
 receive(snapshot);vm.runInContext('clearSidebar()',context);assert.equal(sidebarAccess.hidden,true);assert.equal(items().length,0);
 for(const invalid of [
+  {...snapshot,logicalRows:65537},
   {...snapshot,nodes:[root,folder,{...file,bounds:[79,3,22,1]}]},
   {...snapshot,nodes:[root,folder,{...file,name:'x'.repeat(257)}]},
   {...snapshot,nodes:[root,{...folder,parent:file.id},file]},

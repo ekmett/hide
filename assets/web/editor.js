@@ -310,7 +310,7 @@ function receiveSidebar(value){
    typeof id[1]==='string'&&/^[0-9a-f]{48}$/.test(id[1])&&typeof id[2]==='string'&&Array.from(id[2]).length>0&&Array.from(id[2]).length<=128);
  if(!value||value.readOnly!==true||!integer(value.revision)||!Array.isArray(value.layout)||value.layout.length!==7||
    !value.layout.every(integer)||value.layout[0]!==cols||value.layout[1]!==lines||
-   ![value.visibleStart,value.visibleCount,value.logicalRows].every(integer)||value.logicalRows>32768||
+   ![value.visibleStart,value.visibleCount,value.logicalRows].every(integer)||value.logicalRows>65536||
    !Array.isArray(value.nodes)||value.nodes.length>512)invalid();
  const nodes=new Map();
  for(const node of value.nodes){
