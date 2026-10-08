@@ -22,13 +22,14 @@ import Hide.Plugin.Tree
 
 -- | A key remains stable through row movement; the publication hit also carries
 -- a generation, so retained actions cannot bind to later data at the same key.
+-- Wire identity belongs to NodeState: plugin IDs may contain private payloads.
 data NodeKey = NodeKey !TreeRef !NodeId deriving (Eq,Ord,Show)
 keyOf :: TreeHit -> NodeKey
 keyOf (TreeHit ref ident _)=NodeKey ref ident
 data RowKey = NodeRow !NodeKey | StateRow !NodeKey deriving (Eq,Ord,Show)
 data LoadState = Unloaded | Loading !Integer !(Maybe Text) | Loaded !(Maybe Text) | Failed !Text deriving (Eq,Show)
 data NodeState = NodeState
-  { stateInfo :: !NodeInfo, stateGeneration :: !Integer, stateParent :: !(Maybe NodeKey)
+  { stateInfo :: !NodeInfo, stateWireId :: !Integer, stateGeneration :: !Integer, stateParent :: !(Maybe NodeKey)
   , stateChildren :: !(S.Seq NodeKey), stateChildIndex :: !(M.Map NodeKey ()), stateExpanded :: !Bool, stateLoad :: !LoadState
   , stateLoadOrigin :: !(Maybe MenuOrigin)
   , stateRequest :: !Integer, stateAddress :: ![Int], stateAction :: !(Maybe CommandRef), stateActions :: ![(Text,TreeMenuTarget)]
@@ -49,14 +50,14 @@ data Sidebar = Sidebar
   { treeRoot :: FilePath, treeRows :: !(M.Map [Int] TreeRow), treeSelected :: !Int
   , treeScroll :: !Int, treeWidth :: !Int, treeFocused :: !Bool
   , treeNodes :: !(M.Map NodeKey NodeState), treeRoots :: !(S.Seq NodeKey)
-  , treeEpoch :: !Integer, treeRevision :: !Integer, treeProjectionRevision :: !Integer
+  , treeEpoch :: !Integer, treeNextWireId :: !Integer, treeRevision :: !Integer, treeProjectionRevision :: !Integer
   , treeHints :: !(Maybe SidebarHints), treeAgentRefs :: ![TreeRef]
   , treeWatchPaths :: ![FilePath], treeBadges :: !(M.Map FilePath (Bool,Int,Int))
   } deriving (Eq,Show)
 data Projection = Projection !Integer !(M.Map [Int] TreeRow) !(M.Map RowKey Int) !(M.Map NodeKey NodeState) ![FilePath]
 
 emptySidebar :: FilePath -> Int -> Bool -> Sidebar
-emptySidebar path width focused=Sidebar path M.empty 0 0 width focused M.empty S.empty 1 0 (-1) Nothing [] [] M.empty
+emptySidebar path width focused=Sidebar path M.empty 0 0 width focused M.empty S.empty 1 1 0 (-1) Nothing [] [] M.empty
 -- | New selection replaces saved viewport intent, leaving unrelated expansions.
 -- Advancing metadata revision also rejects any in-flight recovery projection.
 dismissRecoveryAnchors :: Sidebar -> Sidebar
@@ -120,9 +121,9 @@ addRoot :: TreeRef -> NodeInfo -> Maybe CommandRef -> [(Text,TreeMenuTarget)] ->
 addRoot ref info action actions tree
   | M.member key (treeNodes tree)=tree
   | S.length (treeRoots tree)>=32 || M.size (treeNodes tree)>=32768=tree
-  | otherwise=tree {treeNodes=M.insert key node (treeNodes tree),treeRoots=treeRoots tree S.|> key,treeRevision=treeRevision tree+1}
+  | otherwise=tree {treeNodes=M.insert key node (treeNodes tree),treeRoots=treeRoots tree S.|> key,treeNextWireId=treeNextWireId tree+1,treeRevision=treeRevision tree+1}
   where key=NodeKey ref (infoId info)
-        node=NodeState info (treeEpoch tree) Nothing S.empty M.empty False Unloaded Nothing (treeEpoch tree) [] action actions
+        node=NodeState info (treeNextWireId tree) (treeEpoch tree) Nothing S.empty M.empty False Unloaded Nothing (treeEpoch tree) [] action actions
 removeRoot :: TreeRef -> Sidebar -> Sidebar
 removeRoot ref tree
   | null roots=tree
@@ -190,7 +191,7 @@ adoptPage request nodes next tree
   | length (requestAncestors request)>64=Left "Sidebar depth budget reached."
   | length nodes>128 || M.size (treeNodes tree)+length [() | (info,_,_)<-nodes,not (M.member (NodeKey ref (infoId info)) (treeNodes tree))]>32768=Left "Sidebar node budget reached."
   | any foreignNode nodes=Left "Sidebar node belongs to another parent or is an ancestor."
-  | otherwise=Right tree {treeNodes=M.insert parent updated (foldr insert (treeNodes tree) nodes),treeRevision=treeRevision tree+1}
+  | otherwise=Right tree {treeNodes=M.insert parent updated adopted,treeNextWireId=nextWireId,treeRevision=treeRevision tree+1}
   where
     parent=keyOf (requestHit request)
     NodeKey ref _=parent
@@ -202,15 +203,16 @@ adoptPage request nodes next tree
     foreignNode (info,_,_)=let key=NodeKey ref (infoId info) in key==parent || case M.lookup key (treeNodes tree) of
       Just previous->stateParent previous/=Just parent || requestCursor request/=Nothing
       Nothing->False
-    insert (info,action,actions) values=
+    (adopted,nextWireId)=foldl' insert (treeNodes tree,treeNextWireId tree) nodes
+    insert (values,serial) (info,action,actions)=
       let key=NodeKey ref (infoId info)
           previous=M.lookup key values
           retained=previous >>= \old->if infoBranch info && infoBranch (stateInfo old) && infoResource info==infoResource (stateInfo old) then Just old else Nothing
-          node=NodeState info (maybe (treeEpoch tree) ((+1).stateGeneration) previous) (Just parent)
+          node=NodeState info (maybe serial stateWireId previous) (maybe (treeEpoch tree) ((+1).stateGeneration) previous) (Just parent)
             (maybe S.empty stateChildren retained) (maybe M.empty stateChildIndex retained) (maybe False stateExpanded retained) (maybe Unloaded stateLoad retained)
             (retained >>= stateLoadOrigin)
             (maybe (treeEpoch tree) stateRequest previous) (maybe [] stateAddress previous) action actions
-      in M.insert key node values
+      in (M.insert key node values,maybe (serial+1) (const serial) previous)
 failRequest :: TreeRequest -> Text -> Sidebar -> Sidebar
 failRequest request failure tree
   | not (requestCurrent request tree)=tree

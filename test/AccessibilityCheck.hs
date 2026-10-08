@@ -11,8 +11,10 @@ import qualified Data.Map.Strict as M
 import qualified Data.Map.Lazy as Lazy
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Hide.Accessibility
 import Hide.Model
+import Hide.Plugin.Command (withRegistry)
 import Hide.Plugin.Tree
 import Hide.Sidebar
 import SidebarFixture
@@ -46,7 +48,7 @@ checks=do
     (all (\path->not (path `BS.isInfixOf` BL.toStrict (encode owner))) ["/public","/authority"])
   check "semantic projection is read-only and uses scoped provider/node identity"
     (field "readOnly" owner==Just True && field "id" root==Just (["sidebar"]::[T.Text]) &&
-     case oneId of Just ["tree",scope,"0"]->T.length scope==48; _->False)
+     case oneId of Just ["tree",scope,opaque]->T.length scope==48 && T.all (`elem` ("0123456789."::String)) opaque; _->False)
   check "offscreen ancestors retain identity and have no invented visible bounds"
     (field "id" (byName "Files" shiftedProjection)==treeId &&
      field "bounds" (byName "Files" shiftedProjection)==Just Null)
@@ -107,7 +109,50 @@ checks=do
   check "projection has fixed row/node caps and clips bounds to the grid"
     (field "visibleCount" boundedProjection==Just (256::Int) && length (items boundedProjection)<=512 &&
      all (within (512,1000)) (items boundedProjection) && all (within (20,7)) (items shiftedProjection))
+  privateIdentityChecks
   putStrLn "sidebar semantic checks passed"
+
+
+-- Provider-local IDs are routing payloads, not publication identities. Sessions
+-- uses a full secret session key; arbitrary plugins may use paths or other data.
+privateIdentityChecks :: IO ()
+privateIdentityChecks=withRegistry $ \registry->do
+  let sessionKey=T.replicate 48 "a"
+      pathKey="/authority/private-node-identity"
+      ident=either (error . T.unpack) id . nodeId
+      rootInfo=NodeInfo (ident pathKey) "Independent provider" "" True Nothing
+      infos=[NodeInfo (ident ("session:"<>sessionKey)) "Saved session" "" False Nothing,
+        NodeInfo (ident ("private:"<>pathKey)) "Provider-local path" "" False Nothing]
+      root=NodeDef rootInfo Nothing []
+      definitions=map (\info->NodeDef info Nothing []) infos
+      right=either (error . show) id
+  provider<-right <$> registerTree registry "semantic.private-identities" root (\() _->pure (Right (NodePage definitions Nothing)))
+  let ref=treeReference provider
+      rootKey=NodeKey ref (infoId rootInfo)
+      mounted=addRoot ref rootInfo Nothing [] (emptySidebar "/public" 30 False)
+      replace values tree=do
+        let (loading,Just request)=requestChildren (nodeHit rootKey (treeNodes tree M.! rootKey)) Nothing tree
+        loaded<-either (error . T.unpack) pure (adoptPage request [(info,Nothing,[]) | info<-values] Nothing loading)
+        prepared<-prepareProjection loaded
+        pure (adoptProjection prepared loaded)
+      project tree=sidebarSemantics GuestSemantics (installSidebar tree (initialDesktop (80,25)))
+      nodeIdentity name tree=fromMaybe (error "missing private-ID semantic node") $ lookup name
+        [(nameOf value,fromMaybe [] (field "id" value)::[T.Text]) | value<-items (project tree)]
+  initial<-replace infos mounted
+  let encoded=BL.toStrict (encode (project initial))
+  check "full session keys and arbitrary private plugin IDs never enter semantic metadata"
+    (all (\secret->not (secret `BS.isInfixOf` encoded)) [TE.encodeUtf8 sessionKey,TE.encodeUtf8 pathKey])
+  reordered<-replace (reverse infos) initial
+  check "node identities survive refresh and sibling movement"
+    (all (\name->nodeIdentity name initial==nodeIdentity name reordered) ["Saved session","Provider-local path"] &&
+     treeNextWireId initial==treeNextWireId reordered)
+  removed<-replace [last infos] reordered
+  returned<-replace infos removed
+  check "a pruned and reintroduced node receives a new identity without rebinding its sibling"
+    (nodeIdentity "Saved session" initial/=nodeIdentity "Saved session" returned &&
+     nodeIdentity "Provider-local path" initial==nodeIdentity "Provider-local path" returned)
+  check "a fresh sidebar epoch cannot alias previous node identities"
+    (nodeIdentity "Saved session" returned/=nodeIdentity "Saved session" returned {treeEpoch=treeEpoch returned+1})
 
 check :: String -> Bool -> IO ()
 check label ok=unless ok (error label)

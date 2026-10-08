@@ -4,8 +4,9 @@ Status: the read-only visible-sidebar slice is implemented. `Hide.Accessibility`
 projects the existing indexed sidebar into a bounded complete `semanticSidebar`
 frame-metadata field, also included in `editor_screen`. Browser ARIA consumes
 that field through the existing metadata merge and reconnect replay. Stable node
-identity combines an opaque provider-registration token with its prepared
-`NodeId`; scrolling and selection travel in a separate small layout receipt.
+identity combines an opaque provider-registration token with the existing
+sidebar epoch and a host-minted node ordinal; provider IDs are never exposed.
+Scrolling and selection travel in a separate small layout receipt.
 At most 256 viewport rows and 512 nodes are emitted, including required ancestors.
 Resource annotations enter the central privacy policy and never enter the wire.
 

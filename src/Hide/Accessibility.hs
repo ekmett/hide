@@ -22,6 +22,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (isJust)
 import qualified Data.Sequence as S
 import Data.Text (Text)
+import qualified Data.Text as T
 import Hide.GuestAccess (protectedPath)
 import Hide.Model (Desktop(..), problemsHeight, treeContentRows)
 import Hide.Plugin.Tree
@@ -33,7 +34,7 @@ data SemanticAudience = OwnerSemantics | GuestSemantics deriving (Eq,Show)
 
 -- | /O(v * h * log n)/ with at most 256 viewport rows, 65 ancestors per row and
 -- 512 emitted nodes, including the host root. IDs survive viewport/selection
--- changes and expire with their actual provider registration. Private ancestry
+-- changes and expire with their actual provider registration/pane lifetime. Private ancestry
 -- is omitted as a whole; covered sidebars publish an empty projection.
 --
 -- Revision tracks provider metadata, while layout also tracks selection, focus
@@ -74,7 +75,7 @@ sidebarSemantics audience d=case sideTree d of
          "index" .= (Nothing::Maybe Int),"generation" .= (0::Int),
          "level" .= (0::Int),"posInSet" .= (0::Int),"setSize" .= S.length (treeRoots current)]
       node current (key,state)=object
-        ["id" .= identity key,"parent" .= Just (maybe ["sidebar"] identity (stateParent state)),
+        ["id" .= identity current key state,"parent" .= Just (maybe ["sidebar"] parentIdentity (stateParent state)),
          "role" .= ("treeitem"::Text),"name" .= infoLabel info,
          "bounds" .= fmap (\(_,y)->[1,y,listWidth,1]) position,
          "selected" .= selected,"focused" .= (selected && treeFocused current),
@@ -86,6 +87,9 @@ sidebarSemantics audience d=case sideTree d of
          "level" .= length address,"posInSet" .= (case reverse address of i:_->i+1; _->1),
          "setSize" .= siblingCount current state]
         where
+          parentIdentity parent=case M.lookup parent (treeNodes current) of
+            Just value->identity current parent value
+            Nothing->["sidebar"]
           position=M.lookup key positions
           selected=maybe False ((==treeSelected current) . fst) position
           cached=M.lookup (stateAddress state) (treeRows current)
@@ -101,7 +105,7 @@ sidebarSemantics audience d=case sideTree d of
     snapshot rev geometry start count total nodes=object
       ["revision" .= rev,"layout" .= geometry,"visibleStart" .= start,"visibleCount" .= count,
        "logicalRows" .= total,"readOnly" .= True,"nodes" .= nodes]
-    identity (NodeKey ref ident)=["tree",treeIdentity ref,nodeIdText ident]
+    identity tree (NodeKey ref _) state=["tree",treeIdentity ref,T.pack (show (treeEpoch tree))<>"."<>T.pack (show (stateWireId state))]
     incomplete state=case stateLoad state of Loaded Nothing->False; _->infoBranch (stateInfo state)
     siblingCount tree _ | treeProjectionRevision tree/=treeRevision tree= -1
     siblingCount tree state=case stateParent state of
