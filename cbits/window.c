@@ -26,7 +26,7 @@ static SDL_Renderer *renderer;
 static SDL_Texture *texture, *vignette, *script_transform;
 static SDL_PixelFormat script_transform_format;
 static bool crt_filter;
-static bool power_enabled,power_eligible,power_drawn;
+static bool power_enabled,power_eligible,power_drawn,power_shake;
 static struct HidePowerMode power_state;
 static double scale;
 static int cell_height;
@@ -300,7 +300,7 @@ void thc_close(void) {
     left_down = false; held_mouse_buttons = 0;
     suppress_option_text = false;
     cursor_present = false; cursor_x = cursor_y = -1;
-    power_state=(struct HidePowerMode){0}; power_enabled=power_eligible=power_drawn=false;
+    power_state=(struct HidePowerMode){0}; power_enabled=power_eligible=power_drawn=power_shake=false;
     thc_canvas_reset(NULL);
     free(canvas_mask); canvas_mask=NULL;
     SDL_StopTextInput(window);
@@ -380,7 +380,8 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     crt_filter = false;
     const char *power_option=SDL_getenv("HIDE_POWER_MODE");
-    power_enabled=power_option && !strcmp(power_option,"1");
+    power_shake=power_option && !strcmp(power_option,"2");
+    power_enabled=power_shake || (power_option && !strcmp(power_option,"1"));
     power_eligible=power_drawn=false; power_state=(struct HidePowerMode){0};
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
     command_event = SDL_RegisterEvents(3);
@@ -876,9 +877,11 @@ int thc_present(void) {
             (float)cell_x(cols),(float)cell_y(rows),crt_filter?1.f:0.f,(float)(cell_height*scale/16)};
         float bursts[HIDE_POWER_BURSTS][4];
         if (!cursor_present) power_state=(struct HidePowerMode){0};
-        unsigned active=hide_power_pack(&power_state,SDL_GetTicks(),bursts);
+        Uint64 now=SDL_GetTicks();
+        unsigned active=hide_power_pack(&power_state,now,bursts);
         power_drawn=active!=0;
         uniforms[12]=(float)active; uniforms[13]=(float)cell_height;
+        if (power_shake && power_eligible) hide_power_shake(&power_state,now,uniforms+14);
         memcpy(uniforms+16,bursts,sizeof(bursts));
         if (!SDL_SetGPURenderStateFragmentUniforms(glyph_state,0,uniforms,sizeof(uniforms)) || !SDL_SetGPURenderState(renderer,glyph_state) ||
             !SDL_RenderTexture(renderer,texture,NULL,&target) || !SDL_SetGPURenderState(renderer,NULL)) return 0;

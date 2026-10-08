@@ -13,7 +13,7 @@ cbuffer Display : register(b0, space3) {
     float4 caretMouse; // cursor x/y, mouse x/y; -1 disables either
     float4 viewport; // width, height, CRT enabled, physical pixels per font row
 #ifndef HIDE_WEBGL
-    float4 powerMode; // live burst count, logical cell height, unused, unused
+    float4 powerMode; // live burst count, logical cell height, shake x/y in logical pixels
     float4 powerBursts[HIDE_POWER_BURSTS]; // cell x/y, seconds since typing, seed
 #endif
 };
@@ -56,7 +56,8 @@ float4 powerSparks(float2 position) {
         float2 delta = (position - emission.xy) * float2(8, powerMode.y);
         // Conservative logical-pixel bounds avoid particle work elsewhere.
         if (age < 0 || abs(delta.x) > 64 || abs(delta.y) > 64) continue;
-        float fade = 1 - age * (1000.0 / HIDE_POWER_LIFETIME_MS);
+        float phase = age * (1000.0 / HIDE_POWER_LIFETIME_MS);
+        float fade = saturate(1 - phase * phase);
         for (uint particle = 0; particle < HIDE_POWER_PARTICLES; ++particle) {
             uint seed = particleHash(uint(emission.w) * 31u + particle);
             float2 velocity = float2((float(seed & 1023u) / 511.5 - 1) * 80,
@@ -79,6 +80,15 @@ float4 powerSparks(float2 position) {
 #endif
 float4 main(float4 color : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target0 {
     float2 position = uv * grid.xy;
+#ifndef HIDE_WEBGL
+    // Move only the editor grid. Clamp displaced sampling to its interior so
+    // edge fragments never index outside retained cells or borrow chrome ink.
+    if (position.y >= 1 && position.y < grid.y - 1 && any(powerMode.zw != 0)) {
+        position = clamp(position - powerMode.zw / float2(8, powerMode.y),
+            float2(0, 1), grid.xy - float2(0.001, 1.001));
+    }
+    float4 sparks = powerSparks(position);
+#endif
     uint2 cellPosition = uint2(floor(position));
     float2 within = frac(position);
     uint index = cellPosition.y * uint(grid.x) + cellPosition.x;
@@ -116,22 +126,27 @@ float4 main(float4 color : TEXCOORD0, float2 uv : TEXCOORD1) : SV_Target0 {
             tile = rgb(cell.paint.x);
             alpha = 1;
         }
-        if (cell.paint.z & 1) { tile += rgb(cell.paint.y) * (1 - alpha); alpha = 1; }
+        if (cell.paint.z & 1) {
+            float3 background = rgb(cell.paint.y);
+#ifndef HIDE_WEBGL
+            // Sparks belong behind glyph/decorative ink, including zero-advance
+            // overlays. Opaque foreground coverage must retain its original color.
+            background = background * (1 - sparks.a) + sparks.rgb;
+#endif
+            tile += background * (1 - alpha); alpha = 1;
+        }
         result += tile * remaining;
         remaining *= 1 - alpha;
         if (cell.geometry.w == 0) break;
         index = cell.geometry.w - 1;
     }
+#ifndef HIDE_WEBGL
+    result += sparks.rgb * remaining; // Unpainted backgrounds default to black.
+#endif
     uint value = rgbWord(result);
     if (caretMouse.x >= 0 && all(cellPosition == uint2(caretMouse.xy)) && within.y >= 0.875) value ^= 0xffffff;
     if (caretMouse.z >= 0 && all(cellPosition == uint2(caretMouse.zw))) value = mouseColor(value);
     float3 painted = rgb(value);
-#ifndef HIDE_WEBGL
-    // Source-over preserves colored particles over bright backgrounds; additive
-    // light disappears on white paint and only recolors existing dark glyphs.
-    float4 sparks = powerSparks(position);
-    painted = painted * (1 - sparks.a) + sparks.rgb;
-#endif
     if (viewport.z != 0) {
         float2 n = uv * 2 - 1;
         float radius = dot(n, n) / 2;

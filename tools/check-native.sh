@@ -11,7 +11,8 @@ cc -Wall -Wextra -DWITH_WINDOW $(pkg-config --cflags $packages) cbits/window.c c
 cc -Wall -Wextra -DWITH_WINDOW $(pkg-config --cflags $packages) cbits/window.c cbits/unicode.c test/native-atlas.c $(pkg-config --libs $packages) $fonts -lm -o .deps/native-atlas
 .deps/native-atlas software
 if [ -n "${HIDE_TEST_GPU:-}" ]; then
-  .deps/native-atlas "$HIDE_TEST_GPU"
+  HIDE_POWER_MODE=1 .deps/native-atlas "$HIDE_TEST_GPU"
+  HIDE_POWER_MODE=2 .deps/native-atlas "$HIDE_TEST_GPU"
   cc -Wall -Wextra -DWITH_WINDOW $(pkg-config --cflags $packages) cbits/window.c cbits/unicode.c test/native-canvas.c $(pkg-config --libs $packages) $fonts -lm -o .deps/native-canvas
   .deps/native-canvas "$HIDE_TEST_GPU"
 fi

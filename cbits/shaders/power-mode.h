@@ -4,6 +4,7 @@
 #define HIDE_POWER_BURSTS 4
 #define HIDE_POWER_PARTICLES 8
 #define HIDE_POWER_LIFETIME_MS 600
+#define HIDE_POWER_SHAKE_MS 180
 
 #if defined(__cplusplus) || defined(__STDC__)
 #include <stdint.h>
@@ -29,6 +30,19 @@ static inline unsigned hide_power_pack(const struct HidePowerMode *state,uint64_
         active+=live;
     }
     return active;
+}
+/* Latest typing impulse: bounded logical-pixel translation, settled before the
+ * sparks expire. Triangle waves avoid per-fragment trigonometry or heap work. */
+static inline void hide_power_shake(const struct HidePowerMode *state,uint64_t now,float out[2]) {
+    out[0]=out[1]=0;
+    const struct HidePowerBurst *burst=&state->bursts[(state->serial-1u)%HIDE_POWER_BURSTS];
+    if (!burst->seed || now<burst->started || now-burst->started>=HIDE_POWER_SHAKE_MS) return;
+    unsigned age=(unsigned)(now-burst->started);
+    float decay=1.f-(float)age/HIDE_POWER_SHAKE_MS;
+    float x=(float)((age+burst->seed*17u)%64u)/32.f;
+    float y=(float)((age+burst->seed*29u)%80u)/40.f;
+    out[0]=3.f*decay*decay*(2.f*(x<=1.f?x:2.f-x)-1.f);
+    out[1]=2.f*decay*decay*(2.f*(y<=1.f?y:2.f-y)-1.f);
 }
 #endif
 #endif

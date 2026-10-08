@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 /* Hidden renderer execution, cell/atlas counters and full-origin clipping. */
 #include "../cbits/window.h"
+#include "../cbits/shaders/power-mode.h"
 #include <SDL3/SDL.h>
 #include <assert.h>
 #include <stdio.h>
@@ -93,7 +94,8 @@ static void decoration_scene(uint32_t lines) {
 static void pixel_is(SDL_Surface *image,int x,int y,Uint8 r,Uint8 g,Uint8 b);
 #ifndef HIDE_BASELINE
 static void power_mode_pixels(const char *capture) {
-    uint16_t blank[16]={0};
+    uint16_t blank[16]={0},stroke[16];
+    for (int y=0;y<16;++y) stroke[y]=0xaa00;
     /* Colored particles must remain visible over light as well as dark paint.
      * Capture both ages before inspecting pixels, so CPU scanning cannot consume
      * the animation lifetime. Moving coverage distinguishes travel from tint/fade. */
@@ -101,6 +103,11 @@ static void power_mode_pixels(const char *capture) {
         assert(thc_begin());
         for (int y=0;y<25;++y) for (int x=0;x<80;++x)
             thc_glyph(x,y,1,8,blank,0xffffff,light?0xffffff:0x0000aa,0,0,1);
+        for (int y=8;y<=10;++y)
+            assert(thc_unicode(14,y,12,"MMMMMMMMMMMM",0xffff55,light?0xffffff:0x0000aa,0,0,12));
+        /* Mix shaped text with opaque bitmap strokes at the emission point. */
+        for (int y=8;y<=10;++y) for (int x=19;x<=21;++x)
+            thc_glyph(x,y,1,8,stroke,0xffff55,light?0xffffff:0x0000aa,0,0,1);
         thc_cursor_blink(0); thc_cursor(20,10); thc_power_mode(1);
         assert(thc_present());
         SDL_Surface *baseline=SDL_LoadBMP(capture); assert(baseline);
@@ -114,11 +121,12 @@ static void power_mode_pixels(const char *capture) {
         SDL_Delay(120); assert(thc_wait(event) && event[0]==17);
         assert(thc_present());
         SDL_Surface *late=SDL_LoadBMP(capture); assert(late);
-        int visible=0,min_x=early->w,min_y=early->h,max_x=-1,max_y=-1;
+        int visible=0,ink_pixels=0,min_x=early->w,min_y=early->h,max_x=-1,max_y=-1;
         for (int y=0;y<baseline->h;++y) for (int x=0;x<baseline->w;++x) {
             Uint8 r,g,b,a,rr,gg,bb,aa;
             assert(SDL_ReadSurfacePixel(baseline,x,y,&r,&g,&b,&a));
             assert(SDL_ReadSurfacePixel(early,x,y,&rr,&gg,&bb,&aa));
+            if (r==255 && g==255 && b==85) { ++ink_pixels; pixel_is(early,x,y,r,g,b); }
             if (r!=rr || g!=gg || b!=bb) {
                 assert(x>=20*16-128 && x<(21*16+128));
                 assert(y>=10*32-128 && y<(11*32+128));
@@ -129,6 +137,7 @@ static void power_mode_pixels(const char *capture) {
                 min_y=SDL_min(min_y,y); max_y=SDL_max(max_y,y);
             }
         }
+        assert(ink_pixels>=64);
         if (visible<64) fprintf(stderr,"Power Mode on %s paint: only %d contrasting pixels\n",light?"light":"dark",visible);
         assert(visible>=64);
         int travelled=0;
@@ -136,6 +145,7 @@ static void power_mode_pixels(const char *capture) {
             Uint8 r,g,b,a,rr,gg,bb,aa;
             assert(SDL_ReadSurfacePixel(baseline,x,y,&r,&g,&b,&a));
             assert(SDL_ReadSurfacePixel(late,x,y,&rr,&gg,&bb,&aa));
+            if (r==255 && g==255 && b==85) pixel_is(late,x,y,r,g,b);
             if (r!=rr || g!=gg || b!=bb) {
                 assert(x>=20*16-128 && x<(21*16+128));
                 assert(y>=10*32-128 && y<(11*32+128));
@@ -163,6 +173,79 @@ static void power_mode_pixels(const char *capture) {
     }
     puts("Power Mode shader: contrasting sparks, travel, expiry, disable, retained atlas/grid and idle wake passed");
 }
+/* Match actual rendered displacement, away from the caret/particle region. */
+static bool shake_translation(SDL_Surface *baseline,SDL_Surface *frame,int *dx,int *dy) {
+    for (int y=-4;y<=4;++y) for (int x=-6;x<=6;++x) {
+        bool equal=true;
+        for (int yy=9*32;equal && yy<11*32;++yy) for (int xx=49*16;equal && xx<54*16;++xx) {
+            Uint8 r,g,b,a,rr,gg,bb,aa;
+            assert(SDL_ReadSurfacePixel(baseline,xx,yy,&r,&g,&b,&a));
+            assert(SDL_ReadSurfacePixel(frame,xx+x,yy+y,&rr,&gg,&bb,&aa));
+            equal=r==rr && g==gg && b==bb;
+        }
+        if (equal) { *dx=x; *dy=y; return true; }
+    }
+    return false;
+}
+static void power_shake_pixels(const char *capture) {
+    uint16_t blank[16]={0},marker[16];
+    for (int y=0;y<16;++y) marker[y]=y<4?0xffff:y<8?0xf000:0x9000;
+    assert(thc_begin());
+    for (int y=0;y<25;++y) for (int x=0;x<80;++x)
+        thc_glyph(x,y,1,8,(y==0 || y==24)?marker:blank,0xffff55,0x0000aa,0,0,1);
+    for (int y=6;y<=15;++y) for (int x=50;x<=52;++x)
+        thc_glyph(x,y,1,8,marker,0xffff55,0x0000aa,0,0,1);
+    thc_cursor_blink(0); thc_cursor(20,10); thc_power_mode(1);
+    assert(thc_present());
+    SDL_Surface *baseline=SDL_LoadBMP(capture); assert(baseline);
+    uint64_t atlas_before,grid_before,bytes,batches;
+    thc_atlas_stats(&atlas_before,&bytes,&batches); thc_grid_stats(&grid_before,&bytes);
+    thc_power_mode_burst(); SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+    int32_t event[6]; assert(thc_wait(event) && event[0]==17);
+    assert(thc_present());
+    SDL_Surface *early=SDL_LoadBMP(capture); assert(early);
+    SDL_Delay(40); assert(thc_wait(event) && event[0]==17); assert(thc_present());
+    SDL_Surface *late=SDL_LoadBMP(capture); assert(late);
+    SDL_Delay(HIDE_POWER_SHAKE_MS); assert(thc_present());
+    SDL_Surface *settled=SDL_LoadBMP(capture); assert(settled);
+    int dx,dy,late_dx,late_dy,settled_dx,settled_dy;
+    assert(shake_translation(baseline,early,&dx,&dy));
+    assert(shake_translation(baseline,late,&late_dx,&late_dy));
+    assert(dx!=0 || dy!=0 || late_dx!=0 || late_dy!=0);
+    assert(shake_translation(baseline,settled,&settled_dx,&settled_dy));
+    assert(settled_dx==0 && settled_dy==0);
+    SDL_Surface *frames[]={early,late,settled};
+    for (unsigned i=0;i<sizeof(frames)/sizeof(frames[0]);++i) {
+        assert(frames[i]->pitch==baseline->pitch && frames[i]->h==baseline->h);
+        size_t strip=(size_t)baseline->pitch*32,last=(size_t)(baseline->h-32)*baseline->pitch;
+        assert(!memcmp(baseline->pixels,frames[i]->pixels,strip));
+        assert(!memcmp((char *)baseline->pixels+last,(char *)frames[i]->pixels+last,strip));
+    }
+    int sparks=0;
+    for (int y=10*32-128;y<11*32+128;++y) for (int x=20*16-128;x<21*16+128;++x) {
+        Uint8 r,g,b,a,rr,gg,bb,aa;
+        assert(SDL_ReadSurfacePixel(baseline,x,y,&r,&g,&b,&a));
+        assert(SDL_ReadSurfacePixel(settled,x,y,&rr,&gg,&bb,&aa));
+        sparks+=r!=rr || g!=gg || b!=bb;
+    }
+    assert(sparks>=64); // Shake settles while colored particles still live.
+    for (unsigned i=0;i<sizeof(frames)/sizeof(frames[0]);++i) SDL_DestroySurface(frames[i]);
+    thc_power_mode(0); assert(thc_present());
+    SDL_Surface *disabled=SDL_LoadBMP(capture); assert(disabled);
+    assert(!memcmp(baseline->pixels,disabled->pixels,(size_t)baseline->pitch*baseline->h));
+    SDL_DestroySurface(disabled);
+    thc_power_mode(1); thc_power_mode_burst(); SDL_Delay(620); assert(thc_present());
+    SDL_Surface *expired=SDL_LoadBMP(capture); assert(expired);
+    assert(!memcmp(baseline->pixels,expired->pixels,(size_t)baseline->pitch*baseline->h));
+    SDL_DestroySurface(expired); SDL_DestroySurface(baseline);
+    uint64_t atlas_after,grid_after;
+    thc_atlas_stats(&atlas_after,&bytes,&batches); thc_grid_stats(&grid_after,&bytes);
+    assert(atlas_after==atlas_before && grid_after==grid_before);
+    SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+    assert(thc_wait(event) && event[0]==0);
+    printf("Power Mode 2: bounded shake (%d,%d)/(%d,%d), fixed chrome, settling, sparks, disable/expiry and retained atlas/grid passed\n",dx,dy,late_dx,late_dy);
+}
+
 #endif
 static void script_scene(int script) {
     uint16_t blank[16]={0},narrow[16],wide[16];
@@ -259,7 +342,9 @@ int main(int argc,char **argv) {
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE_EXIT","1",true);
     if (!strcmp(backend,"software")) SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
 #ifndef HIDE_BASELINE
-    SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"HIDE_POWER_MODE","1",true);
+    const char *power_option=SDL_getenv("HIDE_POWER_MODE");
+    bool shake=power_option && !strcmp(power_option,"2");
+    SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"HIDE_POWER_MODE",shake?"2":"1",true);
 #endif
     if (!thc_open(backend,2,80,25,16)) { fprintf(stderr,"open: %s\n",thc_error()); return 1; }
     /* A hidden Cocoa window can inherit SDL's initial mouse focus at (0,0).
@@ -306,7 +391,9 @@ int main(int argc,char **argv) {
     /* SDL invalidates the backbuffer at present. Production captures before
      * present; assertions read that completed capture, never a reused buffer. */
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",capture,true);
-    if (strcmp(backend,"software")) power_mode_pixels(capture);
+    if (strcmp(backend,"software")) {
+        if (shake) power_shake_pixels(capture); else power_mode_pixels(capture);
+    }
     uint16_t half[16]; for (int y=0;y<16;++y) half[y]=0x00ff;
     assert(thc_begin()); thc_clip(0,1); thc_glyph(-1,0,2,16,half,0xffffff,0,0,0,2); assert(thc_present());
     SDL_Surface *image=SDL_LoadBMP(capture); assert(image);
