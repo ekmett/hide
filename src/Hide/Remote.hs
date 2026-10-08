@@ -389,8 +389,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
           writePacket connection (json "hello" ["version" .= protocolVersion,"session" .= session,"epoch" .= attachmentEpoch,"ack" .= ack,"replay" .= length replay])
           writePacket connection (JsonPacket (assetsPacket font scale))
           canvasEpoch<-T.pack <$> randomIdentity
-          writePacket connection (JsonPacket (canvasReset canvasEpoch))
           mapM_ (writePacket connection) replay
+          writePacket connection (JsonPacket (canvasReset canvasEpoch))
           -- Keep input consumption independent of frame generation. Drain replies
           -- in order as a bounded batch, then render the latest state once.
           outgoing <- newTBQueueIO 128

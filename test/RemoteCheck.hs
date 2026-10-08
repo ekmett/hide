@@ -98,6 +98,8 @@ checks = isolatedStore $ do
         let count=maybe 0 id (parseMaybe (\o -> o .:? "replay" .!= 0) greeting)
         replies <- replicateM count (receive h)
         writeIORef replayed replies
+        reset<-receive h
+        assert "fresh canvas epoch follows all counted reply replay" (case reset of Just (JsonPacket (Object fields))->KM.lookup "type" fields==Just (String "canvas-reset"); _->False)
         marker<-control h "frame-ready"
         assert "reset frame records its exact committed input" (KM.lookup "seq" marker==KM.lookup "ack" greeting && KM.lookup "changed" marker==Just (Bool True))
         frame <- receive h

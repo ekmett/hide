@@ -79,7 +79,7 @@ remoteTerminalDisplay (columns,linesCount) frame message=(cursor,cellDisplayOps 
   where
     width=max 0 columns; height=max 0 linesCount
     cells=maybe [] remoteCells frame
-    rows=IM.fromListWith (++) [(y,[cell]) | cell<-cells,let y=case cell of RemoteText _ row _ _ _->row; RemoteGlyph _ row _ _ _ _ _->row; RemoteScript _ row _ _ _ _->row,y<height]
+    rows=IM.fromListWith (++) [(y,[cell]) | cell<-cells,let y=case cell of RemoteText _ cy _ _ _->cy; RemoteGlyph _ cy _ _ _ _ _->cy; RemoteScript _ cy _ _ _ _->cy,y<height]
     blanks n=[CellText V.defAttr (T.replicate n " ") | n>0]
     spans at []=blanks (width-at)
     spans at (cell:rest)

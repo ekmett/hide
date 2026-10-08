@@ -179,6 +179,7 @@ createFiles host root=do
   owner<-newIORef Nothing
   open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec prepareSidebarFile)
   scope<-imageWindowScope <$> readState host
+  -- docs artifact: png-view, captured through this Files action by tools/docs-screenshots.hs.
   image<-either (ioError . userError . show) pure =<< registerCommand registry
     (CommandDef "hide.sidebar.files.png" "View PNG" codec codec (\ctx path->
       if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Opening an image requires the human.")) else do

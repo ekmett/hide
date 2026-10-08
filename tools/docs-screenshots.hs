@@ -245,6 +245,23 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           unless (map fst (contextItemsFor shown)==["Build","Run","Debug"] && contextMenu shown/=Nothing)
             (fail "Executable target context menu did not offer Build, Run and Debug")
           capture effects scratch output "package-target-menu" shown
+        pngView d = do
+          let rows=maybe [] (M.elems.treeRows) . sideTree
+              isImage row=PluginTree.infoLabel (rowInfo row)=="preferences.png"
+          mounted<-initializeSidebar sidebarHost d {sideTree=Just (emptySidebar (root </> "docs/site/screenshots") 28 False),streamerMode=False}
+            >>= await "PNG in Files" tick (any isImage . rows)
+          index<-case [i | (i,row)<-zip [0..] (rows mounted),isImage row] of
+            [value]->pure value
+            _->fail "Missing preferences PNG"
+          popup<-Driver.input effects (V.EvMouseDown 12 (2+index-maybe 0 treeScroll (sideTree mounted)) V.BRight []) mounted
+          action<-case [i | (i,(title,_))<-zip [0..] (contextItemsFor popup),title=="View PNG"] of
+            [value]->pure value
+            _->fail "Files PNG action missing"
+          pending<-key V.KEnter [] popup {contextMenu=fmap (\(rect,_)->(rect,action)) (contextMenu popup)}
+          opened<-await "PNG window" tick (maybe False ((/=Nothing).PluginWindow.preparedWindowImage) . activePluginWindow) pending
+          pure (case activeWindow opened of
+            Just w->resizeWindowBounds (windowId w) (Rect 29 3 68 26) opened
+            _->opened)
         permissionDiff d = case (activeWindow d,activeDocument d) of
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
             let patch=T.unlines (["--- a/src/Hide/Buffer.hs","+++ b/src/Hide/Buffer.hs","@@ -1,6 +1,7 @@"] ++
@@ -351,11 +368,12 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
                 ident<-either (fail . T.unpack) pure (PluginTree.nodeId "1")
                 prepared<-PluginWindow.prepareRecoverableRowsWindow "hide.downloads" 1 "Downloads" []
                   [PluginWindow.WindowRow ident ("hdb for GHC "<>Compilers.compilerVersion (Hdb.hdbCompiler plan)<>" — Downloading hdb") details] >>= either (fail . T.unpack) pure
-                update<-PluginWindow.openTextWindow downloadScope prepared >>= maybe (fail "Downloads scope closed") pure
+                update<-PluginWindow.openWindow downloadScope prepared >>= maybe (fail "Downloads scope closed") pure
                 value<-PluginWindow.admitWindowUpdate False update >>= maybe (fail "Downloads publication expired") pure
                 let shown=uncurry addPluginWindow value d {streamerMode=False}
                 pure (case activeWindow shown of Just w->resizeWindowBounds (windowId w) (Rect 8 3 64 19) shown; _->shown)
               Nothing->fail "Request downloads explicitly")
+          , ("png-view", pngView)
           , ("find-replace", \d -> command Find d >>= typeText "bufferLineAt" >>= key (V.KChar 'h') [V.MCtrl] >>= typeText "lineAt")
           , ("permission-diff", permissionDiff)
           , ("shell-block-menu", shellBlockMenu)
@@ -413,7 +431,7 @@ capture effects scratch output name shown = do
         Nothing | Just (r,_)<-contextMenu shown -> Just r
         Nothing -> case menu shown of
           Just (i,_) -> Just (menuRect shown i)
-          Nothing | name `elem` ["conversation","debug-step","side-by-side","downloads"] -> bounds <$> activeWindow shown
+          Nothing | name `elem` ["conversation","debug-step","side-by-side","downloads","png-view"] -> bounds <$> activeWindow shown
                   | otherwise -> Nothing
       pixels = case crop of
         Nothing -> Nothing
