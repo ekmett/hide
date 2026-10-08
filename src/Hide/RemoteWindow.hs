@@ -435,10 +435,11 @@ remoteDetachShortcut event = case event of
   1:key:mods:_ -> key==fromEnum ']' && mods .&. 15==2
   _ -> False
 
--- | Gate disconnected input while retaining local zoom controls.
+-- | Gate disconnected input while retaining local zoom and presentation.
 remoteInputAllowed :: Bool -> [Int] -> Bool
 remoteInputAllowed connected event = connected || case event of
   1:key:mods:_ -> maybe False (const True) (zoomDirection key mods)
+  17:_ -> True -- Retained sparks must expire even after the session disconnects.
   _ -> False
 -- | Detach locally on a disconnected close, without queuing a Quit that
 -- could unexpectedly execute after reconnection.

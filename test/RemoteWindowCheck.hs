@@ -194,6 +194,8 @@ checks = do
   check "offline closes detach without queuing remote quit" (remoteCloseDetaches False [6] && not (remoteCloseDetaches True [6]))
   check "offline user input is ignored" (all (not . remoteInputAllowed False) [[1,97,0],[2],[3,1,1,1,0,1],[11,0],[14]])
   check "offline zoom remains local" (remoteInputAllowed False [1,fromEnum '+',2] && remoteInputAllowed True [1,97,0])
+  check "offline typing animation can expire locally without sending input"
+    (remoteInputAllowed False [17] && nativeEventInput [17]==Nothing && not (nativeRepaint [17]))
   check "native blur releases remote state" (nativeEventInput [7] == Just (object ["type" .= ("blur"::T.Text)]))
   check "remote key mapping preserves shift tab" (nativeKeyInput (-9) 1 == Just (object ["type" .= ("key"::T.Text),"key" .= ("Tab"::T.Text),"mods" .= (["shift"]::[T.Text])]))
   check "native Command preserves wire modifier" (nativeKeyInput (fromEnum 'v') 8==Just (object ["type" .= ("key"::T.Text),"key" .= ("v"::T.Text),"mods" .= (["cmd"]::[T.Text])]))
