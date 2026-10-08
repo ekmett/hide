@@ -389,6 +389,17 @@ rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommand
         adoptWindowUpdate P.HumanMenu update desktop
       selected desktop=activeWindow desktop >>= rowsInteraction
       move event= fst . handleEvent event
+#ifdef WITH_PROTOCOL
+  let startup=(initialDesktop (80,25)) {contributedMenus=catalogue,menusActive=True}
+  startupFrame<-either fail pure (parseRemoteFrame (object (frameMetadata "." startup)) (frameRows startup))
+  check "default Downloads context contribution round trips through startup native metadata"
+    ([(contributionSlot item,contributionEnabled item) | item<-remoteContributions startupFrame,contributionId item=="hide.downloads.cancel"]==[("context.window-rows",False)])
+  check "context-only Downloads action does not become a top-level native menu"
+    (all (\(_,entries)->all (\(title,_,_)->title/="Cancel transfer") entries) (remoteMenuLayout startupFrame))
+  let invalid=startup {contributedMenus=[if P.menuName (P.menuReference item)=="hide.downloads.cancel" then item {P.menuSlot="context.unknown"} else item | item<-catalogue]}
+  check "native receiver still rejects unknown host menu slots"
+    (case parseRemoteFrame (object (frameMetadata "." invalid)) (frameRows invalid) of Left _->True; Right _->False)
+#endif
   detailA<-W.prepareTextWindow "A" "AAA details\nnext line"
   detailB<-W.prepareTextWindow "B" "BBB details"
   prepared<-W.prepareRecoverableRowsWindow "hide.downloads" 1 "Transfers" []

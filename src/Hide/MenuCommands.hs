@@ -70,7 +70,7 @@ data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] [
 -- retireMenuFromHost. Closing cancels and joins the worker before either registry
 -- scope closes, so shutdown cannot race adoption or resurrect a document.
 withMenuCommands :: DocsCommands -> (MenuHost -> IO a) -> IO a
-withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus ("context.window-rows":"context.source":"context.messages":[T.toLower title | (title,_,_)<-Model.menus]) $ \menus->do
+withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus Model.menuContributionSlots $ \menus->do
   command<-either (ioError . userError . show) pure =<< registerCommand registry (helpCommand docs)
   reference<-either (ioError . userError . show) pure =<< Plugin.contributeMenu menus
     (Plugin.MenuDef "hide.help.contents" "help" "contents" 0 "Contents" "F1" True
