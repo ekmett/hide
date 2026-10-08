@@ -53,27 +53,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
       rejected <- spawnAgent hub Human spec
       assert "malformed policy blocks spawning but not editor startup" (either (const True) (const False) rejected)
       writeFile policy "[editor.agents]\nmax_agents = 4\nmax_subagents = 2\n[editor.agent]\ncontext = 'global context marker'\n"
-      _ <- syncPrimary runtime project Nothing "private-primary" (Capabilities True True False []) False >>= right
-      ticket <- sendAgent hub Human primary "inspect" >>= right
-      requests <- waitRequests runtime
-      reply <- case [cell | DeliverPrimary _ cell <- requests] of
-        [cell] -> pure cell
-        _ -> error "Expected primary delivery"
-      _ <- cancelAgent hub Human primary >>= right
-      assert "active primary cancellation waits for real provider completion" =<< isEmptyMVar reply
-      cancelled <- drainAgentRequests runtime
-      assert "primary cancel reaches UI" (any isCancel cancelled)
-      putMVar reply (Left "Cancelled")
-      result <- waitAgent hub Human primary ticket 2000 >>= right
-      assert "primary cancellation completes" (field "status" result==Just ("cancelled"::T.Text))
-      await "primary cancellation barrier releases" $ do
-        status <- statusAgent hub Human primary >>= right
-        pure (field "status" status==Just ("idle"::T.Text))
-      next <- sendAgent hub Human primary "another" >>= right
-      _ <- waitRequests runtime
-      failPendingPrimary runtime "Provider disconnected."
-      ended <- waitAgent hub Human primary next 2000 >>= right
-      assert "disconnect resolves outstanding primary delivery" (field "status" ended==Just ("failed"::T.Text))
+      primaryDeliveryChecks runtime project (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)])
       let choices=Capabilities False False True [ConfigChoice "model" "model" "small" [("small","Small"),("large","Large")]]
       bracket (ACP.startClient (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \client->do
         _<-syncPrimary runtime project (Just client) "private-primary" choices False >>= right
@@ -175,12 +155,145 @@ checks = bracket temporary removePathForcibly $ \root -> do
       assert "nested shared child uses its parent's editor" (sessionId nestedSession==sessionId workspace)
       _ <- endAgent hub Human isolated >>= right
       assert "ending worktree agent preserves checkout" =<< doesFileExist (sessionDirectory workspace </> "source.txt")
+  primaryShutdownCheck root
   creationChecks root
   persistenceChecks root
   where
     spawnedId value=maybe (fail "Missing spawned agent ID") (pure . AgentId) (field "agent" value >>= field "id")
-    isCancel CancelPrimary = True
-    isCancel _ = False
+
+-- The public receipt owns terminal completion; removing a mailbox entry alone
+-- grants no provider admission and cannot keep the cancellation barrier alive.
+primaryDeliveryChecks :: AgentRuntime -> FilePath -> ACP.Launch -> IO ()
+primaryDeliveryChecks runtime project launch=bracket (ACP.startClient launch project) ACP.stopClient $ \client->do
+  let hub=agentHub runtime
+      primary=primaryAgent runtime
+      key="private-primary"
+      caps=Capabilities True True False []
+      complete owner busy result=completePrimaryDelivery runtime (Just owner) (Just key) busy result
+      idle=await "primary reservation releases" $ do
+        value<-statusAgent hub Human primary >>= right
+        pure (field "status" value==Just ("idle"::T.Text))
+      request body=do
+        ticket<-sendAgent hub Human primary body >>= right
+        entries<-waitRequests runtime
+        delivery<-case [receipt | DeliverPrimary receipt<-entries] of
+          [receipt]->pure receipt
+          _->error "Expected opaque primary delivery"
+        pure (ticket,delivery)
+      isCancel CancelPrimary=True
+      isCancel _=False
+  _<-syncPrimary runtime project (Just client) key caps False >>= right
+  (ticket,delivery)<-request "inspect"
+  admitted<-admitPrimaryDelivery runtime delivery client key
+  assert "admission preserves Hub ticket, author and user-seat attribution" $ case admitted of
+    Just message->messageTicket message==ticket && messageAuthor message==Human && messageIsUserSeat message && messageText message=="inspect"
+    _->False
+  assert "runtime owns admitted delivery" =<< primaryDeliveryActive runtime
+  withAgentRuntimeUsing (const (error "Unexpected editor startup")) (const (error "Unexpected editor reconnect")) project (pure launch) $ \other->do
+    _<-syncPrimary other project (Just client) key caps False >>= right
+    foreignAdmission<-admitPrimaryDelivery other delivery client key
+    assert "foreign runtime cannot admit an owned receipt" (maybe True (const False) foreignAdmission)
+    rejectPrimaryDelivery other delivery "Foreign rejection."
+  foreignResult<-waitAgent hub Human primary ticket 0 >>= right
+  assert "foreign admission/rejection cannot mutate owner reply" (field "status" foreignResult==Just ("running"::T.Text))
+  _<-syncPrimary runtime project (Just client) key caps {supportsSteering=True} False >>= right
+  duplicate<-admitPrimaryDelivery runtime delivery client key
+  assert "capability refresh preserves exactly one admission" (maybe True (const False) duplicate)
+  rejectPrimaryDelivery runtime delivery "Late duplicate rejection."
+  pending<-waitAgent hub Human primary ticket 0 >>= right
+  assert "late rejection cannot release admitted reply" (field "status" pending==Just ("running"::T.Text))
+  _<-cancelAgent hub Human primary >>= right
+  assert "admitted cancellation waits for provider terminal response" =<< primaryDeliveryActive runtime
+  cancelling<-statusAgent hub Human primary >>= right
+  assert "Hub retains reservation during admitted cancellation" (field "status" cancelling==Just ("cancelling"::T.Text))
+  cancelled<-drainAgentRequests runtime
+  assert "primary cancel reaches existing UI mailbox" (any isCancel cancelled)
+  assert "real provider outcome settles cancelled receipt" =<< complete client False (Left "Cancelled")
+  idle
+  result<-waitAgent hub Human primary ticket 0 >>= right
+  assert "primary cancellation completes" (field "status" result==Just ("cancelled"::T.Text))
+  (unadmitted,drained)<-request "drained only"
+  _<-cancelAgent hub Human primary >>= right
+  idle
+  stale<-admitPrimaryDelivery runtime drained client key
+  assert "drain then cancel forbids late admission" (maybe True (const False) stale)
+  notActive<-primaryDeliveryActive runtime
+  assert "unadmitted cancellation retains no prompt owner" (not notActive)
+  _<-waitAgent hub Human primary unadmitted 0 >>= right
+  _<-drainAgentRequests runtime
+  (first,owned)<-request "redacted result"
+  _<-admitPrimaryDelivery runtime owned client key >>= maybe (error "Expected result admission") pure
+  let redacted=Right (object ["text" .= ("[private session]"::T.Text)])
+  assert "current owner completes first result" =<< complete client True redacted
+  finished<-waitAgent hub Human primary first 2000 >>= right
+  assert "runtime publishes the owner's already-redacted terminal value" (field "result" finished==Just (object ["text" .= ("[private session]"::T.Text)]))
+  queued<-sendAgent hub Human primary "next turn" >>= right
+  held<-statusAgent hub Human primary >>= right
+  assert "external human busy state precedes reply release" (field "queued" held==Just (1::Int) && (field "currentTicket" held::Maybe (Maybe Int))==Just Nothing)
+  _<-syncPrimary runtime project (Just client) key caps False >>= right
+  queuedEntries<-waitRequests runtime
+  nextDelivery<-case [receipt | DeliverPrimary receipt<-queuedEntries] of
+    [receipt]->pure receipt
+    _->error "Expected next primary turn"
+  _<-admitPrimaryDelivery runtime nextDelivery client key >>= maybe (error "Expected next-turn admission") pure
+  failPendingPrimary runtime "Provider disconnected."
+  disconnected<-waitAgent hub Human primary queued 2000 >>= right
+  assert "disconnect resolves runtime-owned primary delivery" (field "status" disconnected==Just ("failed"::T.Text))
+  rejected<-complete client False (Right Null)
+  assert "terminal delivery cannot complete a second time" (not rejected)
+  idle
+  (oldTicket,oldDelivery)<-request "old provider"
+  _<-admitPrimaryDelivery runtime oldDelivery client key >>= maybe (error "Expected old-provider admission") pure
+  bracket (ACP.startClient launch project) ACP.stopClient $ \replacement->do
+    _<-syncPrimary runtime project (Just replacement) key caps False >>= right
+    oldResult<-waitAgent hub Human primary oldTicket 2000 >>= right
+    assert "same-key provider replacement resolves old delivery" (field "status" oldResult==Just ("failed"::T.Text))
+    late<-admitPrimaryDelivery runtime oldDelivery replacement key
+    assert "old driver receipt cannot adopt replacement client" (maybe True (const False) late)
+    idle
+    (newTicket,newDelivery)<-request "new provider"
+    _<-admitPrimaryDelivery runtime newDelivery replacement key >>= maybe (error "Expected replacement admission") pure
+    oldCompletion<-complete client True (Right Null)
+    assert "old provider cannot complete or advertise busy for replacement" (not oldCompletion)
+    live<-waitAgent hub Human primary newTicket 0 >>= right
+    assert "replacement receipt stays pending after old completion" (field "status" live==Just ("running"::T.Text))
+    assert "replacement owns completion" =<< complete replacement False (Right Null)
+    _<-waitAgent hub Human primary newTicket 2000 >>= right
+    idle
+    (_,beforeCancel)<-request "cancel before replacement"
+    _<-cancelAgent hub Human primary >>= right
+    _<-syncPrimary runtime project (Just client) key caps False >>= right
+    retired<-drainAgentRequests runtime
+    assert "provider replacement clears old queued UI cancellation" (not (any isCancel retired))
+    before<-admitPrimaryDelivery runtime beforeCancel client key
+    assert "cancelled issuing-provider receipt cannot be re-admitted" (maybe True (const False) before)
+    idle
+
+primaryShutdownCheck :: FilePath -> IO ()
+primaryShutdownCheck root=do
+  let project=root </> "project"
+      launch=ACP.Launch "python3" [root </> "provider.py"] [("PROBE_LOG",root </> "provider.jsonl")]
+      key="private-shutdown"
+  withEnvironment [("XDG_CONFIG_HOME",root </> "config"),("XDG_DATA_HOME",root </> "data"),("THC_EDIT_SESSION",replicate 48 'b')] $
+    bracket (ACP.startClient launch project) ACP.stopClient $ \client->do
+      (stopped,receipt,ticket)<-withAgentRuntimeUsing (const (error "Unexpected editor startup")) (const (error "Unexpected editor reconnect")) project (pure launch) $ \runtime->do
+        _<-syncPrimary runtime project (Just client) key (Capabilities False False False []) False >>= right
+        number<-sendAgent (agentHub runtime) Human (primaryAgent runtime) "scope exit" >>= right
+        entries<-waitRequests runtime
+        delivery<-case [request | DeliverPrimary request<-entries] of
+          [request]->pure request
+          _->error "Expected shutdown delivery"
+        admitted<-admitPrimaryDelivery runtime delivery client key
+        assert "scope-exit fixture admits primary prompt" (maybe False (const True) admitted)
+        pure (runtime,delivery,number)
+      active<-primaryDeliveryActive stopped
+      assert "runtime teardown releases admitted delivery ownership" (not active)
+      late<-admitPrimaryDelivery stopped receipt client key
+      assert "closed runtime cannot re-admit retained receipt" (maybe True (const False) late)
+      completed<-completePrimaryDelivery stopped (Just client) (Just key) False (Right Null)
+      assert "closed runtime cannot publish a late completion" (not completed)
+      value<-waitAgent (agentHub stopped) Human (primaryAgent stopped) ticket 0 >>= right
+      assert "teardown resolves the Hub ticket" (field "status" value/=Just ("running"::T.Text))
 
 -- The host launch lifetime belongs to the runtime, independently of a view.
 creationChecks :: FilePath -> IO ()

@@ -1095,8 +1095,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         pure ()
     removeFile runSettings
     -- Context reads happen before enqueueing a prompt. Holding one must leave
-    -- the draft editable, and cancelling it must never send the stale prompt.
-    C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
+    -- the draft editable; human and Hub cancellation must retire unsent work.
+    forM_ [False,True] $ \hubOrigin -> C.withConsoles $ \consoles -> withConversation consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       connected<-prompt runtime "stream" configured >>= done runtime
       let contextPath=root </> "thc.toml"
@@ -1108,14 +1108,34 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         takeMVar contextRelease
         BS.hPut handle "[editor.agent]\ncontext = 'late guidance'\n") $ \writer -> do
           takeMVar contextOpened
-          fast<-timeout 1000000 (submit runtime QuerySubmit (draftBuffer (newBuffer "cancel before send") connected))
-          preparing<-maybe (error "Context preparation blocked send/input") pure fast
+          let agents=conversationAgents runtime
+              hub=AR.agentHub agents
+              primary=AR.primaryAgent agents
+              draft=draftBuffer (newBuffer "cancel before send") connected
+          (ticket,preparing)<-if hubOrigin then do
+            number<-AH.sendAgent hub AH.Human primary "cancel before send" >>= either (error . T.unpack) pure
+            admitted<-await runtime "Hub delivery context preparation" agentReplying draft
+            check "Hub preparation retains its admitted receipt" =<< AR.primaryDeliveryActive agents
+            pure (Just number,admitted)
+          else do
+            fast<-timeout 1000000 (submit runtime QuerySubmit draft)
+            prepared<-maybe (error "Context preparation blocked send/input") pure fast
+            pure (Nothing,prepared)
           check "draft remains while context is preparing" (contents (composerBuffer preparing)=="cancel before send")
           next<-timeout 1000000 (tickConversation runtime preparing)
           responsive<-maybe (error "Context preparation blocked tick") pure next
           let edited=draftBuffer (newBuffer "newer human draft") responsive
-          cancelled<-send runtime "cancel" [] edited
+          cancelled<-if hubOrigin then do
+            _<-AH.cancelAgent hub AH.Human primary >>= either (error . T.unpack) pure
+            fast<-timeout 1000000 (tickConversation runtime edited)
+            maybe (error "Hub preparation cancellation blocked tick") pure fast
+          else send runtime "cancel" [] edited
           check "cancelling context preparation preserves newer draft" (contents (composerBuffer cancelled)=="newer human draft")
+          forM_ ticket $ \number->do
+            active<-AR.primaryDeliveryActive agents
+            check "cancelled unsent Hub prompt releases admitted receipt" (not active)
+            result<-AH.waitAgent hub AH.Human primary number 2000 >>= either (error . T.unpack) pure
+            check "cancelled unsent Hub prompt has a terminal result" (field "status" result==Just ("cancelled"::T.Text))
           putMVar contextRelease ()
           wait writer
           removeFile contextPath

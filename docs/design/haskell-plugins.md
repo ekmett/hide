@@ -776,8 +776,8 @@ retires the sink even when the session key repeats. Capability updates use the
 current sink without replacing the driver or retiring an outstanding control.
 Text is published only after the owner's cross-chunk redaction; tool events omit
 raw arguments/results and permission choices. Publication neither enqueues human
-prompts nor replays transcript state during synchronization. Primary transcript,
-prompt tickets and disconnect/recovery ownership remain unchanged.
+prompts nor replays transcript state during synchronization. Conversation retains
+the primary transcript, ACP request dispatch and provider recovery.
 
 `AgentHub.historyAgent` and `searchAgentHistory` return public `HistoryPage` and
 `HistoryEvent` values. Conversation reads typed event indices and host-attributed
@@ -794,8 +794,23 @@ agent ID/task ticket through the existing mailbox. Conversation only adopts the
 checked human form/workspace and displays completion. The runtime joins pending
 acquisition before the final checkpoint; view state owns no launch worker.
 
+Primary Hub deliveries also use `AgentRuntime` ownership. The existing mailbox
+returns an opaque `PrimaryDelivery`; `admitPrimaryDelivery` claims it once for
+its issuing provider object and session. A drained request has no admission yet,
+and cancellation resolves it immediately. An admitted prompt retains the Hub
+reservation until its real terminal response; cancelling preparation before
+provider prompt IO releases the receipt locally. Replacement, disconnect and
+shutdown settle owned replies and retire queued cancellation callbacks. Foreign
+runtime receipts and late duplicate rejections cannot mutate a running reply.
+The response-dispatch owner calls `completePrimaryDelivery` only for its current
+terminal prompt response, after redaction. The runtime advertises the next human
+turn's busy state before releasing the Hub worker; completion from a replaced
+client cannot publish into the new provider. Capability refresh keeps the same
+provider lifetime. Conversation holds no prompt reply cell, and its human Query
+and Cancel timing stays unchanged.
+
 These remain host-only operations: agent tools cannot manufacture human steering
-or change their controlling user's model. Primary query/cancel ownership, prompt
+or change their controlling user's model. Human query/cancel ownership, prompt
 preparation, ACP file and terminal requests, and provider startup/recovery still
 belong to Conversation; the full separate-package agent integration remains unfinished.
 

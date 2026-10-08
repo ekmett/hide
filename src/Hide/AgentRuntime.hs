@@ -6,7 +6,7 @@
 -- activate only after the session lifetime lock is held. Invalid recovery data is
 -- retained and disables spawning rather than being silently replaced.
 module Hide.AgentRuntime
-  ( AgentRuntime, AgentRequest(..), PrimaryControl(..), primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
+  ( AgentRuntime, AgentRequest(..), PrimaryDelivery, admitPrimaryDelivery, rejectPrimaryDelivery, completePrimaryDelivery, primaryDeliveryActive, PrimaryControl(..), primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
   , syncPrimary, recordPrimaryEvent, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentCreation, requestAgentReconnect
   ) where
@@ -48,12 +48,20 @@ import Hide.Session
 
 -- | A host/UI mailbox request whose reply cell stays filled after completion.
 -- Consumers must reject stale requests already resolved elsewhere.
-data AgentRequest = DeliverPrimary HubMessage (MVar (Either Text Value))
+data AgentRequest = DeliverPrimary !PrimaryDelivery
   | ControlPrimary PrimaryControl
   | CancelPrimary | EndPrimary
   | ProviderPermission AgentId ACPPermission (MVar (Maybe Text))
   | AgentReconnected AgentId (Either Text ())
   | AgentCreated (Either Text (AgentId,Int))
+-- | One Hub-issued delivery. Its filled terminal reply remains its lifetime;
+-- callers cannot mutate that reply or manufacture a fresh admission. Equality
+-- observes only reply identity, never the attributed prompt payload.
+data PrimaryDelivery = PrimaryDelivery !FilePath !(Maybe (StableName ACP.Client)) !Text !HubMessage !(MVar (Either Text Value))
+instance Eq PrimaryDelivery where
+  PrimaryDelivery _ _ _ _ a == PrimaryDelivery _ _ _ _ b=a==b
+
+
 -- | One host-only control bound to the exact primary connection. Reply cells
 -- stay filled after cancellation so a drained request cannot be admitted later.
 data PrimaryControl
@@ -78,7 +86,7 @@ data AgentRuntime = AgentRuntime
 -- request even when cancellation raced with draining the mailbox.
 data RuntimeState = RuntimeState
   { requests :: [AgentRequest]
-  , deliveries :: [MVar (Either Text Value)]
+  , deliveries :: [PrimaryDelivery], admittedPrimary :: Maybe PrimaryDelivery
   , permissions :: M.Map AgentId [MVar (Maybe Text)]
   , sessions :: M.Map AgentId SessionRecord
   , launches :: M.Map AgentId ACP.Launch
@@ -99,7 +107,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
   where
     acquire = mask $ \restore -> do
       access <- newAgentAccess
-      state <- newMVar (RuntimeState [] [] M.empty M.empty M.empty Nothing Nothing Nothing False Nothing False)
+      state <- newMVar (RuntimeState [] [] Nothing M.empty M.empty M.empty Nothing Nothing Nothing False Nothing False)
       root <- lookupEnv "THC_EDIT_SESSION" >>= traverse (\sid -> do
         saved <- loadSession sid
         case saved of
@@ -158,9 +166,9 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
     shutdown runtime = do
       modifyMVar_ (runtimeState runtime) $ \s -> do
         mapM_ (rejectPrimaryControl "Editor closed.") (primaryControl s)
-        forM_ (deliveries s) (\cell -> void (tryPutMVar cell (Left "Editor closed.")))
+        mapM_ (settleDelivery (Left "Editor closed.")) (deliveries s)
         forM_ (concat (M.elems (permissions s))) (\cell -> void (tryPutMVar cell Nothing))
-        pure s {closed=True,requests=[]}
+        pure s {closed=True,requests=[],admittedPrimary=Nothing}
       withMVar (reconnectWorkers runtime) (mapM_ cancel)
       closeAgentHub (agentHub runtime) `finally` do
         ids <- M.keys . sessions <$> readMVar (runtimeState runtime)
@@ -183,14 +191,14 @@ drainAgentRequests runtime = do
     ready <- filterM unresolved (requests s)
     pure (s {requests=[]},if closed s then [] else ready++created)
   where
-    unresolved (DeliverPrimary _ cell) = isEmptyMVar cell
+    unresolved (DeliverPrimary delivery) = deliveryWaiting delivery
     unresolved (ControlPrimary control) = primaryControlWaiting control
     unresolved (ProviderPermission _ _ cell) = isEmptyMVar cell
     unresolved _ = pure True
 
 -- | Publish primary capabilities and exact connection identity. A replacement
 -- client invalidates captured controls even if it reuses the same session key;
--- capability refresh retains the existing provider lifetime.
+-- capability refresh retains the existing provider lifetime and delivery receipt.
 syncPrimary :: AgentRuntime -> FilePath -> Maybe ACP.Client -> Text -> Capabilities -> Bool -> IO (Either Text ())
 syncPrimary runtime directory client key caps busy = do
   connection<-traverse (\value->makeStableName =<< evaluate value) client
@@ -208,7 +216,9 @@ syncPrimary runtime directory client key caps busy = do
       case loaded of
         Left (_::IOException) -> pure (Left "Could not read configured agent provider.")
         Right launch -> do
-          failPrimaryControl runtime "Primary provider changed."
+          modifyMVar_ (runtimeState runtime) $ \state->do
+            retired<-retireDeliveries "Primary provider changed." state
+            pure retired {primaryState=Nothing,primaryEvents=Nothing}
           updated <- updateExternalAgent (agentHub runtime) (primaryAgent runtime)
             (primaryDriver (runtimeState runtime) (agentAccess runtime) (pure (Just (primaryAgent runtime))) connection directory key caps)
           case updated of
@@ -234,6 +244,75 @@ recordPrimaryEvent runtime client key event=do
     Just (_,Just current,sid,_) | not (closed state),owner==current,key==sid->primaryEvents state
     _->Nothing
   mapM_ ($ event) publish
+
+-- | Claim one unresolved Hub delivery for the exact current provider object.
+-- Claiming twice cannot fail an already running prompt. No new prompt queue is
+-- created: the Hub worker still waits for this receipt's terminal result.
+admitPrimaryDelivery :: AgentRuntime -> PrimaryDelivery -> ACP.Client -> Text -> IO (Maybe HubMessage)
+admitPrimaryDelivery runtime delivery@(PrimaryDelivery directory expected sid message _) client key=do
+  owner<-makeStableName =<< evaluate client
+  current<-statusAgent (agentHub runtime) Human (primaryAgent runtime)
+  let running=case current of Right value->field "status" value==Just ("running"::Text); _->False
+  modifyMVar (runtimeState runtime) $ \state->do
+    waiting<-deliveryWaiting delivery
+    if delivery `notElem` deliveries state || not waiting || admittedPrimary state/=Nothing
+      then pure (state,Nothing)
+      else if closed state || not running || expected/=Just owner || sid/=key || not (driverBinding state directory expected sid)
+        then settleDelivery (Left "Primary delivery expired.") delivery >> pure (state,Nothing)
+        else pure (state {admittedPrimary=Just delivery},Just message)
+
+-- | Refuse only an unadmitted delivery. A duplicate/late view callback cannot
+-- reject an admitted provider prompt or overwrite its first terminal result.
+-- Receipts from another runtime are refused without touching their owner.
+rejectPrimaryDelivery :: AgentRuntime -> PrimaryDelivery -> Text -> IO ()
+rejectPrimaryDelivery runtime delivery reason=withMVar (runtimeState runtime) $ \state->
+  when (delivery `elem` deliveries state && admittedPrimary state/=Just delivery)
+    (void (settleDelivery (Left reason) delivery))
+
+-- | Complete the exact current binding with an already-redacted provider result.
+-- Publish the host's next-turn busy state before releasing the Hub worker; stale
+-- client objects cannot change that handoff even if their session key repeats.
+-- The caller owns the provider response dispatcher: it must invoke completion
+-- only for its current terminal prompt/preparation response, never a late response
+-- from a previous prompt on this same client. A cancel request leaves the receipt
+-- pending until that real provider outcome.
+-- Returns whether this call settled an admitted delivery. Calls without one may
+-- still update the matching external human turn's existing busy advertisement.
+completePrimaryDelivery :: AgentRuntime -> Maybe ACP.Client -> Maybe Text -> Bool -> Either Text Value -> IO Bool
+completePrimaryDelivery runtime client session busy result=case (client,session) of
+  (Just current,Just key)->do
+    owner<-makeStableName =<< evaluate current
+    modifyMVar (runtimeState runtime) $ \state->
+      if closed state || not (primaryBinding state owner key) then pure (state,False) else do
+        -- This Hub operation is STM-only and cannot re-enter provider callbacks.
+        setExternalAgentBusy (agentHub runtime) (primaryAgent runtime) busy
+        case admittedPrimary state of
+          Just delivery@(PrimaryDelivery _ expected sid _ _) | Just owner==expected && key==sid->do
+            settled<-settleDelivery result delivery
+            pure (state {admittedPrimary=Nothing},settled)
+          _->pure (state,False)
+  _->pure False
+
+-- | O(1). An admitted primary provider prompt, independent of window selection.
+primaryDeliveryActive :: AgentRuntime -> IO Bool
+primaryDeliveryActive runtime=maybe False (const True) . admittedPrimary <$> readMVar (runtimeState runtime)
+
+primaryBinding :: RuntimeState -> StableName ACP.Client -> Text -> Bool
+primaryBinding state owner key=case primaryState state of
+  Just (_,Just expected,sid,_)->owner==expected && key==sid
+  _->False
+
+-- A Hub worker may retain an old driver across replacement before its IO begins.
+-- Preserve its issuance binding through admission instead of adopting a new client.
+driverBinding :: RuntimeState -> FilePath -> Maybe (StableName ACP.Client) -> Text -> Bool
+driverBinding state directory owner key=case primaryState state of
+  Just (current,expected,sid,_)->directory==current && owner==expected && key==sid
+  _->False
+
+deliveryWaiting :: PrimaryDelivery -> IO Bool
+deliveryWaiting (PrimaryDelivery _ _ _ _ reply)=isEmptyMVar reply
+settleDelivery :: Either Text Value -> PrimaryDelivery -> IO Bool
+settleDelivery result (PrimaryDelivery _ _ _ _ reply)=tryPutMVar reply result
 
 failPendingPrimary :: AgentRuntime -> Text -> IO ()
 failPendingPrimary runtime = failDeliveries (runtimeState runtime)
@@ -300,19 +379,29 @@ primaryDriver state access identity connection directory key caps = AgentDriver
         requestPrimaryControl state (ConfigurePrimary owner key settings reply) reply
   , driverDeliver= \message -> mask $ \restore -> do
       cell <- newEmptyMVar
+      let delivery=PrimaryDelivery directory connection key message cell
       modifyMVar_ state $ \s -> if closed s
         then putMVar cell (Left "Editor closed.") >> pure s
-        else pure s {requests=requests s++[DeliverPrimary message cell],deliveries=cell:deliveries s}
+        else pure s {requests=requests s++[DeliverPrimary delivery],deliveries=delivery:deliveries s}
       restore (readMVar cell) `finally` do
         void (tryPutMVar cell (Left "Primary delivery interrupted."))
         modifyMVar_ state (\s -> pure s
-          {deliveries=filter (/=cell) (deliveries s),requests=filter (not . matchingDelivery cell) (requests s)})
+          {deliveries=filter (/=delivery) (deliveries s),requests=filter (not . matchingDelivery delivery) (requests s)
+          ,admittedPrimary=case admittedPrimary s of Just active | active==delivery->Nothing; kept->kept})
   , driverCancel=modifyMVar_ state $ \s -> do
-      mapM_ (rejectPrimaryControl "Agent control cancelled.") (primaryControl s)
-      -- A drained delivery may still be executing. Its UI owner releases the
-      -- reply only after the underlying prompt settles, preserving Hub's barrier.
-      forM_ [cell | DeliverPrimary _ cell <- requests s] (\cell -> void (tryPutMVar cell (Left "Cancelled.")))
-      pure s {requests=filter (not . isDelivery) (requests s)++[CancelPrimary | not (closed s)]}
+      let current=driverBinding s directory connection key
+          belongs (PrimaryDelivery cwd owner sid _ _)=cwd==directory && owner==connection && sid==key
+      when current (mapM_ (rejectPrimaryControl "Agent control cancelled.") (primaryControl s))
+      -- Draining alone is not admission. Only a claimed provider prompt retains
+      -- the Hub reservation until its owner dispatches the terminal response.
+      forM_ (filter belongs (deliveries s)) $ \delivery->unless
+        (admittedPrimary s==Just delivery) (void (settleDelivery (Left "Cancelled.") delivery))
+      -- Replacement retires old queued cancels under this same state lock and
+      -- invalidates the binding before replacing the Hub driver. A callback
+      -- captured by Hub before replacement cannot cancel the new UI client.
+      let keep (DeliverPrimary delivery)=not (belongs delivery)
+          keep _=True
+      pure s {requests=filter keep (requests s)++[CancelPrimary | current && not (closed s)]}
   , driverStop=do
       identity >>= mapM_ (revokeAgentAccess access)
       failDeliveries state "Primary agent ended."
@@ -360,18 +449,21 @@ requestPrimaryControl state control reply=mask $ \restore->do
       {primaryControl=if primaryControl current==Just control then Nothing else primaryControl current
       ,requests=filter (\request->case request of ControlPrimary queued->queued/=control; _->True) (requests current)}
 
-isDelivery :: AgentRequest -> Bool
-isDelivery DeliverPrimary{} = True
-isDelivery _ = False
-matchingDelivery :: MVar (Either Text Value) -> AgentRequest -> Bool
-matchingDelivery cell (DeliverPrimary _ other) = cell==other
+matchingDelivery :: PrimaryDelivery -> AgentRequest -> Bool
+matchingDelivery delivery (DeliverPrimary other) = delivery==other
 matchingDelivery _ _ = False
 
 failDeliveries :: MVar RuntimeState -> Text -> IO ()
-failDeliveries state reason = modifyMVar_ state $ \s -> do
+failDeliveries state reason=modifyMVar_ state (retireDeliveries reason)
+
+retireDeliveries :: Text -> RuntimeState -> IO RuntimeState
+retireDeliveries reason s=do
   mapM_ (rejectPrimaryControl reason) (primaryControl s)
-  forM_ (deliveries s) (\cell -> void (tryPutMVar cell (Left reason)))
-  pure s {requests=filter (not . isDelivery) (requests s)}
+  mapM_ (settleDelivery (Left reason)) (deliveries s)
+  pure s {requests=filter keep (requests s),admittedPrimary=Nothing}
+  where keep DeliverPrimary{}=False
+        keep CancelPrimary=False
+        keep _=True
 
 enqueue :: MVar RuntimeState -> AgentRequest -> IO ()
 enqueue state request = modifyMVar_ state $ \s -> pure s
