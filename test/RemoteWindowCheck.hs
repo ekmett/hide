@@ -64,6 +64,7 @@ checks = do
   let mask=BS.pack ([1,0,1,128,0,0]++replicate (80*25*2-6) 0)
       surface slot viewport=object ["id" .= (91::Int),"resource" .= resource,"slot" .= (slot::Int),"rect" .= (viewport::[Int]),
         "target" .= ([0,0,2,2]::[Double]),"name" .= ("safe λ <script>.png"::T.Text),"description" .= ("PNG, 2 by 2 pixels"::T.Text)]
+      scene :: [Value] -> BS.ByteString -> Value
       scene surfaces bytes=object ["epoch" .= epoch,"surfaces" .= surfaces,"mask" .= TE.decodeUtf8 (B64.encode bytes)]
       frame value=parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"canvas" .= value]) rows
       validScene=scene [surface 1 [0,0,2,2]] mask
