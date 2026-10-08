@@ -69,6 +69,10 @@ checks = do
   let logical source=T.concat (map markdownBlockText (markdownBlocks (parseMarkdown source)))
   check "logical copy retains hard breaks and block separation without list furniture"
     (logical "a **b**\nc  \nd\n\n- one\n- two\n\n```sh\n\tx\n```"=="a b c\nd\n\none\ntwo\n\n\tx\n")
+  check "parser EOF terminator stays out of exact literal bodies"
+    (map (\(_,_,_,body)->body) (snd (renderMarkdownWithShellBlocks 40 "```sh\necho hi"))==["echo hi"] &&
+     map (\(_,_,_,body)->body) (snd (renderMarkdownWithShellBlocks 40 "- example\n\n  ```sh\n  echo nested"))==["echo nested"] &&
+     logical "<div>raw</div>"=="<div>raw</div>")
   let linkedTable=markdownBlocks (parseMarkdown "| H | V |\n|---|---|\n| [alpha](target.md) | 42 |")
   check "table logical copy and link offsets share the parser's canonical cells"
     (T.concat (map markdownBlockText linkedTable)=="H\tV\nalpha\t42" &&

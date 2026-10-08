@@ -85,7 +85,16 @@ data MarkdownBlock = MarkdownBlock !Block !T.Text !Bool
 
 parseMarkdown :: T.Text -> Markdown
 parseMarkdown source=Markdown (normalize (trim (either (const (Blocks [Pre (paint Plain source)])) id
-  (runIdentity (C.commonmarkWith (pipeTableSpec <> C.defaultSyntaxSpec) "" source)))))
+  (runIdentity (C.parseCommonmarkWith (pipeTableSpec <> C.defaultSyntaxSpec) tokens)))))
+  where
+    -- Tables need an EOF line-end token. Its empty contents keep exact code
+    -- and raw-block payloads unchanged when the source has no final newline.
+    complete=T.null source || T.isSuffixOf "\n" source || T.isSuffixOf "\r" source
+    original=C.tokenize "" (if complete then source else T.snoc source '\n')
+    tokens=if complete then original else endLine original
+    endLine []=[]
+    endLine [token]=[token {C.tokContents=""}]
+    endLine (token:rest)=token:endLine rest
 
 -- | Borrow ordered logical parser blocks. Separators are owned here, never
 -- inferred from wrapped rows. The final block has no synthetic trailing break.
