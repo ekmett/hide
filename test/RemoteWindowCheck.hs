@@ -61,7 +61,7 @@ checks = do
     (either (const True) (const False) (parseRemoteFrame (exportMetadata ([-1]::[Integer])) rows))
 #ifdef WITH_REMOTE
   let offered=named {pendingFileExport=(9,Just (Model.ExportFileCopy "saved.hs" (BS.pack [0,255]) (Model.Rect 1 2 20 1)))}
-      detached=fst (Wire.applyInput Wire.Blur offered)
+      detached=fst (P.applyInput P.Blur offered)
   check "detaching invalidates prepared saved exports without touching buffers"
     (fst (pendingFileExport detached)==10 && snd (pendingFileExport detached)==Nothing && Model.fileExportView detached/=Model.fileExportView offered)
 #endif
