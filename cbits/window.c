@@ -3,6 +3,7 @@
 #include "unicode.h"
 #include "shaders/cell.h"
 #include "shaders/cell.generated.h"
+#include "shaders/canvas.generated.h"
 #include <SDL3/SDL.h>
 #include <limits.h>
 #include <math.h>
@@ -78,6 +79,175 @@ static Uint32 command_event, wake_event, dock_event;
 static double wheel_remainder;
 static void pointer(float x, float y, int32_t *event);
 
+/* Immutable image resources belong to the SDL thread. The issuer never reuses
+ * IDs within an epoch. Receiver checks are bounded: duplicate live begins fail,
+ * and only the exact active upload may accept contiguous chunks; release cancels
+ * it, so a late chunk cannot resurrect a texture. */
+#define CANVAS_RESOURCES 64
+#define CANVAS_BYTES (64u*1024u*1024u)
+#define CANVAS_CHUNK 262144u
+typedef struct {
+    char id[49]; int width,height; size_t bytes,offset;
+    SDL_Texture *texture; SDL_GPURenderState *state; bool ready;
+} CanvasResource;
+typedef struct { char id[49]; int slot,rect[4]; float target[4]; } CanvasSurface;
+static char canvas_epoch[49];
+static CanvasResource canvas_resources[CANVAS_RESOURCES],*canvas_upload;
+static CanvasSurface canvas_surfaces[CANVAS_RESOURCES];
+static size_t canvas_bytes,canvas_surface_count,canvas_row_used;
+static unsigned char *canvas_row;
+static uint32_t *canvas_mask;
+static int canvas_cols,canvas_rows;
+static bool canvas_committed,canvas_mask_ready;
+static SDL_GPUShader *canvas_shader;
+static SDL_GPUBuffer *canvas_mask_buffer;
+static SDL_GPUTransferBuffer *canvas_mask_transfer;
+static uint64_t canvas_uploads,canvas_uploaded_bytes,canvas_mask_uploads;
+static bool canvas_id(const char *value) {
+    if (!value || strlen(value)!=48) return false;
+    for (int i=0;i<48;++i) if (!((value[i]>='0' && value[i]<='9') || (value[i]>='a' && value[i]<='f'))) return false;
+    return true;
+}
+static bool canvas_current(const char *epoch) { return canvas_id(epoch) && !strcmp(epoch,canvas_epoch); }
+static CanvasResource *canvas_resource(const char *id) {
+    for (size_t i=0;i<CANVAS_RESOURCES;++i) if (canvas_resources[i].id[0] && !strcmp(canvas_resources[i].id,id)) return &canvas_resources[i];
+    return NULL;
+}
+static void canvas_retire(CanvasResource *resource) {
+    if (canvas_upload==resource) { canvas_upload=NULL; free(canvas_row); canvas_row=NULL; canvas_row_used=0; }
+    SDL_DestroyGPURenderState(resource->state); SDL_DestroyTexture(resource->texture);
+    canvas_bytes-=resource->bytes; memset(resource,0,sizeof(*resource));
+}
+int thc_canvas_reset(const char *epoch) {
+    if (epoch && !canvas_id(epoch)) return SDL_SetError("Invalid canvas epoch");
+    for (size_t i=0;i<CANVAS_RESOURCES;++i) if (canvas_resources[i].id[0]) canvas_retire(&canvas_resources[i]);
+    canvas_surface_count=0; canvas_cols=canvas_rows=0; canvas_committed=canvas_mask_ready=false;
+    canvas_epoch[0]=0; if (epoch) memcpy(canvas_epoch,epoch,49);
+    return 1;
+}
+int thc_canvas_begin(const char *epoch,const char *id,int width,int height,size_t bytes) {
+    if (!canvas_current(epoch) || !canvas_id(id) || width<1 || width>4096 || height<1 || height>4096 ||
+        (size_t)width*height>4194304 || bytes!=(size_t)width*height*4 || canvas_resource(id) || canvas_upload ||
+        bytes>CANVAS_BYTES-canvas_bytes) return SDL_SetError("Invalid or unavailable canvas resource");
+    if (!gpu) return SDL_SetError("Canvas images require the Metal or Vulkan renderer");
+    CanvasResource *resource=NULL;
+    for (size_t i=0;i<CANVAS_RESOURCES;++i) if (!canvas_resources[i].id[0]) { resource=&canvas_resources[i]; break; }
+    if (!resource) return SDL_SetError("Too many canvas resources");
+    SDL_Texture *image=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_RGBA32,SDL_TEXTUREACCESS_STATIC,width,height);
+    unsigned char *row=malloc((size_t)width*4);
+    if (!image || !row || !SDL_SetTextureScaleMode(image,SDL_SCALEMODE_NEAREST) || !SDL_SetTextureBlendMode(image,SDL_BLENDMODE_NONE)) {
+        free(row); SDL_DestroyTexture(image); return 0;
+    }
+    memcpy(resource->id,id,49); resource->width=width; resource->height=height; resource->bytes=bytes; resource->texture=image;
+    canvas_bytes+=bytes; canvas_upload=resource; canvas_row=row; canvas_row_used=0; return 1;
+}
+int thc_canvas_chunk(const char *epoch,const char *id,size_t offset,const void *bytes,size_t length) {
+    CanvasResource *resource=canvas_upload;
+    if (!canvas_current(epoch) || !canvas_id(id) || !resource || strcmp(resource->id,id) || offset!=resource->offset ||
+        !bytes || !length || length>CANVAS_CHUNK || length>resource->bytes-offset) return SDL_SetError("Invalid canvas chunk");
+    const unsigned char *source=bytes; size_t remaining=length,pitch=(size_t)resource->width*4;
+    if (canvas_row_used) {
+        size_t take=SDL_min(remaining,pitch-canvas_row_used);
+        memcpy(canvas_row+canvas_row_used,source,take); canvas_row_used+=take; resource->offset+=take; source+=take; remaining-=take;
+        if (canvas_row_used==pitch) {
+            SDL_Rect row={0,(int)(resource->offset/pitch)-1,resource->width,1};
+            if (!SDL_UpdateTexture(resource->texture,&row,canvas_row,(int)pitch)) { canvas_retire(resource); return 0; }
+            canvas_row_used=0; ++canvas_uploads; canvas_uploaded_bytes+=pitch;
+        }
+    }
+    size_t whole=remaining/pitch;
+    if (whole) {
+        SDL_Rect rows={0,(int)(resource->offset/pitch),resource->width,(int)whole};
+        if (!SDL_UpdateTexture(resource->texture,&rows,source,(int)pitch)) { canvas_retire(resource); return 0; }
+        size_t take=whole*pitch; resource->offset+=take; source+=take; remaining-=take;
+        ++canvas_uploads; canvas_uploaded_bytes+=take;
+    }
+    if (remaining) { memcpy(canvas_row,source,remaining); canvas_row_used=remaining; resource->offset+=remaining; }
+    if (resource->offset==resource->bytes) { resource->ready=true; canvas_upload=NULL; free(canvas_row); canvas_row=NULL; return 2; }
+    return 1;
+}
+int thc_canvas_release(const char *epoch,const char *id) {
+    if (!canvas_current(epoch) || !canvas_id(id)) return SDL_SetError("Invalid canvas release");
+    CanvasResource *resource=canvas_resource(id); if (resource) canvas_retire(resource); return 1;
+}
+int thc_canvas_scene(const char *epoch,int width,int height,const void *packed,size_t count) {
+    if (!canvas_current(epoch) || width<1 || width>512 || height<1 || height>256 || !packed || count!=(size_t)width*height)
+        return SDL_SetError("Invalid canvas ownership grid");
+    if (!canvas_mask) { canvas_mask=calloc(512u*256u,sizeof(*canvas_mask)); if (!canvas_mask) return SDL_SetError("Cannot allocate canvas grid"); }
+    const unsigned char *mask=packed;
+    bool changed=width!=canvas_cols || height!=canvas_rows;
+    for (size_t i=0;i<count;++i) {
+        unsigned value=mask[i*2]|((unsigned)mask[i*2+1]<<8);
+        if ((value&32767u)>64 || (!(value&32767u) && value)) return SDL_SetError("Invalid canvas ownership slot");
+        if (canvas_mask[i]!=value) changed=true;
+    }
+    for (size_t i=0;i<count;++i) canvas_mask[i]=mask[i*2]|((unsigned)mask[i*2+1]<<8);
+    canvas_cols=width; canvas_rows=height; canvas_surface_count=0; canvas_committed=false;
+    if (changed) canvas_mask_ready=false;
+    return 1;
+}
+int thc_canvas_surface(const char *id,int slot,int x,int y,int width,int height,double tx,double ty,double tw,double th) {
+    if (!canvas_id(id) || slot<1 || slot>64 || canvas_surface_count>=64 || x<0 || y<0 || width<1 || height<1 ||
+        x>=canvas_cols || y>=canvas_rows || width>canvas_cols-x || height>canvas_rows-y ||
+        !isfinite(tx) || !isfinite(ty) || !isfinite(tw) || !isfinite(th) || fabs(tx)>1e6 || fabs(ty)>1e6 || tw<=0 || th<=0 || tw>1e6 || th>1e6)
+        return SDL_SetError("Invalid canvas surface");
+    for (size_t i=0;i<canvas_surface_count;++i) if (canvas_surfaces[i].slot==slot) return SDL_SetError("Duplicate canvas slot");
+    CanvasSurface *surface=&canvas_surfaces[canvas_surface_count++];
+    memcpy(surface->id,id,49); surface->slot=slot;
+    surface->rect[0]=x; surface->rect[1]=y; surface->rect[2]=width; surface->rect[3]=height;
+    surface->target[0]=(float)tx; surface->target[1]=(float)ty; surface->target[2]=(float)tw; surface->target[3]=(float)th;
+    return 1;
+}
+void thc_canvas_clear(void) { canvas_surface_count=0; canvas_committed=false; }
+int thc_canvas_commit(void) {
+    const CanvasSurface *owners[65]={0};
+    for (size_t i=0;i<canvas_surface_count;++i) owners[canvas_surfaces[i].slot]=&canvas_surfaces[i];
+    for (int y=0;y<canvas_rows;++y) for (int x=0;x<canvas_cols;++x) {
+        unsigned slot=canvas_mask[y*canvas_cols+x]&32767u; if (!slot) continue;
+        const CanvasSurface *surface=owners[slot];
+        if (!surface || x<surface->rect[0] || y<surface->rect[1] || x-surface->rect[0]>=surface->rect[2] || y-surface->rect[1]>=surface->rect[3])
+            return SDL_SetError("Canvas mask has no owning viewport");
+    }
+    canvas_committed=true; return 1;
+}
+
+static bool canvas_draw(const SDL_FRect *target) {
+    if (!canvas_committed || !canvas_surface_count || canvas_cols!=cols || canvas_rows!=rows) return true;
+    if (!gpu) return true;
+    if (!canvas_mask_buffer) {
+        SDL_GPUBufferCreateInfo buffer={SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,512u*256u*4u,0};
+        SDL_GPUTransferBufferCreateInfo transfer={SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,512u*256u*4u,0};
+        canvas_mask_buffer=SDL_CreateGPUBuffer(gpu,&buffer); canvas_mask_transfer=SDL_CreateGPUTransferBuffer(gpu,&transfer);
+        if (!canvas_mask_buffer || !canvas_mask_transfer) return false;
+    }
+    if (!canvas_mask_ready) {
+        size_t bytes=(size_t)canvas_cols*canvas_rows*4;
+        void *mapped=SDL_MapGPUTransferBuffer(gpu,canvas_mask_transfer,true); if (!mapped) return false;
+        memcpy(mapped,canvas_mask,bytes); SDL_UnmapGPUTransferBuffer(gpu,canvas_mask_transfer);
+        SDL_GPUCommandBuffer *upload=SDL_AcquireGPUCommandBuffer(gpu); if (!upload) return false;
+        SDL_GPUCopyPass *copy=SDL_BeginGPUCopyPass(upload);
+        SDL_GPUTransferBufferLocation source={canvas_mask_transfer,0}; SDL_GPUBufferRegion destination={canvas_mask_buffer,0,(Uint32)bytes};
+        SDL_UploadToGPUBuffer(copy,&source,&destination,true); SDL_EndGPUCopyPass(copy);
+        if (!SDL_SubmitGPUCommandBuffer(upload)) return false;
+        canvas_mask_ready=true; ++canvas_mask_uploads;
+    }
+    for (size_t i=0;i<canvas_surface_count;++i) {
+        CanvasSurface *surface=&canvas_surfaces[i]; CanvasResource *resource=canvas_resource(surface->id);
+        if (!resource || !resource->ready) continue;
+        if (!resource->state) {
+            SDL_GPURenderStateCreateInfo state={0}; state.fragment_shader=canvas_shader; state.num_storage_buffers=1; state.storage_buffers=&canvas_mask_buffer;
+            resource->state=SDL_CreateGPURenderState(renderer,&state); if (!resource->state) return false;
+        }
+        float uniforms[8]={(float)cols,(float)rows,(float)surface->slot,0,surface->target[0],surface->target[1],surface->target[2],surface->target[3]};
+        if (!SDL_SetGPURenderStateFragmentUniforms(resource->state,0,uniforms,sizeof(uniforms)) || !SDL_SetGPURenderState(renderer,resource->state) ||
+            !SDL_RenderTexture(renderer,resource->texture,NULL,target) || !SDL_SetGPURenderState(renderer,NULL)) return false;
+    }
+    return true;
+}
+void thc_canvas_stats(uint64_t *uploads,uint64_t *bytes,uint64_t *masks,uint64_t *retained) {
+    *uploads=canvas_uploads; *bytes=canvas_uploaded_bytes; *masks=canvas_mask_uploads; *retained=canvas_bytes;
+}
+
 static void clear_pointer(void) {
     mouse_x = mouse_y = -1;
     SDL_ShowCursor();
@@ -104,10 +274,15 @@ void thc_close(void) {
     left_down = false;
     suppress_option_text = false;
     cursor_present = false; cursor_x = cursor_y = -1;
+    thc_canvas_reset(NULL);
+    free(canvas_mask); canvas_mask=NULL;
     SDL_StopTextInput(window);
     SDL_DestroyGPURenderState(glyph_state); glyph_state=NULL;
     if (gpu) {
         SDL_ReleaseGPUShader(gpu,glyph_shader); glyph_shader=NULL;
+        SDL_ReleaseGPUShader(gpu,canvas_shader); canvas_shader=NULL;
+        SDL_ReleaseGPUBuffer(gpu,canvas_mask_buffer); canvas_mask_buffer=NULL;
+        SDL_ReleaseGPUTransferBuffer(gpu,canvas_mask_transfer); canvas_mask_transfer=NULL;
         SDL_ReleaseGPUBuffer(gpu,cell_buffer); cell_buffer=NULL;
         SDL_ReleaseGPUTransferBuffer(gpu,cell_transfer); cell_transfer=NULL;
     }
@@ -201,6 +376,10 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
         shader.stage=SDL_GPU_SHADERSTAGE_FRAGMENT; shader.num_samplers=1; shader.num_storage_buffers=1; shader.num_uniform_buffers=1;
         glyph_shader=SDL_CreateGPUShader(gpu,&shader);
         if (!glyph_shader) return 0;
+        shader.code=metal?hide_canvas_msl:hide_canvas_spv;
+        shader.code_size=metal?sizeof(hide_canvas_msl):sizeof(hide_canvas_spv);
+        canvas_shader=SDL_CreateGPUShader(gpu,&shader);
+        if (!canvas_shader) return 0;
     } else renderer=SDL_CreateRenderer(window,backend);
     if (!renderer || !SDL_GetRenderOutputSize(renderer,&renderer_w,&renderer_h)) return 0;
     SDL_SetRenderVSync(renderer, 1);
@@ -662,6 +841,7 @@ int thc_present(void) {
     }
     if (!SDL_SetRenderClipRect(renderer,NULL)) return 0;
     if (!gpu && crt_filter && !draw_crt(&target)) return 0;
+    if (!canvas_draw(&target)) return 0;
     const char *capture=SDL_getenv("THC_EDIT_CAPTURE");
     if (capture && *capture && !thc_capture(capture)) return 0;
     return SDL_RenderPresent(renderer);

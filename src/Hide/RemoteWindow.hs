@@ -7,6 +7,7 @@
 -- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame
+  , RemoteCanvas(..), RemoteCanvasSurface(..), CanvasControl(..), CanvasReceiveState, emptyCanvasReceiveState, admitCanvasControl, validateCanvasChunk
   , nativeKeyInput, nativeEventInput, remoteBindingInput, remoteMenuInput, remoteNativeMenuInput, remoteDockWindowInput, remoteMenuLayout, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
@@ -15,7 +16,10 @@ import Hide.Bindings (readChord, chordName)
 import Data.Aeson hiding (withArray)
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseEither)
-import Data.Bits ((.&.))
+import Data.Bits ((.&.), (.|.), shiftL)
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.IntMap.Strict as IM
+import qualified Data.Map.Strict as M
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
@@ -36,7 +40,6 @@ import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM hiding (check)
 import Control.Exception (bracket, bracket_, throwIO, IOException, catch, finally)
 import Control.Monad (forM_, forever, when, foldM)
-import qualified Data.Map.Strict as M
 import Foreign (nullPtr, alloca, allocaArray, peek, peekArray, pokeArray)
 import Foreign.C
 import Data.IORef
@@ -82,6 +85,7 @@ data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
+  , remoteCanvas :: Maybe RemoteCanvas
   , remoteSidebar :: BS.ByteString, remoteExportView :: [Integer], remoteBindings :: [(T.Text,T.Text)]
   , remoteWindows :: [(Int,T.Text,Bool,Bool)]
   , remoteContributions :: [RemoteContribution], remoteMenus :: [Bool], remoteCells :: [RemoteCell]
@@ -123,8 +127,9 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
     unless (ident>0 && ident<=2147483647 && T.length windowTitle<=8192 && not (T.any (\c->c<' ' || c=='\DEL') windowTitle)) (fail "Invalid editor window")
     pure (ident,windowTitle,selected,windowEnabled))
   unless (IS.size (IS.fromList [ident | (ident,_,_,_)<-windows])==length windows && length [() | (_,_,True,_)<-windows]<=1) (fail "Invalid editor window catalogue")
+  canvas <- o .:? "canvas" >>= traverse (parseRemoteCanvas size)
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar canvas sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
   where
     validBinding (chord,name)=T.length name<=256 && case readChord chord of Right (key,mods)->chordName key mods==Just chord; _->False
     parseContribution=withObject "menu contribution" $ \o->do
@@ -169,6 +174,113 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
         start>=0 && start<w && shown>0 && shown<=w-start && shown<=cols-at &&
         (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
       foldRuns cols y paint (at+shown) (RemoteGlyph at y paint text w start shown:acc) rest
+
+-- | Complete, bounded image scene. Resource IDs identify retained pixels, never
+-- input capabilities; the host window ID remains a separate field.
+data RemoteCanvasSurface = RemoteCanvasSurface
+  { canvasWindow :: !Int, canvasResource :: !T.Text, canvasSlot :: !Int
+  , canvasViewport :: !(Int,Int,Int,Int), canvasDestination :: !(Double,Double,Double,Double)
+  , canvasName :: !T.Text, canvasDescription :: !T.Text
+  } deriving (Eq,Show)
+data RemoteCanvas = RemoteCanvas
+  { canvasEpoch :: !T.Text, canvasSurfaces :: [RemoteCanvasSurface], canvasMask :: !BS.ByteString
+  , canvasAccessibility :: !BS.ByteString
+  } deriving (Eq,Show)
+
+validCanvasIdentity :: T.Text -> Bool
+validCanvasIdentity ident=T.length ident==48 && T.all (`elem` ("0123456789abcdef"::String)) ident
+
+parseRemoteCanvas :: (Int,Int) -> Value -> Parser RemoteCanvas
+parseRemoteCanvas (cols,rows)=withObject "canvas scene" $ \o->do
+  epoch<-o .: "epoch"
+  unless (validCanvasIdentity epoch) (fail "Invalid canvas epoch")
+  values<-o .: "surfaces"
+  unless (length values<=64) (fail "Too many canvas surfaces")
+  surfaces<-mapM surface values
+  unless (IS.size (IS.fromList (map canvasWindow surfaces))==length surfaces && IS.size (IS.fromList (map canvasSlot surfaces))==length surfaces) (fail "Duplicate canvas identity or slot")
+  encoded<-o .: "mask"
+  let size=cols*rows*2
+  unless (T.length encoded<=((size+2) `div` 3)*4) (fail "Oversized canvas mask")
+  mask<-either fail pure (B64.decode (TE.encodeUtf8 encoded))
+  unless (BS.length mask==size) (fail "Invalid canvas mask size")
+  let owners=IM.fromList [(canvasSlot entry,entry) | entry<-surfaces]
+      scan !index !visible
+        | index==cols*rows=Right visible
+        | otherwise=let value=fromIntegral (BS.index mask (index*2)) .|. (fromIntegral (BS.index mask (index*2+1)) `shiftL` 8)
+                        slot=value .&. 32767; x=index `mod` cols; y=index `div` cols in
+            if value==0 then scan (index+1) visible else case IM.lookup slot owners of
+              Just entry | let (a,b,w,h)=canvasViewport entry, x>=a && y>=b && x-a<w && y-b<h ->
+                scan (index+1) (IM.insertWith merge slot (x,y,x,y) visible)
+              _->Left "Canvas mask has no owning viewport"
+      merge (a,b,c,d) (e,f,g,h)=(min a e,min b f,max c g,max d h)
+  visible<-either fail pure (scan 0 IM.empty)
+  let images=[object ["id" .= canvasWindow entry,"name" .= canvasName entry,"description" .= canvasDescription entry,
+              "bounds" .= (x,y,z-x+1,w-y+1)] | entry<-surfaces, Just (x,y,z,w)<-[IM.lookup (canvasSlot entry) visible]]
+      accessibility=BL.toStrict (encode (object ["images" .= images,"size" .= (cols,rows)]))
+  pure (RemoteCanvas epoch surfaces mask accessibility)
+  where
+    surface=withObject "canvas surface" $ \o->do
+      ident<-o .: "id"; resource<-o .: "resource"; slot<-o .: "slot"
+      viewport@(x,y,w,h)<-o .: "rect"
+      target@(a,b,c,d)<-o .: "target"
+      name<-o .: "name"; description<-o .: "description"
+      unless (ident>0 && ident<=2147483647 && validCanvasIdentity resource && slot>=1 && slot<=64 &&
+        x>=0 && y>=0 && w>0 && h>0 && x<cols && y<rows && w<=cols-x && h<=rows-y &&
+        all (\n->not (isNaN n || isInfinite n) && abs n<=1000000) [a,b,c,d] && c>0 && d>0 &&
+        T.length name<=256 && T.length description<=1024 && not (T.any (=='\0') (name<>description))) (fail "Invalid canvas surface")
+      pure (RemoteCanvasSurface ident resource slot viewport target name description)
+
+-- | Fixed receive cursor over one image upload. Bytes are not retained here;
+-- the existing bounded incoming queue lends each chunk to the SDL owner.
+data CanvasControl = CanvasReset !T.Text | CanvasBegin !T.Text !T.Text !Int !Int !Int
+  | CanvasChunk !T.Text !T.Text !Int !Int | CanvasRelease !T.Text !T.Text deriving (Eq,Show)
+data CanvasReceiveState = CanvasReceiveState (Maybe T.Text) (M.Map T.Text Int) (Maybe (T.Text,Int,Int)) deriving (Eq,Show)
+emptyCanvasReceiveState :: CanvasReceiveState
+emptyCanvasReceiveState=CanvasReceiveState Nothing M.empty Nothing
+
+-- | Validate owner epoch, declared residency and contiguous upload admission.
+-- Issuer IDs are immutable and never reused within an epoch. A release cancels
+-- the current cursor; late chunks cannot recreate a resource. A fresh explicit
+-- begin is another admission, without an unbounded retired-ID ledger.
+admitCanvasControl :: CanvasReceiveState -> Value -> Either String (CanvasReceiveState,CanvasControl)
+admitCanvasControl (CanvasReceiveState epoch live upload) value=do
+  control<-parseEither (withObject "canvas control" $ \o->do
+    kind<-o .: "type" :: Parser T.Text
+    actual<-o .: "epoch"
+    unless (validCanvasIdentity actual) (fail "Invalid canvas epoch")
+    case kind of
+      "canvas-reset"->pure (CanvasReset actual)
+      _->do
+        ident<-o .: "id"
+        unless (validCanvasIdentity ident) (fail "Invalid canvas resource identity")
+        case kind of
+          "canvas-resource"->CanvasBegin actual ident <$> o .: "width" <*> o .: "height" <*> o .: "bytes"
+          "canvas-chunk"->CanvasChunk actual ident <$> o .: "offset" <*> o .: "length"
+          "canvas-release"->pure (CanvasRelease actual ident)
+          _->fail "Unknown canvas control") value
+  let same actual=unless (epoch==Just actual) (Left "Stale canvas epoch")
+  state<-case control of
+    CanvasReset actual->Right (CanvasReceiveState (Just actual) M.empty Nothing)
+    CanvasBegin actual ident width height size->do
+      same actual
+      unless (width>0 && height>0 && width<=4096 && height<=4096 && width*height<=4194304 && size==width*height*4 &&
+        M.notMember ident live && M.size live<64 && upload==Nothing && size<=67108864-sum (M.elems live)) (Left "Invalid canvas resource admission")
+      Right (CanvasReceiveState epoch (M.insert ident size live) (Just (ident,size,0)))
+    CanvasChunk actual ident offset size->do
+      same actual
+      case upload of
+        Just (current,total,received) | ident==current && offset==received && size>0 && size<=262144 && size<=total-received ->
+          Right (CanvasReceiveState epoch live (if received+size==total then Nothing else Just (ident,total,received+size)))
+        _->Left "Invalid canvas upload cursor"
+    CanvasRelease actual ident->do
+      same actual
+      Right (CanvasReceiveState epoch (M.delete ident live) (case upload of Just (current,_,_) | current==ident->Nothing; _->upload))
+  Right (state,control)
+
+-- | Header/binary pairing is exact; these bytes can never become a cell frame.
+validateCanvasChunk :: CanvasControl -> BS.ByteString -> Either String ()
+validateCanvasChunk (CanvasChunk _ _ _ count) bytes=unless (BS.length bytes==count) (Left "Canvas chunk binary length mismatch")
+validateCanvasChunk _ _=Left "Binary canvas payload has no chunk header"
 
 modifierNames :: Int -> [T.Text]
 modifierNames mask = ["shift" | mask .&. 1/=0] ++ ["ctrl" | mask .&. 2/=0] ++ ["alt" | mask .&. 4/=0] ++ ["cmd" | mask .&. 8/=0]
@@ -293,13 +405,13 @@ sanitizeDownloadName input = case limit (T.map clean (last (T.splitOn "/" (T.rep
                 | otherwise = c
 
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
-data Incoming = Frame Int Word64 RemoteFrame | Assets (M.Map Char Glyph) | Control Value | ExportCopy FilePath (Int,Int,Int,Int) [Integer]
+data Incoming = Frame Int Word64 RemoteFrame | Assets (M.Map Char Glyph) | Control Value | Canvas CanvasControl | CanvasBytes CanvasControl BS.ByteString | ExportCopy FilePath (Int,Int,Int,Int) [Integer]
 -- Compression and file transfers stay off the SDL thread.
 receiveFrames :: FileExports -> RemotePeer -> TBQueue Incoming -> IO ()
-receiveFrames exports peer queue = go [] (object []) Nothing 0
+receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiveState
   where
     emit item = atomically (writeTBQueue queue item) >> c_wake
-    go rows metadata download demand = peerReceive peer >>= \packet -> case packet of
+    go rows metadata download demand canvasState = peerReceive peer >>= \packet -> case packet of
       Nothing -> emit (Control (object ["type" .= ("closed"::T.Text)]))
       Just (JsonPacket value) -> do
         kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
@@ -313,7 +425,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0
             supported <- parseIO (withObject "assets" (\o -> o .:? "menuCommands" .!= [])) value :: IO [T.Text]
             unless (length supported<=256 && all ((<=256).T.length) supported) (ioError (userError "Invalid menu commands"))
             emit (Assets atlas)
-            go [] (object ["menuCommands" .= supported]) Nothing 0
+            go [] (object ["menuCommands" .= supported]) Nothing 0 emptyCanvasReceiveState
           "download" -> do
             offer <- parseIO (withObject "download" $ \o->do
               name<-o .: "name"
@@ -327,13 +439,24 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0
                 Nothing->pure Nothing
                 _->fail "Unknown download purpose"
               pure (name,receipt)) value
-            go rows metadata (Just offer) demand
+            go rows metadata (Just offer) demand canvasState
           "frame-ready" -> do
             (serial,changed)<-parseIO (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) value
-            if changed then go rows metadata download serial
-              else emit (Control value) >> go rows metadata download demand
-          "connection" -> emit (Control value) >> go rows metadata Nothing 0
-          _ -> emit (Control value) >> go rows metadata download demand
+            if changed then go rows metadata download serial canvasState
+              else emit (Control value) >> go rows metadata download demand canvasState
+          "connection" -> emit (Control value) >> go rows (case metadata of Object fields->Object (KM.delete "canvas" fields); _->metadata) Nothing 0 emptyCanvasReceiveState
+          _ | kind `elem` ["canvas-reset","canvas-resource","canvas-chunk","canvas-release"]->do
+            unless (case download of Nothing->True; _->False) (ioError (userError "Canvas control interrupted a download pair"))
+            (next,control)<-either (ioError . userError) pure (admitCanvasControl canvasState value)
+            case control of
+              CanvasChunk{}->do
+                binary<-peerReceive peer
+                case binary of
+                  Just (BinaryPacket bytes)->either (ioError . userError) pure (validateCanvasChunk control bytes) >> emit (CanvasBytes control bytes)
+                  _->ioError (userError "Canvas chunk header requires its immediate binary packet")
+              _->emit (Canvas control)
+            go rows metadata Nothing demand next
+          _ -> emit (Control value) >> go rows metadata download demand canvasState
       Just (BinaryPacket bytes) -> case download of
         Just (name,receipt) -> do
           (case receipt of
@@ -344,14 +467,14 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0
             Just _->do
               started<-startHelperFileExport exports name bytes (either (hPutStrLn stderr . T.unpack) (const (pure ())))
               either (hPutStrLn stderr . T.unpack) (const (pure ())) started) `catch` \(e::IOException) -> hPutStrLn stderr ("Download failed: "++show e)
-          go rows metadata Nothing demand
+          go rows metadata Nothing demand canvasState
         Nothing -> do
           received<-getMonotonicTimeNSec
           (delta,newRows) <- decodeFrame rows bytes
           let merged = case (delta,metadata) of (Object new,Object old) -> Object (KM.union new old); _ -> delta
           frame <- either (ioError . userError) pure (parseRemoteFrame merged newRows)
           emit (Frame demand received frame)
-          go newRows merged Nothing demand
+          go newRows merged Nothing demand canvasState
     saveDownload name bytes = do
       directory <- (</> "Downloads") <$> getHomeDirectory
       createDirectoryIfMissing True directory
@@ -360,8 +483,8 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0
 parseIO :: (Value -> Parser a) -> Value -> IO a
 parseIO parser = either (ioError . userError) pure . parseEither parser
 
-drawRemote :: Font -> M.Map Char Glyph -> RemoteFrame -> IO ()
-drawRemote font atlas frame = allocaArray 16 $ \scratch -> do
+drawRemote :: Font -> M.Map Char Glyph -> Maybe T.Text -> RemoteFrame -> IO ()
+drawRemote font atlas epoch frame = allocaArray 16 $ \scratch -> do
   c_cursor_blink (flag (remoteBlink frame))
   c_crt_filter (flag (remoteCRT frame))
   c_pixelate_unicode (flag (remotePixelated frame))
@@ -393,6 +516,10 @@ drawRemote font atlas frame = allocaArray 16 $ \scratch -> do
     RemoteScript x y paint text natural script ->
       drawGlyph scratch x y paint text 1 0 1 (case script of Superscript -> 1; Subscript -> 2) natural
   forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
+  case remoteCanvas frame of
+    Just scene | Just (canvasEpoch scene)==epoch->installNativeCanvas (canvasEpoch scene) (remoteSize frame) (canvasMask scene)
+      [(canvasResource entry,canvasSlot entry,canvasViewport entry,canvasDestination entry) | entry<-canvasSurfaces scene]
+    _->c_canvas_clear
   check "Present remote frame" c_present
   where
     flag value = if value then 1 else 0
@@ -423,15 +550,28 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
   titleTiming <- newIORef (0::Double,""::T.Text)
   exportGesture <- newIORef Nothing
   installedSidebar <- newIORef Nothing
+  installedCanvas <- newIORef Nothing
+  canvasEpochRef <- newIORef Nothing
   let clearSidebar=do
         check "Clear sidebar accessibility" (c_accessibility nullPtr 0)
         writeIORef installedSidebar Nothing
+        writeIORef installedCanvas Nothing
       installSidebar value=do
         previous<-readIORef installedSidebar
         let bytes=remoteSidebar value
         when (previous/=Just bytes) $ do
           BS.useAsCStringLen bytes $ \(ptr,len)->check "Update sidebar accessibility" (c_accessibility ptr (fromIntegral len))
           writeIORef installedSidebar (Just bytes)
+          when (BS.null bytes) (writeIORef installedCanvas Nothing)
+      installCanvas value=do
+        epoch<-readIORef canvasEpochRef
+        let bytes=case remoteCanvas value of
+              Just scene | Just (canvasEpoch scene)==epoch->canvasAccessibility scene
+              _->"{\"images\":[],\"size\":[40,12]}"
+        previous<-readIORef installedCanvas
+        when (previous/=Just bytes) $ do
+          BS.useAsCStringLen bytes $ \(ptr,len)->check "Update image accessibility" (c_accessibility ptr (fromIntegral len))
+          writeIORef installedCanvas (Just bytes)
   incoming <- newTBQueueIO 8
   outgoing <- newTBQueueIO 256
   queuedBytes <- newTVarIO (0::Int)
@@ -525,12 +665,32 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
             let timing=T.pack (printf " | %.1f ms/frame" (sum samples/fromIntegral (length samples)))
             writeIORef titleTiming (now,timing)
             title connection frame
+      resetCanvas=do
+        check "Reset image resources" (c_canvas_reset nullPtr)
+        writeIORef canvasEpochRef Nothing
+        let empty="{\"images\":[],\"size\":[40,12]}"
+        BS.useAsCStringLen empty $ \(ptr,len)->check "Clear image accessibility" (c_accessibility ptr (fromIntegral len))
+        writeIORef installedCanvas Nothing
       controls (frame,atlas,connection,changed,closed) item = case item of
+        Canvas control->do
+          case control of
+            CanvasReset epoch->resetCanvas >> utf8 epoch (\value->check "Reset image epoch" (c_canvas_reset value)) >> writeIORef canvasEpochRef (Just epoch)
+            CanvasBegin epoch ident width height size->utf8 epoch $ \owner->utf8 ident $ \resource->
+              check "Allocate image resource" (c_canvas_begin owner resource (fromIntegral width) (fromIntegral height) (fromIntegral size))
+            CanvasRelease epoch ident->utf8 epoch $ \owner->utf8 ident $ \resource->check "Release image resource" (c_canvas_release owner resource)
+            CanvasChunk{}->ioError (userError "Image chunk has no binary payload")
+          pure (frame,atlas,connection,changed || case control of CanvasBegin{}->False; _->True,closed)
+        CanvasBytes (CanvasChunk epoch ident offset _) bytes->do
+          ok<-utf8 epoch $ \owner->utf8 ident $ \resource->BS.useAsCStringLen bytes $ \(chunk,len)->
+            c_canvas_chunk owner resource (fromIntegral offset) chunk (fromIntegral len)
+          check "Upload image chunk" (pure ok)
+          pure (frame,atlas,connection,changed || ok==2,closed)
+        CanvasBytes _ _->ioError (userError "Image binary has no chunk header")
         ExportCopy path row view -> do
           c_cancel_file_drag
           writeIORef exportGesture (Just (path,row,view,False))
           pure (frame,atlas,connection,changed,closed)
-        Assets glyphs -> clearSidebar >> pure (frame,glyphs,connection,True,closed)
+        Assets glyphs -> clearSidebar >> resetCanvas >> pure (frame,glyphs,connection,True,closed)
         Frame serial received value -> do
           started<-atomicModifyIORef' demands (\pending -> let (time,next)=settleFrame serial pending in (next,time))
           modifyIORef' presentationDemand (Just . maybe (fromMaybe received started) (min (fromMaybe received started)))
@@ -547,6 +707,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
             c_menu_enabled (fromIntegral (i::Int)) (if enabled then 1 else 0)
 #endif
           installSidebar value
+          installCanvas value
           pure (Just value,atlas,connection,True,closed)
         Control value -> do
           kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
@@ -570,6 +731,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
             "connection" -> do
               connected <- parseIO (withObject "connection" (.: "connected")) value
               clearSidebar
+              resetCanvas
               when connected resize
               pure (frame,atlas,if connected then "" else " (reconnecting)",True,closed)
             _ -> pure (frame,atlas,connection,changed,closed)
@@ -578,6 +740,8 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           result <- poll worker
           case result of Just (Left e) -> throwIO e; _ -> pure ()
         messages <- atomically (drain incoming)
+        pending <- atomically (not <$> isEmptyTBQueue incoming)
+        when pending c_wake
         (current,glyphs,status,changed,closed) <- foldM controls (frame,atlas,connection,repaint,False) messages
         unless closed $ do
           offer<-readIORef exportGesture
@@ -593,7 +757,8 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
             forM_ current $ \value -> do
               now<-getMonotonicTimeNSec
               start<-fromMaybe now <$> atomicModifyIORef' presentationDemand (\time -> (Nothing,time))
-              drawRemote font glyphs value
+              epoch<-readIORef canvasEpochRef
+              drawRemote font glyphs epoch value
               end<-getMonotonicTimeNSec
               modifyIORef' drawTimes (take 60 . (fromIntegral (end-start)/1000000:))
 #ifdef darwin_HOST_OS
@@ -639,7 +804,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
   where
     drain queue = do
       item <- tryReadTBQueue queue
-      case item of Nothing -> pure []; Just value -> (value:) <$> drain queue
+      case item of Nothing -> pure []; Just value@CanvasBytes{} -> pure [value]; Just value -> (value:) <$> drain queue
 #ifdef darwin_HOST_OS
     atMay xs i = case drop i xs of x:_ -> Just x; _ -> Nothing
 #endif

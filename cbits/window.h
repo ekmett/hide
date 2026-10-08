@@ -26,6 +26,18 @@ const char *thc_error(void);
 const char *thc_backend(void);
 void thc_size(int *cols, int *rows);
 int thc_begin(void);
+/* SDL-thread retained straight-RGBA resources. One contiguous upload cursor;
+ * complete scene commits retain only a normal-cell ownership stencil. */
+int thc_canvas_reset(const char *epoch);
+int thc_canvas_begin(const char *epoch, const char *id, int width, int height, size_t bytes);
+/* Chunk returns 2 on completion, 1 while incomplete, 0 on error. */
+int thc_canvas_chunk(const char *epoch, const char *id, size_t offset, const void *bytes, size_t length);
+int thc_canvas_release(const char *epoch, const char *id);
+int thc_canvas_scene(const char *epoch, int cols, int rows, const void *little_endian_mask, size_t cells);
+int thc_canvas_surface(const char *id, int slot, int x, int y, int width, int height, double tx, double ty, double tw, double th);
+void thc_canvas_clear(void);
+int thc_canvas_commit(void);
+void thc_canvas_stats(uint64_t *uploads, uint64_t *bytes, uint64_t *masks, uint64_t *retained);
 /* The next glyph retains its full origin/width; only these visible cells draw. */
 void thc_clip(int visible_x, int clip_cells);
 /* Traits: bold1, italic2, explicit-width4, underline8, strikethrough16.
