@@ -383,7 +383,7 @@ renderSceneWith canvases d=(privacyLayers++layers,visibleCursor)
           (hidden,tailCells)=span not rest
           start=x+length shown
       in [(start,length hidden) | not (null hidden)]++hiddenRuns (start+length hidden) tailCells
-    visibleCursor | maybe False (\w->maybe False (const True) (windowImage d w) && windowFocused d w) (activeWindow d)=V.NoCursor
+    visibleCursor | dialog d==Nothing,maybe False (\w->maybe False (const True) (windowImage d w) && windowFocused d w) (activeWindow d)=V.NoCursor
                   | otherwise=case cursor of
                     V.Cursor x y | streamerMode d && not (streamerReadableAt d x y) -> V.NoCursor
                     _ -> cursor

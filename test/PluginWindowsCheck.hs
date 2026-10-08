@@ -488,6 +488,9 @@ imageChecks=do
         modalAfter=fst (handleEvent (V.EvKey (V.KChar '+') []) modal)
     check "compiled source bindings reach image pan and unbound image zoom"
       (map imageViewport (windows mappedPan)/=map imageViewport (windows mappedZoom) && map imageViewport (windows mappedZoom)/=map imageViewport (windows mapped))
+    let findPrompt=prompt "Find" (Searching False "") [Input "Text" "needle" 6] mapped
+    check "active image hides its own cursor while preserving the modal input cursor"
+      (renderCursor mapped==V.NoCursor && case renderCursor findPrompt of V.Cursor{}->True; _->False)
     check "modal input cannot change the covered image" (map imageViewport (windows modalAfter)==map imageViewport (windows modal))
     check "fit restores the same transform" (map Canvas.canvasTarget (Canvas.canvasSurfaces (scene fitted))==map Canvas.canvasTarget (Canvas.canvasSurfaces initial))
     let (armed,_)=handleEvent (V.EvMouseDown 3 7 V.BLeft []) opened
