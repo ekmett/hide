@@ -4,7 +4,56 @@
 #include <SDL3/SDL.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* Optional private allocation receipt over actual retained presentations, using
+ * SDL's own allocator seam. Driver-internal and Haskell allocations are separate. */
+static SDL_malloc_func allocation_malloc;
+static SDL_calloc_func allocation_calloc;
+static SDL_realloc_func allocation_realloc;
+static SDL_free_func allocation_free;
+static _Atomic uint64_t allocation_calls,allocation_bytes;
+static void *SDLCALL measured_malloc(size_t bytes) {
+    atomic_fetch_add(&allocation_calls,1); atomic_fetch_add(&allocation_bytes,bytes);
+    return allocation_malloc(bytes);
+}
+static void *SDLCALL measured_calloc(size_t count,size_t bytes) {
+    atomic_fetch_add(&allocation_calls,1); atomic_fetch_add(&allocation_bytes,count*bytes);
+    return allocation_calloc(count,bytes);
+}
+static void *SDLCALL measured_realloc(void *pointer,size_t bytes) {
+    atomic_fetch_add(&allocation_calls,1); atomic_fetch_add(&allocation_bytes,bytes);
+    return allocation_realloc(pointer,bytes);
+}
+static void allocation_frames(const char *capture) {
+    SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE","",true);
+    thc_cursor_blink(0); thc_cursor(20,10);
+    uint64_t base_calls=0,base_bytes=0;
+    for (int active=0;active<2;++active) {
+#ifndef HIDE_BASELINE
+        thc_power_mode(active);
+#endif
+        for (int i=0;i<8;++i) assert(thc_present());
+        uint64_t calls=atomic_load(&allocation_calls),bytes=atomic_load(&allocation_bytes);
+        for (int i=0;i<32;++i) {
+#ifndef HIDE_BASELINE
+            if (active) thc_power_mode_burst();
+#endif
+            assert(thc_present());
+        }
+        calls=atomic_load(&allocation_calls)-calls; bytes=atomic_load(&allocation_bytes)-bytes;
+        if (!active) { base_calls=calls; base_bytes=bytes; }
+        else { assert(calls<=base_calls*2 && bytes<=base_bytes*2); }
+        printf("private SDL allocation receipt: active=%d frames=32 calls=%llu bytes=%llu\n",active,
+            (unsigned long long)calls,(unsigned long long)bytes);
+    }
+#ifndef HIDE_BASELINE
+    thc_power_mode(0);
+#endif
+    SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",capture,true);
+}
 
 #ifdef __APPLE__
 void thc_dock_close(void) {}
@@ -42,6 +91,52 @@ static void decoration_scene(uint32_t lines) {
     assert(thc_unicode(17,0,2," ",0xffffff,0x0000aa,7|lines,0,2));
 }
 static void pixel_is(SDL_Surface *image,int x,int y,Uint8 r,Uint8 g,Uint8 b);
+#ifndef HIDE_BASELINE
+static void power_mode_pixels(const char *capture) {
+    uint16_t blank[16]={0};
+    assert(thc_begin());
+    for (int y=0;y<25;++y) for (int x=0;x<80;++x)
+        thc_glyph(x,y,1,8,blank,0xffffff,0x0000aa,0,0,1);
+    thc_cursor_blink(0); thc_cursor(20,10); thc_power_mode(1);
+    assert(thc_present());
+    SDL_Surface *baseline=SDL_LoadBMP(capture); assert(baseline);
+    uint64_t atlas_before,bytes,batches,grid_before;
+    thc_atlas_stats(&atlas_before,&bytes,&batches); thc_grid_stats(&grid_before,&bytes);
+    thc_power_mode_burst();
+    SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+    int32_t event[6]; assert(thc_wait(event) && event[0]==17);
+    SDL_Delay(65); assert(thc_present());
+    SDL_Surface *burst=SDL_LoadBMP(capture); assert(burst);
+    int changed=0;
+    for (int y=0;y<baseline->h;++y) for (int x=0;x<baseline->w;++x) {
+        Uint8 r,g,b,a,rr,gg,bb,aa;
+        assert(SDL_ReadSurfacePixel(baseline,x,y,&r,&g,&b,&a));
+        assert(SDL_ReadSurfacePixel(burst,x,y,&rr,&gg,&bb,&aa));
+        if (r!=rr || g!=gg || b!=bb) {
+            ++changed;
+            assert(x>=20*16-48 && x<(21*16+48));
+            assert(y>=10*32-64 && y<(11*32+64));
+        }
+    }
+    assert(changed>0);
+    SDL_DestroySurface(burst);
+    thc_power_mode(0); assert(thc_present());
+    SDL_Surface *disabled=SDL_LoadBMP(capture); assert(disabled);
+    assert(baseline->pitch==disabled->pitch && baseline->h==disabled->h);
+    assert(!memcmp(baseline->pixels,disabled->pixels,(size_t)baseline->pitch*baseline->h));
+    SDL_DestroySurface(disabled);
+    thc_power_mode(1); thc_power_mode_burst(); SDL_Delay(620); assert(thc_present());
+    SDL_Surface *expired=SDL_LoadBMP(capture); assert(expired);
+    assert(!memcmp(baseline->pixels,expired->pixels,(size_t)baseline->pitch*baseline->h));
+    SDL_DestroySurface(expired); SDL_DestroySurface(baseline);
+    uint64_t atlas_after,grid_after;
+    thc_atlas_stats(&atlas_after,&bytes,&batches); thc_grid_stats(&grid_after,&bytes);
+    assert(atlas_before==atlas_after && grid_before==grid_after);
+    SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+    assert(thc_wait(event) && event[0]==0);
+    puts("Power Mode shader: visible local sparks, expiry, disable, retained atlas/grid and idle wake passed");
+}
+#endif
 static void script_scene(int script) {
     uint16_t blank[16]={0},narrow[16],wide[16];
     for (int y=0;y<16;++y) { narrow[y]=0xff00; wide[y]=0xffff; }
@@ -129,8 +224,16 @@ static void pixel_is(SDL_Surface *image,int x,int y,Uint8 r,Uint8 g,Uint8 b) {
 }
 int main(int argc,char **argv) {
     const char *backend=argc>1?argv[1]:"software";
+    bool measure=getenv("HIDE_TEST_ALLOCATIONS")!=NULL;
+    if (measure) {
+        SDL_GetOriginalMemoryFunctions(&allocation_malloc,&allocation_calloc,&allocation_realloc,&allocation_free);
+        assert(SDL_SetMemoryFunctions(measured_malloc,measured_calloc,measured_realloc,allocation_free));
+    }
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE_EXIT","1",true);
     if (!strcmp(backend,"software")) SDL_SetHint(SDL_HINT_VIDEO_DRIVER,"dummy");
+#ifndef HIDE_BASELINE
+    SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"HIDE_POWER_MODE","1",true);
+#endif
     if (!thc_open(backend,2,80,25,16)) { fprintf(stderr,"open: %s\n",thc_error()); return 1; }
     /* A hidden Cocoa window can inherit SDL's initial mouse focus at (0,0).
      * This scene measures glyph paint, so explicitly place the pointer outside. */
@@ -157,6 +260,10 @@ int main(int argc,char **argv) {
     assert(SDL_ReadSurfacePixel(first,0,0,&red,&green,&blue,&alpha)); assert(red==255 && green==255 && blue==255);
     assert(SDL_ReadSurfacePixel(first,2,0,&red,&green,&blue,&alpha)); assert(red==0 && green==0 && blue==170);
     SDL_DestroySurface(first);
+    if (measure) {
+        allocation_frames(argc>2?argv[2]:capture);
+        thc_close(); remove(capture); return 0;
+    }
 #ifndef HIDE_BASELINE
     uint64_t uploads,bytes,batches,warm,grid,gridBytes;
     thc_atlas_stats(&uploads,&bytes,&batches); thc_grid_stats(&grid,&gridBytes);
@@ -172,6 +279,7 @@ int main(int argc,char **argv) {
     /* SDL invalidates the backbuffer at present. Production captures before
      * present; assertions read that completed capture, never a reused buffer. */
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",capture,true);
+    if (strcmp(backend,"software")) power_mode_pixels(capture);
     uint16_t half[16]; for (int y=0;y<16;++y) half[y]=0x00ff;
     assert(thc_begin()); thc_clip(0,1); thc_glyph(-1,0,2,16,half,0xffffff,0,0,0,2); assert(thc_present());
     SDL_Surface *image=SDL_LoadBMP(capture); assert(image);

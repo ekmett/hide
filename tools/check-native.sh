@@ -5,6 +5,8 @@ case "$(uname -s)" in
   *) fonts=""; packages="sdl3 libutf8proc pangocairo" ;;
 esac
 mkdir -p .deps
+cc -O2 -Wall -Wextra test/power-mode.c -o .deps/power-mode-check
+.deps/power-mode-check
 cc -Wall -Wextra -DWITH_WINDOW $(pkg-config --cflags $packages) cbits/window.c cbits/unicode.c test/native-input.c $(pkg-config --libs $packages) $fonts -lm -o .deps/native-input
 cc -Wall -Wextra -DWITH_WINDOW $(pkg-config --cflags $packages) cbits/window.c cbits/unicode.c test/native-atlas.c $(pkg-config --libs $packages) $fonts -lm -o .deps/native-atlas
 .deps/native-atlas software

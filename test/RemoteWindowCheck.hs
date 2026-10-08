@@ -99,6 +99,8 @@ checks = do
     (not (nativeRepaint [3,10,4,0,0,1]) && not (nativeRepaint [9,10,4,-1,0]))
   check "press and release repaint the local pointer visibility"
     (nativeRepaint [3,10,4,1,0,1] && nativeRepaint [4,10,4])
+  check "typing animation presents retained cells without rebuilding a remote frame"
+    (not (nativeRepaint [17,0,0,0,0,0]) && nativeEventInput [17,0,0,0,0,0]==Nothing)
   check "remote Unicode rows validate" (valid rows)
   let exportMetadata receipt=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"fileExportView" .= receipt]
   check "export gesture metadata rejects unbounded receipts"

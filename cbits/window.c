@@ -2,6 +2,7 @@
 #include "accessibility.h"
 #include "unicode.h"
 #include "shaders/cell.h"
+#include "shaders/power-mode.h"
 #include "shaders/cell.generated.h"
 #include "shaders/canvas.generated.h"
 #include <SDL3/SDL.h>
@@ -25,6 +26,8 @@ static SDL_Renderer *renderer;
 static SDL_Texture *texture, *vignette, *script_transform;
 static SDL_PixelFormat script_transform_format;
 static bool crt_filter;
+static bool power_enabled,power_eligible,power_drawn;
+static struct HidePowerMode power_state;
 static double scale;
 static int cell_height;
 
@@ -297,6 +300,7 @@ void thc_close(void) {
     left_down = false; held_mouse_buttons = 0;
     suppress_option_text = false;
     cursor_present = false; cursor_x = cursor_y = -1;
+    power_state=(struct HidePowerMode){0}; power_enabled=power_eligible=power_drawn=false;
     thc_canvas_reset(NULL);
     free(canvas_mask); canvas_mask=NULL;
     SDL_StopTextInput(window);
@@ -375,6 +379,9 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     SDL_SetAppMetadata("Haskell", "0.1.0.0", NULL);
     if (!SDL_Init(SDL_INIT_VIDEO)) return 0;
     crt_filter = false;
+    const char *power_option=SDL_getenv("HIDE_POWER_MODE");
+    power_enabled=power_option && !strcmp(power_option,"1");
+    power_eligible=power_drawn=false; power_state=(struct HidePowerMode){0};
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
     command_event = SDL_RegisterEvents(3);
     wake_event = command_event + 1;
@@ -550,6 +557,18 @@ static uint32_t mouse_color(uint32_t pixel) {
     return pixel ^ 0x00aaaaaa;
 }
 void thc_crt_filter(int enabled) { crt_filter = enabled != 0; }
+void thc_power_mode(int eligible) {
+    power_eligible=power_enabled && eligible && gpu;
+    if (!power_eligible) { power_state=(struct HidePowerMode){0}; power_drawn=false; }
+}
+void thc_power_mode_burst(void) {
+    if (power_eligible && cursor_present && cursor_y>0 && cursor_y<rows-1)
+        hide_power_emit(&power_state,cursor_x,cursor_y,SDL_GetTicks());
+}
+static bool power_pending(void) {
+    float bursts[HIDE_POWER_BURSTS][4];
+    return power_eligible && (power_drawn || hide_power_pack(&power_state,SDL_GetTicks(),bursts));
+}
 
 static bool draw_crt(const SDL_FRect *target) {
     if (!vignette) {
@@ -851,10 +870,16 @@ int thc_present(void) {
     SDL_FRect target={(float)origin_x,(float)origin_y,(float)cell_x(cols),(float)cell_y(rows)};
     if (gpu) {
         if (!grid_ready && !prepare_grid()) return 0;
-        float uniforms[12]={(float)cols,(float)rows,atlas_size,0,
+        float uniforms[16+HIDE_POWER_BURSTS*4]={(float)cols,(float)rows,atlas_size,0,
             cursor_present && cursor_drawn?(float)cursor_x:-1,cursor_present && cursor_drawn?(float)cursor_y:-1,
             left_down?-1:(float)mouse_x,left_down?-1:(float)mouse_y,
             (float)cell_x(cols),(float)cell_y(rows),crt_filter?1.f:0.f,(float)(cell_height*scale/16)};
+        float bursts[HIDE_POWER_BURSTS][4];
+        if (!cursor_present) power_state=(struct HidePowerMode){0};
+        unsigned active=hide_power_pack(&power_state,SDL_GetTicks(),bursts);
+        power_drawn=active!=0;
+        uniforms[12]=(float)active; uniforms[13]=(float)cell_height;
+        memcpy(uniforms+16,bursts,sizeof(bursts));
         if (!SDL_SetGPURenderStateFragmentUniforms(glyph_state,0,uniforms,sizeof(uniforms)) || !SDL_SetGPURenderState(renderer,glyph_state) ||
             !SDL_RenderTexture(renderer,texture,NULL,&target) || !SDL_SetGPURenderState(renderer,NULL)) return 0;
         ++draw_batches;
@@ -950,14 +975,14 @@ static int delivered(const SDL_Event *event,int32_t *out) {
 }
 static int idle_event(int32_t *out) {
     event_age=0;
-    out[0] = cursor_present && cursor_drawn != cursor_phase() ? 8 : 0;
+    out[0] = power_pending() ? 17 : cursor_present && cursor_drawn != cursor_phase() ? 8 : 0;
     return 1;
 }
 int thc_wait(int32_t *out) {
     SDL_Event e;
     event_age=0;
     memset(out, 0, 6 * sizeof(*out));
-    Uint64 deadline = SDL_GetTicks() + 100;
+    Uint64 deadline = SDL_GetTicks() + (power_pending()?16:100);
     for (;;) {
         Uint64 now = SDL_GetTicks();
         if (now >= deadline) return idle_event(out);

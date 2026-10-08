@@ -537,6 +537,7 @@ drawRemote :: Font -> M.Map Char Glyph -> Maybe T.Text -> RemoteFrame -> IO ()
 drawRemote font atlas epoch frame = allocaArray 16 $ \scratch -> do
   c_cursor_blink (flag (remoteBlink frame))
   c_crt_filter (flag (remoteCRT frame))
+  c_power_mode (flag (not (remoteTerminal frame) && remoteDialog frame==Nothing))
   c_pixelate_unicode (flag (remotePixelated frame))
   check "Allocate remote frame" c_begin
   forM_ (remoteCells frame) $ \cell -> case cell of
@@ -675,8 +676,11 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
         2:_ -> do
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of
-            Right text -> forM_ (T.unpack text) $ \c -> sendEvent [1,fromEnum c,0]
+            Right text -> do
+              c_power_mode_burst
+              forM_ (T.unpack text) $ \c -> sendEvent [1,fromEnum c,0]
             Left _ -> pure ()
+        17:_ -> check "Present typing animation" c_present
         11:i:_ -> do
 #ifdef darwin_HOST_OS
           generation<-fromIntegral <$> c_menu_generation

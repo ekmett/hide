@@ -11,7 +11,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
   , c_accessibility, c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
   , emptyDialogAccessibility, installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
   , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
-  , c_crt_filter, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
+  , c_crt_filter, c_power_mode, c_power_mode_burst, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
   , c_dock_generation, c_menu_enabled, c_menu_prepare, c_menu_generation, c_menu_shortcut
 #endif
@@ -118,6 +118,8 @@ foreign import ccall unsafe "thc_pixelate_unicode" c_pixelate_unicode :: CInt ->
 foreign import ccall unsafe "thc_cursor" c_cursor :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_cursor_blink" c_cursor_blink :: CInt -> IO ()
 foreign import ccall unsafe "thc_crt_filter" c_crt_filter :: CInt -> IO ()
+foreign import ccall unsafe "thc_power_mode" c_power_mode :: CInt -> IO ()
+foreign import ccall unsafe "thc_power_mode_burst" c_power_mode_burst :: IO ()
 -- Presentation can wait for vblank. Let receiver/sender threads run meanwhile.
 foreign import ccall safe "thc_present" c_present :: IO CInt
 foreign import ccall unsafe "thc_wake" c_wake :: IO ()
@@ -294,6 +296,7 @@ draw :: Font -> NativeCanvasOwner -> Desktop -> IO ()
 draw font canvasOwner d = allocaArray 16 $ \scratch -> do
   c_cursor_blink (if blinkCursor d then 1 else 0)
   c_crt_filter (if crtFilter d then 1 else 0)
+  c_power_mode (if activeTerminal d==Nothing && dialog d==Nothing then 1 else 0)
   c_pixelate_unicode (if pixelateUnicode d then 1 else 0)
   check "Allocate window frame" c_begin
   let (rows,scene)=renderCellRowsAndCanvas d
@@ -432,7 +435,8 @@ runWindow backend scale effects tick initial = do
       bytes <- c_text >>= BS.packCString
       case TE.decodeUtf8' bytes of
         Left _ -> pure (d,[])
-        Right text -> foldText text d
+        Right text -> c_power_mode_burst >> foldText text d
+    dispatch (17:_) d = check "Present typing animation" c_present >> pure (d,[])
     dispatch (3:x:y:clicks:mods:button:_) d
       | clicks == 0 = pure (mouseMotion x y (keyMods mods) d)
       | button==1, clicks>=2, V.MShift `elem` keyMods mods || not (terminalMouseAt x y d) = pure (handleDoubleClick x y d)

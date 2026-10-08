@@ -51,8 +51,13 @@ int thc_unicode(int x, int y, int cells, const char *text, uint32_t fg, uint32_t
 void thc_cursor(int x, int y);
 void thc_cursor_blink(int enabled);
 void thc_crt_filter(int enabled);
+/* SDL-thread typing feedback. Eligibility alone does not enable the opt-in
+ * HIDE_POWER_MODE=1 setting. Burst uses the last visible caret; it retains no text. */
+void thc_power_mode(int eligible);
+void thc_power_mode_burst(void);
 int thc_present(void);
 /* Six integers; kind 0 is a 100ms idle wake, kind 8 requests a redraw (also blink),
+ * kind 17 requests only presentation of retained glyph/cell storage,
  * kind 12 is hover at cell x,y, and kind 13 carries held modifier bits in slot 1.
  * Wheel kind 9 carries signed detents in slot 3, including coalesced travel.
  * Button-down kind 3 has click count in slot 3 and SDL button number in slot 5.
