@@ -76,6 +76,8 @@ Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
 
 ## Images
 
+![A PNG screenshot of Preferences open in an image window.](site/screenshots/png-view.png)
+
 Right-click a `.png` file in Files and choose **View PNG** to open an image
 window. It starts fitted to the window. Press **F** to fit again, **1** for
 actual size, or **+** / **−** to zoom. The wheel zooms; arrow keys and dragging

@@ -260,7 +260,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           pending<-key V.KEnter [] popup {contextMenu=fmap (\(rect,_)->(rect,action)) (contextMenu popup)}
           opened<-await "PNG window" tick (maybe False ((/=Nothing).PluginWindow.preparedWindowImage) . activePluginWindow) pending
           pure (case activeWindow opened of
-            Just w->resizeWindowBounds (windowId w) (Rect 29 3 68 26) opened
+            Just w->resizeWindowBounds (windowId w) (Rect 29 3 68 18) opened
             _->opened)
         permissionDiff d = case (activeWindow d,activeDocument d) of
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
