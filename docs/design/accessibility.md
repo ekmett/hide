@@ -1,10 +1,18 @@
 # Accessibility for the native and browser frontends
 
-Status: proposed implementation plan, researched 2026-10-02. No accessibility
-bridge described here is implemented or qualified. The recommendation is one
-semantic projection of the desktop, a small AppKit adapter first, and the same
-projection for browser, Windows and Linux adapters. Keep the existing renderer.
-Do not infer controls or document text from its painted character cells.
+Status: the read-only visible-sidebar slice is implemented. `Hide.Accessibility`
+projects the existing indexed sidebar into a bounded complete `semanticSidebar`
+frame-metadata field, also included in `editor_screen`. Browser ARIA consumes
+that field through the existing metadata merge and reconnect replay. Stable node
+identity combines an opaque provider-registration token with its prepared
+`NodeId`; scrolling and selection travel in a separate small layout receipt.
+At most 256 viewport rows and 512 nodes are emitted, including required ancestors.
+Resource annotations enter the central privacy policy and never enter the wire.
+
+The remaining desktop bridge and native adapters below are proposed and are not
+qualified. Keep the existing renderer. Do not infer controls or document text
+from its painted character cells. The initial sidebar slice has no actions,
+offscreen reads, source-text references or second widget registry.
 
 The [plugin design](haskell-plugins.md#semantic-tree-and-accessibility-transport)
 uses the same retained tree for standard widgets and canvas descriptions. Track
@@ -41,7 +49,7 @@ structure nor the source document.
 
 ## Shared semantic contract
 
-Add `Hide.Accessibility` with a pure projection and checked action reducer.
+Extend `Hide.Accessibility` beyond its sidebar projection with a checked action reducer.
 The first representation needs only nodes, parent/child IDs, roles, names,
 values, states, logical bounds, relationships, supported actions and optional
 text references. Compose host chrome and published plugin semantic subtrees,

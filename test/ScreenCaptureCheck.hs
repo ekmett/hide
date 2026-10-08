@@ -12,6 +12,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Hide.Accessibility
 import Hide.Browser (Entry(..))
 import Hide.Buffer (newBuffer, Selection(..))
 import qualified Hide.Plugin.Window as W
@@ -64,6 +65,8 @@ checksWithBody chatBase=do
   let privateMessages=setProblemsVisible True desktop {guestPrivatePaths=["/authority"],
         diagnostics=[Diagnostic "/authority/secret.hs" Nothing 0 0 1 "secret-diagnostic-payload"]}
   safeMessages<-takeCapture privateMessages True
+  check "screen metadata uses the shared guest-safe semantic sidebar"
+    ((field "semanticSidebar" (textMetadata safeMessages)::Maybe Value)==Just (sidebarSemantics GuestSemantics privateMessages))
   check "logical screen omits protected diagnostic content"
     (not ("secret-diagnostic-payload" `T.isInfixOf` fromMaybe "" (field "text" (textMetadata safeMessages))))
   behindDialog<-takeCapture privateMessages {dialog=Just (Dialog "Public dialog" Widgets [] 0 ["OK"] [])} False

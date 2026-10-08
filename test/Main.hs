@@ -27,6 +27,7 @@ import qualified PluginBufferCheck
 import qualified MenuCommandsCheck
 import qualified MenuContextCheck
 import qualified PluginMenuCheck
+import qualified AccessibilityCheck
 import qualified SidebarCheck
 import qualified PluginTreeCheck
 import qualified PluginCommandCheck
@@ -156,6 +157,7 @@ main = do
   WorkerDiffCheck.checks
   BufferEditsCheck.checks
   PluginBufferCheck.checks
+  AccessibilityCheck.checks
   PluginTreeCheck.checks
   SidebarCheck.checks
   PluginCommandCheck.checks

@@ -2,6 +2,7 @@
 module PluginTreeCheck (checks) where
 import Control.Monad (unless)
 import Data.Aeson (Value(Null))
+import qualified Data.Text as T
 import Hide.Plugin.Command
 import Hide.Plugin.Tree
 
@@ -14,6 +15,8 @@ checks=withRegistry $ \registry->do
       handler _ _=pure (Right (NodePage [child] Nothing))
       right=either (error . show) id
   provider<-right <$> registerTree registry "example.sidebar" root handler
+  check "provider wire scope is opaque bounded lowercase hexadecimal"
+    (let identity=treeIdentity (treeReference provider) in T.length identity==48 && T.all (`elem` ("0123456789abcdef"::String)) identity)
   duplicate<-registerTree registry "example.sidebar" root handler
   check "duplicate tree provider registration fails" (case duplicate of Left DuplicateCommand{}->True; _->False)
   loaded<-right <$> loadChildren provider () (ChildRequest (ident "root") Nothing)
@@ -22,10 +25,12 @@ checks=withRegistry $ \registry->do
   stale<-loadChildren provider () (ChildRequest (ident "root") Nothing)
   check "retired provider refuses queued loading" (case stale of Left StaleCommand{}->True; _->False)
   replacement<-right <$> registerTree registry "example.sidebar" root handler
-  check "provider name reuse retains a new scoped identity" (treeReference replacement/=treeReference provider)
+  check "provider name reuse retains a new scoped identity"
+    (treeReference replacement/=treeReference provider && treeIdentity (treeReference replacement)/=treeIdentity (treeReference provider))
   _<-withRegistry $ \other->do
     independent<-right <$> registerTree other "example.sidebar" root handler
-    check "another registry cannot reuse the same provider identity" (treeReference independent/=treeReference replacement)
+    check "another registry cannot reuse the same provider identity"
+      (treeReference independent/=treeReference replacement && treeIdentity (treeReference independent)/=treeIdentity (treeReference replacement))
   overflow<-right <$> registerTree registry "example.overflow" root (\_ _->pure (Right (NodePage (repeat child) Nothing)))
   refused<-loadChildren overflow () (ChildRequest (ident "root") Nothing)
   check "an infinite child page is rejected at its fixed bound" (case refused of Left CommandRejected{}->True; _->False)

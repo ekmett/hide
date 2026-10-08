@@ -9,7 +9,7 @@ module Hide.Plugin.Tree
   ( TreeRef, NodeId, nodeId, nodeIdText, TreeHit(..), ChildRequest(..)
   , NodeInfo(..), NodeDef(..), NodeMenu(..), TreeMenuTarget(..), menuTarget, menuActions, NodePage(..), PreparedPage, pageNodes, pageNext
   , TreeProvider, TreeAction, treeAction, registerTree, treeReference, treeRoot
-  , treeCurrent, retireTree, loadChildren, invokeTreeAction, actionReference, actionCurrent
+  , treeIdentity, treeCurrent, retireTree, loadChildren, invokeTreeAction, actionReference, actionCurrent
   ) where
 
 import Control.DeepSeq (force)
@@ -19,6 +19,7 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Aeson
+import Hide.RemoteEndpoint (randomIdentity)
 import Hide.Plugin.Command
 
 -- | Provider-local identity. It is distinct from labels and resource paths.
@@ -29,7 +30,12 @@ nodeId text
   | otherwise=Right (NodeId text)
 nodeIdText :: NodeId -> Text
 nodeIdText (NodeId text)=text
-newtype TreeRef = TreeRef CommandRef deriving (Eq,Ord,Show)
+data TreeRef = TreeRef !CommandRef !Text deriving (Eq,Ord,Show)
+-- | /O(1)/. Opaque wire scope for this exact provider registration. It survives
+-- redraw, scrolling and child refresh; re-registration always creates a new scope.
+-- Node IDs remain provider-owned and are meaningful only inside this scope.
+treeIdentity :: TreeRef -> Text
+treeIdentity (TreeRef _ identity)=identity
 -- | Frozen hit identity, including the owning node publication generation.
 data TreeHit = TreeHit !TreeRef !NodeId !Integer deriving (Eq,Ord,Show)
 -- | Page cursors are opaque bounded provider tokens; the host never derives paths.
@@ -69,7 +75,7 @@ pageNodes (PreparedPage nodes _)=nodes
 pageNext :: PreparedPage context reply -> Maybe Text
 pageNext (PreparedPage _ token)=token
 data TreeProvider context reply = TreeProvider
-  (Registry context) (Command context ChildRequest (PreparedPage context reply)) (NodeDef context reply)
+  (Registry context) (Command context ChildRequest (PreparedPage context reply)) !Text (NodeDef context reply)
 
 -- | Register one provider through an ordinary scoped children command. Root
 -- metadata is strictly prepared here, outside the UI lock. Duplicate provider
@@ -81,23 +87,28 @@ registerTree registry name root children=do
   prepared<-preparePage (NodePage [root] Nothing)
   case prepared of
     Left err->pure (Left err)
-    Right _->fmap (fmap (\command->TreeProvider registry command root)) $ registerCommand registry
-      (CommandDef (name<>".children") (infoLabel (nodeInfo root)) input output
-        (\context request->children context request >>= either (pure . Left) preparePage))
+    Right _->do
+      identity<-T.pack <$> randomIdentity
+      registered<-registerCommand registry
+        (CommandDef (name<>".children") (infoLabel (nodeInfo root)) input output
+          (\context request->children context request >>= either (pure . Left) preparePage))
+      case registered of
+        Left err->pure (Left err)
+        Right command->pure (Right (TreeProvider registry command identity root))
   where
     input=Codec Null (const (Left "Tree loading is a host-owned typed operation.")) (const Null)
     output=Codec Null (const (Left "Tree pages are prepared host values.")) (const Null)
 
 treeReference :: TreeProvider context reply -> TreeRef
-treeReference (TreeProvider _ command _)=TreeRef (commandRef command)
+treeReference (TreeProvider _ command identity _)=TreeRef (commandRef command) identity
 treeRoot :: TreeProvider context reply -> NodeDef context reply
-treeRoot (TreeProvider _ _ root)=root
+treeRoot (TreeProvider _ _ _ root)=root
 treeCurrent :: TreeProvider context reply -> IO Bool
-treeCurrent (TreeProvider registry command _)=commandCurrent registry (commandRef command)
+treeCurrent (TreeProvider registry command _ _)=commandCurrent registry (commandRef command)
 retireTree :: TreeProvider context reply -> IO (Either CommandError ())
-retireTree (TreeProvider registry command _)=retireCommand registry (commandRef command)
+retireTree (TreeProvider registry command _ _)=retireCommand registry (commandRef command)
 loadChildren :: TreeProvider context reply -> context -> ChildRequest -> IO (Either CommandError (PreparedPage context reply))
-loadChildren (TreeProvider registry command _) context request@(ChildRequest _ token)
+loadChildren (TreeProvider registry command _ _) context request@(ChildRequest _ token)
   | maybe False (\value->T.length value>256 || T.any (< ' ') value) token=pure (Left (InvalidArguments "Invalid sidebar page cursor."))
   | otherwise=invoke registry command context request
 invokeTreeAction :: TreeAction context reply -> context -> IO (Either CommandError reply)

@@ -21,6 +21,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
+import Hide.Accessibility (SemanticAudience(GuestSemantics), sidebarSemantics)
 import Hide.Font
 import Hide.Frontend (modeHeight)
 import Hide.Commands (commandIdentifier)
@@ -33,7 +34,7 @@ import Hide.Unicode (CellSpan(..), Script(..), clusterWidth, terminalProjection,
 screenTool :: Value
 screenTool=object
   ["name" .= ("editor_screen"::Text),
-   "description" .= ("Capture the guest-readable editor frame as colorless text and optional PNG. Private cells are redacted in both outputs. Includes independent readable/clickable cell masks, key combinations and command permissions; excludes OS chrome, CRT effects and native Unicode shaping."::Text),
+   "description" .= ("Capture the guest-readable editor frame as colorless text and optional PNG. Private cells are redacted in both outputs. Includes a read-only structured visible sidebar, independent readable/clickable cell masks, key combinations and command permissions; excludes OS chrome, CRT effects and native Unicode shaping."::Text),
    "inputSchema" .= object ["type" .= ("object"::Text),"properties" .= object
      ["image" .= object ["type" .= ("boolean"::Text),"default" .= False]],"additionalProperties" .= False],
    "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]]
@@ -102,6 +103,7 @@ capture font desktop includeImage
       "accessRows" .= accessRows,"keyboardAllowed" .= guestKeyboardAllowed desktop,
       "keyPermissions" .= keys,
       "commandPermissions" .= commands,
+      "semanticSidebar" .= sidebarSemantics GuestSemantics desktop,
       "redactedCells" .= Vec.length (Vec.filter (not . cellReadable) accessGrid),
       "redaction" .= ("Unreadable graphemes become spaces and solid black pixels; whole wide graphemes are hidden if any covered cell is private. Cell coordinates are preserved."::Text),
       "cellWidth" .= (8::Int),"cellHeight" .= cellHeight,"pixelWidth" .= (cols*8),"pixelHeight" .= (rows*cellHeight),

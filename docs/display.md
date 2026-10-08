@@ -37,6 +37,20 @@ local cursor/expose redraws start at their event. This is not a measurement of w
 pixels reach the physical display. Browser timing still measures frontend drawing
 and submission; browser GPU execution continues asynchronously.
 
+## Accessible sidebar
+
+The browser exposes the visible Files and plugin sidebar as a read-only
+accessible tree. Names, hierarchy, selection, expansion and loading state come
+from the same prepared rows as the editor frame. Scrolling replaces the bounded
+visible projection and includes the ancestors needed to describe each row.
+Dialogs and menus suppress this sidebar projection while they cover it.
+
+Browser names follow streamer mode, matching the human display. The structured
+sidebar in `editor_screen` always applies the agent private-path policy, even
+when streamer mode is off. Resource paths and provider error messages are not
+included. This slice provides no additional editor actions, offscreen queries,
+source-document accessibility or native accessibility adapter.
+
 ## Text styles
 
 Normal-width Markdown headings and strong text use bold; emphasis uses italic. These traits
