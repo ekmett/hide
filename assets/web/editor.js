@@ -454,9 +454,9 @@ function connect(){
    if(message.type?.startsWith('canvas-')){images.control(message);dirty=true;
    }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
    }else if(message.type==='connection'){
-     ready=message.connected&&glyphs.size>0;if(!ready){clearClipboardRequest();clearSidebar();images.clear();}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
+     ready=message.connected&&glyphs.size>0;if(!ready){clearClipboardRequest();clearSidebar();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
    }else if(message.type==='assets'){
-     clearSidebar();images.clear();
+     clearSidebar();images.clear();dirty=true;
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
@@ -484,16 +484,16 @@ function connect(){
    }else if(message.type==='ack'){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='detached'){
-     detached=true;closed=true;ready=false;clearDownload();clearSidebar();images.clear();guardLeave();fullscreen.disabled=true;
+     detached=true;closed=true;ready=false;clearDownload();clearSidebar();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Session detached. Resume from your terminal with hide --resume.';
      navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
-     closed=true;ready=false;clearDownload();clearSidebar();images.clear();guardLeave();fullscreen.disabled=true;
+     closed=true;ready=false;clearDownload();clearSidebar();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{stopped=true;if(connection!==socket)return;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();images.clear();mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{stopped=true;if(connection!==socket)return;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();

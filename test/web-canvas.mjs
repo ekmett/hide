@@ -51,7 +51,7 @@ for(const bad of [
  {...surface,slot:65},{...surface,target:[0,0,NaN,2]},{...surface,target:[0,0,0,2]}, {...surface,rect:[1,0,2,2]}, {...surface,name:'x'.repeat(257)}, {...surface,description:'x'.repeat(1025)}
 ]){assert.throws(()=>scene([bad]),/Invalid canvas/);assert.equal(access.hidden,true);}
 assert.throws(()=>scene([surface],[2,0,0,0]),/Invalid canvas/);
-assert.throws(()=>scene([surface],[0x8000,0,0,0]),/Invalid canvas/);
+scene([surface],[0x8000,0,0,0]);assert.equal(access.hidden,true); // A halo bit without an image owner has no image paint.
 assert.throws(()=>scene([surface,surface]),/Invalid canvas/);
 context.value={epoch,surfaces:[surface],mask:''};assert.throws(()=>run('images.receive(value,2,2)'),/Invalid canvas/);
 run('images.clear()');assert.equal(run('images.upload'),null);assert.equal(run('images.resources.size'),0);assert.equal(run('images.epoch'),null);

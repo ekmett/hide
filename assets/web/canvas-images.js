@@ -59,7 +59,7 @@ class CanvasImages {
   const mask=new Uint32Array(cols*lines),visible=new Set();
   for(let i=0;i<mask.length;i++){
    const cell=raw.charCodeAt(i*2)|(raw.charCodeAt(i*2+1)<<8),slot=cell&32767;
-   if(slot&&!slots.has(slot)||!slot&&(cell&32768))invalid();
+   if(slot&&!slots.has(slot))invalid();
    mask[i]=cell;if(slot)visible.add(slot);
   }
   this.scene={surfaces:value.surfaces,mask,visible,cols,lines};this.mask();this.describe();

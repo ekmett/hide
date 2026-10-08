@@ -99,6 +99,7 @@ checks = do
         url:_->pure url
         []->threadDelay 10000 >> awaitURL path
     third (_,_,value)=value
+    newReader :: IO (IORef (M.Map T.Text BS.ByteString),IORef [Value],IORef Int)
     newReader=(,,) <$> newIORef M.empty <*> newIORef [] <*> newIORef (0::Int)
     readFrame conn reader@(resources,rows,begins)=do
       packet<-bounded "browser packet" (WS.receiveDataMessage conn)
@@ -127,4 +128,5 @@ checks = do
           writeIORef rows current
           retained<-readIORef resources
           pure (value,retained)
+    field :: FromJSON a => Key -> Value -> IO a
     field key value=either error pure (parseEither (withObject "metadata" (\o->o .: key)) value)
