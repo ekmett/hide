@@ -22,6 +22,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
+import qualified Hide.Plugin.Canvas as Canvas
 import Hide.ConversationBody (CapturedConversationSource,LogicalBody,ConversationCopy(..),BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItemIndex,logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
 import qualified Hide.Privacy as Privacy
 import Control.Applicative ((<|>))
@@ -44,6 +45,7 @@ import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbs
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
 import Hide.Syntax (Style(..), StyledText, StyledRow, styledText, styledContents, styledRows, splitStyledText, SourceRow, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
+import Hide.Frontend (modeHeight)
 import Hide.Hex
 import Hide.Unicode (textInputChar)
 import Hide.InlineState
@@ -115,7 +117,7 @@ data Window = Window
   { windowId :: Int, windowContent :: WindowContent, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
   , windowHexLow :: Bool, windowHexAscii :: Bool
-  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction, rowsInteraction :: Maybe RowsInteraction, sourceWidthHint :: Maybe SourceWidthHint, windowEditorMount :: Maybe Editor.EditorMount
+  , windowNumber :: Int, bufferView :: BufferView, reviewSelection :: Maybe ReviewSelection, reviewSplit :: Int, markdownInteraction :: Maybe MarkdownInteraction, rowsInteraction :: Maybe RowsInteraction, sourceWidthHint :: Maybe SourceWidthHint, windowEditorMount :: Maybe Editor.EditorMount, imageViewport :: Canvas.CanvasView
   } deriving (Eq,Show)
 -- Only a thumb estimate, never source identity or proof of EOF. A matching
 -- revision/range retains a discovered extent when scrolling left; every actual
@@ -251,7 +253,7 @@ data Diagnostic = Diagnostic
   { diagnosticPath :: FilePath, diagnosticVersion :: Maybe Int, diagnosticRow :: Int
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
-data Drag = FollowingLink Int Int Int LinkOrigin Text | ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data Drag = FollowingLink Int Int Int LinkOrigin Text | ImagePanning Int Int Int Canvas.CanvasView | ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
 -- | The human-selected composer action for Enter; Ctrl+Enter uses the other action.
 data ChatSubmit = QuerySubmit | SteerSubmit deriving (Eq,Show,Enum,Bounded)
@@ -749,7 +751,7 @@ addPluginWindow reference prepared d=d {windows=w:windows d,pluginWindows=M.inse
     (sw,sh)=screenSize d
     column=fromMaybe 0 (listToMaybe [conversationScrollColumn view | view<-M.elems (conversationViews d),conversationBodyRef view==Just reference])
     w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 column Nothing False False
-      (nextWindowNumber d) CurrentView Nothing 50 Nothing (initialRowsInteraction prepared) Nothing Nothing
+      (nextWindowNumber d) CurrentView Nothing 50 Nothing (initialRowsInteraction prepared) Nothing Nothing Canvas.fitCanvasView
 
 -- | Current Details text for rows, or the original plain/styled view. This reads
 -- only the selected NodeId and the prepared ordinal index, never content.
@@ -783,6 +785,42 @@ pluginTextRect d w=case rowsInteraction w of
   Just _->snd (rowsWindowRects d w)
   _->let Rect x y ww _=bounds w in Rect (x+1) (y+1) (max 0 (ww-2)) (pluginBodyRows d w)
 
+-- | O(log n). Only a current installed image participates in content input.
+windowImage :: Desktop -> Window -> Maybe Canvas.PreparedImage
+windowImage d w=do
+  PluginContent reference<-pure (windowContent w)
+  if reference `S.member` retiredPluginWindows d then Nothing else
+    M.lookup reference (pluginWindows d) >>= PluginWindow.preparedWindowImage
+
+-- | The source-image zoom at the current viewport. Fit is resolved using the
+-- same cell-to-logical-pixel conversion consumed by rendering and capture.
+imageZoom :: Desktop -> Window -> Canvas.PreparedImage -> Double
+imageZoom d w image=targetWidth*8/fromIntegral (Canvas.imageWidth image)
+  where
+    Rect x y width height=pluginTextRect d w
+    (_,_,targetWidth,_)=Canvas.canvasImageTarget (modeHeight (fromMaybe 3 (videoMode d))) (x,y,width,height) (imageViewport w) image
+
+imageKey :: V.Key -> [V.Modifier] -> Desktop -> Maybe Desktop
+imageKey key mods d=do
+  w<-activeWindow d
+  image<-windowImage d w
+  if not (windowFocused d w) || not (null mods || key==V.KChar '+' && mods==[V.MShift]) then Nothing else do
+    let Canvas.CanvasView chosen dx dy=imageViewport w
+        pan x y=Canvas.CanvasView chosen (max (-300000) (min 300000 (dx+x))) (max (-300000) (min 300000 (dy+y)))
+        zoom factor=Canvas.CanvasView (Just (max (1/64) (min 64 (imageZoom d w image*factor)))) dx dy
+    view<-case key of
+      V.KChar 'f'->Just Canvas.fitCanvasView
+      V.KChar '1'->Just (Canvas.CanvasView (Just 1) 0 0)
+      V.KChar '+'->Just (zoom 1.25)
+      V.KChar '='->Just (zoom 1.25)
+      V.KChar '-'->Just (zoom 0.8)
+      V.KLeft->Just (pan 32 0)
+      V.KRight->Just (pan (-32) 0)
+      V.KUp->Just (pan 0 32)
+      V.KDown->Just (pan 0 (-32))
+      _->Nothing
+    pure (modifyActive (\current->current {imageViewport=view}) d)
+
 -- The same reserved body extent feeds paint, hit maps and scrollbar limits.
 pluginBodyRows :: Desktop -> Window -> Int
 pluginBodyRows d w=max 0 (height (bounds w)-2-if windowHasEditor d w then height (composerRect d w)+1 else 0)
@@ -810,6 +848,12 @@ moveWindowRow :: Int -> Desktop -> Desktop
 moveWindowRow delta d=case activeWindow d of
   Just w | Just (_,index,ident,_)<-windowRows d w,Just chosen<-M.lookup ident index->selectWindowRow (chosen+delta) d
   _->d
+
+-- | A declaration never overrides the current protected-origin policy. The
+-- origin remains host metadata, never a resource ID or frontend field.
+privatePreparedWindow :: Desktop -> PluginWindow.PreparedWindow -> Bool
+privatePreparedWindow d prepared=PluginWindow.preparedWindowDisclosure prepared/=PluginWindow.ReadableWindow ||
+  maybe False (Privacy.protectedFilePath (guestPrivatePaths d)) (PluginWindow.preparedWindowSemantics prepared >>= PluginWindow.textLinkBase)
 
 -- | Shared document authority classification. Titles, buffer reads and screen
 -- masks use the same canonical path and host-owned document-role rules.
@@ -846,7 +890,7 @@ addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDoc
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
-    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing Nothing Nothing Nothing
+    w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing Nothing Nothing Nothing Canvas.fitCanvasView
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -1137,7 +1181,8 @@ linkAt x y d | Just w<-activeWindow d,PluginContent reference<-windowContent w=d
       row=y-top rect+scrollRow w
       col=x-left rect+scrollColumn w
       position=windowTextOffset d w (PluginWindow.preparedWindowText prepared) row col
-  if not (inside rect x y) || reference `S.member` retiredPluginWindows d then Nothing else do
+  if not (inside rect x y) || reference `S.member` retiredPluginWindows d ||
+      PluginWindow.preparedWindowImage prepared/=Nothing && (videoMode d/=Nothing || browserFrontend d) then Nothing else do
     (_,_,url)<-Vec.find (\(start,end,_)->position>=start && position<end) (PluginWindow.textLinks semantics)
     pure (OpenLink (WindowLink reference prepared (PluginWindow.textLinkBase semantics)) url)
 linkAt x y d=do
@@ -1928,6 +1973,7 @@ dispatchEvent (V.EvKey (V.KFun key) mods) d
   | Just action <- lookup (key,mods) [((4,[]),"continue"),((7,[]),"stepIn"),((8,[]),"next"),((7,[V.MCtrl]),"stepOut"),((8,[V.MCtrl]),"breakpoint")] = runCommand (DebugCommand action) d
 dispatchEvent ev d | activeAutocomplete d, Just result<-autocompleteEvent ev d = result
 dispatchEvent ev d | questionActive d, Just result<-questionEvent ev d = result
+dispatchEvent (V.EvKey key mods) d | Just next<-imageKey key mods d = (next,[])
 dispatchEvent ev d | activeEditorMount d/=Nothing,maybe False (windowFocused d) (activeWindow d),Just result<-composerEvent ev d = result
 dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[ServiceAction "terminal-input" [ident,text]])
 dispatchEvent (V.EvMouseUp x y button) d | Just (FollowingLink _ a b origin target)<-drag d,
@@ -2976,6 +3022,9 @@ mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
   FollowingLink i a b origin target
     | x==a && y==b -> d {drag=Just (FollowingLink i a b origin target)}
     | otherwise -> selectAt True x y (focusWindow i d) {drag=Just (Selecting i)}
+  ImagePanning wid startX startY (Canvas.CanvasView zoom dx dy) -> mapWindow wid (\w->w {imageViewport=Canvas.CanvasView zoom
+    (max (-300000) (min 300000 (dx+fromIntegral (x-startX)*8)))
+    (max (-300000) (min 300000 (dy+fromIntegral ((y-startY)*modeHeight (fromMaybe 3 (videoMode d))))))}) d
   ReviewSizing wid -> case find ((==wid).windowId) (windows d) of
     Just w -> mapWindow wid (\v -> v {reviewSplit=max 0 (min 100 ((x-left (bounds w)-1)*100 `div` max 1 (width (bounds w)-3)))}) d
     Nothing -> d
@@ -3001,6 +3050,8 @@ windowMouse :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Ef
 windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bounds w) x y) (windows d) of
   Nothing -> (d,[])
   Just w -> let focused = focusWindow (windowId w) d {sideTree=fmap (\sidebar -> sidebar {treeFocused=False}) (sideTree d)}; Rect l t ww hh = bounds w in case button of
+    V.BScrollUp | Just _<-windowImage focused w,inside (pluginTextRect focused w) x y -> (fromMaybe focused (imageKey (V.KChar '+') [] focused),[])
+    V.BScrollDown | Just _<-windowImage focused w,inside (pluginTextRect focused w) x y -> (fromMaybe focused (imageKey (V.KChar '-') [] focused),[])
     V.BScrollUp | Just _<-windowRows focused w,inside (fst (rowsWindowRects focused w)) x y -> (moveWindowRow (-3) focused,[])
     V.BScrollUp -> (changeScroll True (-3) focused,[])
     V.BScrollDown | Just _<-windowRows focused w,inside (fst (rowsWindowRects focused w)) x y -> (moveWindowRow 3 focused,[])
@@ -3036,6 +3087,7 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
       | x==l -> (beginWindowDrag (EdgeSizing (windowId w) False True 0) focused,[])
       | x==l+ww-1 -> (beginWindowDrag (EdgeSizing (windowId w) False False 1) focused,[])
       | y==t+hh-1 -> (beginWindowDrag (EdgeSizing (windowId w) True False 1) focused,[])
+      | Just _<-windowImage focused w,videoMode focused/=Nothing || browserFrontend focused,inside (pluginTextRect focused w) x y -> (focused {drag=Just (ImagePanning (windowId w) x y (imageViewport w))},[])
       | bufferView w==SideBySideView, x==left (bounds w)+1+fst (reviewPaneWidths w) -> (focused {drag=Just (ReviewSizing (windowId w))},[])
       | activeAutocomplete focused, inside (autocompleteComposerRect focused w) x y -> (autocompleteClick x y mods w focused,[])
       | activeAutocomplete focused, y>=top (autocompleteComposerRect focused w) -> (focused,[])
@@ -3207,6 +3259,7 @@ scrollbarLimit d vertical doc w = max 0 (if vertical then (case windowPresentati
 -- | Frame scrollbar geometry and limits for the actual semantic view. Plain
 -- plugin extents are prepared/cached by their worker; no content is scanned here.
 windowScrollbar :: Desktop -> Bool -> Window -> Maybe (Rect,Int)
+windowScrollbar d _ original | Just _<-windowImage d original=Nothing
 windowScrollbar d vertical original=case windowContent original of
   SourceContent _->do
     doc<-windowDocument (buffers d) original

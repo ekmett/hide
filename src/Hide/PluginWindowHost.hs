@@ -7,6 +7,8 @@ module Hide.PluginWindowHost (adoptWindowUpdate, replaceWindowUpdate, tickPlugin
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Vector as V
+import qualified Data.ByteString as BS
+import Hide.Plugin.Canvas (imageResourceId,imageRGBA,fitCanvasView)
 import Control.Monad (filterM)
 import Hide.Buffer (Buffer,Selection(..),contentLength,contentLineCount)
 import qualified Hide.Plugin.EditorHost as E
@@ -25,12 +27,15 @@ adoptWindowUpdate origin update desktop
   | M.size (pluginWindows desktop)>=256 && not present=pure desktop {status="Plugin window budget reached."}
   | otherwise=do
       accepted<-W.admitWindowUpdate present update
-      pure $ case accepted of
-        Nothing->desktop {status="Plugin window publication expired."}
+      case accepted of
+        Nothing->pure desktop {status="Plugin window publication expired."}
         Just (reference,prepared)
-          | present->desktop {pluginWindows=M.insert reference prepared (pluginWindows desktop),
+          | not (imageBudget (M.insert reference prepared (pluginWindows desktop)))->do
+              if present then pure () else W.retireWindowRef reference
+              pure desktop {status="Image window budget reached (64 windows / 64 MiB decoded)."}
+          | present->pure desktop {pluginWindows=M.insert reference prepared (pluginWindows desktop),
               windows=map (clamp reference prepared) (windows desktop)}
-          | otherwise->addPluginWindow reference prepared desktop
+          | otherwise->pure (addPluginWindow reference prepared desktop)
   where present=M.member (W.updateWindowRef update) (pluginWindows desktop)
 
 -- | Replace an owner-held output slot with a fresh content lifetime. Exact live
@@ -51,6 +56,9 @@ replaceWindowUpdate origin old update desktop
         accepted<-W.admitWindowUpdate False update
         case accepted of
           Nothing->pure desktop {status="Plugin window publication expired."}
+          Just (reference,prepared) | not (imageBudget (M.insert reference prepared (M.delete old (pluginWindows desktop))))->do
+            W.retireWindowRef reference
+            pure desktop {status="Image window budget reached (64 windows / 64 MiB decoded)."}
           Just (reference,prepared)->do
             W.retireWindowRef old
             mapM_ E.retireEditorMount [mount | w<-windows desktop,windowContent w==PluginContent old,Just mount<-[windowEditorMount w]]
@@ -58,7 +66,7 @@ replaceWindowUpdate origin old update desktop
               retiredPluginWindows=S.delete old (retiredPluginWindows desktop),windows=map (replace reference prepared) (windows desktop)}
   where
     replace reference prepared w | windowContent w==PluginContent old=w {windowContent=PluginContent reference,windowEditorMount=Nothing,
-      selection=Selection 0 0,scrollRow=0,scrollColumn=0,rowsInteraction=initialRowsInteraction prepared}
+      selection=Selection 0 0,scrollRow=0,scrollColumn=0,rowsInteraction=initialRowsInteraction prepared,imageViewport=fitCanvasView}
     replace _ _ w=w
 
 -- Scalar scope checks are bounded by the 256-view admission limit. Retirement
@@ -66,7 +74,17 @@ replaceWindowUpdate origin old update desktop
 tickPluginWindows :: Desktop -> IO Desktop
 tickPluginWindows desktop=do
   retired<-filterM (fmap not . W.windowRefCurrent) (M.keys (pluginWindows desktop))
-  pure desktop {retiredPluginWindows=S.fromList retired}
+  let dead=S.fromList retired
+  pure desktop {retiredPluginWindows=dead,pluginWindows=M.mapWithKey (\reference prepared->
+    if S.member reference dead then W.retirePreparedImage prepared else prepared) (pluginWindows desktop)}
+
+-- The prepared resource accessor and ByteString length are constant-time;
+-- shared immutable resources count once, while every image instance counts.
+imageBudget :: M.Map W.WindowRef W.PreparedWindow -> Bool
+imageBudget prepared=length images<=64 && sum (map (BS.length . imageRGBA) (M.elems unique))<=67108864
+  where
+    images=[image | body<-M.elems prepared,Just image<-[W.preparedWindowImage body]]
+    unique=M.fromList [(imageResourceId image,image) | image<-images]
 
 clamp :: W.WindowRef -> W.PreparedWindow -> Window -> Window
 clamp reference prepared window

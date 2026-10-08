@@ -58,7 +58,7 @@ checks = do
   conversationBody<-W.prepareSemanticTextWindow "Conversation" [(conversationText,Plain)] semantics
     >>= either (error . T.unpack) pure
   W.withWindowScope $ \scope->withBufferReadCommands $ \commands->do
-    update<-W.openTextWindow scope conversationBody >>= maybe (error "Prepared read fixture scope ended") pure
+    update<-W.openWindow scope conversationBody >>= maybe (error "Prepared read fixture scope ended") pure
     (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "Prepared read fixture admission failed") pure
     let conversation=addPluginWindow reference conversationBody (initialDesktop (80,25))
     (_,finishRead)<-readWindowTool commands (captureWindow conversation) conversation "read_window" (object [])

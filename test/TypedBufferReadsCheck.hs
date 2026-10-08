@@ -326,7 +326,7 @@ windowReadChecks path=W.withWindowScope $ \scope->do
       wait worker=timeout 3000000 (Control.Concurrent.Async.wait worker) >>= maybe (error "window read timed out") pure
       text result=result >>= parseMaybe (withObject "read" (.: "text"))
   prepared<-prepare "public\nsecret\nvisible"
-  update<-W.openTextWindow scope prepared >>= maybe (error "window read opening failed") pure
+  update<-W.openWindow scope prepared >>= maybe (error "window read opening failed") pure
   (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "window read admission failed") pure
   let base=addPluginWindow reference prepared (initialDesktop (80,25))
       ident=maybe (error "window read frame missing") windowId (activeWindow base)
@@ -359,7 +359,7 @@ windowReadChecks path=W.withWindowScope $ \scope->do
       result<-readWindowCommand commands (pure (Right image)) page >>= either (error . T.unpack) pure
       check "accepted immutable window snapshot formats after close" (text (Just result)==Just ("public\n      \nvisible"::T.Text))
     refreshed<-prepare "public\nsecret\nnew body"
-    refresh<-W.refreshTextWindow reference refreshed >>= maybe (error "window read refresh failed") pure
+    refresh<-W.refreshWindow reference refreshed >>= maybe (error "window read refresh failed") pure
     _<-W.admitWindowUpdate True refresh >>= maybe (error "window read refresh admission failed") pure
     let current=base {pluginWindows=M.singleton reference refreshed}
     withAsync (reader target) $ \worker->do

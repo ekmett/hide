@@ -419,7 +419,7 @@ keyChecks root=W.withWindowScope $ \scope->do
   wrappedBodyKey<-checkpointKey chat {conversationViews=M.map id (conversationViews chat),pluginWindows=M.map id (pluginWindows chat)}
   check "logical body wrapper retains one cheap checkpoint identity" (chatKey==wrappedBodyKey)
   maskedKey<-checkpointKey masked
-  opening<-W.openTextWindow scope maskedBody >>= maybe (fail "Key fixture scope ended") pure
+  opening<-W.openWindow scope maskedBody >>= maybe (fail "Key fixture scope ended") pure
   (reference,_)<-W.admitWindowUpdate False opening >>= maybe (fail "Key fixture admission failed") pure
   let receipt token=BodyControlReceipt maskedBody 80 False Nothing
         (HostBodyControls Nothing Nothing Nothing [(14,28,"question-input",[token])])
@@ -496,7 +496,7 @@ showBody :: W.WindowScope -> T.Text -> T.Text -> Desktop -> IO Desktop
 showBody scope target name original=case conversationBody view of
   InstalledBody _ _->pure (selectConversationView target name original)
   InertBody prepared->do
-    opening<-W.openTextWindow scope prepared >>= maybe (fail "Recovery fixture scope ended") pure
+    opening<-W.openWindow scope prepared >>= maybe (fail "Recovery fixture scope ended") pure
     (reference,accepted)<-W.admitWindowUpdate False opening >>= maybe (fail "Recovery fixture admission failed") pure
     let attached=original {pluginWindows=M.insert reference accepted (pluginWindows original),
           conversationViews=M.insert target view {conversationBody=InstalledBody reference Nothing} (conversationViews original)}

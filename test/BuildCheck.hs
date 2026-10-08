@@ -54,7 +54,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
   let sourceDesktop=addDocument (Just (FileState file Nothing)) ((newBuffer "main = pure ()") {undoStack=error "captured build touched source Undo"}) initial
   W.withWindowScope $ \scope->do
     prepared<-W.prepareTextWindow "Make output" "log"
-    opening<-W.openTextWindow scope prepared >>= maybe (fail "prepare output focus") pure
+    opening<-W.openWindow scope prepared >>= maybe (fail "prepare output focus") pure
     outputFocused<-adoptWindowUpdate P.HumanMenu opening sourceDesktop
     check "output focus keeps standalone source" (B.buildSource outputFocused==Just file)
     check "output focus keeps project directory without Files" . (==root) =<< B.resolveBuildRoot outputFocused
