@@ -247,20 +247,16 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           capture effects scratch output "package-target-menu" shown
         pngView d = do
           let rows=maybe [] (M.elems.treeRows) . sideTree
-              isImage row=PluginTree.infoLabel (rowInfo row)=="preferences.png"
-          mounted<-initializeSidebar sidebarHost d {sideTree=Just (emptySidebar (root </> "docs/site/screenshots") 28 False),streamerMode=False}
+              isImage row=PluginTree.infoLabel (rowInfo row)=="alpine-lake.png"
+          mounted<-initializeSidebar sidebarHost d {sideTree=Just (emptySidebar (root </> "assets/examples") 28 False),streamerMode=False}
             >>= await "PNG in Files" tick (any isImage . rows)
           index<-case [i | (i,row)<-zip [0..] (rows mounted),isImage row] of
             [value]->pure value
-            _->fail "Missing preferences PNG"
-          popup<-Driver.input effects (V.EvMouseDown 12 (2+index-maybe 0 treeScroll (sideTree mounted)) V.BRight []) mounted
-          action<-case [i | (i,(title,_))<-zip [0..] (contextItemsFor popup),title=="View PNG"] of
-            [value]->pure value
-            _->fail "Files PNG action missing"
-          pending<-key V.KEnter [] popup {contextMenu=fmap (\(rect,_)->(rect,action)) (contextMenu popup)}
-          opened<-await "PNG window" tick (maybe False ((/=Nothing).PluginWindow.preparedWindowImage) . activePluginWindow) pending
+            _->fail "Missing landscape PNG"
+          selected<-Driver.input effects (V.EvMouseDown 12 (2+index-maybe 0 treeScroll (sideTree mounted)) V.BLeft []) mounted
+          opened<-await "PNG window" tick (maybe False ((/=Nothing).PluginWindow.preparedWindowImage) . activePluginWindow) selected
           pure (case activeWindow opened of
-            Just w->resizeWindowBounds (windowId w) (Rect 29 3 68 18) opened
+            Just w->resizeWindowBounds (windowId w) (Rect 29 3 68 25) opened
             _->opened)
         permissionDiff d = case (activeWindow d,activeDocument d) of
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do

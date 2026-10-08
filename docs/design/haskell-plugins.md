@@ -527,8 +527,18 @@ cells, canvas-local coordinates, frontend logical points and device pixels. Any
 filter distortion must also participate in geometry conversion. Hit testing uses
 that same transform and capture rules. Plugins cannot paint or accept clicks over an approval dialog by enlarging their content bounds.
 
-The PNG implementation prepares immutable RGBA8 on a worker through
+Ordinary file opening chooses the representation from the file signature. A PNG
+opens in an image window through the same Files, file dialog, command-line and
+drop routes as a source file. No separate viewing service is required.
+
+The PNG decoder prepares immutable RGBA8 on a worker through
 `prepareImageWindow`, then uses `openWindow` for ordinary scoped publication.
+Additional image formats belong before that boundary: recognize the encoding,
+check allocation bounds, decode, apply orientation and color conversion, then
+publish pixels. The canvas and transport do not need to know which codec produced
+them. Large-image tiling can replace a single retained texture with a set of
+texture tiles behind the same placement and clipping contract; it must preserve
+bounded upload work and discard stale tiles when the view changes.
 The cell compositor emits the text grid and a tiny ownership stencil in one pass:
 one little-endian 16-bit value per normal character cell, with a surface slot in
 the low bits and a shadow bit at the top. Wide glyph halves occupy separate cells.

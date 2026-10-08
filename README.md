@@ -33,7 +33,8 @@ beside it. With THC installed, `thc edit .` opens the same editor.
 
 Browse files and Cabal targets in the sidebar. Tile, cascade or split windows;
 split views share a buffer and its undo history. Markdown files can be shown
-as source or rendered text. Binary files open in the hex editor.
+as source or rendered text. PNG images open in an image window; other binary
+files open in the hex editor.
 
 Review edits as an inline or side-by-side diff, or show just the changed regions.
 Unsaved files show line counts for additions and deletions. Saving checks for

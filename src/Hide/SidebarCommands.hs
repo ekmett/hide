@@ -182,6 +182,7 @@ prepareSidebarFile ctx path
                   doc<-evaluate (newDocument buffer (Just file))
                   pure (Right (SidebarDocument (filePath file) doc))
 
+-- Docs: tools/docs-screenshots.hs png-view exercises this through ordinary Files opening.
 prepareImageReply :: SidebarContext -> Maybe FilePath -> Text -> BS.ByteString -> IO (Either CommandError SidebarReply)
 prepareImageReply ctx path title bytes
   | sidebarOrigin ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Opening an image requires the human."))

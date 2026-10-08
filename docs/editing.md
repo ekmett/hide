@@ -67,8 +67,8 @@ folder. Drag across a link to select its text without opening it.
 
 Web links open in your browser. Right-click a linked screenshot and choose
 **Open** to view it; the Files pane offers the same action for Markdown,
-images and PDF files. Double-clicking a file in Files still opens its editor
-buffer. In a browser session, external links and images open in a new tab;
+images and PDF files. Opening a file in Files chooses the appropriate editor
+window. In a browser session, external links and images open in a new tab;
 if popup blocking prevents that, click **Open link** above the editor.
 Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
 
@@ -76,11 +76,11 @@ Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
 
 ## Images
 
-![A PNG screenshot of Preferences open in an image window.](site/screenshots/png-view.png)
+![An alpine lake open in an image window.](site/screenshots/png-view.png)
 
-Right-click a `.png` file in Files and choose **View PNG** to open an image
-window. It starts fitted to the window. Press **F** to fit again, **1** for
-actual size, or **+** / **−** to zoom. The wheel zooms; arrow keys and dragging
+Open an image from Files, the file dialog or the command line, or drop it into
+the editor. PNG files open in an image window, fitted to its size. Press **F**
+to fit again, **1** for actual size, or **+** / **−** to zoom. The wheel zooms; arrow keys and dragging
 pan. Resize or tile it like a source window.
 
 Metal, Vulkan and browser frontends keep the image crisp over the optional CRT
