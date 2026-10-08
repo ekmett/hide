@@ -239,9 +239,13 @@ dialogChecks=do
       shifted=project clipped {screenSize=(30,8)}
   check "scrolled-off modal fields do not publish their values"
     (not ("OFFSCREEN-VALUE" `BS.isInfixOf` BL.toStrict (encode shifted)))
+  let manyFields=modal [CheckBox ("Field "<>T.pack (show i)) False | i<-[0::Int ..199]] 199
+      manyProjection=project manyFields
+  check "field budgeting follows the viewport rather than discarding a late focused field"
+    (field "focused" (byId (fieldId 199) manyProjection)==Just True && length (items manyProjection)<=256)
   let large=base {screenSize=(200,1000),dialog=Just (Dialog "Large" Widgets
         [Radio "Options" [T.replicate 120 "v" | _<-[1::Int ..1000]] 0] 0 ["Close"] [])}
       bounded=project large
       textSize=sum [T.length (nameOf n)+maybe 0 T.length (field "value" n::Maybe T.Text) | n<-items bounded]
   check "modal metadata stays bounded independently of oversized field catalogues"
-    (length (items bounded)<=256 && textSize<=32768 && all (within (200,1000)) (items bounded))
+    (field "truncated" bounded==Just True && length (items bounded)<=256 && textSize<=32768 && all (within (200,1000)) (items bounded))

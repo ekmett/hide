@@ -139,12 +139,14 @@ dialogSemantics audience desktop=case dialog desktop of
   Nothing->snapshot False False []
   Just dg
     | not rootReadable->snapshot True False []
-    | otherwise->let (nodes,cut)=bounded 256 32768 candidates in snapshot True cut nodes
+    | otherwise->let (nodes,cut)=bounded 256 32768 candidates in snapshot True (cut || catalogueCut) nodes
     where
       rootBounds=dialogRect desktop dg
       Rect rx ry rw rh=rootBounds
       contentBounds=Rect rx (ry+2) rw (max 0 (rh-5))
       geometry=zip3 [0::Int ..] (fieldRects desktop dg) (fields dg)
+      visibleFields=[entry | entry@(_,rect,_)<-geometry,Just _<-[clip screen =<< clip contentBounds rect]]
+      catalogueCut=not (null (drop 128 visibleFields)) || not (null (drop 64 (body dg))) || not (null (drop 32 (buttons dg)))
       popup=case openComboBox dg of
         Just (i,_,choices,_,_)->Just (i,comboBoxRect desktop dg i choices)
         Nothing->Nothing
@@ -165,7 +167,7 @@ dialogSemantics audience desktop=case dialog desktop of
       candidates=case clip screen rootBounds of
         Nothing->[]
         Just rootRect->node ["dialog"] Nothing "dialog" rootName Nothing rootRect False Nothing Nothing Nothing False:
-          concatMap fieldNodes (take 128 geometry) ++
+          concatMap fieldNodes (take 128 visibleFields) ++
           concat [emit False ["dialog","body",number i] (Just ["dialog"]) "text"
             (shown False contentBounds rect 0 text) Nothing rect False Nothing Nothing Nothing False
             | (i,text)<-take 64 (zip [0::Int ..] (body dg)),let rect=Rect (rx+3) (ry+2+i) (max 0 (rw-6)) 1,
@@ -197,8 +199,14 @@ dialogSemantics audience desktop=case dialog desktop of
               textValue at offset text=if private || not (anyVisible False contentBounds at) then Nothing else Just (shown False contentBounds at offset text)
               inputValue text position=if focused && position>16384 then Nothing else
                 textValue (Rect x (y+1) w 1) (if focused then max 0 (displayColumn text position-w+1) else 0) text
+              fieldCut=not private && case field of
+                Input _ _ position->focused && position>16384
+                SelectedInput _ _ selection->focused && caret selection>16384
+                Radio _ choices _->not (null (drop 256 choices))
+                ComboBox _ choices _ (Just _)->not (null (drop 256 choices))
+                _->False
               container role value checked selected expanded multiline children=
-                node ident (Just ["dialog"]) role name value bounds focused checked selected expanded multiline:children
+                markCut fieldCut (node ident (Just ["dialog"]) role name value bounds focused checked selected expanded multiline):children
               option popupChild role index selected checked at text=
                 if private then [] else emit popupChild (ident++["option",number index]) (Just ident) role
                   (shown popupChild (if popupChild then screen else contentBounds) at 0 text) Nothing at
@@ -289,6 +297,7 @@ dialogSemantics audience desktop=case dialog desktop of
       in (size,cut,object ["id" .= (ident::[Text]),"parent" .= (parent::Maybe [Text]),"role" .= (role::Text),
         "name" .= title,"value" .= text,"bounds" .= [x,y,w,h],"focused" .= focused,
         "checked" .= (checked::Maybe Bool),"selected" .= (selected::Maybe Bool),"expanded" .= (expanded::Maybe Bool),"multiline" .= multiline])
+    markCut limited (size,cut,value)=(size,limited || cut,value)
     bounded :: Int -> Int -> [(Int,Bool,Value)] -> ([Value],Bool)
     bounded _ _ []=([],False)
     bounded left budget ((size,shortened,value):rest)
