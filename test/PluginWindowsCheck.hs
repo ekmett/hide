@@ -216,7 +216,7 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
   check "retirement retains host view and marks its read-only snapshot unavailable"
     (length (windows placeholder)==2 && "Unavailable: Private notes" `T.isInfixOf` snapshot placeholder && M.size (buffers placeholder)==1)
   check "retired scope refuses escaped publication" (windows retiredResult==windows source)
-  durable<-W.prepareRecoverableTextWindow "example.notes" 1 "Remembered notes" "durable content" >>= either (fail . T.unpack) pure
+  durable<-W.prepareRecoverableTextWindow "example.notes" 1 W.PrivateWindow "Remembered notes" "durable content" >>= either (fail . T.unpack) pure
   durableUpdate<-W.openWindow scope durable >>= maybe (fail "prepare durable instance") pure
   retained<-adoptWindowUpdate P.HumanMenu durableUpdate source
   let custom=retained {windows=case windows retained of w:rest->w {bounds=Rect 2 3 40 10,selection=Selection 2 5}:rest; []->[]}

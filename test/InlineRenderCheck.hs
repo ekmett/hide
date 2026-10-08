@@ -2,6 +2,7 @@
 module InlineRenderCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
+import EditorFixture (installAutocompleteFixture)
 import Control.Exception (evaluate)
 import Control.Monad (forM_,unless)
 import Data.Foldable (toList)
@@ -25,7 +26,7 @@ import Hide.Syntax
 import Hide.Unicode (displayOpsForPic)
 
 checks :: IO ()
-checks=do
+checks=W.withWindowScope $ \scope->do
   ref<-E.newDraftRef
   chatBody<-W.prepareTextWindow "Chat" ""
   let source="before\nlet old tail\nfollowing\nlast"
@@ -83,12 +84,12 @@ checks=do
          opaque {inlinePreview=fmap (\v->v {inlineIndex=inlineIndex v+1}) (inlinePreview opaque)}] $ \changed->do
     next<-renderKey changed
     check "inline identity, dismissal and validation epoch invalidate redraw" (key/=next)
-  let hint=colored {buffers=M.adjust (\doc->doc {documentLabel=Just "Autocomplete"}) (sourceFixtureBuffer w) (buffers colored),
-        autocompleteACPEnabled=True,autocompleteDraft=newBuffer "    hint",autocompleteSelection=Selection 2 2,
+  hintBase<-installAutocompleteFixture scope "completion trace" colored
+  let hint=hintBase {autocompleteACPEnabled=True,autocompleteDraft=newBuffer "    hint",autocompleteSelection=Selection 2 2,
         autocompleteFocused=True,inlinePreview=Nothing,
         conversationViews=M.singleton "" (ConversationView (InertBody chatBody) "Chat" ref Nothing Nothing FollowEnd 0 0 Nothing Nothing Nothing Nothing),
         editorDrafts=M.singleton ref (EditorDraft (newBuffer "CHAT_ONLY") (Selection 0 0) True Nothing)}
-      hintRect=autocompleteComposerRect hint w
+      hintRect=autocompleteComposerRect hint (fromJust (activeWindow hint))
   check "ACP hint composer retains plain indentation and does not render the chat draft"
     ("    hint" `T.isInfixOf` snapshot hint && not ("CHAT_ONLY" `T.isInfixOf` snapshot hint) &&
       V.picCursor (renderDesktop hint)==V.Cursor (left hintRect+2) (top hintRect))
@@ -97,17 +98,16 @@ checks=do
   hintKey<-renderKey hint
   hintSame<-renderKey hint
   check "unchanged hint draft keeps redraw identity" (hintKey==hintSame)
-  forM_ [hint {autocompleteDraft=newBuffer "other hint"},hint {autocompleteSelection=Selection 3 3},
+  forM_ [hint {autocompleteWindow=Nothing},hint {autocompleteDraft=newBuffer "other hint"},hint {autocompleteSelection=Selection 3 3},
          hint {autocompleteFocused=False},hint {autocompleteACPEnabled=False}] $ \changed->do
     next<-renderKey changed
     check "hint contents, selection, focus and availability invalidate redraw" (hintKey/=next)
-  let autocomplete=addDocument Nothing (newBuffer "Completion transcript") colored
-      acpId=nextId colored
+  autocomplete<-installAutocompleteFixture scope "Completion transcript" colored
+  let acpId=nextId colored
       terminal=addDocument Nothing (newBuffer "Terminal output") autocomplete
       terminalId=nextId autocomplete
       docked=layoutBottomWindows terminal
-        {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal 1"}) terminalId
-          (M.adjust (\doc->doc {documentLabel=Just "Autocomplete"}) acpId (buffers terminal)),
+        {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal 1"}) terminalId (buffers terminal),
          dockedTerminals=M.fromList [(ident,(Rect 0 1 30 8,Nothing)) | ident<-[acpId,terminalId]],
          bottomTerminal=Just acpId,problemsVisible=True}
       sourceFocused=focusWindow (windowId w) docked

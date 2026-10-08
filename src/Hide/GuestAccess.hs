@@ -43,7 +43,7 @@ data InputOrigin = HumanInput | GuestInput deriving (Eq,Show)
 data CellAccess = CellAccess { cellReadable :: Bool, cellClickable :: Bool } deriving (Eq,Show)
 
 protectedBuffer :: Desktop -> Int -> Bool
-protectedBuffer d bid=maybe False (\doc -> privateDocument d doc || maybe False (`elem` ["Conversation","Autocomplete","Agent request","Proposed agent edit"]) (documentLabel doc)) (M.lookup bid (buffers d))
+protectedBuffer d bid=maybe False (\doc -> privateDocument d doc || maybe False (`elem` ["Conversation","Agent request","Proposed agent edit"]) (documentLabel doc)) (M.lookup bid (buffers d))
 
 -- | Plugin content is private until the host accepts explicit semantic grants.
 -- Labels and painted cells cannot grant agent interaction or clipboard access.
@@ -266,7 +266,7 @@ guestTransitionAllowed before after effects
       streamerMode before==streamerMode after && chatSubmit before==chatSubmit after && privateFieldsUnchanged before after &&
       M.keys (editorDrafts before)==M.keys (editorDrafts after) &&
       editingInput before==editingInput after &&
-      autocompleteACPEnabled before==autocompleteACPEnabled after &&
+      autocompleteWindow before==autocompleteWindow after && autocompleteACPEnabled before==autocompleteACPEnabled after &&
       autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
       agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
       childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after
@@ -356,12 +356,11 @@ readableAt d x y
   _ | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
         Just w | windowHasEditor d w,inside (composerRect d w) x y -> False
+        Just w | autocompletePane d w,inside (autocompleteComposerRect d w) x y -> False
         Just w | PluginContent _<-windowContent w ->case windowPluginText d w of
           Just prepared | not (privatePreparedWindow d prepared)->not (preparedCellPrivate W.textGuestHidden d prepared w x y)
           _->False
-        Just w | protectedWindow d w -> case windowDocument (buffers d) w of
-          Just doc | documentLabel doc==Just "Autocomplete" -> not (autocompletePane d w && inside (autocompleteComposerRect d w) x y)
-          _ -> False
+        Just w | protectedWindow d w -> False
         _ -> True
 
 -- Independent of the human Streamer-mode toggle. Guests ALWAYS use this mask.

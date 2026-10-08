@@ -22,6 +22,10 @@ import Hide.Autocomplete
 import Hide.AgentSidebarTypes
 import Hide.Buffer
 import Hide.Model
+import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Menu as Menu
+import Hide.PluginWindowHost (adoptWindowUpdate,retireClosedWindow)
+import Hide.GuestAccess (readableAt,pointerAllowedAt)
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do
@@ -31,7 +35,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       source="value = old\nnext = untouched\n"
       desktop=addDocument Nothing (newBuffer source) (initialDesktop (100,30))
       send runtime action args d=snd <$> autocompleteEffects runtime (\state _->pure (False,state)) d [AutocompleteAction action args]
-      hasTranscript d=any ((==Just "Autocomplete").documentLabel) (M.elems (buffers d))
+      hasTranscript d=any (\w->maybe False ((==windowContent w).PluginContent) (autocompleteWindow d)) (windows d)
       logs=mapMaybe decodeStrict' . BS.lines <$> BS.readFile logPath
       prompts=do
         entries<-logs
@@ -107,9 +111,29 @@ checks=bracket temporary removePathForcibly $ \root->do
       waitRetired runtime requestId
       settled<-tickAutocomplete runtime wideRequest
       shown<-save runtime True settled >>= awaitDesktop runtime "debug pane toggle on" hasTranscript
+      shown<-awaitDesktop runtime "prepared completion activity" (\d->case autocompleteWindow d >>= (`M.lookup` pluginWindows d) of
+        Just body->let text=W.preparedWindowText body in "[reply]" `T.isInfixOf` contentSlice text 0 (contentLength text)
+        Nothing->False) shown
       check "debug pane preserves focused source" (activeText shown==large)
-      -- Revealing the same completion transcript must keep its warm provider.
-      continued<-send runtime "propose" [] shown
+      check "completion transcript allocates no source document" (M.keys (buffers shown)==M.keys (buffers settled))
+      let oldRef=maybe (error "Missing completion reference") id (autocompleteWindow shown)
+          traceWindow=case [w | w<-windows shown,windowContent w==PluginContent oldRef] of w:_->w; _->error "Missing completion frame"
+          traceBody=pluginWindows shown M.! oldRef
+          focused=(focusWindow (windowId traceWindow) shown) {autocompleteFocused=False,autocompleteDraft=newBuffer "retained human hint"}
+          selected=fst (runCommand SelectAll focused)
+          copied=fst (runCommand Copy selected)
+      check "published completion body preserves upstream secret redaction"
+        (all (not . (`T.isInfixOf` contentSlice (W.preparedWindowText traceBody) 0 (contentLength (W.preparedWindowText traceBody)))) ["private-completion","runtime-autocomplete-secret"])
+      check "completion output uses plugin copy without hint text" (clipboard copied==W.copyPreparedSelection traceBody 0 (contentLength (W.preparedWindowText traceBody)))
+      check "completion trace remains readable but has no guest input authority"
+        (readableAt focused (left (bounds traceWindow)+2) (top (bounds traceWindow)+2) && not (pointerAllowedAt focused (left (bounds traceWindow)+2) (top (bounds traceWindow)+2)))
+      late<-W.refreshWindow oldRef traceBody >>= maybe (error "Missing pending trace refresh") pure
+      let closed=fst (runCommand Close focused)
+      retired<-retireClosedWindow oldRef closed
+      stale<-adoptWindowUpdate Menu.HumanMenu late retired
+      check "late completion publication cannot reopen a closed frame" (not (hasTranscript stale) && contents (autocompleteDraft stale)=="retained human hint")
+      -- A completion after frame close keeps the warm provider and the frame shut.
+      continued<-send runtime "propose" [] stale
       fifth<-awaitPrompt 5
       let fifthId=required "requestId" fifth::T.Text
       fifthSubmitted<-autocompleteTool runtime "submit_completion" (object ["requestId" .= fifthId,"proposals" .= ([]::[Value])])
@@ -117,12 +141,19 @@ checks=bracket temporary removePathForcibly $ \root->do
       writeFile (root </> T.unpack fifthId) "complete"
       waitRetired runtime fifthId
       warm<-tickAutocomplete runtime continued
+      check "new trace output leaves a closed completion frame closed" (not (hasTranscript warm))
       staleChoices<-timeout 5000000 (completionChoices runtime (CompletionTarget (-1) Nothing) "model")
       check "expired choice query resolves without a dialog publication" (case staleChoices of Just (Left _)->True; _->False)
       warmEntries<-logs
       check "revealing completion chat preserves the existing provider instance"
         (length [() | entry<-warmEntries,field "method" entry==Just ("session/new"::T.Text)]==1)
-      hidden<-save runtime False warm >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
+      target<-awaitIO "completion target for reopening" $ fmap (\(CompletionSummary current _)->current) <$> completionSummary runtime
+      opening<-snd <$> autocompleteEffects runtime (\state _->pure (False,state)) warm [AgentSidebarAction (ShowCompletion target)]
+      reopened<-awaitDesktop runtime "reopened completion view" hasTranscript opening
+      check "reopening gets a new frame identity and retains the hint"
+        (autocompleteWindow reopened/=Just oldRef && contents (autocompleteDraft reopened)=="retained human hint")
+      let sourceFocused=maybe reopened (\w->focusWindow (windowId w) reopened) (activeWindow warm)
+      hidden<-save runtime False sourceFocused >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
       check "debug toggle keeps the source" (activeText hidden==large)
       let shortSource=addDocument Nothing (newBuffer "x\n") hidden
           configure target option value state=snd <$> autocompleteEffects runtime (\d _->pure (False,d)) state

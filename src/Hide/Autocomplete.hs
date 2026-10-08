@@ -19,6 +19,7 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
 import Data.Maybe (fromMaybe, mapMaybe, isNothing)
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
@@ -37,6 +38,9 @@ import Hide.RemoteEndpoint (randomIdentity)
 import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub as Hub
 import Control.DeepSeq (force)
+import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Menu as Menu
+import Hide.PluginWindowHost (adoptWindowUpdate)
 
 -- Snapshot identity guards adoption even when undo returns an old revision.
 data Snapshot = Snapshot InlineView Buffer (StableName Buffer) FilePath
@@ -45,7 +49,7 @@ data Job = Request Snapshot T.Text Int | Settings | Save Value | Feedback Comple
   | SignIn | FinishSignIn | SignOut | Hint T.Text
   | Reveal CompletionTarget | Choices CompletionTarget T.Text (TMVar (Either T.Text CompletionChoices)) | Configure CompletionTarget T.Text T.Text
 data Reply = Ready Snapshot [InlineOption] | Notice T.Text | ShowSettings Value
-  | ShowSignIn T.Text | Configured Bool Bool | Transcript Buffer
+  | ShowSignIn T.Text | Configured Bool Bool | Transcript W.PreparedWindow
   | RevealTranscript CompletionTarget
   | CompletionConfigured CompletionTarget Int T.Text
 
@@ -60,7 +64,8 @@ data Autocomplete = Autocomplete
   , generation :: TVar Int, connection :: IORef (Maybe A.ACPCompletion)
   , requested :: IORef (Maybe Snapshot), displayed :: IORef (Maybe InlineView)
   , hold :: IORef (Maybe (Integer,Int,Bool)), debugVisible :: IORef Bool
-  , debugBuffer :: IORef Buffer, transcriptReady :: IORef (Maybe Buffer)
+  , transcriptScope :: W.WindowScope, debugBody :: IORef W.PreparedWindow
+  , transcriptReady :: IORef (Maybe W.PreparedWindow)
   , summary :: IORef (Maybe CompletionSummary), settingsEpoch :: IORef Int
   , choiceClosed :: TVar Bool }
 
@@ -70,10 +75,11 @@ completionSummary :: Autocomplete -> IO (Maybe CompletionSummary)
 completionSummary=readIORef . summary
 
 withAutocomplete :: FilePath -> (Autocomplete -> IO a) -> IO a
-withAutocomplete root use=do
+withAutocomplete root use=W.withWindowScope $ \scope->do
+  empty<-prepareTranscript ""
   token<-T.pack <$> randomIdentity
   runtime<-Autocomplete token <$> newTBQueueIO 64 <*> newTQueueIO <*> newTVarIO 0 <*> newIORef Nothing
-    <*> newIORef Nothing <*> newIORef Nothing <*> newIORef Nothing <*> newIORef False <*> newIORef (newBuffer "") <*> newIORef Nothing <*> newIORef Nothing <*> newIORef 0 <*> newTVarIO False
+    <*> newIORef Nothing <*> newIORef Nothing <*> newIORef Nothing <*> newIORef False <*> pure scope <*> newIORef empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef 0 <*> newTVarIO False
   servers<-editorServersFor (Just token)
   withAsync (owner runtime servers `finally` closeChoices runtime) $ \_ ->
     withAsync (traceLoop runtime) (const (use runtime)) `finally` closeChoices runtime
@@ -403,8 +409,8 @@ tickAutocomplete runtime original=do
         current<-readIORef (summary runtime)
         if maybe True (\(CompletionSummary target _)->target/=expected) current || not (isNothing (dialog state)) then pure state {status="Completion view expired."} else do
           writeIORef (debugVisible runtime) True
-          b<-readIORef (debugBuffer runtime)
-          let shown=showTranscript True b state
+          body<-readIORef (debugBody runtime)
+          shown<-showTranscript runtime True body state
           pure (maybe shown (\w->focusWindow (windowId w) shown) (transcriptWindow shown))
       CompletionConfigured expected serial text->do
         current<-readIORef (summary runtime)
@@ -417,13 +423,13 @@ tickAutocomplete runtime original=do
       Configured visible acp->do
         previous<-readIORef (debugVisible runtime)
         writeIORef (debugVisible runtime) visible
-        b<-readIORef (debugBuffer runtime)
+        body<-readIORef (debugBody runtime)
         let configured=state {autocompleteACPEnabled=acp}
-        pure (if previous==visible then configured else showTranscript visible b configured)
-      Transcript b->do
-        writeIORef (debugBuffer runtime) b
+        if previous==visible then pure configured else showTranscript runtime visible body configured
+      Transcript body->do
+        writeIORef (debugBody runtime) body
         visible<-readIORef (debugVisible runtime)
-        pure (if visible then updateTranscript b state else state)
+        if visible then updateTranscript body state else pure state
 
 settingsDialog :: Value -> Desktop -> Desktop
 settingsDialog values d=d {dialog=Just (Dialog "Autocomplete" (AutocompleteDialog "save") fields' 0 ["OK","Cancel","Sign in","Sign out"] ["Separate from the main conversation."])}
@@ -438,6 +444,8 @@ settingsDialog values d=d {dialog=Just (Dialog "Autocomplete" (AutocompleteDialo
       input "copilotExecutable" "Copilot executable" "copilot-language-server",input "copilotArguments" "Copilot arguments (JSON)" "[\"--stdio\"]",
       CheckBox "Show completion chat" visible]
 
+-- Preparation and bounded coalescing stay on the existing trace worker. The
+-- host receives immutable rows, never a Buffer/Undo root or an opening callback.
 traceLoop :: Autocomplete -> IO ()
 traceLoop runtime=go ""
   where
@@ -446,32 +454,52 @@ traceLoop runtime=go ""
       messages<-readIORef (connection runtime) >>= maybe (pure []) A.pollACPCompletionTranscript
       if null messages then go old else do
         let text=T.takeEnd 65536 (old<>T.intercalate "\n" messages<>"\n")
-            b=newBuffer text
-        _<-evaluate (prepareBuffer b)
-        writeIORef (transcriptReady runtime) (Just b)
+        body<-prepareTranscript text
+        writeIORef (transcriptReady runtime) (Just body)
         go text
 
+prepareTranscript :: T.Text -> IO W.PreparedWindow
+prepareTranscript text=W.prepareRecoverableTextWindow "hide.autocomplete.transcript" 1 W.ReadableWindow "Autocomplete" text
+  >>= either (ioError . userError . T.unpack) pure
+
 transcriptWindow :: Desktop -> Maybe Window
-transcriptWindow d=case [w | w<-windows d, (documentLabel =<< windowDocument (buffers d) w)==Just "Autocomplete"] of
+transcriptWindow d=case [w | Just reference<-[autocompleteWindow d],w<-windows d,windowContent w==PluginContent reference] of
   w:_->Just w
   _->Nothing
 
-updateTranscript :: Buffer -> Desktop -> Desktop
-updateTranscript b d=case transcriptWindow d of
-  Nothing->d
-  Just w | Just bid<-bufferId w->d {buffers=M.adjust (\doc->doc {documentBuffer=b}) bid (buffers d)}
-  _->d
+-- A trace publication only refreshes its installed frame. Closing the window
+-- leaves the latest prepared body with this owner and never implicitly reopens.
+updateTranscript :: W.PreparedWindow -> Desktop -> IO Desktop
+updateTranscript body d=case transcriptWindow d of
+  Just w | PluginContent reference<-windowContent w->do
+    update<-W.refreshWindow reference body
+    maybe (pure d) (\publication->adoptWindowUpdate Menu.HumanMenu publication d) update
+  _->pure d
 
-showTranscript :: Bool -> Buffer -> Desktop -> Desktop
-showTranscript False _ d=case transcriptWindow d of
-  Nothing->d
-  Just w | Just bid<-bufferId w->layoutProblems d (normalizeBottom d {windows=filter ((/=windowId w).windowId) (windows d),buffers=M.delete bid (buffers d),dockedTerminals=M.delete (windowId w) (dockedTerminals d)})
-  _->d
-showTranscript True b d=case transcriptWindow d of
-  Just _->updateTranscript b d
-  Nothing->let added=addDocument Nothing b d
-               ident=nextId d
-               labeled=added {buffers=M.adjust (\doc->doc {documentLabel=Just "Autocomplete",documentCursorVisible=False}) ident (buffers added)}
-               rectangle=maybe (Rect 0 1 80 8) bounds (activeWindow labeled)
-               docked=layoutProblems d labeled {dockedTerminals=M.insert ident (rectangle,Nothing) (dockedTerminals labeled),bottomTerminal=Just ident}
-           in maybe docked (\w->focusWindow (windowId w) docked) (activeWindow d)
+showTranscript :: Autocomplete -> Bool -> W.PreparedWindow -> Desktop -> IO Desktop
+showTranscript _ False _ d=do
+  mapM_ W.retireWindowRef (autocompleteWindow d)
+  pure $ case transcriptWindow d of
+    Nothing->d {autocompleteWindow=Nothing}
+    Just w->layoutProblems d (normalizeBottom d
+      {windows=filter ((/=windowId w).windowId) (windows d),
+       pluginWindows=maybe (pluginWindows d) (`M.delete` pluginWindows d) (autocompleteWindow d),
+       retiredPluginWindows=maybe (retiredPluginWindows d) (`S.delete` retiredPluginWindows d) (autocompleteWindow d),
+       autocompleteWindow=Nothing,dockedTerminals=M.delete (windowId w) (dockedTerminals d)})
+showTranscript runtime True body d=case transcriptWindow d of
+  Just _->updateTranscript body d
+  Nothing->do
+    update<-W.openWindow (transcriptScope runtime) body
+    case update of
+      Nothing->pure d
+      Just publication->do
+        added<-adoptWindowUpdate Menu.HumanMenu publication d
+        let reference=W.updateWindowRef publication
+        case [w | w<-windows added,windowContent w==PluginContent reference] of
+          w:_->do
+            let ident=windowId w
+                rectangle=bounds w
+                docked=layoutProblems d added {autocompleteWindow=Just reference,
+                  dockedTerminals=M.insert ident (rectangle,Nothing) (dockedTerminals added),bottomTerminal=Just ident}
+            pure (maybe docked (\previous->focusWindow (windowId previous) docked) (activeWindow d))
+          _->W.retireWindowRef reference >> pure added

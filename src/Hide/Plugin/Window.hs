@@ -218,12 +218,15 @@ prepareSemanticRowsWindow title styled semantics=do
 -- | Prepare text whose title and content may be written to private recovery.
 -- Use only non-secret state declared durable by the view's owner. Type IDs are
 -- namespaced command-style names; positive versions describe the stored format.
-prepareRecoverableTextWindow :: Text -> Int -> Text -> Text -> IO (Either Text PreparedWindow)
-prepareRecoverableTextWindow kind version title text
+-- Readability is an explicit observation grant; recovery restores inert private
+-- text and never reconnects the provider or restores input authority.
+prepareRecoverableTextWindow :: Text -> Int -> WindowDisclosure -> Text -> Text -> IO (Either Text PreparedWindow)
+prepareRecoverableTextWindow kind version disclosure title text
   | not (validCommandName kind) || T.length kind>128 || version<=0=pure (Left "Invalid durable plugin window type/version.")
   | otherwise=do
-      PreparedWindow ident caption measured rows width _ sections scripts semantics _<-prepareTextWindow title text
-      pure (Right (PreparedWindow ident caption measured rows width (Just (kind,version)) sections scripts semantics Nothing))
+      PreparedWindow ident caption measured rows width _ sections scripts _ _<-prepareTextWindow title text
+      let semantics=TextSemantics CopyText Nothing V.empty V.empty disclosure V.empty V.empty V.empty
+      pure (Right (PreparedWindow ident caption measured rows width (Just (kind,version)) sections scripts (Just (semantics,V.empty)) Nothing))
 
 -- | Prepare a fixed selectable list above one readonly Details pane on a worker.
 -- Refresh preserves the selected ID if present; host geometry, draft selection

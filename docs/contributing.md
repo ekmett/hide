@@ -664,7 +664,8 @@ straight RGBA8 onto black. Capture includes only permitted images and describes
 only image surfaces with visible owned cells. Pixel resources remain immutable
 while pan, zoom and window layout change.
 
-Ordinary views are transient. `prepareRecoverableTextWindow` explicitly declares
+Ordinary views are transient. `prepareRecoverableTextWindow` takes an explicit
+`WindowDisclosure` for live observation and declares
 non-secret text eligible for private recovery, with a namespaced type ID and
 positive format version. Recovery preserves text, title and host geometry in an
 inert unavailable view with a fresh revoked reference. Parsing never runs plugin

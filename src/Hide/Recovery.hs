@@ -163,7 +163,7 @@ readCheckpoint path baseline=do
       W.retireWindowRef (fst accepted)
       pure accepted
     restorePlugin scope (ident,kind,version,title,text)=do
-      prepared<-W.prepareRecoverableTextWindow kind version title text >>= either (ioError . userError . T.unpack) pure
+      prepared<-W.prepareRecoverableTextWindow kind version W.PrivateWindow title text >>= either (ioError . userError . T.unpack) pure
       (reference,view)<-install scope prepared
       pure (ident,reference,view)
     restoreConversation scope desktop frames (target,ConversationSeed name records buffer selected focused anchored column reply)=do
@@ -544,7 +544,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,
     gitReview=Nothing,hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,contextMenu=Nothing,contextKind=SourceContext,contributedMenus=contributedMenus baseline,agentMenuRefs=agentMenuRefs baseline,menusActive=menusActive baseline,contextTarget=Nothing,
     diagnostics=[],diagnosticsGeneration=diagnosticsGeneration baseline+1,buildDiagnostics=[],problemsSelected=0,problemsScroll=0,problemsFocused=False,statusHover=Nothing,heldModifiers=[],
-    autocompleteACPEnabled=False,autocompleteDraft=newBuffer "",autocompleteSelection=Selection 0 0,autocompleteFocused=True,
+    autocompleteWindow=Nothing,autocompleteACPEnabled=False,autocompleteDraft=newBuffer "",autocompleteSelection=Selection 0 0,autocompleteFocused=True,
     childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing,agentSteering=False,agentReplying=False,agentQueued=0,agentContextUsage=Nothing,chatQuestion=Nothing},views,snapshots,parsedViews)
 
 documentParser :: V.Vector Text -> Value -> Parser (Int,Document)

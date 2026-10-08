@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HintComposerCheck (checks) where
 
-import EditorFixture (withEditorFixture)
+import EditorFixture (withEditorFixture,installAutocompleteFixture)
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
@@ -15,10 +15,12 @@ import Hide.Buffer
 import Hide.GuestAccess
 import Hide.Model
 import Hide.Recovery
+import qualified Hide.Plugin.Window as W
 
 checks :: IO ()
-checks=withEditorFixture "" (initialDesktop (90,30)) $ \chatBase->do
-  let base=(addReadOnly "Autocomplete" "completion trace\nresponse\n" (closeActive (setComposerInput (newBuffer "main chat draft") (Selection 2 5) True chatBase)))
+checks=withEditorFixture "" (initialDesktop (90,30)) $ \chatBase->W.withWindowScope $ \scope->do
+  trace<-installAutocompleteFixture scope "completion trace\nresponse\n" (closeActive (setComposerInput (newBuffer "main chat draft") (Selection 2 5) True chatBase))
+  let base=trace
         {autocompleteACPEnabled=True,
          agentReplying=True,agentQueued=2,agentSteering=True}
       paste text d=fst (handleEvent (V.EvPaste (TE.encodeUtf8 text)) d)
@@ -35,7 +37,7 @@ checks=withEditorFixture "" (initialDesktop (90,30)) $ \chatBase->do
   check "Enter emits exact hint and clears only its own draft"
     (effects==[AutocompleteAction "hint" ["hint λ\n    preserve indentation"]] && bufferLength (autocompleteDraft submitted)==0 && autocompleteSelection submitted==Selection 0 0 && checkDraft submitted)
   check "empty hint does not submit" (null (snd (key V.KEnter [] submitted)))
-  check "hint editing never changes trace document" (maybe False ((=="completion trace\nresponse\n") . contents . documentBuffer) (activeDocument submitted))
+  check "hint editing never changes trace document" (maybe False ((=="completion trace\nresponse\n") . (\text->contentSlice text 0 (contentLength text)) . W.preparedWindowText) (activePluginWindow submitted))
   let allHint=fst (runCommand SelectAll filled)
       copied=fst (runCommand Copy allHint)
       cut=fst (runCommand Cut copied)
@@ -48,15 +50,16 @@ checks=withEditorFixture "" (initialDesktop (90,30)) $ \chatBase->do
   let (clicked,clickEffects)=handleEvent (V.EvMouseDown (left rect+4) (top rect+1) V.BLeft []) filled
   check "hint clicks retain literal indentation and independent selection"
     (null clickEffects && caret (autocompleteSelection clicked)==T.length "hint λ\n    " && composerSelection clicked==Selection 2 5)
-  let doc=fromJust (activeDocument filled)
   check "hint composer reserves transcript rows only for ACP"
-    (windowContentRows (filled {autocompleteACPEnabled=False}) doc w-windowContentRows filled doc w==height rect+1)
+    (pluginBodyRows (filled {autocompleteACPEnabled=False}) w-pluginBodyRows filled w==height rect+1)
   check "agents cannot type or click hint composer"
     (not (guestKeyboardAllowed filled) && not (pointerAllowedAt filled (left rect) (top rect)) && not (readableAt filled (left rect) (top rect)))
   hintAllowed<-guestTransitionAllowed base typed []
   check "agent transition policy rejects hint edits and submission"
     (not hintAllowed && not (guestEffectsAllowed effects))
   check "agent can still read autocomplete trace above the private draft" (readableAt filled (left (bounds w)+2) (top (bounds w)+2))
+  let fake=(addReadOnly "Autocomplete" "ordinary document" (initialDesktop (90,30))) {autocompleteACPEnabled=True}
+  check "an ordinary document title grants no hint input" (not (activeAutocomplete fake) && bufferLength (autocompleteDraft (paste "not a hint" fake))==0)
   let disabled=paste "not a hint" (base {autocompleteACPEnabled=False})
   check "disabled ACP does not expose a composer" (bufferLength (autocompleteDraft disabled)==0)
   let settings=Dialog "Autocomplete" (AutocompleteDialog "save")
@@ -103,7 +106,9 @@ checks=withEditorFixture "" (initialDesktop (90,30)) $ \chatBase->do
     check "checkpoint does not serialize hint text" (not (TE.encodeUtf8 "EPHEMERAL-HINT-SECRET" `BS.isInfixOf` bytes))
     restored<-readCheckpoint path secret >>= either (error . T.unpack) pure
     check "recovery clears hint draft and runtime enablement"
-      (not (autocompleteACPEnabled restored) && bufferLength (autocompleteDraft restored)==0 && autocompleteSelection restored==Selection 0 0)
+      (autocompleteWindow restored==Nothing && not (autocompleteACPEnabled restored) && bufferLength (autocompleteDraft restored)==0 && autocompleteSelection restored==Selection 0 0)
+    check "recovery retains completion output only as an inert plugin view"
+      (any ((=="completion trace\nresponse\n") . (\text->contentSlice text 0 (contentLength text)) . W.preparedWindowText) (pluginWindows restored) && not (activeAutocomplete restored))
     before<-checkpointKey base
     after<-checkpointKey typed
     check "ephemeral hint edits do not invalidate the recovery checkpoint" (before==after)

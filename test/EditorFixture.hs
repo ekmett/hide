@@ -2,7 +2,7 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 -- | Scoped real host editor ownership for model checks. The registry, body and
 -- draft live for the callback; joint preparation/admission uses production APIs.
-module EditorFixture (withEditorFixture, withEditorTextFixture, withEditorBodyFixture, sameBufferVersions) where
+module EditorFixture (withEditorFixture, withEditorTextFixture, withEditorBodyFixture, installAutocompleteFixture, sameBufferVersions) where
 
 import Control.Monad (unless)
 import Data.Aeson (Value(Null))
@@ -18,7 +18,7 @@ import qualified Hide.Plugin.Command as C
 import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Window as W
 import qualified Hide.Plugin.Menu as P
-import Hide.PluginWindowHost (adoptEditorWindowUpdate)
+import Hide.PluginWindowHost (adoptEditorWindowUpdate,adoptWindowUpdate)
 
 withEditorFixture :: Text -> Desktop -> (Desktop -> IO a) -> IO a
 withEditorFixture target original run=case conversationBodySnapshot target original of
@@ -58,3 +58,14 @@ sameBufferVersions a b=do
   left<-traverse (B.captureVersion . documentBuffer) (buffers a)
   right<-traverse (B.captureVersion . documentBuffer) (buffers b)
   pure (left==right)
+
+-- The completion view's host hint state is bound to an exact prepared frame;
+-- ordinary documents with the same caption are not input owners.
+installAutocompleteFixture :: W.WindowScope -> Text -> Desktop -> IO Desktop
+installAutocompleteFixture scope text desktop=do
+  body<-W.prepareRecoverableTextWindow "hide.autocomplete.transcript" 1 W.ReadableWindow "Autocomplete" text >>= either (error . T.unpack) pure
+  publication<-W.openWindow scope body >>= maybe (error "Completion fixture scope ended") pure
+  installed<-adoptWindowUpdate P.HumanMenu publication desktop
+  let reference=W.updateWindowRef publication
+  unless (M.member reference (pluginWindows installed)) (error "Completion fixture was not installed")
+  pure installed {autocompleteWindow=Just reference,autocompleteACPEnabled=True}

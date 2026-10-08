@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HighlightingCheck (checks) where
 
-import EditorFixture (withEditorFixture,withEditorTextFixture)
+import EditorFixture (withEditorFixture,withEditorTextFixture,installAutocompleteFixture)
 import Control.Concurrent
 import Control.Exception (evaluate,finally)
 import Control.Monad (unless,foldM,forM_)
@@ -22,9 +22,10 @@ import Hide.Model
 import Hide.Render (snapshot,snapshotHtml,renderCellRows)
 import Hide.Unicode (CellSpan(..))
 import Hide.Syntax
+import qualified Hide.Plugin.Window as W
 
 checks :: IO ()
-checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase->do
+checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase->W.withWindowScope $ \scope->do
   sourceLineChecks
   composerWidthChecks
   plainSourceRowChecks
@@ -110,8 +111,8 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   -- Chat and autocomplete share the visible-row renderer. Keep long draft
   -- lines borrowed even when moving the selection without changing their text.
   forM_ [False,True] $ \hint->do
+    base<-if hint then installAutocompleteFixture scope "reply" (closeActive chatBase) else pure chatBase
     let draft=newBuffer (T.intercalate "\n" (replicate 12 (T.replicate 100 "words 界 e\x301 👩🏽\x200d\&💻 ")))
-        base=if hint then addReadOnly "Autocomplete" "reply" (closeActive chatBase) else chatBase
         chat=(setComposerInput draft (Selection 0 0) True base) {sideTree=Nothing,blinkCursor=False,appearance=LightMode,
           autocompleteACPEnabled=True,autocompleteDraft=draft,autocompleteSelection=Selection 0 0,autocompleteFocused=True}
     _<-evaluate (occupied (renderCellRows chat))
