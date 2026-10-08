@@ -663,7 +663,7 @@ commandEnabled :: Desktop -> Command -> Bool
 commandEnabled d cmd | cmd `elem` [DialogFocusNext,DialogFocusPrevious,DialogAccept,DialogCancel] = dialogCommandAllowed cmd d
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d cmd | activeMarkdown d, markdownSourceCommand cmd = False
-commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd,not ((composerActive d || questionActive d) && cmd `elem` [Undo,Redo,Cut,Paste]) = False
+commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd,not ((composerActive d || questionActive d || activeAutocomplete d && autocompleteFocused d) && cmd `elem` [Undo,Redo,Cut,Paste]) = False
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d (DebugCommand "breakpoint") | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
@@ -1287,7 +1287,7 @@ runCommand cmd source | sourceKeyCommand cmd, not (commandEnabled source cmd) =
       maybe False ((/=Nothing) . documentLabel) (activeDocument source)
     then source {status="This window is read-only."} else source,[])
 runCommand cmd source | dialog source==Nothing, activeMarkdown source, markdownSourceCommand cmd = (source {status="Markdown view is read-only. Switch to Current to edit."},[])
-runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd,not ((composerActive source || questionActive source) && cmd `elem` [Undo,Redo,Cut,Paste]) = (source {status="This plugin window is read-only."},[])
+runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd,not ((composerActive source || questionActive source || activeAutocomplete source && autocompleteFocused source) && cmd `elem` [Undo,Redo,Cut,Paste]) = (source {status="This plugin window is read-only."},[])
 runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
   let (next,requests)=runCommand cmd source {browserFrontend=False}
   in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next) | not (any deferredCopy requests)])

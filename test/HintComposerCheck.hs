@@ -38,6 +38,9 @@ checks=withEditorFixture "" (initialDesktop (90,30)) $ \chatBase->W.withWindowSc
     (effects==[AutocompleteAction "hint" ["hint λ\n    preserve indentation"]] && bufferLength (autocompleteDraft submitted)==0 && autocompleteSelection submitted==Selection 0 0 && checkDraft submitted)
   check "empty hint does not submit" (null (snd (key V.KEnter [] submitted)))
   check "hint editing never changes trace document" (maybe False ((=="completion trace\nresponse\n") . (\text->contentSlice text 0 (contentLength text)) . W.preparedWindowText) (activePluginWindow submitted))
+  check "focused hint enables its edit commands without granting transcript mutation"
+    (all (commandEnabled filled) [Undo,Redo,Cut,Paste] && not (commandEnabled filled Save) &&
+      all (not . commandEnabled filled {autocompleteFocused=False}) [Undo,Redo,Cut,Paste])
   let allHint=fst (runCommand SelectAll filled)
       copied=fst (runCommand Copy allHint)
       cut=fst (runCommand Cut copied)
