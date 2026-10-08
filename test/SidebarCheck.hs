@@ -4,7 +4,9 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,wait,poll,waitCatch,asyncThreadId)
 import Data.IORef
 import Data.List (findIndex)
-import Data.Aeson (object,(.=))
+import Data.Aeson (object,(.=),withObject,(.:))
+import Data.Aeson.Types (parseEither)
+import Hide.RemoteWindow (parseRemoteFrame,remoteExportView)
 import Hide.WorkspaceFilesMCP (fileTool)
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
@@ -107,8 +109,15 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   offered<-act host (chooseExport (popupFor "Main.hs" dirtySource)) >>= await (tickSidebar host applyEffects) (\next->snd (pendingFileExport next)/=Nothing)
   check "saved export preserves unsaved buffer and sends disk bytes with a visible row"
     (dirty (documentBuffer (doc offered)) && case snd (pendingFileExport offered) of
-      Just (ExportFileCopy name payload r)->name=="Main.hs" && payload=="main = 1\n" && top r>=2 && top r<2+treeContentRows offered
+      Just (ExportFileCopy name payload r receipt)->name=="Main.hs" && payload=="main = 1\n" && receipt==fileExportView offered && receipt/=fileExportView offered {sideTree=fmap (\tree->tree {treeScroll=treeScroll tree+1}) (sideTree offered)} && top r>=2 && top r<2+treeContentRows offered
       _->False)
+  let scrolled=offered {sideTree=fmap (\tree->tree {treeScroll=treeScroll tree+1}) (sideTree offered)}
+      sentReceipt=case snd (pendingFileExport scrolled) of
+        Just offer->parseEither (withObject "saved export" (\fields->fields .: "view")) (Wire.fileExportHeader offer)
+        Nothing->Left "missing saved export"
+      currentReceipt=remoteExportView <$> parseRemoteFrame (object (Wire.frameMetadata dir scrolled)) (Wire.frameRows scrolled)
+  check "transport keeps the admitted gesture receipt when the sidebar changes before sending"
+    (sentReceipt==Right (fileExportView offered) && currentReceipt==Right (fileExportView scrolled) && sentReceipt/=currentReceipt)
   queuedExport<-act host (chooseExport (popupFor "Main.hs" mounted))
   expiredExport<-await (tickSidebar host applyEffects) (\next->"expired" `T.isInfixOf` status next) (fst (Wire.applyInput Wire.Blur queuedExport))
   check "prepared file export cannot survive frontend detach" (snd (pendingFileExport expiredExport)==Nothing)

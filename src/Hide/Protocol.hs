@@ -39,6 +39,12 @@ import Hide.Unicode (Script(..), CellSpan(..), graphemes, clusterWidth)
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | PasteReply T.Text T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
               | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
+-- | The gesture receipt belongs to the prepared offer, not the later send frame.
+fileExportHeader :: FileExport -> Value
+fileExportHeader (ExportFileCopy name _ row view)=object
+  ["type" .= ("download"::T.Text),"purpose" .= ("file-export"::T.Text),"name" .= name,
+   "row" .= [left row,top row,width row,height row],"view" .= view]
+
 -- | The requested read has one required, bounded host-issued identity.
 parseClipboardRequest :: Value -> Parser T.Text
 parseClipboardRequest=withObject "clipboard request" $ \o->do

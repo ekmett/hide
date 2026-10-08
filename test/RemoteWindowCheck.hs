@@ -56,11 +56,11 @@ checks = do
   check "remote Unicode rows validate" (valid rows)
   let exportMetadata receipt=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"fileExportView" .= receipt]
   check "export gesture metadata rejects unbounded receipts"
-    (either (const True) (const False) (parseRemoteFrame (exportMetadata (replicate 13 (1::Integer))) rows))
+    (either (const True) (const False) (parseRemoteFrame (exportMetadata (replicate 14 (1::Integer))) rows))
   check "export gesture metadata excludes negative identities"
     (either (const True) (const False) (parseRemoteFrame (exportMetadata ([-1]::[Integer])) rows))
 #ifdef WITH_REMOTE
-  let offered=named {pendingFileExport=(9,Just (Model.ExportFileCopy "saved.hs" (BS.pack [0,255]) (Model.Rect 1 2 20 1)))}
+  let offered=named {pendingFileExport=(9,Just (Model.ExportFileCopy "saved.hs" (BS.pack [0,255]) (Model.Rect 1 2 20 1) []))}
       detached=fst (P.applyInput P.Blur offered)
   check "detaching invalidates prepared saved exports without touching buffers"
     (fst (pendingFileExport detached)==10 && snd (pendingFileExport detached)==Nothing && Model.fileExportView detached/=Model.fileExportView offered)

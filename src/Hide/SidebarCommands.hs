@@ -666,7 +666,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
                 (hit:_,Just tree) | Just index<-M.lookup (keyOf hit) (treeNodes tree) >>= (\node->M.lookupIndex (stateAddress node) (treeRows tree)),
                   index>=treeScroll tree,index<treeScroll tree+treeContentRows d ->
                     let row=Rect 1 (index-treeScroll tree+2) (max 1 (treeWidth tree-3)) 1
-                    in pure d {pendingFileExport=(epoch+1,Just (ExportFileCopy name bytes row)),status="Saved copy ready for export; drag the selected file on macOS."}
+                    in pure d {pendingFileExport=(epoch+1,Just (ExportFileCopy name bytes row (fileExportView d {pendingFileExport=(epoch+1,Nothing)}))),status="Saved copy ready for export; drag the selected file on macOS."}
                 _->pure d {status="Sidebar export expired."}
             Right (Right (SidebarPackageDebug target entry)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageDebugAction target entry]
             Right (Right (SidebarBuild action target)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageBuildAction action target]

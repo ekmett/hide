@@ -105,7 +105,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   terminal <- o .:? "terminal" .!= False
   wordstar <- o .:? "wordstar" .!= False
   exportView <- o .:? "fileExportView" .!= []
-  unless (length exportView<=12 && all (\n->n>=0 && n<=9007199254740991) exportView) (fail "Invalid file export view")
+  unless (length exportView<=13 && all (\n->n>=0 && n<=9007199254740991) exportView) (fail "Invalid file export view")
   bindings <- o .: "bindings"
   unless (length bindings<=8192 && all validBinding bindings) (fail "Invalid binding projection")
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
@@ -318,7 +318,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0
                 Just "file-export"->do
                   row@(x,y,w,h)<-o .: "row"
                   view<-o .: "view"
-                  unless (x>=0 && x<=511 && y>=0 && w>0 && w<=512 && h==1 && x+w<=512 && y<256 && length view==12 && all (\n->n>=0 && n<=9007199254740991) view) (fail "Invalid file export receipt")
+                  unless (x>=0 && x<=511 && y>=0 && w>0 && w<=512 && h==1 && x+w<=512 && y<256 && length view==13 && all (\n->n>=0 && n<=9007199254740991) view) (fail "Invalid file export receipt")
                   pure (Just (row,view))
                 Nothing->pure Nothing
                 _->fail "Unknown download purpose"
