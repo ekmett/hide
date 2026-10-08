@@ -37,6 +37,9 @@ checks = do
   same<-renderKey large {systemDark=systemDark large,buffers=M.map id (buffers large)}
   check "redraw identity does not inspect histories, highlights or diagnostics" =<< evaluate (key==same)
   baseKey<-renderKey base
+  exportKey<-renderKey base {pendingFileExport=(1,Just (error "redraw key forced exported bytes"))}
+  drainedKey<-renderKey base {pendingFileExport=(1,Nothing)}
+  check "redraw tracks export identity without inspecting bytes or repainting retirement" (exportKey/=baseKey && exportKey==drainedKey)
   forM_ [changeDoc (\doc->doc {documentBuffer=newBuffer "replacement with same revision"}) base,
          changeDoc (\doc->doc {documentHighlight=[("x",Keyword)]}) base,
          changeDoc (\doc->doc {documentLinks=[(0,1,"new target")]}) base,

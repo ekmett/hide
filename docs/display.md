@@ -159,6 +159,20 @@ on the machine running the editor. In a native window, dropping a local file
 opens its actual filesystem path. Remote clients upload dropped local files
 as new unsaved buffers.
 
+Right-click a saved file in **Files** and choose **Export saved copy…** to copy
+its disk contents into another application. Unsaved edits stay in the editor;
+use **File > Download** in the browser when you want the current buffer instead.
+
+On macOS, drag that Files row after choosing export. A click without dragging
+cancels the offer. Scrolling, changing the sidebar, resizing or leaving the
+frontend also cancels an armed row, so the gesture cannot silently export a
+different file. The destination receives a copy, including over SSH; the source
+is neither moved nor marked saved. Native Linux and terminal frontends use the
+optional [file drag helper](configuration.md#terminal-file-drag-helper).
+
+In the browser, this action prepares **Download filename** in the toolbar.
+Choose Download, or drag it out in a browser that supports that operation.
+
 **File > Download** exports the current buffer, including unsaved text or binary
 bytes, to the browser's download location. Download does not mark the source file
 saved. Use **File > Save** to save on the editor host.

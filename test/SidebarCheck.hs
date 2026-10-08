@@ -100,6 +100,19 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   let source=fst (runCommand Undo (insertText "x" (addDocument (Just file) buffer (initialDesktop (100,30)))))
   mounted<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) source)
   version<-captureVersion (documentBuffer (doc mounted))
+  let chooseExport popup=case findIndex ((=="Export saved copy…").fst) (contextItemsFor popup) of
+        Nothing->error "Files has no saved-copy export action"
+        Just index->handleEvent (V.EvKey V.KEnter []) (iterate (fst . handleEvent (V.EvKey V.KDown [])) popup!!index)
+      dirtySource=insertText "local " mounted {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree mounted)}
+  offered<-act host (chooseExport (popupFor "Main.hs" dirtySource)) >>= await (tickSidebar host applyEffects) (\next->snd (pendingFileExport next)/=Nothing)
+  check "saved export preserves unsaved buffer and sends disk bytes with a visible row"
+    (dirty (documentBuffer (doc offered)) && case snd (pendingFileExport offered) of
+      Just (ExportFileCopy name payload r)->name=="Main.hs" && payload=="main = 1\n" && top r>=2 && top r<2+treeContentRows offered
+      _->False)
+  queuedExport<-act host (chooseExport (popupFor "Main.hs" mounted))
+  expiredExport<-await (tickSidebar host applyEffects) (\next->"expired" `T.isInfixOf` status next) (fst (Wire.applyInput Wire.Blur queuedExport))
+  check "prepared file export cannot survive frontend detach" (snd (pendingFileExport expiredExport)==Nothing)
+
   form<-open "Main.hs" mounted
   check "Files Rename opens the basename preselected"
     (case dialog form of Just dg | PluginInputForm{}<-purpose dg,[SelectedInput label name selected]<-fields dg->label=="Name" && name=="Main.hs" && selected==Selection 0 7; _->False)

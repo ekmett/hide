@@ -138,7 +138,7 @@ data DialogKey = DialogKey Text Int [Text] [FieldKey] deriving Eq
 data SidebarKey = SidebarKey FilePath Int Int Int Bool Integer deriving Eq
 -- | Comparable UI metadata and immutable payload identities, without a Desktop payload.
 data RenderKey = RenderKey RenderState (M.Map Int DocumentKey) (M.Map Text ViewKey) (M.Map Editor.DraftRef DraftKey)
-  (Maybe QuestionKey) (Maybe DialogKey) (Maybe SidebarKey) Bool (Int,Bool) [RenderIdentity] deriving Eq
+  (Maybe QuestionKey) (Maybe DialogKey) (Maybe SidebarKey) Bool (Int,Bool) Int [RenderIdentity] deriving Eq
 
 -- | Capture a conservative redraw key from explicit metadata and immutable
 -- payload identities. No content hashing or structural Buffer equality runs.
@@ -285,7 +285,7 @@ renderKey original = do
         , keyBottomTerminal=bottomTerminal original
         }
   pure (RenderKey state documents views drafts question' dialog' tree
-    (present (gitReview original)) (fst (clipboardExport original),present (snd (clipboardExport original))) names)
+    (present (gitReview original)) (fst (clipboardExport original),present (snd (clipboardExport original))) (fst (pendingFileExport original)) names)
 
 blue, gray, black, white, yellow, cyan, green, red :: V.Color
 blue=V.RGBColor 0 0 170; gray=V.RGBColor 170 170 170; black=V.RGBColor 0 0 0
