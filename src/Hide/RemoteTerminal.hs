@@ -237,6 +237,18 @@ receiveTerminalFrames exports peer queue = go [] (object []) Nothing
         kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
         case kind of
           "assets" -> go [] (object []) Nothing
+          "canvas-chunk" -> do
+            lengthBytes<-parseIO (withObject "canvas chunk" $ \o->do
+              n<-o .: "length"
+              unless (n>0 && n<=262144) (fail "Invalid image chunk length")
+              pure (n::Int)) value
+            following<-peerReceive peer
+            case following of
+              Just (BinaryPacket bytes) | BS.length bytes==lengthBytes->go rows metadata download
+              _->ioError (userError "Expected image chunk bytes")
+          "canvas-reset" -> go rows metadata download
+          "canvas-resource" -> go rows metadata download
+          "canvas-release" -> go rows metadata download
           "download" -> parseIO (withObject "download" $ \o->(,) <$> o .: "name" <*> o .:? "purpose") value >>= go rows metadata . Just
           "connection" -> emit (Control value) >> go rows metadata Nothing
           _ -> emit (Control value) >> go rows metadata download
