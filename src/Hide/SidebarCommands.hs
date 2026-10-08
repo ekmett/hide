@@ -23,7 +23,6 @@ import Data.Text (Text)
 import System.Directory (canonicalizePath,doesFileExist)
 import qualified Data.ByteString as BS
 import System.IO (withBinaryFile,IOMode(ReadMode))
-import Hide.FileDragHelper (runFileDragHelper)
 import System.FilePath ((</>),takeExtension,takeFileName,takeDirectory)
 import Data.Char (toLower)
 import System.Mem.StableName
@@ -52,11 +51,10 @@ import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Menu as Menu
 
 -- | Captured host policy; extension labels and paths grant no authority.
-data FileExportTarget = BrowserExportTarget | NativeExportTarget | HelperExportTarget deriving (Eq,Show)
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
-  , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportTarget :: !FileExportTarget }
-data SidebarReply = SidebarExportFile !FilePath !(Maybe BS.ByteString) | SidebarExportFinished | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+  , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int }
+data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -146,7 +144,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing [] (if browserFrontend d then BrowserExportTarget else if nativeMac d then NativeExportTarget else HelperExportTarget)
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing [] (fst (pendingFileExport d))
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -185,13 +183,10 @@ createFiles host root=do
         resolved<-canonicalizePath path
         exists<-doesFileExist resolved
         if not exists then pure (Left (CommandRejected "File export needs an existing saved file.")) else
-          case sidebarExportTarget ctx of
-            NativeExportTarget->pure (Right (SidebarExportFile resolved Nothing))
-            HelperExportTarget->fmap (either (Left . CommandRejected) (const (Right SidebarExportFinished))) (runFileDragHelper resolved)
-            BrowserExportTarget->do
-              bytes<-withBinaryFile resolved ReadMode (\h->BS.hGet h (16*1024*1024))
-              pure $ if BS.length bytes>=16*1024*1024 then Left (CommandRejected "File export exceeds the browser's 16 MiB limit.")
-                else Right (SidebarExportFile resolved (Just bytes))))
+          do
+            bytes<-withBinaryFile resolved ReadMode (\h->BS.hGet h (16*1024*1024))
+            pure $ if BS.length bytes>=16*1024*1024 then Left (CommandRejected "File export exceeds the 16 MiB limit.")
+              else Right (SidebarExportFile (sidebarExportEpoch ctx) (T.pack (takeFileName resolved)) bytes)))
   renameTo<-either (ioError . userError . show) pure =<< registerCommand registry
     (CommandDef "hide.sidebar.files.rename-to" "Rename file" codec codec (\ctx (source,name)->
       if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "File rename requires the human.")) else do
@@ -666,15 +661,13 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
           modifyIORef' ref (\s->s {actionJob=Nothing})
           case result of
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
-            Right (Right (SidebarExportFile path bytes)) | current && origin==Menu.HumanMenu->
-              let row=case (trace,sideTree d) of
-                    (hit:_,Just tree)->case M.lookup (keyOf hit) (treeNodes tree) >>= (\node->M.lookupIndex (stateAddress node) (treeRows tree)) of
-                      Just index->Rect 1 (index-treeScroll tree+2) (max 1 (treeWidth tree-3)) 1
-                      Nothing->Rect 0 0 0 0
-                    _->Rect 0 0 0 0
-                  offer=maybe (NativeFileExport path row) (BrowserFileExport (T.pack (takeFileName path))) bytes
-              in pure d {pendingFileExport=(fst (pendingFileExport d)+1,Just offer),status=if maybe True (const False) bytes then "Drag the selected file to export its saved copy." else "Saved copy ready for Download or drag."}
-            Right (Right SidebarExportFinished) | current && origin==Menu.HumanMenu->pure d {status="File drag helper closed."}
+            Right (Right (SidebarExportFile epoch name bytes)) | current && origin==Menu.HumanMenu && epoch==fst (pendingFileExport d)->
+              case (trace,sideTree d) of
+                (hit:_,Just tree) | Just index<-M.lookup (keyOf hit) (treeNodes tree) >>= (\node->M.lookupIndex (stateAddress node) (treeRows tree)),
+                  index>=treeScroll tree,index<treeScroll tree+treeContentRows d ->
+                    let row=Rect 1 (index-treeScroll tree+2) (max 1 (treeWidth tree-3)) 1
+                    in pure d {pendingFileExport=(epoch+1,Just (ExportFileCopy name bytes row)),status="Saved copy ready for export; drag the selected file on macOS."}
+                _->pure d {status="Sidebar export expired."}
             Right (Right (SidebarPackageDebug target entry)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageDebugAction target entry]
             Right (Right (SidebarBuild action target)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageBuildAction action target]
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
@@ -687,7 +680,6 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
               Right (Left err)->d {status="Sidebar action failed: "<>T.pack (show err)}
               Right (Right SidebarExportFile{})->d {status="Sidebar export expired."}
-              Right (Right SidebarExportFinished)->d {status="Sidebar export expired."}
               Right (Right SidebarExisting{})->d {status="Sidebar result expired."}
               Right (Right SidebarPackageDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarBuild{})->d {status="Sidebar result expired."}

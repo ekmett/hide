@@ -304,7 +304,7 @@ data EditingInput = MountedInput | HintInput | QuestionInput deriving (Eq,Show)
 
 -- One transient export offer. Frontends retire only the serial they consumed;
 -- recovery never persists file bytes or an armed native gesture.
-data FileExport = BrowserFileExport !Text !ByteString | NativeFileExport !FilePath !Rect deriving (Eq,Show)
+data FileExport = ExportFileCopy !Text !ByteString !Rect deriving (Eq,Show)
 
 -- | Session UI state and references to immutable document payloads.
 -- This record is not a cheap equality key; use the dedicated rendering projection.
@@ -4761,3 +4761,12 @@ modeOffset :: Buffer -> Int -> Int
 modeOffset b p
   | byteMode b = T.length (TE.decodeUtf8With (\_ _ -> Nothing) (BS.take p (bufferBytes b)))
   | otherwise = BS.length (TE.encodeUtf8 (T.take p (contents b)))
+
+-- | Bounded sidebar identity for a frontend-owned export gesture. No row text,
+-- buffer contents or host paths enter this receipt.
+fileExportView :: Desktop -> [Integer]
+fileExportView d = map fromIntegral [fst (pendingFileExport d),fst (screenSize d),snd (screenSize d),problemsHeight d,
+  fromEnum (dialog d/=Nothing),fromEnum (menu d/=Nothing)] ++ case sideTree d of
+    Nothing -> []
+    Just tree -> [treeEpoch tree,treeRevision tree] ++ map fromIntegral
+      [treeWidth tree,treeScroll tree,treeSelected tree,fromEnum (treeFocused tree)]

@@ -183,7 +183,7 @@ applyInputUnchecked input d = case input of
   Frontend mode mac -> (d {videoMode=mode,nativeMac=mac && mode/=Nothing},[])
   OpenPath path -> (d,[ReadPath path])
   Resize w h -> handleEvent (V.EvResize w h) d
-  Blur -> hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]}
+  Blur -> hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[],pendingFileExport=(fst (pendingFileExport d)+1,Nothing)}
   Modifiers mods -> (d {heldModifiers=mods},[])
   Wheel x y steps mods -> wheelEvent x y steps mods d
   Mouse action x y button clicks mods -> case action of
@@ -276,7 +276,7 @@ frameMetadata cwd d =
      Just (TextArea _ True b sel _ _) -> selectedText sel b
      _ -> if dialog d/=Nothing then "" else clipboard (fst (runCommand Copy d {browserFrontend=False}))),
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
-   "wordstar" .= wordStar d,
+   "wordstar" .= wordStar d,"fileExportView" .= fileExportView d,
    "bindingsActive" .= (bindingInputAvailable d && maybe False (const True) (effectiveBindings d)),
    "bindings" .= (focusedBindingChords d),
    "editorWindows" .= [object ["id" .= ident,"title" .= title,"selected" .= selected,"enabled" .= enabled] | (ident,title,selected,enabled)<-editorWindowEntries d],

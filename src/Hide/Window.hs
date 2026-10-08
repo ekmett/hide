@@ -275,12 +275,7 @@ runWindow backend scale effects tick initial = do
           utf8 text c_set_clipboard
           pure pending {clipboardExport=(serial,Nothing)}
         _->pure pending
-      ready<-case pendingFileExport d of
-        (serial,Just (NativeFileExport path r))->do
-          ok<-utf8 (T.pack path) (\value->c_arm_file_drag value (fromIntegral (left r)) (fromIntegral (top r)) (fromIntegral (width r)) (fromIntegral (height r)))
-          err<-if ok==0 then c_error >>= peekCString else pure ""
-          pure d {pendingFileExport=(serial,Nothing),status=if ok==0 then T.pack err else status d}
-        _->pure d
+      let ready=d
       key<-renderKey ready
       when (fmap (\(_,old,_)->old) previous /= Just key) $ do
         when (fmap (\(_,_,catalogue)->catalogue) previous/=Just (contributedMenus d)) (nativeMenusFor ready)
