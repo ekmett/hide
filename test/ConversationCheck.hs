@@ -1193,6 +1193,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       effortPending<-send runtime "set-config" ["reasoning_effort","ultra"] updated
       effortChanged<-await runtime "effort selection" ((=="Conversation settings updated.").status) effortPending
       check "effort acknowledgement updates title" (conversationTitle effortChanged=="fixture-other (ultra) ▼")
+      let primaryRuntime=conversationAgents runtime
+      primaryHistory<-AH.historyAgent (AR.agentHub primaryRuntime) AH.Human (AR.primaryAgent primaryRuntime) 0 100
+      check "primary model and effort use the hub configuration path" (case primaryHistory of
+        Right history->length [() | event<-fromMaybe [] (field "events" history :: Maybe [Value]),field "kind" event==Just ("configured"::T.Text)]>=2
+        _->False)
       unavailable<-send runtime "set-config" ["model","not-advertised"] effortChanged
       check "unadvertised options are rejected locally" (status unavailable=="This conversation setting is unavailable." && agentSettings unavailable==agentSettings effortChanged)
       copied<-send runtime "copy" [] effortChanged
@@ -1346,6 +1351,11 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       sourceReceipt<-captureVersion (documentBuffer (sourceDocument cancelled))
       sameSource<-versionCurrent sourceReceipt (documentBuffer (sourceDocument steered))
       check "steering does not edit source or retain sent draft" (T.null (contents (composerBuffer steered)) && sameSource)
+      steerHistory<-AH.historyAgent (AR.agentHub primaryRuntime) AH.Human (AR.primaryAgent primaryRuntime) 0 100
+      check "primary steering is attributed by the hub to the human user seat" (case steerHistory of
+        Right history->any (\event->field "kind" event==Just ("steered"::T.Text) && (field "detail" event >>= field "userSeat")==Just True)
+          (fromMaybe [] (field "events" history :: Maybe [Value]))
+        _->False)
       idleRace<-prompt runtime "wait" steered >>= await runtime "idle race active" ((=="Agent is replying...").status)
       rejectedSteer<-submit runtime SteerSubmit (draftBuffer (newBuffer "idle-race") idleRace) >>= await runtime "idle race response" (not . agentReplying)
       check "primary idle race leaves steering draft unsent" (contents (composerBuffer rejectedSteer)=="idle-race")

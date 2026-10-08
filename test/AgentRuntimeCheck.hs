@@ -2,6 +2,7 @@
 module AgentRuntimeCheck (checks) where
 
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync,wait)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
 import Control.Monad (unless)
@@ -73,6 +74,37 @@ checks = bracket temporary removePathForcibly $ \root -> do
       failPendingPrimary runtime "Provider disconnected."
       ended <- waitAgent hub Human primary next 2000 >>= right
       assert "disconnect resolves outstanding primary delivery" (field "status" ended==Just ("failed"::T.Text))
+      let choices=Capabilities False False True [ConfigChoice "model" "model" "small" [("small","Small"),("large","Large")]]
+      bracket (ACP.startClient (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \client->do
+        _<-syncPrimary runtime project (Just client) "private-primary" choices False >>= right
+        (captured,_)<-agentConfiguration hub primary >>= right
+        withAsync (configureAgentAt hub captured "model" "large") $ \setting->do
+          pending<-waitRequests runtime
+          control<-case [request | ControlPrimary request<-pending] of
+            [request]->pure request
+            _->error "Expected primary configuration request"
+          assert "primary control admits its exact connection" =<< primaryControlCurrent control (Just client) (Just "private-primary")
+          bracket (ACP.startClient (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \replacement->do
+            current<-primaryControlCurrent control (Just replacement) (Just "private-primary")
+            assert "same-key replacement cannot consume old primary control" (not current)
+            _<-syncPrimary runtime project (Just replacement) "private-primary" choices False >>= right
+            stale<-agentConfigurationCurrent hub captured
+            assert "same-key replacement retires the hub control receipt" (not stale)
+          rejectPrimaryControl "Primary provider changed." control
+          assert "retired primary configuration resolves without success" . either (const True) (const False) =<< wait setting
+        _<-syncPrimary runtime project (Just client) "private-primary" choices False >>= right
+        withAsync (configureAgent hub primary "model" "large") $ \setting->do
+          pending<-waitRequests runtime
+          control<-case [request | ControlPrimary request<-pending] of
+            [request]->pure request
+            _->error "Expected cancellable primary configuration"
+          _<-cancelAgent hub Human primary >>= right
+          assert "primary cancel resolves an admitted configuration" . either (const True) (const False) =<< wait setting
+          current<-primaryControlCurrent control (Just client) (Just "private-primary")
+          assert "drained control remains retired after cancellation" (not current)
+        _<-drainAgentRequests runtime
+        pure ()
+      _<-syncPrimary runtime project Nothing "private-primary" (Capabilities True True False []) False >>= right
       noGit <- agentTool hub (Agent primary) project "agent_spawn" (object ["name" .= ("No Git default"::T.Text),"task" .= ("Independent work"::T.Text)])
       assert "omitted workspace refuses non-Git without shared fallback" (either (const True) (const False) noGit)
       assert "failed isolated default starts no editor" . null =<< readIORef opened

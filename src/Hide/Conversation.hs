@@ -833,7 +833,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
           case control of
             AR.ConfigurePrimary _ _ _ reply->void (tryPutMVar reply (Right (AH.filterPrivateCapabilities keys (AH.parseCapabilities (agentInitialized s) value))))
             _->pure ()
-          pure d {agentSettings=safeSettings,contextMenu=Nothing,status="Conversation settings updated."}
+          pure d {agentSettings=safeSettings,contextMenu=Nothing,status=if M.member "" (agentControls s) then "Updating conversation settings..." else "Conversation settings updated."}
         (Just (Steering text control),Right value,_) -> case field "outcome" value :: Maybe Text of
           Just "injected" -> do
             modifyIORef' ref (appendRecords [Reply "You" (composerMarkdown text)])
@@ -1650,7 +1650,7 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
     result<-poll worker
     pure (target,result)
   let finished=[target | (target,Just _)<-completed]
-      cancellation=[either (const "Child cancellation failed.") (either id (const "Child reply cancelled.")) result | (target,Just result)<-completed,target==conversationTarget d]
+      cancellation=[either (const "Agent cancellation failed.") (either id (const (if T.null target then "Cancellation requested." else "Child reply cancelled."))) result | (target,Just result)<-completed,target==conversationTarget d]
       original=case cancellation of text:_->controlled {status=text}; _->controlled
   modifyIORef' ref (\s->s {agentCancels=foldr M.delete (agentCancels s) finished})
   if T.null (conversationTarget original) then pure original else do
