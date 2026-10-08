@@ -5,7 +5,7 @@
 module Hide.SidebarCommands
   ( SidebarHost, SidebarContext(..), SidebarReply(..), withSidebarCommands
   , sidebarRegistry, sidebarCapabilities, publishTreeFromHost, retireTreeFromHost, sidebarEffects
-  , tickSidebar, refreshTreeFromHost, initializeSidebar, prepareSidebarFile, publishFormRefreshFromHost
+  , tickSidebar, refreshTreeFromHost, initializeSidebar, awaitFileOpening, prepareSidebarFile, publishFormRefreshFromHost
   ) where
 
 import Control.Concurrent.Async (Async,async,asyncWithUnmask,cancel,poll)
@@ -20,17 +20,18 @@ import Data.List (find,nub)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Data.Text (Text)
-import System.Directory (canonicalizePath,doesFileExist)
+import System.Directory (canonicalizePath,doesFileExist,doesDirectoryExist)
 import qualified Data.ByteString as BS
 import System.IO (withBinaryFile,IOMode(ReadMode))
-import System.FilePath ((</>),takeExtension,takeFileName,takeDirectory)
+import System.FilePath ((</>),takeExtension,takeFileName,takeDirectory,isAbsolute)
 import Data.Char (toLower)
 import System.Mem.StableName
 import Text.Read (readMaybe)
 import Hide.Browser
 import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,bufferContent,Selection(..))
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
-import Hide.Files (FileState(..),loadFile)
+import Hide.Files (FileState(..),FileRepresentation(..),loadFileForDisplay,fileBuffer)
+import Hide.Plugin.Canvas (isImageContent)
 import qualified Hide.WorkspaceRename as Rename
 import System.IO.Error (tryIOError)
 import Hide.GuestAccess (protectedPath,protectedFilePath,protectedBuffer)
@@ -53,22 +54,25 @@ import qualified Hide.Plugin.Menu as Menu
 -- | Captured host policy; extension labels and paths grant no authority.
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
-  , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int }
-data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+  , sidebarColumns :: !Int, sidebarOpenedImage :: !(Maybe (FilePath,Int,PluginWindow.WindowRef)), sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int }
+data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
+  | FileJob !Menu.MenuOrigin !(Maybe Int) !Int !(Async (Either CommandError SidebarReply)) !Bool
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
   | EditorJob !Editor.DraftSubmission !(Async (Either CommandError SidebarReply)) !Bool
+data FileRequest = FilePathRequest !Menu.MenuOrigin !FilePath | FileBytesRequest !Text !BS.ByteString
+data PendingFile = PendingFile !(Maybe Int) !Int !FileRequest
 data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.FormUpdate | TreeInvalidation !P.TreeRef !P.NodeId
-data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
+data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { imageWindowScope :: !PluginWindow.WindowScope
   , providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
   , definitions :: !(M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))
   , jobs :: ![ChildJob], waiting :: ![(TreeRequest,Menu.MenuOrigin)]
   , projection :: !(Maybe (Integer,Async (Projection,M.Map NodeKey (P.NodeDef SidebarContext SidebarReply),RecoveryProjection)))
-  , actionJob :: !(Maybe ActionJob), filesProvider :: !(Maybe FilesProvider)
+  , actionJob :: !(Maybe ActionJob), pendingFiles :: ![PendingFile], filesProvider :: !(Maybe FilesProvider)
   , badgeStamp :: !(Maybe (StableName (M.Map Int Document)))
   , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int))))
   , sidebarRevision :: !Integer, inputForm :: !(Maybe (Form.PreparedForm SidebarContext SidebarReply))
@@ -100,7 +104,7 @@ withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=PluginWindow.withWindowScope $ \scope->withRegistry $ \registry->bracket (acquire scope registry) close use
   where
     acquire scope registry=do
-      state<-newIORef (State scope M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0 Nothing M.empty)
+      state<-newIORef (State scope M.empty M.empty [] [] Nothing Nothing [] Nothing Nothing Nothing 0 Nothing M.empty)
       publications<-newTBQueueIO 32
       cancellation<-newTBQueueIO 32
       closed<-newTVarIO False
@@ -112,6 +116,7 @@ withSidebarCommands use=PluginWindow.withWindowScope $ \scope->withRegistry $ \r
       mapM_ (\(ChildJob _ _ worker _)->cancel worker) (jobs state)
       mapM_ (cancel . snd) (projection state)
       mapM_ (cancel . actionWorker) (actionJob state)
+      modifyIORef' ref (\current->current {actionJob=Nothing,pendingFiles=[]})
       mapM_ (Form.retireForm . Form.formReference) (inputForm state)
       mapM_ Editor.retireDraftRef (M.keys (editorBindings state))
       mapM_ (cancel . snd) (badgeJob state)
@@ -133,6 +138,7 @@ publishFormRefreshFromHost (SidebarHost _ _ queue _ _ closed) prepared=atomicall
   if stopped then throwSTM (userError "Sidebar host closed.") else writeTBQueue queue (FormRefresh prepared)
 actionWorker :: ActionJob -> Async (Either CommandError SidebarReply)
 actionWorker (ActionJob _ _ _ _ worker _)=worker
+actionWorker (FileJob _ _ _ worker _)=worker
 actionWorker (FormJob _ worker _)=worker
 actionWorker (EditorJob _ worker _)=worker
 -- | Withdrawal belongs to the session owner, so queued/late results cannot race
@@ -145,7 +151,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing [] (fst (pendingFileExport d))
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d))
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -156,19 +162,49 @@ addProvider provider tree=let (info,action,actions)=metadata (P.treeRoot provide
 -- its captured identity is still current; adoption performs that check. New reads
 -- recheck canonical privacy before preparing a document, never under the UI lock.
 prepareSidebarFile :: SidebarContext -> FilePath -> IO (Either CommandError SidebarReply)
-prepareSidebarFile ctx path=case sidebarOpened ctx of
+prepareSidebarFile ctx path
+  | Just (captured,wid,reference)<-sidebarOpenedImage ctx,captured==path=
+      pure (if sidebarOrigin ctx==Menu.HumanMenu then Right (SidebarExistingImage path wid reference) else Left (CommandRejected "Opening an image requires the human."))
+  | otherwise=case sidebarOpened ctx of
     Just (captured,wid,bid,version) | captured==path->pure (Right (SidebarExisting path wid bid version))
     _->do
       resolved<-canonicalizePath path
       if sidebarOrigin ctx==Menu.AgentMenu && protectedFilePath (sidebarPrivatePaths ctx) resolved
         then pure (Left (CommandRejected "Agent file target is protected.")) else do
-          result<-loadFile resolved
+          result<-loadFileForDisplay resolved
           case result of
             Left err->pure (Left (CommandRejected (T.pack err)))
-            Right (file,buffer)->do
-              _<-evaluate (prepareBuffer buffer)
-              doc<-evaluate (newDocument buffer (Just file))
-              pure (Right (SidebarDocument (filePath file) doc))
+            Right (ImageFile actual bytes)->prepareImageReply ctx (Just actual) (T.pack (takeFileName actual)) bytes
+            Right (BufferedFile file buffer)
+              | sidebarOrigin ctx==Menu.AgentMenu && protectedFilePath (sidebarPrivatePaths ctx) (filePath file)->pure (Left (CommandRejected "Agent file target is protected."))
+              | otherwise->do
+                  _<-evaluate (prepareBuffer buffer)
+                  doc<-evaluate (newDocument buffer (Just file))
+                  pure (Right (SidebarDocument (filePath file) doc))
+
+prepareImageReply :: SidebarContext -> Maybe FilePath -> Text -> BS.ByteString -> IO (Either CommandError SidebarReply)
+prepareImageReply ctx path title bytes
+  | sidebarOrigin ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Opening an image requires the human."))
+  | otherwise=do
+      let disclosure=if maybe False (protectedFilePath (sidebarPrivatePaths ctx)) path then PluginWindow.PrivateWindow else PluginWindow.ReadableWindow
+      prepared<-PluginWindow.prepareImageWindow title disclosure path bytes
+      case prepared of
+        Right image->pure (Right (SidebarImage path image))
+        Left _->do
+          let buffer=fileBuffer bytes
+          _<-evaluate (prepareBuffer buffer)
+          doc<-evaluate (restyle (newDocument buffer ((\name->FileState name (Just bytes)) <$> path)) {documentSuggestedName=if path==Nothing then Just (T.unpack title) else Nothing})
+          pure (Right (maybe (SidebarUpload doc) (\name->SidebarDocument name doc) path))
+
+prepareUpload :: SidebarContext -> Text -> BS.ByteString -> IO (Either CommandError SidebarReply)
+prepareUpload ctx name bytes
+  | BS.length bytes>16777216=pure (Left (CommandRejected "Dropped file exceeds the 16 MiB limit."))
+  | isImageContent bytes=prepareImageReply ctx Nothing name bytes
+  | otherwise=do
+      let buffer=fileBuffer bytes
+      _<-evaluate (prepareBuffer buffer)
+      doc<-evaluate (restyle (newDocument buffer Nothing) {documentSuggestedName=Just (T.unpack name)})
+      pure (Right (SidebarUpload doc))
 
 -- Files is declared through precisely the public provider/action route.
 createFiles :: SidebarHost -> FilePath -> IO FilesProvider
@@ -178,19 +214,6 @@ createFiles host root=do
   cache<-newIORef (M.singleton rootId root,M.singleton root rootId,1,M.empty)
   owner<-newIORef Nothing
   open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec prepareSidebarFile)
-  scope<-imageWindowScope <$> readState host
-  -- docs artifact: png-view, captured through this Files action by tools/docs-screenshots.hs.
-  image<-either (ioError . userError . show) pure =<< registerCommand registry
-    (CommandDef "hide.sidebar.files.png" "View PNG" codec codec (\ctx path->
-      if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Opening an image requires the human.")) else do
-        resolved<-canonicalizePath path
-        bytes<-withBinaryFile resolved ReadMode (\h->BS.hGet h (16*1024*1024+1))
-        if BS.length bytes>16*1024*1024 then pure (Left (CommandRejected "PNG exceeds the 16 MiB limit.")) else do
-          let disclosure=if protectedFilePath (sidebarPrivatePaths ctx) resolved then PluginWindow.PrivateWindow else PluginWindow.ReadableWindow
-          prepared<-PluginWindow.prepareImageWindow (T.pack (takeFileName resolved)) disclosure (Just resolved) bytes
-          case prepared of
-            Left err->pure (Left (CommandRejected err))
-            Right value->maybe (Left (CommandRejected "Image window scope closed.")) (Right . SidebarWindow) <$> PluginWindow.openWindow scope value))
   export<-either (ioError . userError . show) pure =<< registerCommand registry
     (CommandDef "hide.sidebar.files.export" "Export saved copy" codec codec (\ctx path->
       if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "File export requires the human.")) else do
@@ -257,8 +280,7 @@ createFiles host root=do
                         pure (P.NodeDef (P.NodeInfo node (T.take 256 (T.filter (>= ' ') (entryName entry))) (if entryDirectory entry then "📁" else "📄")
                           (entryDirectory entry) (Just resource))
                           (if entryDirectory entry then Nothing else Just (P.treeAction registry open resource (\_ ->pure)))
-                          ([P.ResourceMenu "Open" resource "" | not (entryDirectory entry),map toLower (takeExtension resource) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"]]++
-                           [P.ActionMenu "View PNG" (P.treeAction registry image resource (\_ value->pure value)) | not (entryDirectory entry),map toLower (takeExtension resource)==".png"]++
+                          ([P.ResourceMenu (if map toLower (takeExtension resource) `elem` [".md",".markdown"] then "Open" else "Open externally") resource "" | not (entryDirectory entry),map toLower (takeExtension resource) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"]]++
                            [P.ActionMenu "Export saved copy…" (P.treeAction registry export resource (\_ value->pure value)) | not (entryDirectory entry)]++
                            [P.ActionMenu "Rename…" (P.treeAction registry rename resource (\_ value->pure value)) | not (entryDirectory entry)]))
                       -- Cache bounded directory pages at the filesystem owner. Old
@@ -266,7 +288,7 @@ createFiles host root=do
                       atomicModifyIORef' cache $ \(a,b,c,dirs)->((M.insert ident base a,M.insert base ident b,c,M.insert base visible (if M.size dirs>=32 then M.empty else dirs)),())
                       pure (Right (P.NodePage values (if length (drop (offset+128) visible)>0 then Just (T.pack (show (offset+128))) else Nothing))))
   writeIORef owner (Just (P.treeReference provider))
-  pure (FilesProvider provider root (commandRef open) (commandRef rename) (commandRef renameTo) (commandRef export) (commandRef image) cache)
+  pure (FilesProvider provider root (commandRef open) (commandRef rename) (commandRef renameTo) (commandRef export) cache)
   where codec=Codec Null (const (Left "Files arguments are host-captured.")) (const Null)
 
 -- | Mount initial Files and prepare its first projection outside the UI boundary.
@@ -299,6 +321,24 @@ sidebarEffects host@(SidebarHost _ ref _ _ _ closed) core d effects=do
   where
     step result@(True,_) _=pure result
     step (_,current) effect=case effect of
+      OpenFile origin path->do
+        directory<-doesDirectoryExist path
+        if directory then core current [ReadPath path] else do
+          resolved<-tryIOError (canonicalizePath path)
+          case resolved of
+            Left err->pure (False,current {status="Cannot open file: "<>T.pack (show err)})
+            Right actual->(False,) <$> queueFileOpen host (FilePathRequest origin actual) current
+      OpenFileBytes name bytes->(False,) <$> queueFileOpen host (FileBytesRequest name bytes) current
+      OpenChoice origin base input pattern->do
+        let chosen=if T.null input then pattern else input
+            path=if isAbsolute (T.unpack chosen) then T.unpack chosen else base </> T.unpack chosen
+        directory<-doesDirectoryExist path
+        if directory then core current [BrowsePath path pattern]
+        else if T.any (`elem` ("*?"::String)) chosen then core current [BrowsePath (takeDirectory path) (T.pack (takeFileName path))]
+        else do
+          exists<-doesFileExist path
+          if exists then step (False,current {dialog=Nothing}) (OpenFile origin path)
+            else pure (False,browserError "File not found." current)
       SubmitEditor editor slot origin->do
         state<-readIORef ref
         if M.member (Editor.mountDraft editor) (editorBindings state) then (False,) <$> submitEditor host editor slot origin current else core current [effect]
@@ -323,7 +363,7 @@ mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
         basis=if M.null (treeNodes visible) then visible {treeEpoch=epoch,treeRevision=epoch} else visible
         tree=foldl (flip addProvider) basis live
     case filesProvider state of
-      Just (FilesProvider provider root _ _ _ _ _ _) | root==treeRoot tree->do
+      Just (FilesProvider provider root _ _ _ _ _) | root==treeRoot tree->do
         let key=NodeKey (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
             next=if M.member (P.treeReference provider) (providers state) then addProvider provider tree else tree
         if M.member key (treeNodes visible) then pure d {sideTree=Just next}
@@ -331,10 +371,10 @@ mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
       _->do
         -- This path is startup/directory selection, which already belongs to the
         -- host's file effect owner. Registration and root validation are bounded.
-        mapM_ (\(FilesProvider provider _ open rename renameTo export image _)->P.retireTree provider >> mapM_ (retireCommand (sidebarRegistry host)) [open,rename,renameTo,export,image]) (filesProvider state)
-        created@(FilesProvider provider _ _ _ _ _ _ _)<-createFiles host (treeRoot tree)
+        mapM_ (\(FilesProvider provider _ open rename renameTo export _)->P.retireTree provider >> mapM_ (retireCommand (sidebarRegistry host)) [open,rename,renameTo,export]) (filesProvider state)
+        created@(FilesProvider provider _ _ _ _ _ _)<-createFiles host (treeRoot tree)
         let owner=P.treeReference provider
-            withdrawn=maybe tree (\(FilesProvider old _ _ _ _ _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
+            withdrawn=maybe tree (\(FilesProvider old _ _ _ _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
             fresh=addProvider provider withdrawn {treeAgentRefs=[owner]}
             key=NodeKey owner (P.infoId (P.nodeInfo (P.treeRoot provider)))
             defs=M.insert key (P.treeRoot provider) (definitions state)
@@ -390,7 +430,7 @@ invokeAction (SidebarHost _ ref _ _ _ _) trace reference origin d=case (trace,si
       (Nothing,Just command) | live && allowed->do
         captured<-captureActionContext origin trace d
         files<-case filesProvider state of
-          Just (FilesProvider _ _ _ rename _ _ _ _) | origin==Menu.HumanMenu,reference==rename->Rename.captureRenameFiles d
+          Just (FilesProvider _ _ _ rename _ _ _) | origin==Menu.HumanMenu,reference==rename->Rename.captureRenameFiles d
           _->pure []
         let ctx=captured {sidebarRenameFiles=files}
         worker<-async (P.invokeTreeAction command ctx)
@@ -406,12 +446,12 @@ captureActionContext origin trace d=do
   let target=case (trace,sideTree d) of
         (hit:_,Just tree)->P.infoResource . stateInfo =<< nodeAt hit tree
         _->Nothing
-  opened<-case target >>= \path->(path,) <$> find (\(_,doc)->fmap filePath (documentFile doc)==Just path) (M.toList (buffers d)) of
+  opened<-case target >>= \path->(path,) <$> find (\(_,doc)->fmap filePath (documentFile doc)==Just path && not (maybe False isImageContent (documentFile doc >>= diskBytes))) (M.toList (buffers d)) of
     Just (path,(bid,doc)) | Just window<-find ((==Just bid) . bufferId) (windows d)->do
       version<-captureVersion (documentBuffer doc)
       pure (Just (path,windowId window,bid,version))
     _->pure Nothing
-  pure (context origin d) {sidebarOpened=opened,sidebarProvider=case trace of P.TreeHit owner _ _:_->Just owner; _->Nothing}
+  pure (context origin d) {sidebarOpened=opened,sidebarOpenedImage=target >>= capturedImage d,sidebarProvider=case trace of P.TreeHit owner _ _:_->Just owner; _->Nothing}
 
 -- Forget only moved-subtree identities/enumerations; unaffected sibling IDs
 -- remain stable. Existing provider workers refresh both parent listings.
@@ -419,7 +459,7 @@ refreshRenamedPath :: SidebarHost -> FilePath -> FilePath -> Desktop -> IO Deskt
 refreshRenamedPath host@(SidebarHost _ ref _ _ _ _) old new d=do
   state<-readIORef ref
   case filesProvider state of
-    Just (FilesProvider provider _ _ _ _ _ _ cache)->do
+    Just (FilesProvider provider _ _ _ _ _ cache)->do
       let parents=nub [takeDirectory old,takeDirectory new]
           moved path=Rename.within old path || Rename.within new path
       paths<-atomicModifyIORef' cache $ \(a,b,c,dirs)->
@@ -434,7 +474,7 @@ refreshFiles :: SidebarHost -> FilePath -> [Entry] -> Desktop -> IO Desktop
 refreshFiles host@(SidebarHost _ ref _ _ _ _) path entries d=do
   state<-readIORef ref
   case (filesProvider state,sideTree d) of
-    (Just (FilesProvider provider _ _ _ _ _ _ cache),Just tree)->do
+    (Just (FilesProvider provider _ _ _ _ _ cache),Just tree)->do
       (_,paths,_,_)<-readIORef cache
       atomicModifyIORef' cache (\(a,b,c,dirs)->((a,b,c,M.insert path entries (if M.size dirs>=32 && not (M.member path dirs) then M.empty else dirs)),()))
       case M.lookup path paths >>= \ident->let key=NodeKey (P.treeReference provider) ident in (key,) <$> M.lookup key (treeNodes tree) of
@@ -492,7 +532,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core ini
   state<-readIORef ref
   (loaded,retained)<-foldM (finishChild state) (withdrawn,[]) (jobs state)
   modifyIORef' ref (\s->s {jobs=reverse retained})
-  adopted<-finishAction host core loaded
+  adopted<-finishAction host core loaded >>= startPendingFile host
   projected<-finishProjection host adopted
   restarted<-startLoads host projected
   startProjection host restarted
@@ -501,7 +541,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core ini
     finishChild state (d,keep) job@(ChildJob request origin worker cancelled)=do
       live<-maybe (pure False) P.treeCurrent (M.lookup (owner request) (providers state))
       allowed<-if origin==Menu.HumanMenu then pure True else case filesProvider state of
-        Just (FilesProvider provider _ _ _ _ _ _ cache) | P.treeReference provider==owner request->do
+        Just (FilesProvider provider _ _ _ _ _ cache) | P.treeReference provider==owner request->do
           (paths,_,_,_)<-readIORef cache
           let P.TreeHit _ ident _=requestHit request
           pure (maybe False (not . protectedPath d) (M.lookup ident paths))
@@ -653,6 +693,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
   state<-readIORef ref
   case actionJob state of
     Nothing->pure d
+    Just (FileJob origin active serial worker cancelled)->finishFileJob host origin active serial worker cancelled d
     Just (FormJob reference worker cancelled)->finishFormJob host core d reference worker cancelled
     Just (EditorJob submitted worker cancelled)->finishEditorJob host core d submitted worker cancelled
     Just (ActionJob trace reference origin columns worker cancelled)->do
@@ -675,7 +716,10 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
         Just result->do
           modifyIORef' ref (\s->s {actionJob=Nothing})
           case result of
-            Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
+            Right (Right reply@SidebarExisting{}) | current->adoptFileReply host origin reply d
+            Right (Right reply@SidebarDocument{}) | current->adoptFileReply host origin reply d
+            Right (Right reply@SidebarExistingImage{}) | current->adoptFileReply host origin reply d
+            Right (Right reply@SidebarImage{}) | current->adoptFileReply host origin reply d
             Right (Right (SidebarExportFile epoch name bytes)) | current && origin==Menu.HumanMenu && epoch==fst (pendingFileExport d)->
               case (trace,sideTree d) of
                 (hit:_,Just tree) | Just index<-M.lookup (keyOf hit) (treeNodes tree) >>= (\node->M.lookupIndex (stateAddress node) (treeRows tree)),
@@ -707,13 +751,118 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right SidebarRename{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)
-              Right (Right (SidebarDocument path doc))
-                | origin==Menu.AgentMenu && protectedPath d path->d {status="Sidebar target is now protected."}
-                | otherwise->case find (\(_,opened)->fmap filePath (documentFile opened)==Just path) (M.toList (buffers d)) of
-                  Just (bid,_) | origin==Menu.AgentMenu && protectedBuffer d bid->d {status="Sidebar target is now private."}
-                  Just (bid,_)->maybe d (\window->leave (focusWindow (windowId window) d)) (find ((==Just bid) . bufferId) (windows d))
-                  Nothing->leave (addDocument (documentFile doc) (documentBuffer doc) d)
-  where leave opened=opened {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree opened)}
+              Right (Right SidebarDocument{})->d {status="Sidebar result expired."}
+              Right (Right SidebarExistingImage{})->d {status="Sidebar result expired."}
+              Right (Right SidebarImage{})->d {status="Sidebar result expired."}
+              Right (Right SidebarUpload{})->d {status="Dropped file has no opening request."}
+
+-- Ordinary opens share the existing single action worker. A bounded FIFO keeps
+-- drop bursts in order; only that worker's own successful openings advance the
+-- captured target of its queued siblings. Unrelated focus/modal changes expire it.
+queueFileOpen :: SidebarHost -> FileRequest -> Desktop -> IO Desktop
+queueFileOpen host@(SidebarHost _ ref _ _ _ _) request d=do
+  state<-readIORef ref
+  let pending=PendingFile (windowId <$> activeWindow d) (nextId d) request
+      bytes (PendingFile _ _ (FileBytesRequest _ value))=BS.length value
+      bytes _=0
+  if dialog d/=Nothing || questionActive d || activeAutocomplete d
+    then pure d {status="File opening is protected."}
+    else if length (pendingFiles state)>=16 || sum (map bytes (pending:pendingFiles state))>33554432
+      then pure d {status="Pending file opening budget reached."}
+      else do
+        modifyIORef' ref (\current->current {pendingFiles=pendingFiles current++[pending]})
+        startPendingFile host d
+
+startPendingFile :: SidebarHost -> Desktop -> IO Desktop
+startPendingFile host@(SidebarHost _ ref _ _ _ _) d=do
+  state<-readIORef ref
+  case (actionJob state,pendingFiles state) of
+    (Nothing,PendingFile active serial request:rest)->do
+      modifyIORef' ref (\current->current {pendingFiles=rest})
+      if active/=(windowId <$> activeWindow d) || serial/=nextId d || dialog d/=Nothing || questionActive d || activeAutocomplete d
+        then startPendingFile host d {status="Queued file opening expired."}
+        else do
+          let (origin,path)=case request of FilePathRequest who name->(who,Just name); FileBytesRequest{}->(Menu.HumanMenu,Nothing)
+          opened<-case path >>= \name->(name,) <$> find (\(_,doc)->fmap filePath (documentFile doc)==Just name && not (maybe False isImageContent (documentFile doc >>= diskBytes))) (M.toList (buffers d)) of
+            Just (name,(bid,doc)) | Just window<-find ((==Just bid).bufferId) (windows d)->do
+              version<-captureVersion (documentBuffer doc)
+              pure (Just (name,windowId window,bid,version))
+            _->pure Nothing
+          let ctx=(context origin d) {sidebarOpened=opened,sidebarOpenedImage=path >>= capturedImage d}
+          worker<-async $ case request of
+            FilePathRequest _ name->prepareSidebarFile ctx name
+            FileBytesRequest name bytes->prepareUpload ctx name bytes
+          modifyIORef' ref (\current->current {actionJob=Just (FileJob origin active serial worker False)})
+          pure d {status="Opening file…"}
+    _->pure d
+
+capturedImage :: Desktop -> FilePath -> Maybe (FilePath,Int,PluginWindow.WindowRef)
+capturedImage d path=do
+  window<-find (\w->windowImage d w/=Nothing && (windowPluginText d w >>= PluginWindow.preparedWindowSemantics >>= PluginWindow.textLinkBase)==Just path) (windows d)
+  case windowContent window of PluginContent reference->Just (path,windowId window,reference); _->Nothing
+
+-- | Complete the current ordinary file opening before startup/snapshot proceeds.
+-- Only startup calls this blocking operation, outside desktop serialization.
+-- Runtime input queues the same worker and adopts it through 'tickSidebar'.
+awaitFileOpening :: SidebarHost -> Desktop -> IO Desktop
+awaitFileOpening host d=do
+  state<-readState host
+  case actionJob state of
+    Just (FileJob origin active serial worker cancelled)->do
+      _<-Control.Concurrent.Async.waitCatch worker
+      finished<-finishFileJob host origin active serial worker cancelled d >>= startPendingFile host
+      awaitFileOpening host finished
+    _->pure d
+
+finishFileJob :: SidebarHost -> Menu.MenuOrigin -> Maybe Int -> Int -> Async (Either CommandError SidebarReply) -> Bool -> Desktop -> IO Desktop
+finishFileJob host@(SidebarHost _ ref _ cancellation _ _) origin active serial worker cancelled d=do
+  let current=not cancelled && active==(windowId <$> activeWindow d) && serial==nextId d && dialog d==Nothing && not (questionActive d || activeAutocomplete d)
+  completed<-poll worker
+  case completed of
+    Nothing | not current && not cancelled->do
+      queued<-atomically $ do full<-isFullTBQueue cancellation; if full then pure False else writeTBQueue cancellation (Cancellation worker) >> pure True
+      modifyIORef' ref (\state->state {actionJob=Just (FileJob origin active serial worker queued)})
+      pure d {status="File opening expired."}
+    Nothing->pure d
+    Just result->do
+      modifyIORef' ref (\state->state {actionJob=Nothing})
+      if not current then pure d {status="File opening expired."} else case result of
+        Left err->pure d {status="Cannot open file: "<>T.pack (displayException err)}
+        Right (Left err)->pure d {status="Cannot open file: "<>T.pack (show err)}
+        Right (Right reply)->adoptFileReply host origin reply d
+
+adoptFileReply :: SidebarHost -> Menu.MenuOrigin -> SidebarReply -> Desktop -> IO Desktop
+adoptFileReply host@(SidebarHost _ ref _ _ _ _) origin reply d=do
+  result<-case reply of
+    SidebarExisting path wid bid version->adoptExisting origin path wid bid version d
+    SidebarExistingImage path wid reference | origin==Menu.HumanMenu,Just (same,ident,owned)<-capturedImage d path,same==path,ident==wid,owned==reference->do
+      live<-PluginWindow.windowRefCurrent reference
+      pure (if live then leave (focusWindow wid d) else d {status="Existing image expired."})
+    SidebarDocument path doc
+      | origin==Menu.AgentMenu && protectedPath d path->pure d {status="File target is now protected."}
+      | otherwise->pure $ case find (\(_,opened)->fmap filePath (documentFile opened)==Just path) (M.toList (buffers d)) of
+          Just (bid,_) | origin==Menu.AgentMenu && protectedBuffer d bid->d {status="File target is now private."}
+          Just (bid,_)->maybe d (\window->leave (focusWindow (windowId window) d)) (find ((==Just bid).bufferId) (windows d))
+          Nothing->leave (addDocument (documentFile doc) (documentBuffer doc) d)
+    SidebarImage path prepared | origin==Menu.HumanMenu->case path >>= \name->find (sameImage name) (windows d) of
+      Just window->pure (leave (focusWindow (windowId window) d))
+      Nothing->do
+        scope<-imageWindowScope <$> readState host
+        request<-PluginWindow.openWindow scope prepared
+        maybe (pure d {status="Image window scope closed."}) (fmap leave . (\update->adoptWindowUpdate origin update d)) request
+    SidebarUpload doc | origin==Menu.HumanMenu->
+      let opened=addDocument Nothing (documentBuffer doc) d
+      in pure (leave opened {buffers=M.insert (nextId d) doc (buffers opened),status="Dropped file opened; Download exports changes."})
+    _->pure d {status="File opening is protected."}
+  let advance (PendingFile expected serial request)
+        | expected==(windowId <$> activeWindow d) && serial==nextId d=PendingFile (windowId <$> activeWindow result) (nextId result) request
+        | otherwise=PendingFile expected serial request
+  modifyIORef' ref (\state->state {pendingFiles=map advance (pendingFiles state)})
+  pure result
+  where
+    leave opened=opened {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree opened)}
+    sameImage path window=windowImage d window/=Nothing &&
+      (windowPluginText d window >>= PluginWindow.preparedWindowSemantics >>= PluginWindow.textLinkBase)==Just path
 
 adoptExisting :: Menu.MenuOrigin -> FilePath -> Int -> Int -> ContentVersion -> Desktop -> IO Desktop
 adoptExisting origin path wid bid version d=case (find ((==wid).windowId) (windows d),M.lookup bid (buffers d)) of

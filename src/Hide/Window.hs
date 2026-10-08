@@ -18,6 +18,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #endif
   ) where
 import Hide.Frontend
+import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import Hide.Commands (builtinCommands, builtinAction)
 import Hide.Bindings (readChord)
@@ -417,7 +418,7 @@ runWindow backend scale effects tick initial = do
           Just ev -> dispatchKey ev d
     dispatch (14:_) d = do
       path <- c_text >>= BS.packCString
-      pure (d,[ReadPath (T.unpack (TE.decodeUtf8 path))])
+      pure (d,[OpenFile PluginMenu.HumanMenu (T.unpack (TE.decodeUtf8 path))])
     dispatch (2:_) d = do
       bytes <- c_text >>= BS.packCString
       case TE.decodeUtf8' bytes of

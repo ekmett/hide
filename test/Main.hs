@@ -116,6 +116,7 @@ import Hide.Buffer
 import Hide.Syntax
 import Hide.Files (FileState(..))
 import Hide.Sidebar
+import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import qualified Graphics.Vty as V
 import qualified Data.Map.Strict as M
@@ -339,12 +340,12 @@ main = do
       chosen = browsing {dialog=fmap (\dg -> dg {focus=1,fields=[Input "Name" "*.hs" 4,FileList entries 1]}) (dialog browsing)}
   check "file browser selection is white on green" ("color:rgb(255,255,255);background:rgb(0,170,0)'> Main.hs" `T.isInfixOf` snapshotHtml chosen)
   check "file browser shows path size and local timestamp" (all (`T.isInfixOf` snapshot chosen) ["/tmp/*.hs","Main.hs","12 bytes","Oct 30, 1992 08:00"])
-  check "browser enter opens selected file" (snd (handleEvent (V.EvKey V.KEnter []) chosen) == [ReadPath "/tmp/Main.hs"])
+  check "browser enter opens selected file" (snd (handleEvent (V.EvKey V.KEnter []) chosen) == [OpenFile PluginMenu.HumanMenu "/tmp/Main.hs"])
   let naming=browsing {dialog=fmap (\dg -> dg {focus=0}) (dialog browsing)}
       erased=key (V.KChar 'u') [V.MCtrl] naming
       named=foldl (\state ch -> key (V.KChar ch) [] state) erased ("Other.hs" :: String)
       openButton=iterate (key (V.KChar '\t') []) named !! 2
-  check "keyboard Open honors typed filename" (snd (handleEvent (V.EvKey V.KEnter []) openButton) == [OpenChoice "/tmp" "Other.hs" "*.hs"])
+  check "keyboard Open honors typed filename" (snd (handleEvent (V.EvKey V.KEnter []) openButton) == [OpenChoice PluginMenu.HumanMenu "/tmp" "Other.hs" "*.hs"])
   let docked = installSidebar (emptySidebar "/tmp" 24 True) n
   check "tree reserves editor space" (all ((>=treeWidthOf docked) . left . bounds) (windows docked))
   check "closing tree returns full editor width" (map bounds (windows (fst (runCommand ToggleTree docked))) == map bounds (windows n))
