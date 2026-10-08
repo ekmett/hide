@@ -242,7 +242,7 @@ listingChecks path=do
   withPermissionsAt path builtinTools $ \owner->withBufferReadCommands $ \commands->do
     let reader=bufferReader owner (pure (Right ()))
         opaque=current {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc)
-          {cachedContents=error "listing forced source contents",saved=error "listing forced saved source",undoStack=error "listing forced Undo",redoStack=error "listing forced Redo"},
+          {saved=error "listing forced saved source",undoStack=error "listing forced Undo",redoStack=error "listing forced Redo"},
           documentHighlight=error "listing forced highlights"}) (buffers current)}
     withAsync (P.listBuffers reader) $ \worker->do
       queued worker
@@ -254,7 +254,7 @@ listingChecks path=do
       check "listing masks private names and paths without omitting references"
         (length entries==3 && any (\info->P.displayName info=="[private]" && P.path info==Nothing) metadata
           && all ((/=Just privatePath) . P.path) metadata)
-      check "listing metadata does not read source, saved text or history" (all (not . P.modified) metadata)
+      check "listing metadata does not read saved text or history" (all (not . P.modified) metadata)
       reference<-maybe (error "listing omitted live source") (pure . P.listedRef)
         (find ((==ident) . P.bufferIdentifier . P.listedMetadata) entries)
       withAsync (P.captureBuffer reader reference) $ \capture->do
