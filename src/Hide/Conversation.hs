@@ -730,7 +730,7 @@ adoptConversationBodies runtime results desktop=do
               Just retained<-conversationLogicalBody (bodyTarget key) current,
               logicalBodyIdentity retained==identity->pure (Just current {pluginWindows=M.insert (bodyWindow key) body (pluginWindows current)})
             _->do
-              update<-W.refreshTextWindow (bodyWindow key) body
+              update<-W.refreshWindow (bodyWindow key) body
               traverse (\prepared->adoptWindowUpdate Plugin.HumanMenu prepared current) update
           case admitted of
             Nothing->pure current

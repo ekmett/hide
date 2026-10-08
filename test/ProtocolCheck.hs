@@ -40,7 +40,7 @@ checks = withEditorFixture "" (initialDesktop (80,25)) $ \primary->do
         check name (either (const True) (const False) result)
   PW.withWindowScope $ \scope->do
     prepared<-PW.prepareStyledTextWindow "Script transport" [("A",ScriptStyle Superscript Plain),("界",ScriptStyle Subscript Plain),("X",Plain)]
-    Just update<-PW.openTextWindow scope prepared
+    Just update<-PW.openWindow scope prepared
     Just (reference,payload)<-PW.admitWindowUpdate False update
     ready<-prepareTextPresentations (addPluginWindow reference payload (initialDesktop (80,25)))
     decoded<-either error pure (parseRemoteFrame (object (frameMetadata "." ready)) (frameRows ready))

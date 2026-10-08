@@ -21,7 +21,7 @@ registerNotes registry menus scope before adapt=do
   case registered of
     Left err->pure (Left (MenuCommandError err))
     Right action->contributeMenu menus (MenuDef "example.notes" "help" "extensions" 10 "Plugin notes" "" False
-      (menuAction registry action (const (Right ())) (\_ prepared->maybe (fail "Window scope retired") (pure . adapt) =<< openTextWindow scope prepared)))
+      (menuAction registry action (const (Right ())) (\_ prepared->maybe (fail "Window scope retired") (pure . adapt) =<< openWindow scope prepared)))
 
 registerNotesTree :: Registry context -> WindowScope -> (WindowUpdate -> reply)
   -> IO (Either CommandError (P.TreeProvider context reply))
@@ -34,7 +34,7 @@ registerNotesTree registry scope adapt=do
       let ident=either (error . show) id (P.nodeId "notes")
           prepare _ ()=do
             prepared<-prepareTextWindow "Sidebar notes" "Typed sidebar window"
-            maybe (fail "Window scope retired") (pure . adapt) =<< openTextWindow scope prepared
+            maybe (fail "Window scope retired") (pure . adapt) =<< openWindow scope prepared
           root=P.NodeDef (P.NodeInfo ident "Plugin notes" "" False Nothing)
             (Just (P.treeAction registry action () prepare)) []
       P.registerTree registry "example.notes" root (\_ _->pure (Right (P.NodePage [] Nothing)))

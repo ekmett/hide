@@ -49,6 +49,7 @@ import Hide.BufferView
 import Hide.Files (FileState(..))
 import Hide.Model
 import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Canvas as Canvas
 import qualified Hide.Plugin.Editor as E
 
 -- Histories are never truncated to fit. A rejected checkpoint leaves the last
@@ -157,7 +158,7 @@ readCheckpoint path baseline=do
       unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")
       either (const (Left "Invalid recovery checkpoint JSON.")) Right (eitherDecodeStrict' bytes)
     install scope prepared=do
-      update<-W.openTextWindow scope prepared >>= maybe (ioError (userError "Recovery scope ended")) pure
+      update<-W.openWindow scope prepared >>= maybe (ioError (userError "Recovery scope ended")) pure
       accepted<-W.admitWindowUpdate False update >>= maybe (ioError (userError "Recovery publication expired")) pure
       W.retireWindowRef (fst accepted)
       pure accepted
@@ -592,7 +593,7 @@ windowParser documents plugins conversations=withObject "window" $ \o->do
   low<-o .: "hexLow"
   ascii<-o .: "hexAscii"
   let view=if sourceView && (toEnum viewIndex/=MarkdownView || maybe False markdownDocument (M.lookup (fromMaybe 0 bid) documents)) then toEnum viewIndex else CurrentView
-  pure (WindowSeed ident content rectangle (\owner->Window ident owner rectangle selected row column restored low ascii number view Nothing split preview Nothing Nothing Nothing))
+  pure (WindowSeed ident content rectangle (\owner->Window ident owner rectangle selected row column restored low ascii number view Nothing split preview Nothing Nothing Nothing Canvas.fitCanvasView))
 
 rectParser :: Value -> Parser Rect
 rectParser value=do

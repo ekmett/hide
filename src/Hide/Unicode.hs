@@ -6,12 +6,15 @@
 -- Clipped GPU cells retain their full semantic glyph. Text-mode partial clusters
 -- become blanks. Terminal output advances
 -- explicitly past two-cell clusters even when the user's font draws them narrowly.
-module Hide.Unicode (SourceCursor, initialSourceCursor, sourceItemStep, sourceSpanStep, sourceItemsFromCursor, sourceLeafFrom, sourceScalarColumn, DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
+module Hide.Unicode (SourceCursor, initialSourceCursor, sourceItemStep, sourceSpanStep, sourceItemsFromCursor, sourceLeafFrom, sourceScalarColumn, DisplayItem, displayItems, itemSourceText, itemScalarCount, itemDisplayText, itemOverflow, itemWidth, sourceItemAdvance, graphemes, sourceGraphemesFrom, sourceTextWidth, sourceGlyphAdvance, scalarWidth, clusterWidth, textImage, wideTextImage, displayClusters, terminalProjection, scriptTerminalText, terminalSpan, Script(..), CellSpan(..), CellLayer(..), cellRowsForLayers, cellRowsAndOwnership, cellRowsForPic, cellDisplayOps, flattenPicture, displayOpsForPic, updateDisplayOps, terminalText, textInputChar) where
 
 import Control.Monad (forM_, when)
 import Data.Char (isPrint)
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
-import Data.Word (Word64)
+import Data.Word (Word64,Word16)
+import qualified Data.ByteString as BS
+import qualified Data.Vector.Unboxed as UV
+import qualified Data.Vector.Unboxed.Mutable as UM
 import Data.IORef (readIORef, writeIORef)
 import Blaze.ByteString.Builder (Write, writeToByteString)
 import Blaze.ByteString.Builder.ByteString (writeByteString)
@@ -341,7 +344,7 @@ data Cell = Cell !V.Attr !T.Text !Int !Int | ScriptCell !V.Attr !T.Text !Int !Sc
 
 -- | Ordered opaque images and small style-only halo regions, front to back.
 -- Halo processing preserves glyph origin, identity and allocated width.
-data CellLayer = CellImage !V.Image | CellHalo !V.Attr ![(Int,Int,Int,Int)]
+data CellLayer = CellCanvas !Int ![CellLayer] | CellImage !V.Image | CellHalo !V.Attr ![(Int,Int,Int,Int)]
                | CellMask !V.Attr ![(Int,Int,Int)]
                -- Positioned row with absolute left/right clip coordinates.
                | CellRow !Int !Int !Int !Int !(Vec.Vector CellSpan)
@@ -355,7 +358,14 @@ cellRowsForPic picture=cellRowsForLayers (map CellImage (V.picLayers picture))
 -- its bounded exposed bands after occlusion. Front-to-back traversal skips
 -- writes to already occupied cells; only unfilled cells accept a halo style.
 cellRowsForLayers :: [CellLayer] -> (Int,Int) -> Vec.Vector (Vec.Vector CellSpan)
-cellRowsForLayers layers size=rowsFromCells (composeCellGrid layers size) size
+cellRowsForLayers layers size=fst (cellRowsAndOwnership layers size)
+
+-- | Compose fallback cells and canvas ownership in one front-to-back pass.
+-- Ordinary cells have slot zero; only accepted writes within CellCanvas acquire
+-- its slot. Halos set bit 15 and post-composition privacy masks clear ownership.
+cellRowsAndOwnership :: [CellLayer] -> (Int,Int) -> (Vec.Vector (Vec.Vector CellSpan),BS.ByteString)
+cellRowsAndOwnership layers size=let (cells,ownership)=composeCellGrid layers size
+  in (rowsFromCells cells size,ownership)
 
 -- Printable ASCII and box/block drawing codepoints each occupy one cell and
 -- have no internal grapheme boundary interaction; combining/variation text goes
@@ -369,19 +379,22 @@ forCells lo hi f=go lo
               | otherwise=f i >> go (i+1)
 {-# INLINE forCells #-}
 
-composeCellGrid :: [CellLayer] -> (Int,Int) -> Vec.Vector Cell
+composeCellGrid :: [CellLayer] -> (Int,Int) -> (Vec.Vector Cell,BS.ByteString)
 composeCellGrid layers (w,h)=runST $ do
   grid<-MV.replicate (w*h) (Unfilled Nothing)
-  let put at cell=do
+  owners<-UM.replicate (w*h) (0::Word16)
+  let put slot at cell=do
         original<-MV.unsafeRead grid at
         case original of
-          Unfilled paint->MV.unsafeWrite grid at (maybe cell (dim cell) paint)
+          Unfilled paint->do
+            MV.unsafeWrite grid at (maybe cell (dim cell) paint)
+            UM.unsafeWrite owners at (fromIntegral slot .|. (if slot/=0 && maybe False (const True) paint then 32768 else 0))
           _->pure ()
       dim (CharCell old c) paint=CharCell paint {V.attrStyle=V.attrStyle old} c
       dim (Cell old text width offset) paint=Cell paint {V.attrStyle=V.attrStyle old} text width offset
       dim (ScriptCell old text natural script) paint=ScriptCell paint {V.attrStyle=V.attrStyle old} text natural script
       dim cell _=cell
-  let draw (l,top,r,b) x y img=case img of
+  let draw slot (l,top,r,b) x y img=case img of
         I.HorizText a text advance _ | y>=top && y<b -> do
           let strict=TL.toStrict text
           if advance==T.length strict && T.all simpleChar strict
@@ -391,24 +404,25 @@ composeCellGrid layers (w,h)=runST $ do
                      -- count bounds the cursor; each iteration advances UTF8 bytes.
                      next !i !byte | i>=hi=pure ()
                      next !i !byte=case TU.iter visible byte of
-                       TU.Iter c n->put (y*w+i) (CharCell a c) >> next (i+1) (byte+n)
+                       TU.Iter c n->put slot (y*w+i) (CharCell a c) >> next (i+1) (byte+n)
                  in next lo 0
             else if advance==T.length strict && not (T.null strict) && T.all (==T.head strict) strict && clusterWidth (T.take 1 strict)==1
-              then let glyph=T.take 1 strict in forCells (max l x) (min r (x+advance)) $ \i->put (y*w+i) (Cell a glyph 1 0)
+              then let glyph=T.take 1 strict in forCells (max l x) (min r (x+advance)) $ \i->put slot (y*w+i) (Cell a glyph 1 0)
             else do
               let chunks=displayClusters advance strict
               forM_ (zip (scanl (+) x (map snd chunks)) chunks) $ \(cx,(t,n))->do
                 let lo=max l cx; hi=min r (cx+n)
-                forCells lo hi $ \i->put (y*w+i)
+                forCells lo hi $ \i->put slot (y*w+i)
                   (if n==1 && T.length t==1 && T.head t<'\128' then CharCell a (T.head t) else Cell a t n (i-cx))
-        I.HorizJoin left right _ _->draw (l,top,r,b) x y left >> draw (l,top,r,b) (x+V.imageWidth left) y right
-        I.VertJoin above below _ _->draw (l,top,r,b) x y above >> draw (l,top,r,b) x (y+V.imageHeight above) below
+        I.HorizJoin left right _ _->draw slot (l,top,r,b) x y left >> draw slot (l,top,r,b) (x+V.imageWidth left) y right
+        I.VertJoin above below _ _->draw slot (l,top,r,b) x y above >> draw slot (l,top,r,b) x (y+V.imageHeight above) below
         I.Crop inside dx dy cw ch->
           let clip=(max l x,max top y,min r (x+cw),min b (y+ch))
-          in when (max l x<min r (x+cw) && max top y<min b (y+ch)) (draw clip (x-dx) (y-dy) inside)
+          in when (max l x<min r (x+cw) && max top y<min b (y+ch)) (draw slot clip (x-dx) (y-dy) inside)
         _->pure ()
-  let layer (CellImage image)=draw (0,0,w,h) 0 0 image
-      layer (CellRow origin y clipLeft clipRight spans)
+  let layer slot (CellImage image)=draw slot (0,0,w,h) 0 0 image
+      layer _ (CellCanvas slot children)=mapM_ (layer slot) children
+      layer slot (CellRow origin y clipLeft clipRight spans)
         | y<0 || y>=h || max 0 clipLeft>=min w clipRight=pure ()
         | otherwise=drawRow origin 0
         where
@@ -423,23 +437,23 @@ composeCellGrid layers (w,h)=runST $ do
                       run !at !byte
                         | at>=right=pure ()
                         | otherwise=case TU.iter visible byte of
-                            TU.Iter c bytes->put (y*w+at) (CharCell paint c) >> run (at+1) (byte+bytes)
+                            TU.Iter c bytes->put slot (y*w+at) (CharCell paint c) >> run (at+1) (byte+bytes)
                   run left 0
                   drawRow (x+count) (index+1)
                 CellGlyph paint text full start shown->do
-                  forCells (max lo x) (min hi (x+shown)) $ \at->put (y*w+at) (Cell paint text full (start+at-x))
+                  forCells (max lo x) (min hi (x+shown)) $ \at->put slot (y*w+at) (Cell paint text full (start+at-x))
                   drawRow (x+shown) (index+1)
                 CellScript paint text natural script->do
-                  when (x>=lo && x<hi) (put (y*w+x) (ScriptCell paint text natural script))
+                  when (x>=lo && x<hi) (put slot (y*w+x) (ScriptCell paint text natural script))
                   drawRow (x+1) (index+1)
-      layer (CellHalo paint regions)=forM_ regions $ \(x,y,columns,rows)->
+      layer _ (CellHalo paint regions)=forM_ regions $ \(x,y,columns,rows)->
         forCells (max 0 y) (min h (y+rows)) $ \cy->
           forCells (max 0 x) (min w (x+columns)) $ \cx->do
             original<-MV.unsafeRead grid (cy*w+cx)
             case original of
               Unfilled Nothing->MV.unsafeWrite grid (cy*w+cx) (Unfilled (Just paint))
               _->pure ()
-      layer CellMask{}=pure ()
+      layer _ CellMask{}=pure ()
       mask paint regions=forM_ regions $ \(x,y,columns)->when (y>=0 && y<h) $
         forCells (max 0 x) (min w (x+columns)) $ \cx->do
           original<-MV.unsafeRead grid (y*w+cx)
@@ -448,12 +462,16 @@ composeCellGrid layers (w,h)=runST $ do
               visible<-MV.unsafeRead grid (y*w+i)
               case visible of
                 Cell _ glyph full part | glyph==text && full==width && i-part==cx-offset->
-                  MV.unsafeWrite grid (y*w+i) (CharCell paint '*')
+                  MV.unsafeWrite grid (y*w+i) (CharCell paint '*') >> UM.unsafeWrite owners (y*w+i) 0
                 _->pure ()
-            _->MV.unsafeWrite grid (y*w+cx) (CharCell paint '*')
-  mapM_ layer layers
+            _->MV.unsafeWrite grid (y*w+cx) (CharCell paint '*') >> UM.unsafeWrite owners (y*w+cx) 0
+  mapM_ (layer 0) layers
   mapM_ (uncurry mask) [(paint,regions) | CellMask paint regions<-layers]
-  Vec.unsafeFreeze grid
+  cells<-Vec.unsafeFreeze grid
+  ownership<-UV.unsafeFreeze owners
+  let bytes=fst (BS.unfoldrN (2*w*h) (\i->let value=ownership UV.! (i `div` 2)
+             in Just (fromIntegral (if even i then value .&. 255 else value `shiftR` 8),i+1)) 0)
+  pure (cells,bytes)
 
 rowsFromCells :: Vec.Vector Cell -> (Int,Int) -> Vec.Vector (Vec.Vector CellSpan)
 rowsFromCells cells (w,h)=Vec.generate h row

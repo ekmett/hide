@@ -15,10 +15,10 @@
 -- Text uses the existing measured tree internally without publishing a BufferRef,
 -- saved baseline, Undo history or editable source document.
 module Hide.Plugin.Window
-  ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openTextWindow, refreshTextWindow
+  ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openWindow, refreshWindow
   , updateWindowRef, admitWindowUpdate, windowRefCurrent, windowScopeCurrent, retireWindowRef
   , EditorWindowUpdate, openEditorWindow, editorWindowBody, editorWindowEditor, admitEditorWindowUpdate
-  , PreparedWindow, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareStyledRowsWindow, prepareSemanticTextWindow, prepareSemanticRowsWindow, prepareRecoverableTextWindow
+  , PreparedWindow, prepareImageWindow, preparedWindowImage, retirePreparedImage, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareStyledRowsWindow, prepareSemanticTextWindow, prepareSemanticRowsWindow, prepareRecoverableTextWindow
   , WindowDisclosure(..), TextCopy(..), MessageAttribution(..), TextSemantics(..), preparedWindowSemantics, preparedWindowDisclosure, preparedWindowMessages, copyPreparedSelection
   , WindowRow(..), prepareRowsWindow, prepareRecoverableRowsWindow
   , WindowRows(..), preparedWindowTitle, preparedWindowText, preparedWindowRows, preparedWindowWidth, preparedWindowHasSections, preparedWindowNeedsLayout, preparedWindowRecovery
@@ -28,6 +28,8 @@ import Control.Exception (evaluate, bracket)
 import Control.Concurrent.STM
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.ByteString as BS
+import Hide.Plugin.Canvas (PreparedImage, preparePNG, imageWidth, imageHeight)
 import Data.Unique (Unique, newUnique, hashUnique)
 import qualified Data.Vector as V
 import qualified Data.Map.Strict as M
@@ -78,45 +80,45 @@ data TextSemantics = TextSemantics
   , textRecoveryHidden :: !(V.Vector (Int,Int))
   }
 
-data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !WindowRows !Int !(Maybe (Text,Int)) !Bool !Bool !(Maybe (TextSemantics,V.Vector (Int,Int,Int,Bool)))
+data PreparedWindow = PreparedWindow !Unique !Text !BufferContent !WindowRows !Int !(Maybe (Text,Int)) !Bool !Bool !(Maybe (TextSemantics,V.Vector (Int,Int,Int,Bool))) !(Maybe PreparedImage)
 preparedWindowRef :: PreparedWindow -> Unique
-preparedWindowRef (PreparedWindow ident _ _ _ _ _ _ _ _)=ident
+preparedWindowRef (PreparedWindow ident _ _ _ _ _ _ _ _ _)=ident
 preparedWindowTitle :: PreparedWindow -> Text
-preparedWindowTitle (PreparedWindow _ title _ _ _ _ _ _ _)=title
+preparedWindowTitle (PreparedWindow _ title _ _ _ _ _ _ _ _)=title
 preparedWindowText :: PreparedWindow -> BufferContent
-preparedWindowText (PreparedWindow _ _ text _ _ _ _ _ _)=text
+preparedWindowText (PreparedWindow _ _ text _ _ _ _ _ _ _)=text
 preparedWindowRows :: PreparedWindow -> WindowRows
-preparedWindowRows (PreparedWindow _ _ _ rows _ _ _ _ _)=rows
+preparedWindowRows (PreparedWindow _ _ _ rows _ _ _ _ _ _)=rows
 
 -- | Worker-cached natural cell extent; querying it never scans content. Semantic
 -- heading/script layouts override this extent with their own prepared width.
 preparedWindowWidth :: PreparedWindow -> Int
-preparedWindowWidth (PreparedWindow _ _ _ _ width _ _ _ _)=width
+preparedWindowWidth (PreparedWindow _ _ _ _ width _ _ _ _ _)=width
 
 -- | Cached heading presence, forced during preparation; input never scans rows.
 preparedWindowHasSections :: PreparedWindow -> Bool
-preparedWindowHasSections (PreparedWindow _ _ _ _ _ _ sections _ _)=sections
+preparedWindowHasSections (PreparedWindow _ _ _ _ _ _ sections _ _ _)=sections
 
 -- | Cached semantic layout admission, forced by the preparation worker. Input
 -- observes only these scalar flags; it never scans styled rows. Script geometry
 -- is independent of the wide-heading preference.
 preparedWindowNeedsLayout :: Bool -> PreparedWindow -> Bool
-preparedWindowNeedsLayout wide (PreparedWindow _ _ _ _ _ _ sections scripts _)=scripts || wide && sections
+preparedWindowNeedsLayout wide (PreparedWindow _ _ _ _ _ _ sections scripts _ _)=scripts || wide && sections
 
 -- | Explicit durable type/version. Ordinary prepared views are transient: their
 -- text is never checkpointed implicitly. The host restores durable text as an
 -- inert unavailable view; it does not invoke a plugin from the recovery parser.
 preparedWindowRecovery :: PreparedWindow -> Maybe (Text,Int)
-preparedWindowRecovery (PreparedWindow _ _ _ _ _ recovery _ _ _)=recovery
+preparedWindowRecovery (PreparedWindow _ _ _ _ _ recovery _ _ _ _)=recovery
 
 -- | /O(1)/. Absent metadata retains ordinary private text/copy behavior.
 preparedWindowSemantics :: PreparedWindow -> Maybe TextSemantics
-preparedWindowSemantics (PreparedWindow _ _ _ _ _ _ _ _ semantics)=fst <$> semantics
+preparedWindowSemantics (PreparedWindow _ _ _ _ _ _ _ _ semantics _)=fst <$> semantics
 
 -- | /O(1)/. Cached passive message intervals include the original styled
 -- newline decisions. StyledRows alone intentionally excludes newline furniture.
 preparedWindowMessages :: PreparedWindow -> V.Vector (Int,Int,Int,Bool)
-preparedWindowMessages (PreparedWindow _ _ _ _ _ _ _ _ semantics)=maybe V.empty snd semantics
+preparedWindowMessages (PreparedWindow _ _ _ _ _ _ _ _ semantics _)=maybe V.empty snd semantics
 
 -- | Copy in the same logical scalar space as selection. Message copy excludes
 -- furniture, preserving decorated newlines and optional multi-message attribution.
@@ -155,6 +157,34 @@ messageIntervals rows=V.fromList (reverse (foldl' merge [] (reverse pieces)))
 preparedWindowDisclosure :: PreparedWindow -> WindowDisclosure
 preparedWindowDisclosure=maybe PrivateWindow textDisclosure . preparedWindowSemantics
 
+-- | Worker-only bounded PNG preparation. The returned window is read-only,
+-- transient and independently disclosed; opening it uses the existing scoped
+-- publication operation. Decode work never runs during adoption or rendering.
+prepareImageWindow :: Text -> WindowDisclosure -> Maybe FilePath -> BS.ByteString -> IO (Either Text PreparedWindow)
+prepareImageWindow title disclosure origin png=do
+  decoded<-preparePNG png
+  case decoded of
+    Left err->pure (Left err)
+    Right image->do
+      let prefix=safeTitle title<>"\nPNG "<>T.pack (show (imageWidth image))<>" × "<>T.pack (show (imageHeight image))<>
+            "\nF: Fit   1: 100%   +/− or wheel: zoom\nArrows or drag: pan\n"
+          fallback=prefix<>"Open externally"
+          links=case origin of Nothing->V.empty; Just _->V.singleton (T.length prefix,T.length fallback,"")
+      PreparedWindow ident caption text rows width recovery sections scripts _ _<-prepareTextWindow title fallback
+      let semantics=TextSemantics CopyText origin links V.empty disclosure V.empty V.empty V.empty
+      pure (Right (PreparedWindow ident caption text rows width recovery sections scripts (Just (semantics,V.empty)) (Just image)))
+
+-- | O(1). The immutable resource, absent for text or retired image windows.
+preparedWindowImage :: PreparedWindow -> Maybe PreparedImage
+preparedWindowImage (PreparedWindow _ _ _ _ _ _ _ _ _ image)=image
+
+-- | O(1). Drop image bytes while preserving the inert text snapshot and identity.
+-- Retirement cannot resurrect this resource through a stale refresh.
+retirePreparedImage :: PreparedWindow -> PreparedWindow
+retirePreparedImage prepared | Nothing<-preparedWindowImage prepared=prepared
+retirePreparedImage (PreparedWindow ident title text rows width recovery sections scripts semantics _)=
+  PreparedWindow ident title text rows width recovery sections scripts semantics Nothing
+
 -- | Prepare styled text and validate every semantic interval on its worker.
 -- @0 <= start <= end <= contentLength preparedWindowText@ holds for every
 -- returned range. Strings and vectors are forced here; adoption only reads refs.
@@ -166,7 +196,7 @@ prepareSemanticTextWindow title styled=prepareSemanticRowsWindow title (styledRo
 -- retained styled newline decisions.
 prepareSemanticRowsWindow :: Text -> [StyledRow] -> TextSemantics -> IO (Either Text PreparedWindow)
 prepareSemanticRowsWindow title styled semantics=do
-  PreparedWindow ident caption text rows width recovery sections scripts _<-prepareStyledRowsWindow title styled
+  PreparedWindow ident caption text rows width recovery sections scripts _ _<-prepareStyledRowsWindow title styled
   let valid (a,z)=a>=0 && a<=z && z<=contentLength text
       ranges=V.map (\(a,z,_)->(a,z)) (textLinks semantics) V.++
         V.map (\(a,z,_,_)->(a,z)) (textShellBlocks semantics) V.++
@@ -182,7 +212,7 @@ prepareSemanticRowsWindow title styled semantics=do
         messages=case textCopy semantics of CopyText->V.empty; CopyMessages{}->messageIntervals styled
     _<-evaluate eligible
     _<-evaluate (V.foldl' (\n (a,z,message,outgoing)->outgoing `seq` n+a+z+message) 0 messages)
-    result<-evaluate (PreparedWindow ident caption text rows width recovery sections scripts (Just (eligible,messages)))
+    result<-evaluate (PreparedWindow ident caption text rows width recovery sections scripts (Just (eligible,messages)) Nothing)
     pure (Right result)
 
 -- | Prepare text whose title and content may be written to private recovery.
@@ -192,8 +222,8 @@ prepareRecoverableTextWindow :: Text -> Int -> Text -> Text -> IO (Either Text P
 prepareRecoverableTextWindow kind version title text
   | not (validCommandName kind) || T.length kind>128 || version<=0=pure (Left "Invalid durable plugin window type/version.")
   | otherwise=do
-      PreparedWindow ident caption measured rows width _ sections scripts semantics<-prepareTextWindow title text
-      pure (Right (PreparedWindow ident caption measured rows width (Just (kind,version)) sections scripts semantics))
+      PreparedWindow ident caption measured rows width _ sections scripts semantics _<-prepareTextWindow title text
+      pure (Right (PreparedWindow ident caption measured rows width (Just (kind,version)) sections scripts semantics Nothing))
 
 -- | Prepare a fixed selectable list above one readonly Details pane on a worker.
 -- Refresh preserves the selected ID if present; host geometry, draft selection
@@ -208,6 +238,7 @@ prepareRowsWindow :: Text -> [MenuRef] -> [WindowRow] -> IO (Either Text Prepare
 prepareRowsWindow title references entries
   | length (take 17 references)>16 || length (nub references)/=length references=pure (Left "Window rows require at most 16 unique menu references.")
   | length (take 65 entries)>64=pure (Left "Too many window rows.")
+  | any (\(WindowRow _ _ detail)->preparedWindowImage detail/=Nothing) entries=pure (Left "Image windows cannot be row details.")
   | otherwise=case validate entries M.empty 0 of
       Left err->pure (Left err)
       Right index->do
@@ -216,9 +247,9 @@ prepareRowsWindow title references entries
         mapM_ evaluate references
         let rows=V.fromList entries
         _<-evaluate (V.foldl' (\n (WindowRow ident caption detail)->ident `seq` detail `seq` n+T.length caption) 0 rows)
-        PreparedWindow ident caption text _ width recovery sections scripts semantics<-prepareTextWindow title
+        PreparedWindow ident caption text _ width recovery sections scripts semantics _<-prepareTextWindow title
           (T.intercalate "\n" [label | WindowRow _ label _<-entries])
-        pure (Right (PreparedWindow ident caption text (RowsDetails rows index references) width recovery sections scripts semantics))
+        pure (Right (PreparedWindow ident caption text (RowsDetails rows index references) width recovery sections scripts semantics Nothing))
   where
     validate [] index _=Right index
     validate (WindowRow ident caption detail:rest) index n
@@ -237,8 +268,8 @@ prepareRecoverableRowsWindow kind version title references entries
       result<-prepareRowsWindow title references entries
       pure $ case result of
         Left err->Left err
-        Right (PreparedWindow ident caption text rows width _ sections scripts semantics)->
-          Right (PreparedWindow ident caption text rows width (Just (kind,version)) sections scripts semantics)
+        Right (PreparedWindow ident caption text rows width _ sections scripts semantics _)->
+          Right (PreparedWindow ident caption text rows width (Just (kind,version)) sections scripts semantics Nothing)
 
 instance Eq PreparedWindow where
   a==b=preparedWindowRef a==preparedWindowRef b
@@ -257,7 +288,7 @@ prepareTextWindow title text=do
         in count `seq` max longest (sourceTextWidth (sourceRowText row))) 0 rows
   _<-evaluate width
   _<-evaluate (prepareBuffer measured)
-  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (PlainRows rows) width Nothing False False Nothing)
+  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (PlainRows rows) width Nothing False False Nothing Nothing)
 
 -- | Prepare CommonMark at a requested cell width on the calling worker.
 -- Copy addresses the laid-out semantic text, excluding host chrome.
@@ -290,7 +321,7 @@ prepareStyledRowsWindow title styled=do
   _<-evaluate (V.foldl' (\n (StyledRow sigils newline _)->n+sigilsLength sigils+maybe 0 (\style->style `seq` 1) newline) 0 rows)
   _<-evaluate (prepareBuffer measured)
   _<-evaluate width
-  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (metadata sectionTitle) (metadata styleLayoutMetadata) Nothing)
+  evaluate (PreparedWindow ident (safeTitle title) (bufferContent measured) (StyledRows rows) width Nothing (metadata sectionTitle) (metadata styleLayoutMetadata) Nothing Nothing)
 
 safeTitle :: Text -> Text
 safeTitle=T.take 8192 . T.map (\c->if c<' ' || c=='\DEL' then ' ' else c)
@@ -309,8 +340,8 @@ updateWindowRef (WindowUpdate reference _ _ _)=reference
 
 -- | Create an exact pending instance in a live publication scope. Reusing the
 -- same prepared text creates independent instances; a duplicated reply does not.
-openTextWindow :: WindowScope -> PreparedWindow -> IO (Maybe WindowUpdate)
-openTextWindow scope@(WindowScope live) prepared=do
+openWindow :: WindowScope -> PreparedWindow -> IO (Maybe WindowUpdate)
+openWindow scope@(WindowScope live) prepared=do
   current<-readTVarIO live
   if not current then pure Nothing else do
     reference<-WindowRef <$> newUnique <*> pure scope <*> pure (preparedWindowDisclosure prepared) <*> newTVarIO (1,False)
@@ -319,8 +350,8 @@ openTextWindow scope@(WindowScope live) prepared=do
 -- | Prepare a complete refresh for an exact adopted instance. Issuing a later
 -- revision invalidates older queued publications. Host geometry and selection
 -- are retained; refresh never opens a missing or closed window.
-refreshTextWindow :: WindowRef -> PreparedWindow -> IO (Maybe WindowUpdate)
-refreshTextWindow reference@(WindowRef _ (WindowScope scope) disclosure state) prepared=atomically $ do
+refreshWindow :: WindowRef -> PreparedWindow -> IO (Maybe WindowUpdate)
+refreshWindow reference@(WindowRef _ (WindowScope scope) disclosure state) prepared=atomically $ do
   live<-readTVar scope
   (revision,opened)<-readTVar state
   if not live || revision<=0 || not opened || preparedWindowDisclosure prepared/=disclosure then pure Nothing else do
@@ -367,7 +398,8 @@ data EditorWindowUpdate c r = EditorWindowUpdate !WindowUpdate !(E.PreparedEdito
 -- mount is consumed only during joint host adoption, never while constructing a
 -- reply. Publishing the same pair twice cannot create two editable frames.
 openEditorWindow :: WindowScope -> PreparedWindow -> E.PreparedEditor c r -> IO (Maybe (EditorWindowUpdate c r))
-openEditorWindow scope body editor=fmap (`EditorWindowUpdate` editor) <$> openTextWindow scope body
+openEditorWindow _ body _ | preparedWindowImage body/=Nothing=pure Nothing
+openEditorWindow scope body editor=fmap (`EditorWindowUpdate` editor) <$> openWindow scope body
 
 -- | /O(1)/. Readonly publication paired to this exact attachment.
 editorWindowBody :: EditorWindowUpdate c r -> WindowUpdate

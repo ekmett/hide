@@ -8,7 +8,7 @@
 -- The redraw gate is a separate explicit metadata projection. Immutable payloads
 -- are compared by stable identity, including hidden documents needed by native
 -- menus; adding a model field must not silently introduce a text/history scan.
-module Hide.Render (renderDesktop, renderCellRows, renderCursor, snapshot, snapshotHtml, RenderKey, renderKey) where
+module Hide.Render (renderDesktop, renderCellRows, renderCellRowsAndCanvas, renderCursor, snapshot, snapshotHtml, RenderKey, renderKey) where
 
 import Control.Exception (evaluate)
 import Hide.ConversationBody (QuestionProjection(..),logicalBodyIdentity)
@@ -19,7 +19,7 @@ import Data.List (find, group, groupBy, sort)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Image.Internal as I
 import qualified Hide.TextLayout as TextLayout
-import Hide.Unicode (Script(..),scriptTerminalText,scalarWidth,CellSpan(..),CellLayer(..),cellRowsForLayers,cellDisplayOps)
+import Hide.Unicode (Script(..),scriptTerminalText,scalarWidth,CellSpan(..),CellLayer(..),cellRowsForLayers,cellRowsAndOwnership,cellDisplayOps)
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Data.Text as T
 import Data.Text (Text)
@@ -42,6 +42,8 @@ import qualified Hide.Plugin.Editor as Editor
 import Hide.Sidebar
 import qualified Hide.Plugin.Tree as Tree
 import qualified Hide.Plugin.Window as PluginWindow
+import Hide.Plugin.Canvas
+import Hide.Frontend (modeHeight)
 import Hide.Model
 import Hide.InlineState
 import Hide.InlineTypes (proposalEnd)
@@ -331,14 +333,44 @@ renderDesktop d = (V.picForImage (V.vertCat (map (V.horizCat . map image . Vec.t
 -- | The one composed visible grid consumed by GPU and frame transports. Shadows
 -- update tile colors in place; no text/image reconstruction or payload equality.
 renderCellRows :: Desktop -> Vec.Vector (Vec.Vector CellSpan)
-renderCellRows d=cellRowsForLayers (fst (renderScene d)) (screenSize d)
+renderCellRows=fst . renderCellRowsAndCanvas
+
+-- | Cells and image ownership share one composition. Only audience-permitted,
+-- live window resources enter the returned scene; occluded windows keep their
+-- resource identity while owning no cells. No pixel payload is traversed here.
+renderCellRowsAndCanvas :: Desktop -> (Vec.Vector (Vec.Vector CellSpan),CanvasScene)
+renderCellRowsAndCanvas d=
+  let surfaces=desktopCanvases d
+      (cells,mask)=cellRowsAndOwnership (fst (renderSceneWith surfaces d)) (screenSize d)
+  in (cells,CanvasScene surfaces mask)
+
+-- Bounded by admission (64 image windows). The clipped viewport is also the
+-- semantic rectangle; the target retains the original uncut host transform.
+desktopCanvases :: Desktop -> [CanvasSurface]
+desktopCanvases d=zipWith surface [1..64] eligible
+  where
+    (columns,rows)=screenSize d
+    eligible=[(w,image,prepared,viewport,clipped) | w<-windows d,windowVisible d w,
+      Just image<-[windowImage d w],Just prepared<-[windowPluginText d w],
+      not (streamerMode d) || not (privatePreparedWindow d prepared),
+      let Rect x y width height=pluginTextRect d w; viewport=(x,y,width,height)
+          left=max 0 x; top=max 0 y; right=min columns (x+width); bottom=min rows (y+height)
+          clipped=(left,top,right-left,bottom-top),right>left,bottom>top]
+    surface slot (w,image,prepared,viewport,clipped)=CanvasSurface (windowId w) slot image clipped
+      (canvasImageTarget (modeHeight (fromMaybe 3 (videoMode d))) viewport (imageViewport w) image)
+      (T.take 256 (PluginWindow.preparedWindowTitle prepared))
+      ("PNG "<>T.pack (show (imageWidth image))<>" × "<>T.pack (show (imageHeight image))<>
+       ". F: fit; 1: actual size; plus/minus or wheel: zoom; arrows or drag: pan.")
 
 -- | Cursor from the same scene, without projecting its cell grid into an image.
 renderCursor :: Desktop -> V.Cursor
 renderCursor=snd . renderScene
 
 renderScene :: Desktop -> ([CellLayer],V.Cursor)
-renderScene d=(privacyLayers++layers,visibleCursor)
+renderScene=renderSceneWith []
+
+renderSceneWith :: [CanvasSurface] -> Desktop -> ([CellLayer],V.Cursor)
+renderSceneWith canvases d=(privacyLayers++layers,visibleCursor)
   where
     (sw,sh)=screenSize d
     privacyLayers
@@ -351,9 +383,10 @@ renderScene d=(privacyLayers++layers,visibleCursor)
           (hidden,tailCells)=span not rest
           start=x+length shown
       in [(start,length hidden) | not (null hidden)]++hiddenRuns (start+length hidden) tailCells
-    visibleCursor=case cursor of
-      V.Cursor x y | streamerMode d && not (streamerReadableAt d x y) -> V.NoCursor
-      _ -> cursor
+    visibleCursor | maybe False (\w->maybe False (const True) (windowImage d w) && windowFocused d w) (activeWindow d)=V.NoCursor
+                  | otherwise=case cursor of
+                    V.Cursor x y | streamerMode d && not (streamerReadableAt d x y) -> V.NoCursor
+                    _ -> cursor
     layers = case dialog d of
       Nothing -> withMenu
       Just dg -> images (dialogLayers d dg) ++ halo (dialogRect d dg) ++ withMenu
@@ -366,10 +399,10 @@ renderScene d=(privacyLayers++layers,visibleCursor)
     images=map CellImage
     halo (Rect x y w h)=[CellHalo shadow [(x+w,y+1,2,max 0 (h-1)),(x+2,y+h,w,1)]]
     base = images [place 0 0 menuBar, place 0 (sh-1) statusBar]
-      ++ bottomLayers d
+      ++ bottomLayers canvases d
       ++ images (maybe [] (treeLayers d) (sideTree d))
       ++ foldr stackWindow (images [V.charFill (attr blue gray) '░' sw sh]) (floatingWindows d)
-    stackWindow w below = windowLayers d (windowFocused d w) w ++
+    stackWindow w below = windowLayers canvases d (windowFocused d w) w ++
       (if fmap windowId (activeWindow d)==Just (windowId w) && dialog d==Nothing && contextMenu d==Nothing && menu d==Nothing then halo (bounds w) else []) ++ below
     menuBar = V.cropRight sw (V.char paper ' ' V.<|> V.horizCat
       [V.char normal ' ' V.<|> label (attr red bg) (T.take 1 title) V.<|> label normal (T.drop 1 title<>" ")
@@ -473,12 +506,16 @@ composerLayers d active w
       | n<-[sr..sr+height rect-1],let (marker,line)=draftLine n,
         let fill=if marker>0 then attr yellow (if darkAppearance d then black else blue) else attr black scrollCyan]
 
-pluginWindowLayers :: Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [CellLayer]
-pluginWindowLayers d active w prepared=
-  map CellImage (questionLayers d w++composerLayers d active w)++bodyLayers++map CellImage ((if active then positionBadge++[windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
+pluginWindowLayers :: Maybe CanvasSurface -> Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [CellLayer]
+pluginWindowLayers canvas d active w prepared=
+  map CellImage (questionLayers d w++composerLayers d active w)++imageBody++map CellImage ((if active then positionBadge++[windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
     ++(place (x+column) y (label frame title):hostWindowFrame d active w frame)
     ++[place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2)))])
   where
+    imageBody=case canvas of
+      Nothing->bodyLayers
+      Just surface->let Rect cx cy cw ch=pluginTextRect d w
+        in [CellCanvas (canvasSlot surface) (bodyLayers++[CellImage (place cx cy (V.charFill edit ' ' cw ch))])]
     Rect x y ww hh=bounds w
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
     frame=attr (if moving then cyan else if active then white else gray) blue
@@ -537,11 +574,11 @@ windowScrollbarImage d vertical w=case windowScrollbar d vertical w of
           (if n==0 then if vertical then '▲' else '◄' else if n==len-1 then if vertical then '▼' else '►' else if n==thumb then '█' else '░')
     in place sx sy ((if vertical then V.vertCat else V.horizCat) [cell n | n<-[0..len-1]])
 
-windowLayers :: Desktop -> Bool -> Window -> [CellLayer]
-windowLayers d active w | PluginContent reference<-windowContent w = case M.lookup reference (pluginWindows d) of
+windowLayers :: [CanvasSurface] -> Desktop -> Bool -> Window -> [CellLayer]
+windowLayers canvases d active w | PluginContent reference<-windowContent w = case M.lookup reference (pluginWindows d) of
   Nothing->[]
-  Just prepared->pluginWindowLayers d active w prepared
-windowLayers d active original =
+  Just prepared->pluginWindowLayers (find ((==windowId w).canvasId) canvases) d active w prepared
+windowLayers _ d active original =
   map CellImage ([place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
     | bufferView w/=MarkdownView,not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
   ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
@@ -996,8 +1033,8 @@ menuRow w a hot name key = V.cropRight w $
     shownName=V.cropRight (max 0 (w-3-V.imageWidth shownKey)) name
     gap=max 1 (w-2-V.imageWidth shownName-V.imageWidth shownKey)
 
-bottomLayers :: Desktop -> [CellLayer]
-bottomLayers d
+bottomLayers :: [CanvasSurface] -> Desktop -> [CellLayer]
+bottomLayers canvases d
   | not (bottomVisible d) || height r<2 = []
   | M.null (dockedTerminals d) = map CellImage (problemsLayers d)
   | otherwise = map CellImage (tabs++controls++[place 0 y (label frame (cornerLeft<>T.replicate (max 0 (width r-2)) horizontal<>cornerRight))])++content
@@ -1014,7 +1051,7 @@ bottomLayers d
                  place (width r-5) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) "x" V.<|> label frame "]")]
       Nothing -> [place (width r-5) y (label frame "[" V.<|> label (attr cyan blue) "↓" V.<|> label frame "]")]
     content=case pane of
-      Just w -> windowLayers d focused w
+      Just w -> windowLayers canvases d focused w
       Nothing -> map CellImage (problemsLayers d)
 
 problemsLayers :: Desktop -> [V.Image]

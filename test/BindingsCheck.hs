@@ -328,7 +328,7 @@ horizontalChecks=do
   check "delete line is unavailable in hex" (not (commandEnabled hex DeleteLine) && activeText (fst (runCommand DeleteLine hex))==activeText hex)
   W.withWindowScope $ \scope->do
     prepared<-W.prepareTextWindow "Horizontal notes" "a界e\x301\&z"
-    update<-W.openTextWindow scope prepared >>= maybe (fail "plugin open failed") pure
+    update<-W.openWindow scope prepared >>= maybe (fail "plugin open failed") pure
     opened<-adoptWindowUpdate P.HumanMenu update base
     let plugin=modifyActive (\w->w {selection=Selection 2 2}) opened {keyBindings=viewMaps}
     check "plugin unbinding consumes physical horizontal fallback" (range (event V.KLeft [] plugin)==Just (Selection 2 2) && range (event V.KLeft [V.MShift] plugin)==Just (Selection 2 2))
@@ -376,7 +376,7 @@ verticalChecks=do
   check "vertical remaps keep modal private sidebar and Messages owners" (range (event (V.KChar 'j') [V.MCtrl,V.MShift] modal)==range modal && not (guestKeyAllowed private (V.KChar 'j') [V.MCtrl,V.MShift]) && all (\d->not (commandEnabled d (CursorUp False)) && range (fst (runCommand (CursorDown False) d))==range d) [sidebar,messages])
   W.withWindowScope $ \scope->do
     prepared<-W.prepareTextWindow "Vertical notes" "ab界e\x301\&z\nx\nab界e\x301\&z"
-    update<-W.openTextWindow scope prepared >>= maybe (fail "plugin open failed") pure
+    update<-W.openWindow scope prepared >>= maybe (fail "plugin open failed") pure
     opened<-adoptWindowUpdate P.HumanMenu update base
     let plugin=modifyActive (\w->w {selection=Selection 8 8}) opened {keyBindings=sourceMaps}
     check "plugin vertical remap and unbind use only prepared text" (range (event V.KUp [] plugin)==range plugin && range (event V.KUp [V.MShift] plugin)==range plugin && range (event (V.KChar 'j') [V.MCtrl,V.MShift] plugin)==Just (Selection 10 10) && activeText (event (V.KChar 'j') [V.MCtrl,V.MShift] plugin)==activeText plugin)
@@ -427,7 +427,7 @@ edgePageChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chat
   check "hex remapped page keeps measured byte-row stride" (range (event (V.KFun 23) [] hex)==Just (Selection (17+9*count) (17+9*count)))
   W.withWindowScope $ \scope->do
     prepared<-W.prepareTextWindow "Edge notes" text
-    update<-W.openTextWindow scope prepared >>= maybe (fail "plugin edge open failed") pure
+    update<-W.openWindow scope prepared >>= maybe (fail "plugin edge open failed") pure
     opened<-adoptWindowUpdate P.HumanMenu update base
     let plugin=modifyActive (\w->w {selection=Selection (pos+4) pos}) (narrow opened) {keyBindings=maps}
         pluginUnbound=plugin {keyBindings=keyBindings unbound}
@@ -513,7 +513,7 @@ wordChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBase
   check "word deletion retains readonly source authority" (not (commandEnabled readonly DeleteWordForward) && state (event (V.KFun 18) [] readonly)==state readonly)
   W.withWindowScope $ \scope->do
     prepared<-W.prepareTextWindow "Word notes" text
-    update<-W.openTextWindow scope prepared >>= maybe (fail "plugin word open failed") pure
+    update<-W.openWindow scope prepared >>= maybe (fail "plugin word open failed") pure
     opened<-adoptWindowUpdate P.HumanMenu update base
     let plugin=modifyActive (\w->w {selection=Selection 7 7}) opened {keyBindings=maps}
     check "plugin word route preserves its complete-grapheme step" (range (event (V.KFun 13) [] plugin)==Just (Selection 6 6) && not (commandEnabled plugin DeleteWordBackward))

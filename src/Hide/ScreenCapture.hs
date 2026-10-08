@@ -28,7 +28,8 @@ import Hide.Commands (commandIdentifier)
 import Hide.Model (Desktop(..), MenuItem(..), menus, commandEnabled)
 import Hide.GuestAccess (CellAccess(..), cellAccess, guestKeyboardAllowed, beginGuestInput, guestKeyCombinations)
 import qualified Hide.Protocol as P
-import Hide.Render (renderCursor, renderCellRows)
+import Hide.Render (renderCursor, renderCellRowsAndCanvas)
+import Hide.Plugin.Canvas
 import Hide.Unicode (CellSpan(..), Script(..), clusterWidth, terminalProjection, scriptTerminalText)
 
 screenTool :: Value
@@ -61,7 +62,8 @@ capture font desktop includeImage
     (cols,rows)=screenSize desktop
     cellHeight=modeHeight (fromMaybe 3 (videoMode desktop))
     position=renderCursor desktop {streamerMode=True}
-    spans=map toList (toList (renderCellRows desktop {streamerMode=True}))
+    (composed,canvas)=renderCellRowsAndCanvas desktop {streamerMode=True}
+    spans=map toList (toList composed)
     maskedRows=[maskRow y line | (y,line)<-zip [0..] spans]
     maskRow y line=snd (mapAccumL (maskCluster y) 0 padded)
       where
@@ -104,6 +106,9 @@ capture font desktop includeImage
       "keyPermissions" .= keys,
       "commandPermissions" .= commands,
       "semanticSidebar" .= sidebarSemantics GuestSemantics desktop,
+      "semanticCanvas" .= [object ["id" .= canvasId surface,"role" .= ("image"::Text),
+        "name" .= canvasName surface,"description" .= canvasDescription surface,"bounds" .= canvasRect surface]
+        | surface<-canvasSurfaces canvas],
       "redactedCells" .= Vec.length (Vec.filter (not . cellReadable) accessGrid),
       "redaction" .= ("Unreadable graphemes become spaces and solid black pixels; whole wide graphemes are hidden if any covered cell is private. Cell coordinates are preserved."::Text),
       "cellWidth" .= (8::Int),"cellHeight" .= cellHeight,"pixelWidth" .= (cols*8),"pixelHeight" .= (rows*cellHeight),
@@ -121,16 +126,21 @@ capture font desktop includeImage
       Just (c,_) -> let tile=glyph font c
                    in [(tile,color (V.attrForeColor attr),color (V.attrBackColor attr),offset*8,advance>clusterWidth text,script) | offset<-[0..advance-1]]
     png=encodePng (generateImage pixel (cols*8) (rows*cellHeight))
-    pixel x y=let (tile,fg,bg,offset,stretched,script)=cells Vec.! ((y `div` cellHeight)*cols+x `div` 8)
-                  px=x `mod` 8; py=y `mod` cellHeight
-                  (gx,gy,visible)=case script of
-                    Nothing->((offset+px) `div` (if stretched then 2 else 1),py*16 `div` cellHeight,True)
-                    Just (natural,mode)->let start=if mode==Superscript then 0 else cellHeight `div` 2
-                                         in (px*2,(py-start)*32 `div` cellHeight,px<natural*4 && py>=start && py<start+cellHeight `div` 2)
-                  ink=visible && gx<glyphWidth tile && gx<16 && gy>=0 && gy<16 && testBit (glyphRows tile !! gy) (15-gx)
-                  base=if ink then fg else bg
-              in if cursor==Just (x `div` 8,y `div` cellHeight) && py>=cellHeight*14 `div` 16
-                   then invert base else base
+    pixel x y
+      | cellReadable (accessGrid Vec.! ((y `div` cellHeight)*cols+x `div` 8)),
+        Just (r,g,b)<-canvasPixel canvas cols ((fromIntegral x+0.5)/8) ((fromIntegral y+0.5)/fromIntegral cellHeight)=
+          PixelRGB8 (fromIntegral r) (fromIntegral g) (fromIntegral b)
+      | otherwise=cellPixel x y
+    cellPixel x y=let (tile,fg,bg,offset,stretched,script)=cells Vec.! ((y `div` cellHeight)*cols+x `div` 8)
+                      px=x `mod` 8; py=y `mod` cellHeight
+                      (gx,gy,visible)=case script of
+                        Nothing->((offset+px) `div` (if stretched then 2 else 1),py*16 `div` cellHeight,True)
+                        Just (natural,mode)->let start=if mode==Superscript then 0 else cellHeight `div` 2
+                                             in (px*2,(py-start)*32 `div` cellHeight,px<natural*4 && py>=start && py<start+cellHeight `div` 2)
+                      ink=visible && gx<glyphWidth tile && gx<16 && gy>=0 && gy<16 && testBit (glyphRows tile !! gy) (15-gx)
+                      base=if ink then fg else bg
+                  in if cursor==Just (x `div` 8,y `div` cellHeight) && py>=cellHeight*14 `div` 16
+                       then invert base else base
     invert (PixelRGB8 r g b)=PixelRGB8 (255-r) (255-g) (255-b)
 
 -- | Blank a whole grapheme if any covered cell is unreadable; preserve position

@@ -1,9 +1,17 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
-module PluginWindowsCheck (checks,rowsChecks) where
+module PluginWindowsCheck (checks,rowsChecks,imageChecks) where
 import Control.Concurrent (threadDelay,yield)
 import Control.Concurrent.MVar
 import Control.Exception (evaluate,finally)
-import Control.Monad (unless)
+import Control.Monad (unless,foldM)
+import qualified Codec.Picture as Picture
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.Text.Encoding as TE
+import qualified Hide.Plugin.Canvas as Canvas
+import Hide.Font (loadFont)
+import Hide.ScreenCapture (capture)
 import Data.IORef
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -30,11 +38,12 @@ import Hide.Model
 import Hide.Plugin.Command (withRegistry,CommandError)
 import qualified Hide.Plugin.Menu as P
 import qualified Hide.Plugin.Tree as PTree
-import Hide.Render (snapshot,renderKey,renderCellRows,renderCursor)
-import Hide.Unicode (CellSpan(..))
+import Hide.Render (snapshot,renderKey,renderCellRows,renderCellRowsAndCanvas,renderCursor)
+import Hide.Unicode (CellSpan(..),CellLayer(..),cellRowsAndOwnership)
 import WindowExtension
 #ifdef WITH_PROTOCOL
-import Data.Aeson (object,(.=))
+import Data.Aeson (Value(..),object,(.=),(.:),withObject)
+import qualified Data.Aeson.KeyMap
 import Data.Aeson.Types (parseEither)
 import Hide.Protocol hiding (Paste)
 import Hide.RemoteWindow
@@ -43,6 +52,7 @@ import Hide.RemoteTerminal (terminalEventInput)
 
 checks :: IO ()
 checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands docs $ \host->do
+  imageChecks
   let check label condition=unless condition (fail label)
       core _ _=error "plugin menu missed typed owner"
   menuReference<-either (error . show) pure =<< registerNotes registry (menuContributions host) scope (pure ()) PreparedWindow
@@ -90,7 +100,7 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
     (all ((==clipboard copied) . clipboard) [wireCopy,macCopy,browserCopy])
 #endif
   plain<-W.prepareTextWindow "Plain row" "a界e\x0301\t👩🏽\x200d\&💻z\r\nnext"
-  plainOpening<-W.openTextWindow scope plain >>= maybe (fail "plain row opening refused") pure
+  plainOpening<-W.openWindow scope plain >>= maybe (fail "plain row opening refused") pure
   plainDesktop<-adoptWindowUpdate P.HumanMenu plainOpening (initialDesktop (30,12))
   let selectedPlain=modifyActive (\w->w {bounds=Rect 0 1 14 7,selection=Selection 1 2}) plainDesktop
       glyphs desktop=[(paint,text,full,start,shown) | CellGlyph paint text full start shown<-Vec.toList (renderCellRows desktop Vec.! 2)]
@@ -125,17 +135,17 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
     (length (windows closed)==1 && M.null (pluginWindows closed) && activeDocument closed/=Nothing && M.size (buffers closed)==1)
   prepared<-W.prepareTextWindow "Updated notes" "a\x0301\nUpdated text and a longer selected text"
   let reference=case windowContent <$> activeWindow opened of Just (PluginContent ref)->ref; _->error "missing plugin ref"
-  refresh<-W.refreshTextWindow reference prepared >>= maybe (fail "live refresh refused") pure
+  refresh<-W.refreshWindow reference prepared >>= maybe (fail "live refresh refused") pure
   refreshed<-adoptWindowUpdate P.HumanMenu refresh selected
   check "refresh preserves host geometry and semantic selection"
     (fmap (\w->(windowId w,bounds w,selection w)) (activeWindow refreshed)==fmap (\w->(windowId w,bounds w,selection w)) (activeWindow selected) && "Updated text" `T.isInfixOf` snapshot refreshed)
-  modalPublication<-W.refreshTextWindow reference prepared >>= maybe (fail "prepare modal refresh") pure
+  modalPublication<-W.refreshWindow reference prepared >>= maybe (fail "prepare modal refresh") pure
   let selectedModal=prompt "Draft" Information [SelectedInput "Name" "keep draft" (Selection 2 7)] refreshed
   behindModal<-adoptWindowUpdate P.HumanMenu modalPublication selectedModal
   check "exact existing window refresh preserves modal and focused window"
     (dialog behindModal==dialog selectedModal && fmap windowId (activeWindow behindModal)==fmap windowId (activeWindow selectedModal) && M.lookup reference (pluginWindows behindModal)==Just prepared)
   longPrepared<-W.prepareTextWindow "Scrollable output" (T.unlines (replicate 100 (T.replicate 120 "x")))
-  longUpdate<-W.openTextWindow scope longPrepared >>= maybe (fail "prepare scrollable output") pure
+  longUpdate<-W.openWindow scope longPrepared >>= maybe (fail "prepare scrollable output") pure
   longOpened<-adoptWindowUpdate P.HumanMenu longUpdate source
   let longView=modifyActive (\w->w {bounds=Rect 2 2 40 12}) longOpened
       click x y desktop=fst (handleEvent (V.EvMouseDown x y V.BLeft []) desktop)
@@ -156,28 +166,28 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
       (advanced,_)=handleEvent (V.EvKey V.KRight []) caretStart
   check "plugin navigation respects combining character boundaries" (fmap (caret . selection) (activeWindow advanced)==Just 2)
   actorPreparedDummyForRevision<-W.prepareTextWindow "Older result" "stale text"
-  older<-W.refreshTextWindow reference actorPreparedDummyForRevision >>= maybe (fail "prepare old revision") pure
-  newer<-W.refreshTextWindow reference prepared >>= maybe (fail "prepare new revision") pure
+  older<-W.refreshWindow reference actorPreparedDummyForRevision >>= maybe (fail "prepare old revision") pure
+  newer<-W.refreshWindow reference prepared >>= maybe (fail "prepare new revision") pure
   ignored<-adoptWindowUpdate P.HumanMenu older refreshed
   newest<-adoptWindowUpdate P.HumanMenu newer ignored
   check "late older revision cannot overwrite latest prepared publication"
     ("Updated text" `T.isInfixOf` snapshot newest && not ("Older result" `T.isInfixOf` snapshot newest))
-  stale<-W.refreshTextWindow reference prepared >>= maybe (fail "prepare queued refresh") pure
+  stale<-W.refreshWindow reference prepared >>= maybe (fail "prepare queued refresh") pure
   (_,retiredClosed)<-applyEffects closed closeEffects
   closeCurrent<-W.windowRefCurrent reference
   check "actual host close retires exact publication capability" (not closeCurrent)
   afterClosed<-adoptWindowUpdate P.HumanMenu stale retiredClosed
   check "queued refresh cannot resurrect a closed instance" (windows afterClosed==windows closed && M.null (pluginWindows afterClosed))
   actorPreparedDummy<-W.prepareTextWindow "Duplicate" "text"
-  originalUpdate<-W.openTextWindow scope actorPreparedDummy >>= maybe (fail "prepare duplicate open") pure
+  originalUpdate<-W.openWindow scope actorPreparedDummy >>= maybe (fail "prepare duplicate open") pure
   originalOpened<-adoptWindowUpdate P.HumanMenu originalUpdate source
   duplicate<-adoptWindowUpdate P.HumanMenu originalUpdate originalOpened
   check "duplicate open reply cannot create another window" (length (windows duplicate)==length (windows originalOpened))
   let slotRef=case windowContent <$> activeWindow originalOpened of Just (PluginContent ref)->ref; _->error "missing slot ref"
       slotModal=prompt "Keep draft" Information [SelectedInput "Name" "draft" (Selection 0 5)] originalOpened
   replacementPrepared<-W.prepareTextWindow "New lifetime" "fresh output"
-  replacementOpening<-W.openTextWindow scope replacementPrepared >>= maybe (fail "prepare slot replacement") pure
-  queuedOld<-W.refreshTextWindow slotRef prepared >>= maybe (fail "prepare old slot reply") pure
+  replacementOpening<-W.openWindow scope replacementPrepared >>= maybe (fail "prepare slot replacement") pure
+  queuedOld<-W.refreshWindow slotRef prepared >>= maybe (fail "prepare old slot reply") pure
   invalidSelf<-replaceWindowUpdate P.HumanMenu slotRef queuedOld slotModal
   invalidInstalled<-replaceWindowUpdate P.HumanMenu slotRef longUpdate slotModal {pluginWindows=pluginWindows longOpened `M.union` pluginWindows slotModal}
   selfLive<-W.windowRefCurrent slotRef
@@ -193,21 +203,21 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
       fmap (\w->(windowId w,windowNumber w,bounds w)) (activeWindow replaced)==fmap (\w->(windowId w,windowNumber w,bounds w)) (activeWindow slotModal) && replacementRef/=slotRef)
   check "old slot publication cannot alter replacement" (M.lookup replacementRef (pluginWindows oldLate)==Just replacementPrepared && M.notMember slotRef (pluginWindows oldLate))
   actorPrepared<-W.prepareTextWindow "Private notes" "private"
-  actorUpdate<-W.openTextWindow scope actorPrepared >>= maybe (fail "prepare actor update") pure
+  actorUpdate<-W.openWindow scope actorPrepared >>= maybe (fail "prepare actor update") pure
   denied<-adoptWindowUpdate P.AgentMenu actorUpdate source
   modalDenied<-adoptWindowUpdate P.HumanMenu actorUpdate modal
   check "shared host adapter preserves agent and modal protection" (windows denied==windows source && windows modalDenied==windows modal)
-  retired<-W.withWindowScope $ \short->W.openTextWindow short actorPrepared >>= maybe (fail "prepare retired update") pure
+  retired<-W.withWindowScope $ \short->W.openWindow short actorPrepared >>= maybe (fail "prepare retired update") pure
   retiredResult<-adoptWindowUpdate P.HumanMenu retired source
   retiredLive<-W.withWindowScope $ \short->do
-    update<-W.openTextWindow short actorPrepared >>= maybe (fail "prepare retiring instance") pure
+    update<-W.openWindow short actorPrepared >>= maybe (fail "prepare retiring instance") pure
     adoptWindowUpdate P.HumanMenu update source
   placeholder<-tickPluginWindows retiredLive
   check "retirement retains host view and marks its read-only snapshot unavailable"
     (length (windows placeholder)==2 && "Unavailable: Private notes" `T.isInfixOf` snapshot placeholder && M.size (buffers placeholder)==1)
   check "retired scope refuses escaped publication" (windows retiredResult==windows source)
   durable<-W.prepareRecoverableTextWindow "example.notes" 1 "Remembered notes" "durable content" >>= either (fail . T.unpack) pure
-  durableUpdate<-W.openTextWindow scope durable >>= maybe (fail "prepare durable instance") pure
+  durableUpdate<-W.openWindow scope durable >>= maybe (fail "prepare durable instance") pure
   retained<-adoptWindowUpdate P.HumanMenu durableUpdate source
   let custom=retained {windows=case windows retained of w:rest->w {bounds=Rect 2 3 40 10,selection=Selection 2 5}:rest; []->[]}
   directory<-getTemporaryDirectory
@@ -375,7 +385,7 @@ rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommand
       source=(addDocument Nothing (newBuffer "source stays unchanged") (initialDesktop (80,25))) {contributedMenus=catalogue}
       sourceSelection=selection <$> activeWindow source
       install prepared desktop=do
-        update<-W.openTextWindow scope prepared >>= maybe (fail "window scope closed") pure
+        update<-W.openWindow scope prepared >>= maybe (fail "window scope closed") pure
         adoptWindowUpdate P.HumanMenu update desktop
       selected desktop=activeWindow desktop >>= rowsInteraction
       move event= fst . handleEvent event
@@ -406,7 +416,7 @@ rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommand
   let window=maybe (error "no window") id (activeWindow copied)
       reference=case windowContent window of PluginContent ref->ref; _->error "no plugin"
       resized=resizeWindowBounds (windowId window) ((bounds window) {width=60,height=19}) copied
-  publication<-W.refreshTextWindow reference changed >>= maybe (fail "refresh refused") pure
+  publication<-W.refreshWindow reference changed >>= maybe (fail "refresh refused") pure
   refreshed<-adoptWindowUpdate P.HumanMenu publication resized
   check "progress/reorder/resize retains stable selected ID and Details selection"
     (selected refreshed==Just (RowsInteraction b True) && fmap selection (activeWindow refreshed)==fmap selection (activeWindow copied))
@@ -435,3 +445,77 @@ rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommand
   check "rows factory rejects duplicate IDs and nested Details" (either (const True) (const False) duplicate && either (const True) (const False) nested)
   where
     findSource desktop=case filter ((/=Nothing).bufferId) (windows desktop) of w:_->Just w; _->Nothing
+
+-- Real PNG preparation, composition and capture exercise the public image route.
+imageChecks :: IO ()
+imageChecks=do
+  let check label condition=unless condition (fail label)
+      bytes=BL.toStrict (Picture.encodePng (Picture.generateImage (\_ _->Picture.PixelRGBA8 200 80 40 128) 16 16))
+      prepare disclosure=W.prepareImageWindow "sample.png" disclosure (Just "/images/sample.png") bytes >>= either (fail . T.unpack) pure
+      scene=snd . renderCellRowsAndCanvas
+      resource desktop=map (Canvas.imageResourceId . Canvas.canvasImage) (Canvas.canvasSurfaces (scene desktop))
+      open scope body desktop=W.openWindow scope body >>= maybe (fail "image open expired") (\update->adoptWindowUpdate P.HumanMenu update desktop)
+      imageOf body=maybe (error "prepared PNG missing") id (W.preparedWindowImage body)
+      ready desktop=modifyActive (\w->w {bounds=Rect 2 2 24 10}) desktop
+  invalid<-W.prepareImageWindow "broken" W.ReadableWindow Nothing "not a png"
+  let oversized=BS.take 16 bytes<>BS.pack [0,0,32,0]<>BS.drop 20 bytes
+  huge<-W.prepareImageWindow "huge" W.ReadableWindow Nothing oversized
+  check "invalid and oversized PNGs are refused before image admission" (either (const True) (const False) invalid && either (const True) (const False) huge)
+  public<-prepare W.ReadableWindow
+  private<-prepare W.PrivateWindow
+  check "PNG resource keeps exact originals and strict RGBA dimensions"
+    (Canvas.imagePNG (imageOf public)==bytes && BS.length (Canvas.imageRGBA (imageOf public))==16*16*4)
+  W.withWindowScope $ \scope->do
+    opened<-ready <$> open scope public (initialDesktop (40,18))
+    let initial=scene opened
+        surface=head (Canvas.canvasSurfaces initial)
+        (tx,ty,tw,th)=Canvas.canvasTarget surface
+        owner x y=Canvas.canvasOwnerAt initial (y*40+x)
+    check "image owns content cells but never host chrome" (owner 3 3==1 && owner 2 2==0 && BS.length (Canvas.canvasMask initial)==40*18*2)
+    check "canvas preserves source aspect in logical pixels" (abs (tw*8-th*16)<0.00001)
+    check "software image sample composites straight alpha onto black"
+      (Canvas.canvasPixel initial 40 (tx+tw/2) (ty+th/2)==Just (100,40,20))
+    let zoomed=fst (handleEvent (V.EvKey (V.KChar '+') []) opened)
+        panned=fst (handleEvent (V.EvKey V.KRight []) zoomed)
+        fitted=fst (handleEvent (V.EvKey (V.KChar 'f') []) panned)
+    check "zoom/pan change placement and retain the immutable resource"
+      (resource opened==resource panned && map Canvas.canvasTarget (Canvas.canvasSurfaces (scene panned))/=map Canvas.canvasTarget (Canvas.canvasSurfaces initial))
+    check "fit restores the same transform" (map Canvas.canvasTarget (Canvas.canvasSurfaces (scene fitted))==map Canvas.canvasTarget (Canvas.canvasSurfaces initial))
+    let covered=modifyActive (\w->w {bounds=Rect 1 1 15 9}) (addDocument Nothing (newBuffer "foreground") opened)
+        coveredScene=scene covered
+    check "ordinary front window clears image ownership and its exposed halo dims image cells"
+      (Canvas.canvasOwnerAt coveredScene (3*40+3)==0 && Canvas.canvasOwnerAt coveredScene (3*40+16)==32769 && resource covered==resource opened)
+    let nowPrivate=opened {guestPrivatePaths=["/images"]}
+    check "current protected paths remove resource and semantic image surfaces before transport"
+      (null (Canvas.canvasSurfaces (scene nowPrivate {streamerMode=True})) && not (readableAt nowPrivate 3 3))
+    hidden<-ready <$> open scope private (initialDesktop (40,18))
+    check "private pixels stay owner-visible and absent from streamer scenes"
+      (not (null (resource hidden)) && null (resource hidden {streamerMode=True}))
+    many<-foldM (\desktop _->open scope public desktop) (initialDesktop (40,18)) [1..65::Int]
+    check "host caps image surfaces at 64 while sharing one decoded resource" (length (windows many)==64)
+    font<-loadFont
+    captured<-capture font opened True >>= either (fail . T.unpack) pure
+    hiddenCapture<-capture font hidden True >>= either (fail . T.unpack) pure
+#ifdef WITH_PROTOCOL
+    let png value=do
+          blocks<-parseEither (withObject "capture" (.: "content")) value
+          encoded<-case [text | Object fields<-blocks,Just (String text)<-[Data.Aeson.KeyMap.lookup "data" fields]] of
+            text:_->Right text; _->Left "missing captured PNG"
+          encodedBytes<-B64.decode (TE.encodeUtf8 encoded)
+          Picture.convertRGB8 <$> Picture.decodePng encodedBytes
+    publicPixels<-either fail pure (png captured)
+    privatePixels<-either fail pure (png hiddenCapture)
+    check "agent PNG includes authorized image pixels and blacks private image content"
+      (Picture.pixelAt publicPixels (floor ((tx+tw/2)*8)) (floor ((ty+th/2)*16))==Picture.PixelRGB8 100 40 20 &&
+       Picture.pixelAt privatePixels (3*8+1) (3*16+1)==Picture.PixelRGB8 0 0 0)
+#else
+    captured `seq` hiddenCapture `seq` pure ()
+#endif
+  retired<-W.withWindowScope $ \scope->open scope public (initialDesktop (40,18))
+  inactive<-tickPluginWindows retired
+  check "scope retirement drops retained pixel/PNG bytes and keeps the inert text"
+    (all ((==Nothing).W.preparedWindowImage) (M.elems (pluginWindows inactive)) && null (resource inactive) && "PNG 16" `T.isInfixOf` snapshot inactive)
+  let (_,mask)=cellRowsAndOwnership [CellImage (V.string V.defAttr "界"),CellHalo V.defAttr [(2,0,1,1)],CellCanvas 1 [CellImage (V.charFill V.defAttr ' ' 4 1)],CellMask V.defAttr [(3,0,1)]] (4,1)
+      masked=Canvas.CanvasScene [] mask
+  check "wide glyph halves remain ordinary while halo and privacy share canvas ownership"
+    (map (Canvas.canvasOwnerAt masked) [0..3]==[0,0,32769,0])
