@@ -6,6 +6,7 @@ const input = document.querySelector('#input');
 const fullscreen = document.querySelector('#fullscreen');
 const clipboardAction = document.querySelector('#clipboard-action');
 const resourceAction = document.querySelector('#open-resource');
+const downloadAction = document.querySelector('#download-file');
 const gl = canvas.getContext('webgl2', {alpha:false, antialias:false, preserveDrawingBuffer:true});
 if (!gl) {status.textContent='WebGL2 is unavailable in this browser.';throw new Error(status.textContent);}
 const vertex = `#version 300 es
@@ -46,7 +47,7 @@ function updateTitle(){
  const base=remoteHost?frame.title.replace(/^th(?: |$)/,`th ${remoteHost}:`):frame.title;
  document.title=base+timingText;
 }
-let downloadName=null, clipboardRequest=null, clipboardEpoch=0, nativeCopies=[];
+let downloadInfo=null, clipboardRequest=null, clipboardEpoch=0, nativeCopies=[];
 let unsaved=false, serial=0, pendingEdit=0, acknowledged=0;
 function beforeLeave(event){event.preventDefault();event.returnValue=true;}
 function guardLeave(){
@@ -289,6 +290,48 @@ async function decodeFrame(bytes, previous){
  for(const [y,row] of message.rows)previous[y]=row;
  return message;
 }
+// Authorized download bytes arrive over the authenticated socket, never a host
+// path. Chromium's DownloadURL is synchronous; keep an explicit click fallback.
+let preparedDownload=null,draggedDownload=null;
+const draggedDownloads=new Map();
+function clearDownload(){
+ if(preparedDownload)URL.revokeObjectURL(preparedDownload.url);
+ for(const [url,timer] of draggedDownloads){clearTimeout(timer);URL.revokeObjectURL(url);}
+ draggedDownloads.clear();preparedDownload=null;draggedDownload=null;downloadInfo=null;
+ downloadAction.hidden=true;downloadAction.href='';downloadAction.removeAttribute?.('download');
+}
+function receiveDownload(metadata,bytes){
+ if(preparedDownload&&!draggedDownloads.has(preparedDownload.url))URL.revokeObjectURL(preparedDownload.url);
+ const basename=String(metadata.name||'download').split(/[\/\\]/).at(-1);
+ const name=basename.replace(/[\x00-\x1f\x7f:]/g,'_').slice(0,255);
+ const blob=new Blob([bytes],{type:'application/octet-stream'});
+ preparedDownload={url:URL.createObjectURL(blob),name:name&&name!=='.'&&name!=='..'?name:'download',size:blob.size};
+ downloadAction.href=preparedDownload.url;downloadAction.download=preparedDownload.name;
+ downloadAction.textContent=`Download ${preparedDownload.name}`;downloadAction.hidden=false;
+ if(metadata.purpose==='file-export')status.textContent='Snapshot ready. Drag Download in Chromium, or click it to export a copy.';
+ else downloadAction.click();
+}
+downloadAction.addEventListener('click',()=>{status.textContent='Download requested; the source and its saved state are unchanged.';});
+downloadAction.addEventListener('dragstart',event=>{
+ if(!preparedDownload||!event.dataTransfer){event.preventDefault();return;}
+ const {url,name,size}=preparedDownload;
+ if(size>16*1024*1024||!draggedDownloads.has(url)&&draggedDownloads.size>=4){
+   event.preventDefault();status.textContent='Drag export is unavailable; click Download instead.';return;
+ }
+ event.dataTransfer.clearData();
+ event.dataTransfer.setData('DownloadURL',`application/octet-stream:${name}:${url}`);
+ event.dataTransfer.effectAllowed='copy';
+ clearTimeout(draggedDownloads.get(url));draggedDownloads.set(url,null);draggedDownload=url;
+ status.textContent='Exporting a copy; click Download if the destination cannot receive the drag.';
+});
+downloadAction.addEventListener('dragend',event=>{
+ const url=draggedDownload;draggedDownload=null;
+ if(url&&draggedDownloads.has(url))draggedDownloads.set(url,setTimeout(()=>{
+   draggedDownloads.delete(url);if(preparedDownload?.url!==url)URL.revokeObjectURL(url);
+ },5*60*1000));
+ status.textContent=event.dataTransfer?.dropEffect==='none'?'Export cancelled; Download remains available.':
+   'Drag ended; Download remains available if the destination could not receive the copy.';
+});
 const systemTheme=matchMedia('(prefers-color-scheme: dark)');
 systemTheme.addEventListener('change',()=>send({type:'theme',dark:systemTheme.matches}));
 function connect(){
@@ -300,10 +343,8 @@ function connect(){
  async function receive(e){
    let message;
    if(e.data instanceof ArrayBuffer){
-     if(downloadName!==null){
-       const url=URL.createObjectURL(new Blob([e.data],{type:'application/octet-stream'}));
-       const link=document.createElement('a');link.href=url;link.download=downloadName;document.body.append(link);link.click();link.remove();
-       setTimeout(()=>URL.revokeObjectURL(url),60000);downloadName=null;
+     if(downloadInfo!==null){
+       receiveDownload(downloadInfo,e.data);downloadInfo=null;
        return;
      }
      message=await decodeFrame(new Uint8Array(e.data),wireRows);
@@ -325,7 +366,7 @@ function connect(){
      if(!allocate())drawRows(message.rows);
      if(changedMode)lastSize='';resize();
    }else if(message.type==='download'){
-     downloadName=message.name;
+     downloadInfo=message;
    }else if(message.type==='open-resource'){
      receiveResource(message);
    }else if(message.type==='copy'){
@@ -335,16 +376,16 @@ function connect(){
    }else if(message.type==='ack'){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='detached'){
-     detached=true;closed=true;ready=false;guardLeave();fullscreen.disabled=true;
+     detached=true;closed=true;ready=false;clearDownload();guardLeave();fullscreen.disabled=true;
      status.textContent='Session detached. Resume from your terminal with hide --resume.';
      navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
-     closed=true;ready=false;guardLeave();fullscreen.disabled=true;
+     closed=true;ready=false;clearDownload();guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{console.info('Editor connection closed',event.code,event.reason);ready=false;clearClipboardRequest();mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();
@@ -370,7 +411,7 @@ window.addEventListener('keydown',e=>{
    }
    return;
  }
- if(e.target instanceof HTMLButtonElement)return;
+ if(e.target instanceof HTMLButtonElement||e.target===downloadAction)return;
  send({type:'modifiers',mods:mods(e)});
  if(composing||e.isComposing||e.key==='Process'||e.key==='Dead')return;
  if(['Control','Shift','Alt','Meta','CapsLock'].includes(e.key))return;

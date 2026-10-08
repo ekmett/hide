@@ -163,6 +163,21 @@ as new unsaved buffers.
 bytes, to the browser's download location. Download does not mark the source file
 saved. Use **File > Save** to save on the editor host.
 
+After a download, **Download filename** remains in the browser toolbar for that
+snapshot. Click it to download another copy, or drag it to a desktop/file manager
+in Chromium where the browser and destination support outgoing file downloads.
+Firefox and Safari should use the explicit Download action. The browser receives
+file bytes over the authenticated editor connection and drags a browser Blob URL,
+never the editor host's filesystem path. Dragging exports a copy and does not
+delete, move or save the source. Cancelling a drag leaves the snapshot available.
+
+The current snapshot stays available until another export replaces it or the
+session/tab closes. Up to four outgoing drag URLs remain readable for five
+minutes after their drag ends, including after replacement; if those slots are
+full or the snapshot exceeds 16 MiB, use Download. The browser owns the downloaded
+copy's location and lifetime; hide cannot confirm that an external application
+accepted a drag.
+
 Reloading the page reconnects to the same editor session through the running
 frontend process. If you leave
 with changed buffers or an unsent query, the browser asks for confirmation;

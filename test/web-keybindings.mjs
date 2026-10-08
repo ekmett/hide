@@ -10,7 +10,7 @@ const context=vm.createContext({
  input:{addEventListener:()=>{},value:'',setSelectionRange:()=>{}},
  navigator:{platform:'MacIntel'},HTMLButtonElement:class {},performance:{now:()=>0},
  sessionFrontend:false,composing:false,cursorEpoch:0,frame:{bindingsActive:true,bindings:[]},
- fullscreen:{},clipboard:'selected',nativeCopies:[],send:packet=>packets.push(packet),command:name=>commands.push(name),
+ fullscreen:{},downloadAction:{},clipboard:'selected',nativeCopies:[],send:packet=>packets.push(packet),command:name=>commands.push(name),
 });
 vm.runInContext(source.slice(source.indexOf('function mods(e)'),source.indexOf('function mods(e)')+source.slice(source.indexOf('function mods(e)')).indexOf('\n')),context);
 vm.runInContext(source.slice(source.indexOf("window.addEventListener('keydown'"),source.indexOf("window.addEventListener('dragover'")),context);
@@ -20,6 +20,7 @@ function key(key,flags={}){
  handlers.get('keydown')(event);return event;
 }
 context.frame.bindings=[['Cmd+C','hide.edit.copy'],['Cmd+V','hide.edit.paste']];
+assert.equal(key('Enter',{target:context.downloadAction}).prevented,undefined);assert.equal(packets.length,0); // Download keeps native keyboard activation.
 assert.equal(key('c',{metaKey:true}).prevented,undefined); // Native clipboard event owns activation.
 context.frame.wordstar=true;context.frame.bindings=[['Ctrl+C','hide.edit.copy']];
 assert.equal(key('c',{ctrlKey:true}).prevented,undefined); // Explicit WordStar or dialog Copy keeps its clipboard gesture.
