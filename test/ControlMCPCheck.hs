@@ -9,6 +9,10 @@ import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
 import qualified Data.Text as T
+import qualified Data.Set as S
+import qualified Data.Map.Strict as M
+import qualified Graphics.Vty as V
+import qualified Hide.Terminal as Terminal
 import System.Directory
 import System.Environment (lookupEnv,setEnv,unsetEnv)
 import System.IO (openTempFile,hClose)
@@ -41,6 +45,25 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
         checkUnchanged label a b extra=do
           sameVersions<-sameBufferVersions a b
           check label (sameVersions && ui a==ui b && extra)
+    let terminalId=maybe (error "missing control fixture") id (activeWindow base >>= bufferId)
+        terminal=base {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal batch"}) terminalId (buffers base),terminalMouseTracking=S.singleton terminalId}
+        window=maybe (error "missing control fixture window") id (activeWindow terminal)
+        mouse action=object ["type" .= ("mouse"::T.Text),"action" .= (action::T.Text),"x" .= (left (bounds window)+3),"y" .= (top (bounds window)+2),"button" .= (0::Int)]
+        mouseActions effects=[Terminal.terminalMouseAction event | TerminalMouseInput "batch" event<-effects]
+    writeIORef observed []
+    (settled,_)<-input terminal [mouse "down"]
+    batchEffects<-readIORef observed
+    check "guest batch releases an unfinished terminal press" (drag settled==Nothing && mouseActions batchEffects==[Terminal.TerminalMousePress,Terminal.TerminalMouseRelease])
+    writeIORef observed []
+    (refused,_)<-input terminal [mouse "down",object ["type" .= ("mouse"::T.Text),"action" .= ("up"::T.Text),"x" .= (-1::Int),"y" .= (-1::Int)]]
+    refusedEffects<-readIORef observed
+    check "guest refusal still releases its terminal press" (drag refused==Nothing && mouseActions refusedEffects==[Terminal.TerminalMousePress,Terminal.TerminalMouseRelease])
+    writeIORef observed []
+    let human=terminal {drag=Just (TerminalDragging (windowId window) V.BLeft (left (bounds window)+3) (top (bounds window)+2))}
+    (isolated,_)<-input human [key "F6" []]
+    humanMouseEffects<-readIORef observed
+    check "guest batch settles an existing human terminal capture" (drag isolated==Nothing && mouseActions humanMouseEffects==[Terminal.TerminalMouseRelease])
+    writeIORef observed []
     (same,readSettings)<-call shaped "editor_settings" (object [])
     checkUnchanged "reading settings preserves window geometry and focus" same shaped (success readSettings)
     (stillSame,_)<-settings shaped []

@@ -8,7 +8,7 @@
 module Hide.Consoles
   ( Consoles, withConsoles, startConsole, tickConsoles, consoleOutput
   , PreparedConsole, prepareConsole, adoptConsole, closePreparedConsole, consoleProcessId
-  , listConsoles, inputConsole, killConsole, retireConsole, releaseConsole
+  , listConsoles, inputConsole, mouseConsole, killConsole, retireConsole, releaseConsole
   ) where
 
 import Control.Concurrent.MVar
@@ -17,6 +17,7 @@ import qualified Data.ByteString as BS
 import Data.ByteString (ByteString)
 import Data.List (find, intercalate)
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text as T
 import Hide.Buffer
@@ -28,7 +29,8 @@ newtype Consoles = Consoles (MVar (Integer,M.Map Text Console))
 data Console = Console
   { consoleTerminal :: Terminal, consoleBuffer :: Int, outputLimit :: Int
   , retainedOutput :: ByteString, outputTruncated :: Bool
-  , latestSnapshot :: TerminalSnapshot, consoleError :: Maybe Text, consoleRetiring :: Bool }
+  , latestSnapshot :: TerminalSnapshot, consoleError :: Maybe Text, consoleRetiring :: Bool
+  , consoleMouse :: Maybe TerminalMouseEvent }
 
 withConsoles :: (Consoles -> IO a) -> IO a
 withConsoles = bracket (Consoles <$> newMVar (1,M.empty)) closeAll
@@ -52,7 +54,7 @@ prepareConsole unset config limit = mask_ $ do
       case polled of
         Left message -> closeTerminal terminal >> pure (Left message)
         Right snapshot -> pure (Right (PreparedConsole (recordOutput snapshot
-          (Console terminal 0 (max 0 (min (16*1024*1024) limit)) BS.empty False snapshot Nothing False)))))
+          (Console terminal 0 (max 0 (min (16*1024*1024) limit)) BS.empty False snapshot Nothing False Nothing)))))
       `onException` closeTerminal terminal
 
 closePreparedConsole :: PreparedConsole -> IO ()
@@ -86,8 +88,12 @@ tickConsoles (Consoles state) desktop = modifyMVar state $ \(counter,consoles) -
     result<-setTerminalAppearance (consoleTerminal console) (darkAppearance desktop)
     case result of
       Left message -> pure console {consoleError=Just message}
-      Right () -> resizeFor desktop console >>= refresh) consoles
-  let shown = foldr showConsole desktop updated
+      Right () -> releaseLostCapture desktop console >>= resizeFor desktop >>= refresh) consoles
+  let projected=foldr showConsole (desktop {terminalMouseTracking=S.empty}) updated
+      shown=case drag projected of
+        Just (TerminalDragging wid _ _ _) | dialog projected/=Nothing || menu projected/=Nothing || contextMenu projected/=Nothing ||
+          not (any (\w->windowId w==wid && windowVisible projected w && maybe False (`S.member` terminalMouseTracking projected) (bufferId w)) (windows projected)) -> projected {drag=Nothing,dragOriginal=Nothing}
+        _->projected
       errors = [message | (ident,console) <- M.toList updated, Just message <- [consoleError console]
                         , maybe True ((== Nothing) . consoleError) (M.lookup ident consoles)]
   pure ((counter,updated),case errors of message:_ -> shown {status=message}; [] -> shown)
@@ -104,6 +110,39 @@ inputConsole :: Consoles -> Text -> ByteString -> IO (Either Text ())
 inputConsole consoles ident bytes = updateConsole consoles ident $ \console -> do
   result <- if consoleRetiring console then pure (Left "Terminal has stopped") else maybe (writeTerminal (consoleTerminal console) bytes) (pure . Left) (consoleError console)
   pure (console,result)
+
+-- | Deliver through the same live process boundary as keyboard input.
+mouseConsole :: Consoles -> Text -> TerminalMouseEvent -> IO (Either Text ())
+mouseConsole consoles ident event = updateConsole consoles ident $ \console -> do
+  -- A new press can arrive before a UI-cancellation tick. Settle the previous
+  -- delivered gesture first, even if its frame has already disappeared.
+  case (consoleMouse console,terminalMouseAction event,terminalMouseButton event) of
+    (Just held,TerminalMousePress,Just button) | button `elem` [TerminalMouseLeft,TerminalMouseMiddle,TerminalMouseRight]->
+      sendTerminalMouse (consoleTerminal console) held {terminalMouseAction=TerminalMouseRelease} >> pure ()
+    _->pure ()
+  result <- if consoleRetiring console then pure (Left "Terminal has stopped") else
+    maybe (sendTerminalMouse (consoleTerminal console) event) (pure . Left) (consoleError console)
+  let held=case (result,terminalMouseAction event,terminalMouseButton event) of
+        (Right (),TerminalMousePress,Just button) | button `elem` [TerminalMouseLeft,TerminalMouseMiddle,TerminalMouseRight]->Just event
+        (Right (),TerminalMouseMotion,Just button) | (terminalMouseButton =<< consoleMouse console)==Just button->Just event
+        (Right (),TerminalMouseRelease,_)->Nothing
+        _->consoleMouse console
+  pure (console {consoleMouse=held},result)
+
+-- Pure UI transitions can dismiss or replace a capture without effects. The
+-- process owner settles its last delivered press before resizing or polling.
+releaseLostCapture :: Desktop -> Console -> IO Console
+releaseLostCapture desktop console=case consoleMouse console of
+  Just event | not captured -> do
+    _<-sendTerminalMouse (consoleTerminal console) event {terminalMouseAction=TerminalMouseRelease}
+    pure console {consoleMouse=Nothing}
+  _->pure console
+  where
+    captured=dialog desktop==Nothing && menu desktop==Nothing && contextMenu desktop==Nothing &&
+      snapshotMouseTracking (latestSnapshot console) && case drag desktop of
+        Just (TerminalDragging wid button _ _)->any (\w->windowId w==wid && windowVisible desktop w && bufferId w==Just (consoleBuffer console)) (windows desktop) &&
+          (terminalMouseButton =<< consoleMouse console)==terminalButton button
+        _->False
 
 -- | Stop normal polling and return cleanup to run outside the shared service lock.
 -- The returned cleanup still has to be executed.
@@ -201,7 +240,9 @@ showConsole console desktop = case M.lookup bid (buffers desktop) of
                   _ -> Selection (clamp a) (clamp c)
               , scrollRow=max 0 (min (scrollbarLimit desktop True document window) (scrollRow window))
               , scrollColumn=max 0 (min (scrollbarLimit desktop False document window) (scrollColumn window)) }
-    in desktop {buffers=M.insert bid document (buffers desktop),windows=map adjust (windows desktop)}
+    in desktop {buffers=M.insert bid document (buffers desktop),windows=map adjust (windows desktop),
+      terminalMouseTracking=if snapshotMouseTracking snapshot && snapshotExitCode snapshot==Nothing && consoleError console==Nothing && not (consoleRetiring console)
+        then S.insert bid (terminalMouseTracking desktop) else S.delete bid (terminalMouseTracking desktop)}
   where
     bid = consoleBuffer console
     snapshot = latestSnapshot console

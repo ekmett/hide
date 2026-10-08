@@ -199,6 +199,9 @@ checks = do
 
   check "download filenames respect UTF8 filesystem limits" (BS.length (TE.encodeUtf8 (sanitizeDownloadName (T.replicate 180 "界")))<=180)
 #ifdef WITH_REMOTE
+  check "native button identity and unknown release survive the wire" (and
+    [ (nativeEventInput event >>= either (const Nothing) Just . parseEither P.parseInput)==Just expected
+    | (event,expected)<- [([3,10,4,1,0,2],P.Mouse "down" 10 4 1 1 []),([4,10,4,0,0,3],P.Mouse "up" 10 4 2 1 []),([4,10,4],P.Mouse "up" 10 4 (-1) 1 [])]])
   check "coalesced native wheel travel survives the wire" (case nativeEventInput [9,10,4,-125,0] of
     Just value -> parseEither P.parseInput value==Right (P.Wheel 10 4 (-125) [])
     _ -> False)

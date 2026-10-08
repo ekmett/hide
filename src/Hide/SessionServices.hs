@@ -102,10 +102,13 @@ closeSessionServices (SessionServices _ _ _ ref)=do
 -- | Consume only session operations; the caller supplies the existing full
 -- runtime interpreter for later prepared-build adoption.
 sessionEffects :: SessionServices -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-sessionEffects runtime fallback=foldM apply . (False,)
+sessionEffects runtime@(SessionServices _ consoles _ _) fallback=foldM apply . (False,)
   where
     apply state@(True,_) _=pure state
     apply (_,d) (ExecuteShellBlockAction origin block)=(False,) <$> executeShellBlock runtime origin block d
+    apply (_,d) (TerminalMouseInput ident event)=do
+      result<-C.mouseConsole consoles ident event
+      pure (False,either (\err->d {status=err}) (const d) result)
     apply (_,d) (ServiceAction action values)=(False,) <$> perform runtime action values d
     apply (_,d) (PackageBuildAction action target)=(False,) <$> startPackageBuildPreparation runtime action target d
     apply (_,d) (AdoptPreparedBuild target)=(False,) <$> adoptBuildPreparation runtime target d

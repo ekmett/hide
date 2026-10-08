@@ -40,6 +40,8 @@ Editor positions are 1-based Unicode character positions. Raw LSP results retain
 
 `terminal_list`, `terminal_start`, `terminal_output`, `terminal_input` and `terminal_stop` use the same Ghostty terminals as the editor and ACP. Output is bounded and reports truncation and exit status. Execution tools can run programs with the editor's account and receive their inputs; choose Enable, Prompt or Disable under **Options > Agent Permissions**.
 
+Applications that enable terminal mouse tracking receive clicks, dragging and wheel input inside the terminal. Hold Shift to select text locally. Window borders and the dock tabs remain editor controls. Losing the captured view, opening a modal or leaving the frontend releases a held application button. Agent `editor_input` batches use the same route and release any unfinished press when the batch ends.
+
 ## Debugging
 
 `debug_status` reports the adapter, stop state, frame, breakpoints and current generation. At termination, `active` becomes false immediately; `finishing` remains true while the editor drains final output for up to one second. `exitCode` is the adapter-reported program result, or null when unavailable. Launch the selected THC/GHC target with `debug_launch`, supply an adapter configuration for another DAP implementation, or attach to a loopback adapter with `debug_attach`.

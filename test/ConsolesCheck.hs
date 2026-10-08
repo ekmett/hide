@@ -3,7 +3,10 @@ module ConsolesCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
-import Control.Monad (unless)
+import Control.Monad (unless,forM_)
+import qualified Graphics.Vty as V
+import qualified Data.Set as S
+import qualified Hide.Protocol as P
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
 import Data.Either (isLeft)
@@ -23,6 +26,7 @@ import Hide.Terminal
 
 checks :: IO ()
 checks = withConsoles $ \consoles -> do
+  routingChecks
   let desktop = initialDesktop (80,25)
   check "unknown output is rejected" . isLeft =<< consoleOutput consoles "missing"
   check "unknown input is rejected" . isLeft =<< inputConsole consoles "missing" "x"
@@ -56,6 +60,21 @@ windowsChecks consoles desktop = do
 
 nativeChecks :: Consoles -> Desktop -> IO ()
 nativeChecks consoles desktop = do
+  forM_ [ ("resize",fst . handleEvent (V.EvResize 90 30))
+        , ("modal",message "Question" ["Current modal"])
+        , ("close",closeActive)] $ \(label,cancelCapture)->do
+    (ident,opened)<-startConsole consoles (config "stty raw -echo; printf '\\033[?1000h\\033[?1006hready'; dd bs=1 count=18 2>/dev/null") 4096 desktop >>= requireRight
+    _<-waitOutput consoles ident (\(bytes,_,_)->"ready" `BS.isInfixOf` bytes)
+    ready<-tickConsoles consoles opened
+    let w=maybe (error "missing mouse terminal") id (activeWindow ready)
+        (pressed,effects)=P.applyInput (P.Mouse "down" (left (bounds w)+3) (top (bounds w)+2) 0 1 []) ready
+    forM_ effects $ \effect->case effect of
+      TerminalMouseInput target event->mouseConsole consoles target event >>= requireRight
+      _->error "unexpected mouse effect"
+    _<-tickConsoles consoles (cancelCapture pressed)
+    (bytes,_,_)<-waitOutput consoles ident (\(_,_,code)->code/=Nothing)
+    check ("lost "++label++" capture releases the actual PTY press") ("\ESC[<0;3;2M\ESC[<0;3;2m" `BS.isInfixOf` bytes)
+    releaseConsole consoles ident >>= requireRight
   (ident,opened) <- startConsole consoles (config "printf '\\033[1;38;2;12;34;56;48;2;65;43;21mA\\033[0m界'; exit 7") 4096 desktop >>= requireRight
   let bid = maybe (error "missing terminal window") sourceFixtureBuffer (activeWindow opened)
   check "numbered read-only terminal window" (maybe False (\doc -> documentLabel doc == Just ("Terminal " <> ident)) (activeDocument opened) && maybe False ((>0) . windowNumber) (activeWindow opened))
@@ -170,3 +189,39 @@ requireRight = either (error . T.unpack) pure
 
 check :: String -> Bool -> IO ()
 check label ok = unless ok (error label)
+
+-- Exercise the ordinary wire path, using only small capture/effect observations.
+routingChecks :: IO ()
+routingChecks = do
+  let opened=addDocument Nothing (newBuffer "screen") (initialDesktop (80,25))
+      w=maybe (error "missing mouse fixture") id (activeWindow opened)
+      bid=sourceFixtureBuffer w
+      d=opened {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal live"}) bid (buffers opened),
+        terminalMouseTracking=S.singleton bid}
+      x=left (bounds w)+3; y=top (bounds w)+2
+      apply action button clicks mods=P.applyInput (P.Mouse action x y button clicks mods)
+      (pressed,press)=apply "down" 0 1 [] d
+      (otherUp,ignored)=apply "up" 2 1 [] pressed
+      (moved,motion)=P.applyInput (P.Mouse "move" (-1) (-1) 0 0 []) otherUp
+      (released,release)=P.applyInput (P.Mouse "up" (-1) (-1) (-1) 1 []) moved
+      (_,wheel)=P.applyInput (P.Wheel x y 2 []) pressed
+      (_,double)=apply "down" 0 2 [] d
+      (shifted,local)=apply "down" 0 1 [V.MShift] d
+      (_,frame)=P.applyInput (P.Mouse "down" (left (bounds w)) (top (bounds w)) 0 1 []) d
+      effect action button requests=case requests of
+        [TerminalMouseInput "live" event]->terminalMouseAction event==action && terminalMouseButton event==button
+        _->False
+      (blurred,blur)=P.applyInput P.Blur pressed
+      (_,noMode)=apply "down" 0 1 [] d {terminalMouseTracking=S.empty}
+      (_,hover)=P.applyInput (P.Mouse "move" x y 0 0 []) d
+  check "terminal mouse uses client coordinates" (case press of
+    [TerminalMouseInput "live" event]->terminalMouseColumn event==2 && terminalMouseRow event==1
+    _->False)
+  check "unrelated release preserves captured terminal button" (drag otherUp==drag pressed && null ignored)
+  check "captured motion and unknown release keep their original owner" (effect TerminalMouseMotion (Just TerminalMouseLeft) motion && effect TerminalMouseRelease (Just TerminalMouseLeft) release && drag released==Nothing)
+  check "wheel remains wheel while terminal drag is captured" (length wheel==2 && all (effect TerminalMousePress (Just TerminalMouseWheelUp) . pure) wheel)
+  check "terminal double click stays application input" (effect TerminalMousePress (Just TerminalMouseLeft) double)
+  check "Shift bypasses application tracking for local selection" (null local && case drag shifted of Just Selecting{}->True; _->False)
+  check "terminal frame and disabled tracking stay local" (null frame && null noMode)
+  check "blur releases the captured application button" (drag blurred==Nothing && effect TerminalMouseRelease (Just TerminalMouseLeft) blur)
+  check "unbuttoned terminal hover is an application motion" (effect TerminalMouseMotion Nothing hover)

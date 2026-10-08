@@ -26,6 +26,7 @@ import qualified Hide.Plugin.Canvas as Canvas
 import Hide.ConversationBody (CapturedConversationSource,LogicalBody,ConversationCopy(..),BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItemIndex,logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
 import qualified Hide.Privacy as Privacy
 import Control.Applicative ((<|>))
+import Control.Monad (guard)
 import Hide.Sidebar
 import Hide.DebuggerSidebarTypes
 import Hide.DownloadsWindowTypes
@@ -55,6 +56,7 @@ import Hide.BufferView
 import qualified Hide.Bindings as Bindings
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Files (FileState(..))
+import qualified Hide.Terminal as Terminal
 
 -- | A zero-based character-cell rectangle with exclusive right and bottom edges.
 data Rect = Rect { left :: Int, top :: Int, width :: Int, height :: Int } deriving (Eq,Show)
@@ -231,7 +233,7 @@ data PackageBuildTarget = PackageBuildTarget
   , packageBuildName :: !Text } deriving (Eq,Show)
 
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | OpenFile !Plugin.MenuOrigin !FilePath | OpenFileBytes !Text !ByteString | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice !Plugin.MenuOrigin FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = TerminalMouseInput !Text !Terminal.TerminalMouseEvent | CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | OpenFile !Plugin.MenuOrigin !FilePath | OpenFileBytes !Text !ByteString | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice !Plugin.MenuOrigin FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -253,7 +255,7 @@ data Diagnostic = Diagnostic
   { diagnosticPath :: FilePath, diagnosticVersion :: Maybe Int, diagnosticRow :: Int
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
-data Drag = FollowingLink Int Int Int LinkOrigin Text | ImagePanning Int Int Int Canvas.CanvasView | ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data Drag = TerminalDragging Int V.Button Int Int | FollowingLink Int Int Int LinkOrigin Text | ImagePanning Int Int Int Canvas.CanvasView | ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
 -- | The human-selected composer action for Enter; Ctrl+Enter uses the other action.
 data ChatSubmit = QuerySubmit | SteerSubmit deriving (Eq,Show,Enum,Bounded)
@@ -342,6 +344,7 @@ data Desktop = Desktop
   , wideSectionTitles :: !Bool, windowPresentations :: M.Map Int WindowPresentation
   , diagnosticsGeneration :: !Integer
   , pendingFileExport :: (Int,Maybe FileExport)
+  , terminalMouseTracking :: S.Set Int -- Live console buffer IDs; never recovered.
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -734,7 +737,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0 (0,Nothing)
+initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0 (0,Nothing) S.empty
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -1978,6 +1981,7 @@ dispatchEvent (V.EvKey (V.KFun key) mods) d | dialog d==Nothing, V.MAlt `elem` m
 dispatchEvent (V.EvKey (V.KFun 9) []) d | dialog d==Nothing = runCommand MakeTarget d
 dispatchEvent (V.EvKey (V.KFun 9) [V.MAlt]) d | dialog d==Nothing = runCommand CompileTarget d
 dispatchEvent (V.EvKey (V.KFun 9) [V.MCtrl]) d | dialog d==Nothing = runCommand RunTarget d
+dispatchEvent ev d | Just result<-terminalDragEvent ev d = result
 dispatchEvent ev d | Just dg <- dialog d = dialogEvent ev dg d
 dispatchEvent ev d | Just popup <- contextMenu d = contextEvent ev popup d
 dispatchEvent ev d | Just m <- menu d = menuEvent ev m d
@@ -3035,6 +3039,7 @@ wheelEvent x y steps mods d = go (abs steps) d []
 
 mouseEvent :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
+  TerminalDragging{} -> d
   FollowingLink i a b origin target
     | x==a && y==b -> d {drag=Just (FollowingLink i a b origin target)}
     | otherwise -> selectAt True x y (focusWindow i d) {drag=Just (Selecting i)}
@@ -3062,10 +3067,74 @@ mouseEvent x y button mods d | bottomVisible d, inside (problemsRect d) x y = bo
 mouseEvent x y button _ d | Just tree <- sideTree d, x < treeWidth tree = treeMouse x y button tree d {problemsFocused=False}
 mouseEvent x y button mods d = windowMouse x y button mods d
 
+terminalClientRect :: Window -> Rect
+terminalClientRect w=let Rect x y columns rows=bounds w in Rect (x+1) (y+1) (max 1 (columns-2)) (max 1 (rows-2))
+
+terminalButton :: V.Button -> Maybe Terminal.TerminalMouseButton
+terminalButton button=lookup button [(V.BLeft,Terminal.TerminalMouseLeft),(V.BMiddle,Terminal.TerminalMouseMiddle),
+  (V.BRight,Terminal.TerminalMouseRight),(V.BScrollUp,Terminal.TerminalMouseWheelUp),(V.BScrollDown,Terminal.TerminalMouseWheelDown)]
+
+terminalMouseEffect :: Terminal.TerminalMouseAction -> Maybe Terminal.TerminalMouseButton -> [V.Modifier] -> Int -> Int -> Desktop -> Window -> Maybe Effect
+terminalMouseEffect action button mods x y d w=do
+  bid<-bufferId w
+  guard (bid `S.member` terminalMouseTracking d && windowVisible d w)
+  ident<-windowDocument (buffers d) w >>= documentLabel >>= T.stripPrefix "Terminal "
+  let Rect l t columns rows=terminalClientRect w
+      modifiers=[value | (key,value)<-[(V.MShift,Terminal.TerminalMouseShift),(V.MCtrl,Terminal.TerminalMouseControl),(V.MAlt,Terminal.TerminalMouseAlt)],key `elem` mods]
+  pure (TerminalMouseInput ident (Terminal.TerminalMouseEvent action button modifiers
+    (max 0 (min (columns-1) (x-l))) (max 0 (min (rows-1) (y-t)))))
+
+-- The initial press owns the gesture even when it crosses other windows/chrome.
+terminalDragEvent :: V.Event -> Desktop -> Maybe (Desktop,[Effect])
+terminalDragEvent event d=case drag d of
+  Just (TerminalDragging wid button _ _)->case event of
+    V.EvMouseDown x y _ mods | dialog d/=Nothing || menu d/=Nothing || contextMenu d/=Nothing->Just (emit Terminal.TerminalMouseRelease x y mods True)
+    V.EvMouseDown x y wheel mods | wheel `elem` [V.BScrollUp,V.BScrollDown]->
+      Just (d,maybe [] (maybe [] pure . terminalMouseEffect Terminal.TerminalMousePress (terminalButton wheel) mods x y d)
+        (find ((==wid).windowId) (windows d)))
+    V.EvMouseDown x y _ mods->Just (emit Terminal.TerminalMouseMotion x y mods False)
+    V.EvMouseUp x y released | released==Nothing || released==Just button->Just (emit Terminal.TerminalMouseRelease x y (heldModifiers d) True)
+    V.EvMouseUp{}->Just (d,[])
+    _->Nothing
+    where
+      emit action x y mods done=let effects=maybe [] (maybe [] pure . terminalMouseEffect action (terminalButton button) mods x y d)
+                                             (find ((==wid).windowId) (windows d))
+        in (d {drag=if done || null effects then Nothing else Just (TerminalDragging wid button x y),dragOriginal=Nothing},effects)
+  _->Nothing
+
+cancelTerminalDrag :: Desktop -> (Desktop,[Effect])
+cancelTerminalDrag d=case drag d of
+  Just (TerminalDragging _ button x y)->fromMaybe (d,[]) (terminalDragEvent (V.EvMouseUp x y (Just button)) d)
+  _->(d,[])
+
+-- Hover never focuses a terminal; Ghostty filters motion against the child's mode.
+terminalHover :: Int -> Int -> [V.Modifier] -> Desktop -> Maybe (Desktop,[Effect])
+terminalHover x y mods d=do
+  guard (drag d==Nothing && dialog d==Nothing && menu d==Nothing && contextMenu d==Nothing && V.MShift `notElem` mods)
+  w<-find (\window->windowVisible d window && inside (bounds window) x y) (windows d)
+  guard (inside (terminalClientRect w) x y)
+  effect<-terminalMouseEffect Terminal.TerminalMouseMotion Nothing mods x y d w
+  let (hovered,effects)=hoverAt x y d
+  pure (hovered,effects++[effect])
+
+-- | Shared native/browser motion path; the captured button owns movement.
+mouseMotion :: Int -> Int -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
+mouseMotion x y mods d
+  | Just forwarded<-terminalHover x y mods d=forwarded
+  | dialog d/=Nothing || drag d==Nothing=hoverAt x y d
+  | otherwise=handleEvent (V.EvMouseDown x y V.BLeft mods) d
+
+terminalMouseAt :: Int -> Int -> Desktop -> Bool
+terminalMouseAt x y d=maybe False (const True) (terminalHover x y [] d)
+
 windowMouse :: Int -> Int -> V.Button -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bounds w) x y) (windows d) of
   Nothing -> (d,[])
   Just w -> let focused = focusWindow (windowId w) d {sideTree=fmap (\sidebar -> sidebar {treeFocused=False}) (sideTree d)}; Rect l t ww hh = bounds w in case button of
+    _ | V.MShift `notElem` mods, Just effect<-terminalMouseEffect Terminal.TerminalMousePress (terminalButton button) mods x y focused w,
+        inside (terminalClientRect w) x y ->
+      (focused {drag=if button `elem` [V.BLeft,V.BMiddle,V.BRight]
+        then Just (TerminalDragging (windowId w) button x y) else Nothing},[effect])
     V.BScrollUp | Just _<-windowImage focused w,inside (pluginTextRect focused w) x y -> (fromMaybe focused (imageKey (V.KChar '+') [] focused),[])
     V.BScrollDown | Just _<-windowImage focused w,inside (pluginTextRect focused w) x y -> (fromMaybe focused (imageKey (V.KChar '-') [] focused),[])
     V.BScrollUp | Just _<-windowRows focused w,inside (fst (rowsWindowRects focused w)) x y -> (moveWindowRow (-3) focused,[])

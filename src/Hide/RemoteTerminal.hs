@@ -13,6 +13,7 @@ module Hide.RemoteTerminal
   ) where
 
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KM
 import Data.Bits ((.&.), shiftR)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
@@ -33,7 +34,6 @@ import Control.Concurrent.STM
 import Control.Exception (bracket, finally, throwIO)
 import Control.Monad (forever, forM_, unless, when)
 import Data.Aeson.Types (Parser, parseEither)
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Graphics.Vty.CrossPlatform (mkVty)
 import System.Directory (getHomeDirectory, createDirectoryIfMissing)
@@ -63,10 +63,14 @@ terminalEventInput event = case event of
     Just (object ["type" .= ("paste"::T.Text),"text" .= text])
   V.EvResize w h -> Just (object ["type" .= ("resize"::T.Text),"width" .= max 40 (min 512 w),"height" .= max 12 (min 256 h)])
   V.EvMouseDown x y button modifiers -> mouse x y (case button of V.BScrollUp -> "wheel-up"; V.BScrollDown -> "wheel-down"; _ -> "down") button modifiers
-  V.EvMouseUp x y button -> mouse x y "up" (maybe V.BLeft id button) []
+  V.EvMouseUp x y button -> case button of
+    Just released->mouse x y "up" released []
+    Nothing->fmap unknownRelease (mouse x y "up" V.BLeft [])
   V.EvLostFocus -> Just (object ["type" .= ("blur"::T.Text)])
   _ -> Nothing
   where
+    unknownRelease (Object fields)=Object (KM.insert "button" (toJSON (-1::Int)) fields)
+    unknownRelease value=value
     mods ms = [name | (modifier,name)<-[(V.MShift,"shift"::T.Text),(V.MCtrl,"ctrl"),(V.MAlt,"alt"),(V.MMeta,"alt")],modifier `elem` ms]
     mouse x y action button modifiers = Just (object ["type" .= ("mouse"::T.Text),"action" .= (action::T.Text),
       "x" .= max (-1) (min 511 x),"y" .= max (-1) (min 255 y),"button" .= (case button of V.BRight -> 2; V.BMiddle -> 1; _ -> 0::Int),"clicks" .= (1::Int),"mods" .= mods modifiers])

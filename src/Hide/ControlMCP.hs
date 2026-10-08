@@ -23,7 +23,7 @@ controlToolNames=["editor_input","editor_settings"]
 -- | Schemas for agent input and the permitted display-settings subset.
 controlTools :: [Value]
 controlTools=
-  [object ["name" .= ("editor_input"::T.Text),"description" .= ("Operate the editor using up to 64 mouse/key/paste events through its normal input path. Coordinates are 0-based character cells. Mouse actions: down/up/move/wheel-up/wheel-down; button0 left,2 right. Keys include characters, Enter, Escape, Tab, ArrowUp/Down/Left/Right, F1..F24, Home/End/PageUp/PageDown/Backspace/Delete/Insert. mods is an array of ctrl/alt/shift. Events may edit, save or run commands; applied sequentially, not transactionally. Conversation input, agent settings, approvals and Streamer mode require human input. Copy/paste uses an isolated clipboard for this batch, never the human clipboard."::T.Text),
+  [object ["name" .= ("editor_input"::T.Text),"description" .= ("Operate the editor using up to 64 mouse/key/paste events through its normal input path. Coordinates are 0-based character cells. Mouse actions: down/up/move/wheel-up/wheel-down; button0 left,1 middle,2 right; up with button-1 releases the captured button. Keys include characters, Enter, Escape, Tab, ArrowUp/Down/Left/Right, F1..F24, Home/End/PageUp/PageDown/Backspace/Delete/Insert. mods is an array of ctrl/alt/shift. Events may edit, save or run commands; applied sequentially, not transactionally. Conversation input, agent settings, approvals and Streamer mode require human input. Copy/paste uses an isolated clipboard for this batch, never the human clipboard."::T.Text),
    "inputSchema" .= object ["type" .= ("object"::T.Text),"required" .= ["events"::T.Text],"additionalProperties" .= False,"properties" .= object ["events" .= object ["type" .= ("array"::T.Text),"minItems" .= (1::Int),"maxItems" .= (64::Int),"items" .= object ["type" .= ("object"::T.Text)]]]],"annotations" .= annotations False],
    object ["name" .= ("editor_settings"::T.Text),"description" .= ("Read session display/editing settings as JSON, or apply a validated settings object. Fields: appearance(light/dark/system), screenMode(3/259), columns(40..512), rows(12..256), wordStar, blinkCursor, crtFilter, pixelateUnicode, materialIcons, macKeySymbols. Omitted fields remain unchanged; selecting screenMode defaults to its 80x25/80x50 grid unless dimensions supplied. Chat input defaults are readable but require human input to change. Backend/window pixel scale and agent configuration are not changed. Changes remain with the resumable session. The optional defaults object merges startup settings into global [editor.defaults]; it accepts these fields plus backend(terminal/auto/metal/vulkan/web/remote) and scale(1..8). Defaults affect future sessions. Responses include startupDefaults."::T.Text),
     "inputSchema" .= object ["type" .= ("object"::T.Text),"additionalProperties" .= False,"properties" .= object ["settings" .= object ["type" .= ("object"::T.Text)],"defaults" .= object ["type" .= ("object"::T.Text)]]],"annotations" .= annotations False]]
@@ -47,9 +47,13 @@ controlTool apply d name args=case parseEither parse args of
             Left err -> pure (d,pure (Left err))
             Right value -> pure (updated,pure (Right (case settingsValue updated of Object o -> Object (KM.insert "startupDefaults" value o); result -> result)))
   Right (Right events) -> do
-    (updated,count,stopped,err)<-foldM run (beginGuestInput d,0::Int,False,Nothing) events
-    pure (if count==0 then d else endGuestInput d updated,pure (Right (object ["appliedEvents" .= count,"exitRequested" .= stopped,"error" .= err,"clipboard" .= T.take 131072 (clipboard updated),"settings" .= settingsValue updated])))
+    (wasStopped,started)<-settleMouse d
+    (updated,count,stopped,err)<-foldM run (beginGuestInput started,0::Int,wasStopped,Nothing) events
+    (stoppedOnRelease,settled)<-settleMouse updated
+    pure (if count==0 then started else endGuestInput d settled,pure (Right (object ["appliedEvents" .= count,"exitRequested" .= (stopped || stoppedOnRelease),"error" .= err,"clipboard" .= T.take 131072 (clipboard updated),"settings" .= settingsValue settled])))
   where
+    settleMouse current=let (released,effects)=cancelTerminalDrag current in
+      if null effects then pure (False,released) else apply released effects
     parse :: Value -> Parser (Either (Value,Maybe Value) [P.WebInput])
     parse=withObject "controls" $ \o -> case name of
       "editor_settings" -> do

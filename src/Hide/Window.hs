@@ -434,15 +434,19 @@ runWindow backend scale effects tick initial = do
         Left _ -> pure (d,[])
         Right text -> foldText text d
     dispatch (3:x:y:clicks:mods:button:_) d
-      | button == 3 = pure (handleEvent (V.EvMouseDown x y V.BRight (keyMods mods)) d)
-      | clicks == 0, dialog d /= Nothing || drag d == Nothing = pure (hoverAt x y d)
-      | clicks >= 2 = pure (handleDoubleClick x y d)
-      | otherwise = clipboardResult (copyClick x y d) d (handleEvent (V.EvMouseDown x y V.BLeft (keyMods mods)) d)
-    dispatch (4:x:y:_) d = pure (handleEvent (V.EvMouseUp x y (Just V.BLeft)) d)
+      | clicks == 0 = pure (mouseMotion x y (keyMods mods) d)
+      | button==1, clicks>=2, V.MShift `elem` keyMods mods || not (terminalMouseAt x y d) = pure (handleDoubleClick x y d)
+      | otherwise = clipboardResult (button==1 && copyClick x y d) d
+          (handleEvent (V.EvMouseDown x y (case button of 3->V.BRight; 2->V.BMiddle; _->V.BLeft) (keyMods mods)) d)
+    dispatch (4:x:y:_:mods:button:_) d = pure (handleEvent (V.EvMouseUp x y (case button of 1->Just V.BLeft; 2->Just V.BMiddle; 3->Just V.BRight; _->Nothing)) d {heldModifiers=keyMods mods})
+    dispatch (4:x:y:_) d = pure (handleEvent (V.EvMouseUp x y Nothing) d)
     dispatch (5:w:h:_) d = pure (handleEvent (V.EvResize w h) d)
     dispatch (6:_) d | dialog d /= Nothing = pure (d,[])
                     | otherwise = pure (runCommand Quit d)
-    dispatch (7:_) d = pure (hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]})
+    dispatch (7:_) d =
+      let (released,pending)=cancelTerminalDrag d
+          (blurred,hoverEffects)=hoverAt (-1) (-1) released {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]}
+      in pure (blurred,pending++hoverEffects)
     dispatch (9:x:y:direction:mods:_) d = pure (wheelEvent x y direction (keyMods mods) d)
     dispatch event@(11:_) d = do
 #ifdef darwin_HOST_OS
@@ -463,7 +467,8 @@ runWindow backend scale effects tick initial = do
 #else
       pure (d,[])
 #endif
-    dispatch (12:x:y:_) d = pure (hoverAt x y d)
+    dispatch (12:x:y:_:mods:_) d = pure (mouseMotion x y (keyMods mods) d)
+    dispatch (12:x:y:_) d = pure (mouseMotion x y [] d)
     dispatch (13:mods:_) d = pure (d {heldModifiers=keyMods mods},[])
     dispatch _ d = pure (d,[])
     changeScale direction d = do

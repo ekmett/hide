@@ -125,7 +125,7 @@ parseInput = withObject "browser event" $ \o -> do
     "mouse" -> do
       action <- o .: "action"; x <- o .: "x"; y <- o .: "y"
       button <- o .:? "button" .!= 0; clicks <- o .:? "clicks" .!= 1
-      unless (action `elem` ["down","up","move","wheel-up","wheel-down"] && x>=(-1) && x<512 && y>=(-1) && y<256 && button>=0 && button<=2 && clicks>=0 && clicks<=3) (fail "Invalid mouse event")
+      unless (action `elem` ["down","up","move","wheel-up","wheel-down"] && x>=(-1) && x<512 && y>=(-1) && y<256 && (button>=0 || action=="up" && button==(-1)) && button<=2 && clicks>=0 && clicks<=3) (fail "Invalid mouse event")
       steps <- o .:? "steps" .!= 1
       unless (steps>=1 && steps<=256) (fail "Invalid wheel distance")
       if action `elem` ["wheel-up","wheel-down"] && steps/=1
@@ -188,15 +188,16 @@ applyInputUnchecked input d = case input of
   Frontend mode mac -> (d {videoMode=mode,nativeMac=mac && mode/=Nothing},[])
   OpenPath path -> (d,[OpenFile Plugin.HumanMenu path])
   Resize w h -> handleEvent (V.EvResize w h) d
-  Blur -> hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[],pendingFileExport=(fst (pendingFileExport d)+1,Nothing)}
+  Blur -> let (released,effects)=cancelTerminalDrag d
+              (blurred,hoverEffects)=hoverAt (-1) (-1) released {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[],pendingFileExport=(fst (pendingFileExport d)+1,Nothing)}
+          in (blurred,effects++hoverEffects)
   Modifiers mods -> (d {heldModifiers=mods},[])
   Wheel x y steps mods -> wheelEvent x y steps mods d
   Mouse action x y button clicks mods -> case action of
-    "move" | dialog d/=Nothing || drag d==Nothing -> hoverAt x y d
-           | otherwise -> handleEvent (V.EvMouseDown x y V.BLeft mods) d
-    "down" | button==0 && clicks>=2 -> handleDoubleClick x y d
-           | otherwise -> handleEvent (V.EvMouseDown x y (if button==2 then V.BRight else V.BLeft) mods) d
-    "up" -> handleEvent (V.EvMouseUp x y (Just (if button==2 then V.BRight else V.BLeft))) d
+    "move" -> mouseMotion x y mods d
+    "down" | button==0 && clicks>=2 && (V.MShift `elem` mods || not (terminalMouseAt x y d)) -> handleDoubleClick x y d
+           | otherwise -> handleEvent (V.EvMouseDown x y (case button of 2->V.BRight; 1->V.BMiddle; _->V.BLeft) mods) d
+    "up" -> handleEvent (V.EvMouseUp x y (case button of -1->Nothing; 2->Just V.BRight; 1->Just V.BMiddle; _->Just V.BLeft)) d {heldModifiers=mods}
     "wheel-up" -> handleEvent (V.EvMouseDown x y V.BScrollUp mods) d
     "wheel-down" -> handleEvent (V.EvMouseDown x y V.BScrollDown mods) d
     _ -> (d,[])
