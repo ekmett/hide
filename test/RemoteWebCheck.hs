@@ -29,7 +29,7 @@ checks = do
   oldOpen<-lookupEnv "THC_EDIT_WEB_OPEN"
   bracket_ (setEnv "THC_EDIT_WEB_OPEN" "0") (maybe (unsetEnv "THC_EDIT_WEB_OPEN") (setEnv "THC_EDIT_WEB_OPEN") oldOpen) $ do
     temp<-getTemporaryDirectory
-    bracket (openTempFile temp "hide-canvas-relay-check") (\(path,h)->hClose h >> removeFile path) $ \(path,logHandle)->
+    bracket (openTempFile temp "hide-canvas-relay-check") (\(path,h)->hClose h >> removeFile path) $ \(_,logHandle)->
       bracket (hDuplicate stderr) hClose $ \saved->bracket_ (hDuplicateTo logHandle stderr) (hFlush stderr >> hDuplicateTo saved stderr) $ do
         queue<-newTChanIO
         let feed packets=atomically (mapM_ (writeTChan queue . Just) packets)
