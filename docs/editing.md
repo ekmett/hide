@@ -74,6 +74,24 @@ Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
 
 [![The Installation link in Help, with its Open context menu.](site/screenshots/documentation-links.png)](site/screenshots/documentation-links.png)
 
+## Images
+
+Right-click a `.png` file in Files and choose **View PNG** to open an image
+window. It starts fitted to the window. Press **F** to fit again, **1** for
+actual size, or **+** / **−** to zoom. The wheel zooms; arrow keys and dragging
+pan. Resize or tile it like a source window.
+
+Metal, Vulkan and browser frontends keep the image crisp over the optional CRT
+filter. Other windows, menus and dialogs cover it normally. In a text terminal,
+the window shows its name, dimensions and an **Open externally** link. That link
+opens through the connected frontend, including when the editor runs over SSH.
+
+The viewer reads the saved PNG without changing an open buffer. It accepts files
+up to 16 MiB, 4096 pixels per side and four megapixels. Image windows share a
+64 MiB decoded-pixel budget. Private images follow the same streamer and agent
+visibility rules as other protected content. Session recovery retains a short
+unavailable-image description; reopen the file to load its pixels again.
+
 ## Buffer views
 
 The section at the bottom of **Window** changes how the selected source window

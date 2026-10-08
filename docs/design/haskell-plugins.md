@@ -74,7 +74,7 @@ Keep three responsibilities distinct:
 Plugins run on the session host, including an SSH host or detached daemon. A
 frontend disconnect does not unload them. A browser or Metal client does not need
 the plugin's Haskell package: it receives cell updates, named actions, prepared
-canvas resources and a semantic widget tree from the host. Canvas rendering is a planned extension,
+canvas resources and a semantic widget tree from the host. The first canvas view is a retained PNG image; custom rendering remains planned,
 tracked separately from the first command/widget implementation.
 
 ## Packaging and activation
@@ -526,8 +526,16 @@ cells, canvas-local coordinates, frontend logical points and device pixels. Any
 filter distortion must also participate in geometry conversion. Hit testing uses
 that same transform and capture rules. Plugins cannot paint or accept clicks over an approval dialog by enlarging their content bounds.
 
-Start with retained image resources and a small portable scene description that
-Metal, Vulkan and WebGL can execute. Send resource creation/upload/release and
+The PNG implementation prepares immutable RGBA8 on a worker through
+`prepareImageWindow`, then uses `openWindow` for ordinary scoped publication.
+The cell compositor emits the text grid and a tiny ownership stencil in one pass:
+one little-endian 16-bit value per normal character cell, with a surface slot in
+the low bits and a shadow bit at the top. Wide glyph halves occupy separate cells.
+An empty image scene needs no ownership array. GPU image shaders consult that
+mask; there is no CPU clip-rectangle expansion or full-resolution depth buffer.
+
+Retained image resources and a small portable scene description are shared by
+Metal, Vulkan and WebGL. Send resource creation/upload/release and
 scene/damage changes over the session wire protocol. Give surfaces and resources
 explicit lifetimes and revisions; an unchanged image is uploaded once, not
 encoded into every cell frame. Reconnect and graphics-context loss rebuild the
@@ -564,8 +572,8 @@ authorized masked composite, never underlying private canvas textures. Text
 terminals receive a useful named fallback with image metadata and Open Externally,
 not an empty source buffer pretending to display pixels.
 
-Deliver this after the shared widget ownership contract. The first PNG slice
-includes resources, clipping, identity/lifecycle, basic image semantics and the
+The first PNG slice uses the shared window ownership contract. It includes
+resources, clipping, identity/lifecycle, basic image semantics and the
 shared wire path. Enrich accessibility and add backend-specific rendering
 extensions with concrete consumers afterward. Keep the accessibility work
 independently useful for ordinary windows throughout.
