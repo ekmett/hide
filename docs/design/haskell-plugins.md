@@ -901,6 +901,15 @@ Conversation still owns provider permissions and presentation. Separating those
 remaining contributions is the next step; ACP, Ghostty and DAP keep their existing
 workers and protocols.
 
+The ACP completion transcript uses a scoped prepared text window. Its existing
+trace worker prepares the latest 65,536 characters after provider redaction;
+owner ticks refresh only the exact installed `WindowRef`. Closing the frame
+preserves its warm provider and independent hint draft, and later trace output
+cannot reopen it. The hint pane is bound to that reference rather than the title.
+Readable output grants no input authority. Recovery retains the transcript as an
+inert private text view and clears the hint binding and draft. The hint editor
+itself remains an existing host control; its typed editor migration is separate.
+
 ## Cabal navigation as a second example
 
 A Cabal plugin contributes a root named after the local package, with component

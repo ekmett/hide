@@ -95,7 +95,7 @@ newOutputOwner scope=mask_ $ do
         Left _->pure Nothing
         Right _ | not prepareView->pure Nothing
         Right bounded->Just <$> ((do
-          prepared<-W.prepareRecoverableTextWindow "hide.debug-output" 1 "Debugger output" bounded
+          prepared<-W.prepareRecoverableTextWindow "hide.debug-output" 1 W.PrivateWindow "Debugger output" bounded
           case prepared of
             Left err->pure (Left err)
             Right snapshot->do

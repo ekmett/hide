@@ -122,6 +122,7 @@ data RenderState = RenderState
   , keyDefaultBufferView :: BufferView
   , keyChatSubmit :: ChatSubmit
   , keyInlineEpoch :: Int
+  , keyAutocompleteWindow :: Maybe PluginWindow.WindowRef
   , keyAutocompleteACPEnabled :: Bool
   , keyAutocompleteSelection :: Selection
   , keyAutocompleteFocused :: Bool
@@ -280,6 +281,7 @@ renderKey original = do
         , keyDefaultBufferView=defaultBufferView original
         , keyChatSubmit=chatSubmit original
         , keyInlineEpoch=inlineEpoch original
+        , keyAutocompleteWindow=autocompleteWindow original
         , keyAutocompleteACPEnabled=autocompleteACPEnabled original
         , keyAutocompleteSelection=autocompleteSelection original
         , keyAutocompleteFocused=autocompleteFocused original

@@ -292,7 +292,7 @@ checks=bracket temporary removePathForcibly $ \root->
       let popup=popupFor label d
           selectedPopup=popup {contextMenu=fmap (\(rectangle,_)->(rectangle,selected)) (contextMenu popup)}
       in handleEvent (V.EvKey V.KEnter []) selectedPopup
-    hasCompletionChat d=any ((==Just "Autocomplete").documentLabel) (M.elems (buffers d))
+    hasCompletionChat d=any (\w->maybe False ((==windowContent w).PluginContent) (autocompleteWindow d)) (windows d)
     agentChoicePurpose dg=case purpose dg of PluginChoiceForm{}->dialogTitle dg=="Agent setting"; _->False
     completionPurpose dg=case purpose dg of PluginChoiceForm{}->dialogTitle dg=="Completion setting"; _->False
     inputValue d=case dialog d of

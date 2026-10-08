@@ -333,6 +333,7 @@ data Desktop = Desktop
   , defaultBufferView :: BufferView, chatSubmit :: ChatSubmit
   , inlinePreview :: Maybe InlineView, inlineEpoch :: Int
   , dockedTerminals :: M.Map Int (Rect,Maybe Rect), bottomTerminal :: Maybe Int
+  , autocompleteWindow :: Maybe PluginWindow.WindowRef
   , autocompleteACPEnabled :: Bool, autocompleteDraft :: Buffer
   , autocompleteSelection :: Selection, autocompleteFocused :: Bool, macKeySymbols :: Bool
   , keyBindings :: M.Map (Bindings.BindingPlatform,Bindings.BindingContext) (Bindings.Bindings Command)
@@ -733,7 +734,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0 (0,Nothing)
+initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0 (0,Nothing)
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -829,7 +830,10 @@ imageKey key mods d=do
 
 -- The same reserved body extent feeds paint, hit maps and scrollbar limits.
 pluginBodyRows :: Desktop -> Window -> Int
-pluginBodyRows d w=max 0 (height (bounds w)-2-if windowHasEditor d w then height (composerRect d w)+1 else 0)
+pluginBodyRows d w=max 0 (height (bounds w)-2-reserved)
+  where reserved | windowHasEditor d w=height (composerRect d w)+1
+                 | autocompletePane d w=height (autocompleteComposerRect d w)+1
+                 | otherwise=0
 
 windowRows :: Desktop -> Window -> Maybe (Vec.Vector PluginWindow.WindowRow,M.Map Tree.NodeId Int,Tree.NodeId,Bool)
 windowRows d w=do
@@ -1542,6 +1546,7 @@ closeActive d = case activeWindow d of
        _->buffers d,
      retiredPluginWindows=foldr S.delete (retiredPluginWindows d) references,
      pluginWindows=foldr M.delete (pluginWindows d) references,
+     autocompleteWindow=if maybe False ((==windowContent w).PluginContent) (autocompleteWindow saved) then Nothing else autocompleteWindow saved,
      conversationViews=M.map retire (conversationViews saved)})
     where
       saved=rememberConversationView d
@@ -2481,7 +2486,9 @@ composerEventWith _ _ _ = Nothing
 -- The Autocomplete hint is independent human input. Reuse editing operations
 -- through a temporary projection, then copy back only its dedicated state.
 autocompletePane :: Desktop -> Window -> Bool
-autocompletePane d w=autocompleteACPEnabled d && maybe False ((==Just "Autocomplete") . documentLabel) (windowDocument (buffers d) w)
+autocompletePane d w=autocompleteACPEnabled d && case autocompleteWindow d of
+  Just reference->windowContent w==PluginContent reference && reference `S.notMember` retiredPluginWindows d
+  Nothing->False
 
 activeAutocomplete :: Desktop -> Bool
 activeAutocomplete d=maybe False (autocompletePane d) (activeWindow d)
@@ -4348,7 +4355,8 @@ bottomTabs d = placeTabs 1 visible
   where
     available=max 0 (fst (screenSize d)-12)
     tabs=[(Nothing,"Messages "<>maybe "" (T.pack.show) (messagesNumber d)) | problemsVisible d]++
-      [(Just (windowId w),(if (documentLabel =<< windowDocument (buffers d) w)==Just "Autocomplete" then "Autocomplete " else "Terminal ")<>T.pack (show (windowNumber w))) | w<-sortOn windowNumber (windows d),windowPinned d w]
+      [(Just (windowId w),tabTitle w<>" "<>T.pack (show (windowNumber w))) | w<-sortOn windowNumber (windows d),windowPinned d w]
+    tabTitle w=case windowContent w of PluginContent{}->windowTitle d w; _->"Terminal"
     selected=fromMaybe 0 (findIndex ((==bottomTerminal d).fst) tabs)
     tabWidth (_,name)=min available (T.length name+2)
     prefix=take (selected+1) tabs
