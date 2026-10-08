@@ -66,6 +66,16 @@ checks = do
     (fst (pendingFileExport detached)==10 && snd (pendingFileExport detached)==Nothing && Model.fileExportView detached/=Model.fileExportView offered)
 #endif
 
+  let sidebar=object ["readOnly" .= True,"revision" .= (1::Int),"nodes" .= ([]::[Value])]
+      sidebarFrame=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"semanticSidebar" .= sidebar]
+  check "native receiver retains the exact bounded semantic snapshot"
+    (case parseRemoteFrame sidebarFrame rows of Right value->eitherDecodeStrict' (remoteSidebar value)==Right sidebar; _->False)
+  check "missing native semantics clears earlier accessibility state"
+    (case parseRemoteFrame meta rows of Right value->BS.null (remoteSidebar value); _->False)
+  check "native semantic transport rejects oversized and nonobject snapshots"
+    (all (either (const True) (const False) . (\value->parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"semanticSidebar" .= value]) rows))
+      [String "bad",object ["name" .= T.replicate 2097153 "a"]])
+
   let menuMeta fields=object (["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]) ]++fields)
       states metadata=either (const []) remoteMenus (parseRemoteFrame metadata rows)
       commandToken command=maybe (error "missing native command") id (elemIndex command nativeCommands)

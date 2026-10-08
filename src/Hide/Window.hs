@@ -8,7 +8,7 @@
 module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMenuEvent, nativeMenuEventFor, nativeMenuToken, nativeCommands, nativeCommandsFor, nativeDockWindow
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
-  , c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
+  , c_accessibility, c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
   , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
@@ -84,6 +84,7 @@ foreign import ccall unsafe "thc_open" c_open :: CString -> CDouble -> CInt -> C
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
 foreign import ccall unsafe "thc_raise" c_raise :: IO ()
+foreign import ccall unsafe "thc_accessibility" c_accessibility :: CString -> CSize -> IO CInt
 foreign import ccall unsafe "thc_cancel_file_drag" c_cancel_file_drag :: IO ()
 foreign import ccall unsafe "thc_arm_file_drag" c_arm_file_drag :: CString -> CInt -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_title" c_title :: CString -> IO ()

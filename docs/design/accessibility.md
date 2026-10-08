@@ -305,3 +305,10 @@ Unicode ranges, no callback into the locked desktop, no stale action delivery,
 and an explicit account of remaining text-size, terminal and protected-control
 limits. Estimate calendar time only after the macOS/transport vertical slice;
 text replication and authority policy dominate the uncertainty.
+
+The macOS frontend consumes that same sidebar snapshot through a retained Cocoa
+accessibility outline. Host-assigned IDs preserve row objects; replacement and
+reset retire old names and links. AppKit derives screen coordinates from the
+actual SDL content view and renderer cell edges. The adapter has no actions or
+setters and does not override application accessibility focus. Native windows,
+dialogs and document text still need their own semantic projections.

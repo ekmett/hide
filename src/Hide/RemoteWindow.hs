@@ -17,6 +17,7 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseEither)
 import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
@@ -35,9 +36,8 @@ import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM hiding (check)
 import Control.Exception (bracket, bracket_, throwIO, IOException, catch, finally)
 import Control.Monad (forM_, forever, when, foldM)
-import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
-import Foreign (alloca, allocaArray, peek, peekArray, pokeArray)
+import Foreign (nullPtr, alloca, allocaArray, peek, peekArray, pokeArray)
 import Foreign.C
 import Data.IORef
 import Data.Word (Word64)
@@ -82,7 +82,7 @@ data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
-  , remoteExportView :: [Integer], remoteBindings :: [(T.Text,T.Text)]
+  , remoteSidebar :: BS.ByteString, remoteExportView :: [Integer], remoteBindings :: [(T.Text,T.Text)]
   , remoteWindows :: [(Int,T.Text,Bool,Bool)]
   , remoteContributions :: [RemoteContribution], remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
@@ -106,6 +106,10 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   wordstar <- o .:? "wordstar" .!= False
   exportView <- o .:? "fileExportView" .!= []
   unless (length exportView<=13 && all (\n->n>=0 && n<=9007199254740991) exportView) (fail "Invalid file export view")
+  sidebar <- o .:? "semanticSidebar"
+  unless (maybe True (\value->case value of Object{}->True; _->False) sidebar) (fail "Invalid sidebar semantics")
+  let sidebarBytes=maybe BS.empty (BL.toStrict . BL.take 2097153 . encode) (sidebar::Maybe Value)
+  unless (BS.length sidebarBytes<=2097152) (fail "Oversized sidebar semantics")
   bindings <- o .: "bindings"
   unless (length bindings<=8192 && all validBinding bindings) (fail "Invalid binding projection")
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
@@ -120,7 +124,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
     pure (ident,windowTitle,selected,windowEnabled))
   unless (IS.size (IS.fromList [ident | (ident,_,_,_)<-windows])==length windows && length [() | (_,_,True,_)<-windows]<=1) (fail "Invalid editor window catalogue")
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
   where
     validBinding (chord,name)=T.length name<=256 && case readChord chord of Right (key,mods)->chordName key mods==Just chord; _->False
     parseContribution=withObject "menu contribution" $ \o->do
@@ -418,6 +422,16 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
   presentationDemand <- newIORef Nothing
   titleTiming <- newIORef (0::Double,""::T.Text)
   exportGesture <- newIORef Nothing
+  installedSidebar <- newIORef Nothing
+  let clearSidebar=do
+        check "Clear sidebar accessibility" (c_accessibility nullPtr 0)
+        writeIORef installedSidebar Nothing
+      installSidebar value=do
+        previous<-readIORef installedSidebar
+        let bytes=remoteSidebar value
+        when (previous/=Just bytes) $ do
+          BS.useAsCStringLen bytes $ \(ptr,len)->check "Update sidebar accessibility" (c_accessibility ptr (fromIntegral len))
+          writeIORef installedSidebar (Just bytes)
   incoming <- newTBQueueIO 8
   outgoing <- newTBQueueIO 256
   queuedBytes <- newTVarIO (0::Int)
@@ -516,7 +530,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           c_cancel_file_drag
           writeIORef exportGesture (Just (path,row,view,False))
           pure (frame,atlas,connection,changed,closed)
-        Assets glyphs -> pure (frame,glyphs,connection,True,closed)
+        Assets glyphs -> clearSidebar >> pure (frame,glyphs,connection,True,closed)
         Frame serial received value -> do
           started<-atomicModifyIORef' demands (\pending -> let (time,next)=settleFrame serial pending in (next,time))
           modifyIORef' presentationDemand (Just . maybe (fromMaybe received started) (min (fromMaybe received started)))
@@ -532,6 +546,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           forM_ (zip [0..] (remoteMenus value)) $ \(i,enabled) ->
             c_menu_enabled (fromIntegral (i::Int)) (if enabled then 1 else 0)
 #endif
+          installSidebar value
           pure (Just value,atlas,connection,True,closed)
         Control value -> do
           kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
@@ -554,6 +569,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
               pure (frame,atlas,connection,changed,closed)
             "connection" -> do
               connected <- parseIO (withObject "connection" (.: "connected")) value
+              clearSidebar
               when connected resize
               pure (frame,atlas,if connected then "" else " (reconnecting)",True,closed)
             _ -> pure (frame,atlas,connection,changed,closed)

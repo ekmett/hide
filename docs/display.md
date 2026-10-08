@@ -133,6 +133,12 @@ Each nesting level adds one column. `--material-icons` selects bundled Material
 folder icons in a native window or browser; in a terminal it needs a Nerd Font
 containing Material Design Icons U+F024B and U+F0770.
 
+On macOS, the native window also exposes the visible sidebar as a read-only
+accessibility outline, including its hierarchy, selected row and loading state.
+Its bounds follow window movement, display scale and clipping. Use the editor's
+normal controls to change the tree; this outline adds reading access without
+changing keyboard focus.
+
 ## Keyboard and clipboard
 
 Use **F10** and letter mnemonics for the in-window menus. On macOS, native menus
