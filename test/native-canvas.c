@@ -43,6 +43,9 @@ static void pixel(SDL_Surface *image,int x,int y,int r,int g,int b) {
 }
 int main(int argc,char **argv) {
     assert(argc==2);
+#ifdef __APPLE__
+    SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP,"1");
+#endif
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE_EXIT","1",true);
     SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",capture,true);
     assert(thc_open(argv[1],2,80,25,16));
@@ -71,16 +74,22 @@ int main(int argc,char **argv) {
     unsigned char colors[16]={255,0,0,255,0,255,0,128,0,0,255,255,151,255,0,128};
     assert(thc_canvas_begin(epoch,colorful,2,2,16));assert(thc_canvas_chunk(epoch,colorful,0,colors,16));
     uint16_t tiny[80*25]={0};tiny[0]=tiny[1]=tiny[81]=1;tiny[80]=32769;
+    uint64_t uploads,bytes,masks,retained,draws,beforeUploads,beforeMasks,beforeDraws;
+    thc_canvas_stats(&uploads,&bytes,&masks,&retained,&beforeDraws);
     cells();assert(thc_canvas_scene(epoch,80,25,tiny,80*25));
-    assert(thc_canvas_surface(colorful,1,0,0,2,2,0,0,2,2));assert(thc_canvas_commit());assert(thc_present());
+    assert(thc_canvas_surface(colorful,1,0,0,2,2,0,0,2,2));
+    /* Retain occluded resources without issuing their shader passes. */
+    assert(thc_canvas_surface(green,2,0,0,8,4,0,0,8,4));
+    assert(thc_canvas_surface(red,64,0,0,8,4,0,0,8,4));
+    assert(thc_canvas_commit());assert(thc_present());
+    thc_canvas_stats(&uploads,&bytes,&masks,&retained,&draws);assert(draws==beforeDraws+1);
     image=SDL_LoadBMP(capture);assert(image);
     pixel(image,8,16,255,0,0);pixel(image,16+8,16,0,128,0);
     pixel(image,8,32+16,0,0,127);pixel(image,16+8,32+16,75,128,0);SDL_DestroySurface(image);
     assert(thc_canvas_release(epoch,colorful));cells();scene(0);assert(thc_present());
-    uint64_t uploads,bytes,masks,retained,beforeUploads,beforeMasks;
-    thc_canvas_stats(&beforeUploads,&bytes,&beforeMasks,&retained); assert(bytes==48 && retained==32);
+    thc_canvas_stats(&beforeUploads,&bytes,&beforeMasks,&retained,&draws); assert(bytes==48 && retained==32);
     for (int i=0;i<3;++i) { cells();scene(i); assert(thc_present()); }
-    thc_canvas_stats(&uploads,&bytes,&masks,&retained); assert(uploads==beforeUploads && masks==beforeMasks);
+    thc_canvas_stats(&uploads,&bytes,&masks,&retained,&draws); assert(uploads==beforeUploads && masks==beforeMasks);
     thc_crt_filter(1); cells();scene(0);assert(thc_present()); image=SDL_LoadBMP(capture);assert(image);
     pixel(image,16+8,32+31,200,100,50); SDL_DestroySurface(image); /* crisp pass follows CRT */
     assert(thc_canvas_begin(epoch,partial,2,2,16)); assert(thc_canvas_chunk(epoch,partial,0,rgba,1));
@@ -92,7 +101,7 @@ int main(int argc,char **argv) {
     mask[0]=65; assert(!thc_canvas_scene(epoch,80,25,mask,80*25));mask[0]=1;
     assert(thc_canvas_scene(epoch,80,25,mask,80*25)); assert(thc_canvas_surface(red,1,0,0,1,1,0,0,1,1)); assert(!thc_canvas_commit());
     assert(thc_canvas_reset(old)); assert(!thc_canvas_release(epoch,red));
-    thc_canvas_stats(&uploads,&bytes,&masks,&retained); assert(retained==0);
+    thc_canvas_stats(&uploads,&bytes,&masks,&retained,&draws); assert(retained==0);
     thc_close(); remove(capture);
     puts("native canvas GPU: contiguous partial rows, ready gate, stencil overlap/halo/wide halves, straight alpha, crisp capture, retained transforms and epoch/release cleanup passed");
     return 0;

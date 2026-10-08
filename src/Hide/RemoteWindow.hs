@@ -359,7 +359,7 @@ remoteMenuLayout frame=[(title,compose title items) | (title,_,items)<-menus]
     shortcut ident=nativeChordShortcut [chord | (chord,name)<-remoteBindings frame,name==ident]
     indexed=zip [length menuActions..] (remoteContributions frame)
     compose title items=map builtin items++[(contributionTitle item,shortcut (contributionId item),token) | (token,item)<-indexed,contributionSlot item==T.toLower title,contributionId item/="hide.help.contents"]
-    builtin (MenuItem title _ Help) | (token,item):_<-[(token,item) | (token,item)<-indexed,contributionId item=="hide.help.contents"] = (contributionTitle item,shortcut (contributionId item),token)
+    builtin (MenuItem _ _ Help) | (token,item):_<-[(token,item) | (token,item)<-indexed,contributionId item=="hide.help.contents"] = (contributionTitle item,shortcut (contributionId item),token)
     builtin (MenuItem title _ Disabled{})=(title,("",0),-1)
     builtin (MenuItem title _ command)=(title,maybe ("",0) shortcut (commandIdentifier command),maybe (-1) id (elemIndex command menuActions))
 
@@ -515,7 +515,7 @@ drawRemote font atlas epoch frame = allocaArray 16 $ \scratch -> do
       chars 0 x
     RemoteGlyph visible y paint text full start shown -> drawGlyph scratch visible y paint text full start shown 0 full
     RemoteScript x y paint text natural script ->
-      drawGlyph scratch x y paint text 1 0 1 (case script of Superscript -> 1; Subscript -> 2) natural
+      drawGlyph scratch x y paint text 1 0 (1::Int) (case script of Superscript -> 1; Subscript -> 2) natural
   forM_ (remoteCursor frame) $ \(x,y) -> c_cursor (fromIntegral x) (fromIntegral y)
   case remoteCanvas frame of
     Just scene | Just (canvasEpoch scene)==epoch->installNativeCanvas (canvasEpoch scene) (remoteSize frame) (canvasMask scene)
@@ -806,9 +806,6 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
     drain queue = do
       item <- tryReadTBQueue queue
       case item of Nothing -> pure []; Just value@CanvasBytes{} -> pure [value]; Just value -> (value:) <$> drain queue
-#ifdef darwin_HOST_OS
-    atMay xs i = case drop i xs of x:_ -> Just x; _ -> Nothing
-#endif
 #else
 runRemoteWindow :: Backend -> Double -> (Int,Int) -> Int -> String -> RemotePeer -> IO ()
 runRemoteWindow _ _ _ _ _ _ = ioError (userError "Graphical support is not built; rebuild with -fwindow -fremote.")

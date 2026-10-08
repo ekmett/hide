@@ -187,7 +187,9 @@ installNativeMenus layout=do
     forM_ items $ \(name,(key,mods),token)->
       if token<0 then c_menu_separator else unless (token `elem` map (fromIntegral . number) [About,EditorOptions,Quit]) $
         utf8 name $ \namePtr->withCString key $ \keyPtr->c_menu_item namePtr keyPtr (fromIntegral mods) (fromIntegral token) 1
-  where number cmd=maybe (error "Missing native application command") fromIntegral (elemIndex cmd nativeCommands)
+  where
+    number :: Command -> CInt
+    number cmd=maybe (error "Missing native application command") fromIntegral (elemIndex cmd nativeCommands)
 #else
 installNativeMenus _ = pure ()
 #endif
@@ -507,9 +509,9 @@ nativeMenuShortcut d cmd
 -- | Cocoa key equivalents carry explicit SDL modifier bits, including Command.
 -- Function and navigation keys use Cocoa's documented Unicode key equivalents.
 nativeChordShortcut :: [Text.Text] -> (String,Int)
-nativeChordShortcut chords=case mapMaybe encode chords of value:_ -> value; [] -> ("",0)
+nativeChordShortcut chords=case mapMaybe encodeChord chords of value:_ -> value; [] -> ("",0)
   where
-    encode chord=case readChord chord of
+    encodeChord chord=case readChord chord of
       Left _->Nothing
       Right (key,mods)->do
         name<-case key of

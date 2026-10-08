@@ -38,7 +38,7 @@ int thc_canvas_scene(const char *epoch, int cols, int rows, const void *little_e
 int thc_canvas_surface(const char *id, int slot, int x, int y, int width, int height, double tx, double ty, double tw, double th);
 void thc_canvas_clear(void);
 int thc_canvas_commit(void);
-void thc_canvas_stats(uint64_t *uploads, uint64_t *bytes, uint64_t *masks, uint64_t *retained);
+void thc_canvas_stats(uint64_t *uploads, uint64_t *bytes, uint64_t *masks, uint64_t *retained, uint64_t *draws);
 /* The next glyph retains its full origin/width; only these visible cells draw. */
 void thc_clip(int visible_x, int clip_cells);
 /* Traits: bold1, italic2, explicit-width4, underline8, strikethrough16.

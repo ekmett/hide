@@ -102,7 +102,7 @@ static bool canvas_committed,canvas_mask_ready,canvas_empty_mask;
 static SDL_GPUShader *canvas_shader;
 static SDL_GPUBuffer *canvas_mask_buffer;
 static SDL_GPUTransferBuffer *canvas_mask_transfer;
-static uint64_t canvas_uploads,canvas_uploaded_bytes,canvas_mask_uploads;
+static uint64_t canvas_uploads,canvas_uploaded_bytes,canvas_mask_uploads,canvas_draws,canvas_visible_slots;
 static bool canvas_id(const char *value) {
     if (!value || strlen(value)!=48) return false;
     for (int i=0;i<48;++i) if (!((value[i]>='0' && value[i]<='9') || (value[i]>='a' && value[i]<='f'))) return false;
@@ -121,7 +121,7 @@ static void canvas_retire(CanvasResource *resource) {
 int thc_canvas_reset(const char *epoch) {
     if (epoch && !canvas_id(epoch)) return SDL_SetError("Invalid canvas epoch");
     for (size_t i=0;i<CANVAS_RESOURCES;++i) if (canvas_resources[i].id[0]) canvas_retire(&canvas_resources[i]);
-    canvas_surface_count=0; canvas_cols=canvas_rows=0; canvas_committed=canvas_mask_ready=false;
+    canvas_surface_count=0; canvas_cols=canvas_rows=0; canvas_committed=canvas_mask_ready=false; canvas_visible_slots=0;
     canvas_epoch[0]=0; if (epoch) memcpy(canvas_epoch,epoch,49);
     return 1;
 }
@@ -203,9 +203,10 @@ int thc_canvas_surface(const char *id,int slot,int x,int y,int width,int height,
     surface->target[0]=(float)tx; surface->target[1]=(float)ty; surface->target[2]=(float)tw; surface->target[3]=(float)th;
     return 1;
 }
-void thc_canvas_clear(void) { canvas_surface_count=0; canvas_committed=false; }
+void thc_canvas_clear(void) { canvas_surface_count=0; canvas_committed=false; canvas_visible_slots=0; }
 int thc_canvas_commit(void) {
-    if (canvas_empty_mask) { canvas_committed=true;return 1; }
+    if (canvas_empty_mask) { canvas_visible_slots=0;canvas_committed=true;return 1; }
+    uint64_t visible=0;
     const CanvasSurface *owners[65]={0};
     for (size_t i=0;i<canvas_surface_count;++i) owners[canvas_surfaces[i].slot]=&canvas_surfaces[i];
     for (int y=0;y<canvas_rows;++y) for (int x=0;x<canvas_cols;++x) {
@@ -213,12 +214,13 @@ int thc_canvas_commit(void) {
         const CanvasSurface *surface=owners[slot];
         if (!surface || x<surface->rect[0] || y<surface->rect[1] || x-surface->rect[0]>=surface->rect[2] || y-surface->rect[1]>=surface->rect[3])
             return SDL_SetError("Canvas mask has no owning viewport");
+        visible|=UINT64_C(1)<<(slot-1);
     }
-    canvas_committed=true; return 1;
+    canvas_visible_slots=visible;canvas_committed=true; return 1;
 }
 
 static bool canvas_draw(const SDL_FRect *target) {
-    if (!canvas_committed || !canvas_surface_count || canvas_cols!=cols || canvas_rows!=rows) return true;
+    if (!canvas_committed || !canvas_visible_slots || canvas_cols!=cols || canvas_rows!=rows) return true;
     if (!gpu) return true;
     if (!canvas_mask_buffer) {
         SDL_GPUBufferCreateInfo buffer={SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,512u*256u*4u,0};
@@ -238,20 +240,34 @@ static bool canvas_draw(const SDL_FRect *target) {
         canvas_mask_ready=true; ++canvas_mask_uploads;
     }
     for (size_t i=0;i<canvas_surface_count;++i) {
-        CanvasSurface *surface=&canvas_surfaces[i]; CanvasResource *resource=canvas_resource(surface->id);
+        CanvasSurface *surface=&canvas_surfaces[i];
+        if (!(canvas_visible_slots&(UINT64_C(1)<<(surface->slot-1)))) continue;
+        CanvasResource *resource=canvas_resource(surface->id);
         if (!resource || !resource->ready) continue;
         if (!resource->state) {
             SDL_GPURenderStateCreateInfo state={0}; state.fragment_shader=canvas_shader; state.num_storage_buffers=1; state.storage_buffers=&canvas_mask_buffer;
             resource->state=SDL_CreateGPURenderState(renderer,&state); if (!resource->state) return false;
         }
         float uniforms[8]={(float)cols,(float)rows,(float)surface->slot,0,surface->target[0],surface->target[1],surface->target[2],surface->target[3]};
-        if (!SDL_SetGPURenderStateFragmentUniforms(resource->state,0,uniforms,sizeof(uniforms)) || !SDL_SetGPURenderState(renderer,resource->state) ||
-            !SDL_RenderTexture(renderer,resource->texture,NULL,target) || !SDL_SetGPURenderState(renderer,NULL)) return false;
+        /* A coarse viewport scissor bounds work without changing the full-grid
+         * UV mapping; the normal-cell stencil still performs the exact clip.
+         * Round outward to include cell edges at fractional native scale. */
+        int left=(int)floor(target->x+(double)surface->rect[0]*target->w/cols);
+        int top=(int)floor(target->y+(double)surface->rect[1]*target->h/rows);
+        int right=(int)ceil(target->x+(double)(surface->rect[0]+surface->rect[2])*target->w/cols);
+        int bottom=(int)ceil(target->y+(double)(surface->rect[1]+surface->rect[3])*target->h/rows);
+        SDL_Rect clip={left,top,right-left,bottom-top};
+        bool drawn=SDL_SetRenderClipRect(renderer,&clip) &&
+            SDL_SetGPURenderStateFragmentUniforms(resource->state,0,uniforms,sizeof(uniforms)) && SDL_SetGPURenderState(renderer,resource->state) &&
+            SDL_RenderTexture(renderer,resource->texture,NULL,target);
+        bool restored=SDL_SetGPURenderState(renderer,NULL);
+        if (!SDL_SetRenderClipRect(renderer,NULL) || !drawn || !restored) return false;
+        ++canvas_draws;
     }
     return true;
 }
-void thc_canvas_stats(uint64_t *uploads,uint64_t *bytes,uint64_t *masks,uint64_t *retained) {
-    *uploads=canvas_uploads; *bytes=canvas_uploaded_bytes; *masks=canvas_mask_uploads; *retained=canvas_bytes;
+void thc_canvas_stats(uint64_t *uploads,uint64_t *bytes,uint64_t *masks,uint64_t *retained,uint64_t *draws) {
+    *uploads=canvas_uploads; *bytes=canvas_uploaded_bytes; *masks=canvas_mask_uploads; *retained=canvas_bytes; *draws=canvas_draws;
 }
 
 static void clear_pointer(void) {
