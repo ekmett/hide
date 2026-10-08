@@ -32,7 +32,7 @@ console.log('Browser two-cell glyph stretch and cache checks passed');
 // Exercise the production row packer: preserve full glyph geometry while
 // advancing by visible cells, then upload only that row's compact metadata.
 const uploads=[],shaped=[];
-Object.assign(context,{frame:{pixelated:false},metrics:()=>[8,16],cols:5,lines:1,gridCols:5,gridRows:1,cellGrid:new Uint32Array(40),atlasEntry:(text,fg,pixelated,w,h,traits)=>{shaped.push([text,w,h,traits]);return [11|(22<<16),16|(16<<16),2];},performance:{now:()=>0},gl:{TEXTURE1:1,TEXTURE_2D:2,RGBA_INTEGER:3,UNSIGNED_INT:4,activeTexture:()=>{},bindTexture:()=>{},texSubImage2D:(...args)=>uploads.push(Array.from(args.at(-1)))},cellTexture:{},atlasStats:{gridBytes:0},rasterTime:0,dirty:false});
+Object.assign(context,{frame:{pixelated:false},contextLost:false,metrics:()=>[8,16],cols:5,lines:1,gridCols:5,gridRows:1,cellGrid:new Uint32Array(40),atlasEntry:(text,fg,pixelated,w,h,traits)=>{shaped.push([text,w,h,traits]);return [11|(22<<16),16|(16<<16),2];},performance:{now:()=>0},gl:{TEXTURE1:1,TEXTURE_2D:2,RGBA_INTEGER:3,UNSIGNED_INT:4,activeTexture:()=>{},bindTexture:()=>{},texSubImage2D:(...args)=>uploads.push(Array.from(args.at(-1)))},cellTexture:{},atlasStats:{gridBytes:0},rasterTime:0,dirty:false});
 vm.runInContext(source.slice(source.indexOf('function drawRows('),source.indexOf('function present(')),context);
 for(const clipStart of [0,1]){
  uploads.length=0;shaped.length=0;

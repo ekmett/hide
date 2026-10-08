@@ -2,6 +2,7 @@
 module Main where
 #ifdef WITH_WEB
 import qualified WebCheck
+import qualified RemoteWebCheck
 #endif
 #ifdef WITH_FONT
 import qualified FontCheck
@@ -183,6 +184,7 @@ main = do
 #endif
 #ifdef WITH_WEB
   WebCheck.checks
+  RemoteWebCheck.checks
 #endif
   HexCheck.checks
   DAPCheck.checks

@@ -10,6 +10,8 @@ const downloadAction = document.querySelector('#download-file');
 const sidebarAccess = document.querySelector('#semantic-sidebar');
 const gl = canvas.getContext('webgl2', {alpha:false, antialias:false, preserveDrawingBuffer:true});
 if (!gl) {status.textContent='WebGL2 is unavailable in this browser.';throw new Error(status.textContent);}
+const images = new CanvasImages(gl,document.querySelector('#semantic-images'));
+let contextLost=false;
 const vertex = `#version 300 es
 in vec2 position; out highp vec2 vertexUV;
 void main(){vertexUV=vec2((position.x+1.0)*0.5,(1.0-position.y)*0.5);gl_Position=vec4(position,0,1);}`;
@@ -19,23 +21,32 @@ function shader(type, source) {
  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
  return s;
 }
-const program=gl.createProgram(); gl.attachShader(program,shader(gl.VERTEX_SHADER,vertex)); gl.attachShader(program,shader(gl.FRAGMENT_SHADER,fragment)); gl.linkProgram(program);
-if(!gl.getProgramParameter(program,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
-gl.useProgram(program);
-const vertices=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,vertices); gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
-const pos=gl.getAttribLocation(program,'position'); gl.enableVertexAttribArray(pos); gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
+function makeProgram(fragment){
+ const program=gl.createProgram(),vs=shader(gl.VERTEX_SHADER,vertex),fs=shader(gl.FRAGMENT_SHADER,fragment);
+ gl.attachShader(program,vs);gl.attachShader(program,fs);gl.linkProgram(program);gl.deleteShader(vs);gl.deleteShader(fs);
+ if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw new Error(gl.getProgramInfoLog(program));return program;
+}
+let program,vertices,cellVAO,atlasTexture,cellTexture,displayUniforms;
+function initializeGPU(){
+ program=makeProgram(fragment);gl.useProgram(program);
+ vertices=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,vertices);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+ cellVAO=gl.createVertexArray();gl.bindVertexArray(cellVAO);
+ const pos=gl.getAttribLocation(program,'position');gl.enableVertexAttribArray(pos);gl.vertexAttribPointer(pos,2,gl.FLOAT,false,0,0);
+ gl.activeTexture(gl.TEXTURE0);atlasTexture=nearestTexture();gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA8,atlasSize,atlasSize);
+ cellTexture=nearestTexture();displayUniforms=gl.createBuffer();
+ gl.bindBuffer(gl.UNIFORM_BUFFER,displayUniforms);gl.bufferData(gl.UNIFORM_BUFFER,48,gl.DYNAMIC_DRAW);gl.bindBufferBase(gl.UNIFORM_BUFFER,0,displayUniforms);
+ gl.uniformBlockBinding(program,gl.getUniformBlockIndex(program,'type_Display'),0);
+ gl.uniform1i(gl.getUniformLocation(program,'SPIRV_Cross_CombinedglyphAtlasglyphSampler'),0);
+ gl.uniform1i(gl.getUniformLocation(program,'SPIRV_Cross_CombinedcellDataSPIRV_Cross_DummySampler'),1);
+ images.restore(makeProgram,vertices);
+}
 function nearestTexture(){
  const texture=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,texture);
  for(const [parameter,value] of [[gl.TEXTURE_MIN_FILTER,gl.NEAREST],[gl.TEXTURE_MAG_FILTER,gl.NEAREST],[gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE],[gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE]])gl.texParameteri(gl.TEXTURE_2D,parameter,value);
  return texture;
 }
-let atlasTexture=nearestTexture(),atlasSize=2048,atlasX=1,atlasY=0,atlasRow=0,atlasEntries=new Map();
-gl.texStorage2D(gl.TEXTURE_2D,1,gl.RGBA8,atlasSize,atlasSize);
-const cellTexture=nearestTexture(),displayUniforms=gl.createBuffer();
-gl.bindBuffer(gl.UNIFORM_BUFFER,displayUniforms);gl.bufferData(gl.UNIFORM_BUFFER,48,gl.DYNAMIC_DRAW);gl.bindBufferBase(gl.UNIFORM_BUFFER,0,displayUniforms);
-gl.uniformBlockBinding(program,gl.getUniformBlockIndex(program,'type_Display'),0);
-gl.uniform1i(gl.getUniformLocation(program,'SPIRV_Cross_CombinedglyphAtlasglyphSampler'),0);
-gl.uniform1i(gl.getUniformLocation(program,'SPIRV_Cross_CombinedcellDataSPIRV_Cross_DummySampler'),1);
+let atlasSize=2048,atlasX=1,atlasY=0,atlasRow=0,atlasEntries=new Map();
+initializeGPU();
 let cellGrid=new Uint32Array(),gridCols=0,gridRows=0;
 const atlasStats={tiles:0,tileBytes:0,gridBytes:0,draws:0};
 let glyphs=new Map(), tiles=new Map(), rows=[], frame=null, scale=2, initialScale=2, cols=80, lines=25, mode=3;
@@ -136,7 +147,7 @@ function atlasEntry(text,fg,pixelated,w,h,traits){
  atlasEntries.set(key,entry);return entry;
 }
 function drawRows(changed,retried=false){
- if(!frame)return;const started=performance.now(),[cw,ch]=metrics();
+ if(!frame||contextLost)return;const started=performance.now(),[cw,ch]=metrics();
  if(gridCols!==cols||gridRows!==lines){
    gridCols=cols;gridRows=lines;cellGrid=new Uint32Array(cols*lines*8);
    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,cellTexture);
@@ -173,14 +184,15 @@ function drawRows(changed,retried=false){
 }
 function present(now){
  const phase=!frame?.blink||Math.floor((now-cursorEpoch)/500)%2===0;
- if(frame&&(dirty||phase!==blinkPhase)){
+ if(frame&&!contextLost&&(dirty||phase!==blinkPhase)){
+   gl.useProgram(program);gl.bindVertexArray(cellVAO);
    const started=performance.now();
    const caret=phase&&frame.cursor?frame.cursor:[-1,-1],pointer=leftDown?[-1,-1]:mouse;
    gl.bindBuffer(gl.UNIFORM_BUFFER,displayUniforms);
    gl.bufferSubData(gl.UNIFORM_BUFFER,0,new Float32Array([cols,lines,atlasSize,0,...caret,...pointer,canvas.width,canvas.height,frame.crt?1:0,canvas.height/(lines*16)]));
    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,atlasTexture);
    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,cellTexture);
-   gl.drawArrays(gl.TRIANGLE_STRIP,0,4);++atlasStats.draws;dirty=false;blinkPhase=phase;
+   gl.drawArrays(gl.TRIANGLE_STRIP,0,4);images.draw();++atlasStats.draws;dirty=false;blinkPhase=phase;
    drawTimes.push(rasterTime+performance.now()-started);rasterTime=0;if(drawTimes.length>60)drawTimes.shift();
  }
  if(now-titleTick>=1000&&drawTimes.length){
@@ -423,22 +435,28 @@ function connect(){
  if(closed)return;
  socket=new WebSocket(new URL('socket',location.href).href.replace(/^http/,'ws'));
  socket.binaryType='arraybuffer';
- const wireRows=[];let incoming=Promise.resolve(),platformSent=false;
- socket.onmessage=e=>{incoming=incoming.then(()=>receive(e)).catch(error=>{status.textContent=`Display error: ${error.message}`;socket.close();});};
+ const connection=socket,wireRows=[];let incoming=Promise.resolve(),platformSent=false,stopped=false;
+ socket.onmessage=e=>{incoming=incoming.then(()=>{if(!stopped&&connection===socket)return receive(e);}).catch(error=>{if(stopped||connection!==socket)return;status.textContent=`Display error: ${error.message}`;connection.close();});};
  async function receive(e){
    let message;
    if(e.data instanceof ArrayBuffer){
+     if(images.chunk!==null){images.binary(e.data);dirty=true;return;}
      if(downloadInfo!==null){
        receiveDownload(downloadInfo,e.data);downloadInfo=null;
        return;
      }
      message=await decodeFrame(new Uint8Array(e.data),wireRows);
-   }else message=JSON.parse(e.data);
-   if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
+   }else {
+     if(images.chunk!==null||downloadInfo!==null)throw new Error('Expected binary payload');
+     message=JSON.parse(e.data);
+   }
+   if(stopped||connection!==socket)return;
+   if(message.type?.startsWith('canvas-')){images.control(message);dirty=true;
+   }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
    }else if(message.type==='connection'){
-     ready=message.connected&&glyphs.size>0;if(!ready){clearClipboardRequest();clearSidebar();}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
+     ready=message.connected&&glyphs.size>0;if(!ready){clearClipboardRequest();clearSidebar();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
    }else if(message.type==='assets'){
-     clearSidebar();
+     clearSidebar();images.clear();dirty=true;
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
@@ -448,6 +466,8 @@ function connect(){
      frame={...frame,...message};updateTitle();unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
      if(Object.hasOwn(message,'semanticSidebar'))receiveSidebar(message.semanticSidebar);
      else if(message.reset)clearSidebar();
+     if(Object.hasOwn(message,'canvas'))images.receive(message.canvas,cols,lines);
+     else if(message.reset){images.scene=null;images.describe();}
      if(message.reset){rows=Array(lines).fill(null);}
      for(const [y,r] of message.rows)rows[y]=r;
      if(oldCursor!==JSON.stringify(frame.cursor))cursorEpoch=performance.now();
@@ -464,16 +484,16 @@ function connect(){
    }else if(message.type==='ack'){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='detached'){
-     detached=true;closed=true;ready=false;clearDownload();clearSidebar();guardLeave();fullscreen.disabled=true;
+     detached=true;closed=true;ready=false;clearDownload();clearSidebar();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Session detached. Resume from your terminal with hide --resume.';
      navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
-     closed=true;ready=false;clearDownload();clearSidebar();guardLeave();fullscreen.disabled=true;
+     closed=true;ready=false;clearDownload();clearSidebar();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{stopped=true;if(connection!==socket)return;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();
@@ -572,5 +592,9 @@ fullscreen.addEventListener('click',async()=>{
  input.focus({preventScroll:true});
 });
 document.addEventListener('fullscreenchange',()=>{if(!document.fullscreenElement){navigator.keyboard?.unlock?.();status.textContent=detached?'Session detached. Resume with hide --resume.':closed?'Editor closed. You can close this tab.':ready?'Connected':'Disconnected';}resize();});
-canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();status.textContent='WebGL context lost — reload to reconnect; buffers stay in the editor.';});
+canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();contextLost=true;images.lost();status.textContent='WebGL context lost — restoring display…';});
+canvas.addEventListener('webglcontextrestored',()=>{
+ try{atlasSize=2048;atlasX=1;atlasY=atlasRow=0;atlasEntries.clear();gridCols=gridRows=0;initializeGPU();contextLost=false;gl.viewport(0,0,canvas.width,canvas.height);drawRows(rows.map((r,y)=>[y,r]));dirty=true;status.textContent=ready?'Connected':'Disconnected';}
+ catch(error){status.textContent='Cannot restore display: '+error.message;}
+});
 input.focus({preventScroll:true});
