@@ -8,7 +8,7 @@
 -- when the human has disabled streamer mode.
 module Hide.GuestAccess
   ( InputOrigin(..), CellAccess(..), cellAccess, readableAt, pointerAllowedAt
-  , streamerReadableAt, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, protectedWindow, privateDocument, sanitizedBuffer, sanitizedBufferContent, sanitizedPreparedContent
+  , streamerReadableAt, privateDialogField, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, protectedWindow, privateDocument, sanitizedBuffer, sanitizedBufferContent, sanitizedPreparedContent
   , validateGuestEffects, guestCommandAllowed, guestCommandAllowedIn, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where
@@ -292,6 +292,8 @@ privateField _=False
 pluginForm :: Dialog -> Bool
 pluginForm dg=case purpose dg of PluginInputForm reference->private reference; PluginInputsForm reference _->private reference; PluginChoiceForm reference _->private reference; _->False
   where private reference=Form.formDisclosure reference==Form.PrivateForm
+-- | Shared dialog value classification. Labels may remain readable while a
+-- value is private; screen and semantic projections apply their audience mask.
 privateDialogField :: Desktop -> Dialog -> Field -> Bool
 privateDialogField d dg field=pluginForm dg || privateSourceWatch d dg || privateField field || case inputValue field of
   Just (_,value) -> case purpose dg of

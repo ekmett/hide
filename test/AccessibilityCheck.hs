@@ -12,6 +12,8 @@ import qualified Data.Map.Lazy as Lazy
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Hide.Buffer (newBuffer,Selection(..),Buffer(saved,undoStack,redoStack))
+import Hide.Browser (Entry(..))
 import Hide.Accessibility
 import Hide.Model
 import Hide.Plugin.Command (withRegistry)
@@ -111,7 +113,8 @@ checks=do
     (field "visibleCount" boundedProjection==Just (256::Int) && length (items boundedProjection)<=512 &&
      all (within (512,1000)) (items boundedProjection) && all (within (20,7)) (items shiftedProjection))
   privateIdentityChecks
-  putStrLn "sidebar semantic checks passed"
+  dialogChecks
+  putStrLn "sidebar and dialog semantic checks passed"
 
 
 -- Provider-local IDs are routing payloads, not publication identities. Sessions
@@ -172,3 +175,73 @@ within (cols,rows) value=case field "bounds" value::Maybe (Maybe [Int]) of
   Just Nothing->True
   Just (Just [x,y,w,h])->x>=0 && y>=0 && w>0 && h>0 && x+w<=cols && y+h<=rows
   _->False
+
+-- Semantics are a bounded read of what the current modal paints, with the same
+-- privacy as pixels and no action capability hidden in its identities or state.
+dialogChecks :: IO ()
+dialogChecks=do
+  let base=initialDesktop (80,25)
+      modal fs chosen=base {dialog=Just (Dialog "Current controls" Widgets fs chosen ["OK","Cancel"] ["Visible explanation"])}
+      byId :: [T.Text] -> Value -> Value
+      byId ident snapshot=fromMaybe (error ("missing dialog node "++show ident))
+        (lookup ident [(fromMaybe [] (field "id" item),item) | item<-items snapshot])
+      fieldId n=["dialog","field",T.pack (show (n::Int))]
+      project=dialogSemantics OwnerSemantics
+      visible=modal [Input "Name" "λ-current" 9,CheckBox "Enabled" True,Radio "Mode" ["Slow","Fast"] 1] 0
+      value=project visible
+      edited=visible {dialog=fmap (\dg->dg {fields=Input "Name" "updated" 7:drop 1 (fields dg)}) (dialog visible),screenSize=(92,31)}
+  check "dialog dismissal is an explicit complete empty snapshot"
+    (field "present" (project base)==Just False && null (items (project base)))
+  check "modal exposes actual current field values, focus and control state read-only"
+    (field "present" value==Just True && field "readOnly" value==Just True &&
+     field "value" (byId (fieldId 0) value)==Just (Just ("λ-current"::T.Text)) &&
+     field "focused" (byId (fieldId 0) value)==Just True &&
+     field "checked" (byId (fieldId 1) value)==Just (Just True))
+  check "dialog field identity survives typing and resizing without encoding contents"
+    (field "id" (byId (fieldId 0) (project edited))==Just (fieldId 0) &&
+     all (all (`notElem` ["λ-current","updated","Current controls"]) . (fromMaybe [] . field "id" :: Value -> [T.Text])) (items value))
+  check "modal node bounds are positive and clipped to the screen"
+    (all (within (80,25)) (items value) && all (within (12,7)) (items (project visible {screenSize=(12,7)})))
+  let credentials=modal [Input "API token" "NEVER-PUBLISH" 13,CheckBox "Streamer mode" True] 0
+      safe=dialogSemantics GuestSemantics credentials
+  check "central value privacy masks secrets and hidden checkbox state but preserves allowed labels"
+    (not ("NEVER-PUBLISH" `BS.isInfixOf` BL.toStrict (encode safe)) &&
+     field "value" (byId (fieldId 0) safe)==Just Null &&
+     field "checked" (byId (fieldId 1) safe)==Just Null &&
+     "API token" `elem` names safe && safe==project credentials {streamerMode=True})
+  let approval=base {dialog=Just (Dialog "PRIVATE TITLE" (PermissionDialog "approve:42")
+        [ReadOnly "PRIVATE LABEL" "PRIVATE VALUE"] 0 ["PRIVATE BUTTON"] ["PRIVATE BODY"])}
+      hidden=dialogSemantics GuestSemantics approval
+  check "a guest-hidden approval emits only modal presence, never title/body/labels or state"
+    (field "present" hidden==Just True && null (items hidden) &&
+     not ("PRIVATE" `BS.isInfixOf` BL.toStrict (encode hidden)))
+  let poison=(newBuffer "skip\nVISIBLE\t界\nlast")
+        {saved=error "dialog forced saved text",undoStack=error "dialog forced Undo",redoStack=error "dialog forced Redo"}
+      area=modal [TextArea "Source" True poison (Selection 0 0) 1 0] 0
+      areaValue=byId (fieldId 0) (project area)
+  check "text area borrows visible measured rows without saved text or Undo"
+    (field "multiline" areaValue==Just True && maybe False (T.isPrefixOf "VISIBLE") (field "value" areaValue::Maybe T.Text) &&
+     not ("skip" `BS.isInfixOf` BL.toStrict (encode (project area))))
+  let horizontal=modal [TextArea "Source" True (newBuffer (T.replicate 100000 "x"<>"VISIBLE")) (Selection 0 0) 0 100000] 0
+  check "long edited-row horizontal text is sought through the measured source window"
+    (maybe False (T.isPrefixOf "VISIBLE") (field "value" (byId (fieldId 0) (project horizontal))::Maybe T.Text))
+  let dropdown=modal [ComboBox "Compiler" ["One","Two","Three"] 0 (Just 1),Input "Covered" "COVERED-SECRET" 0] 0
+      projected=project dropdown
+      option=byId ["dialog","field","0","option","1"] projected
+  check "combo preview exposes its actual visible choices without covered underlying text"
+    (field "name" option==Just ("Two"::T.Text) && field "selected" option==Just (Just True) &&
+     not ("COVERED-SECRET" `BS.isInfixOf` BL.toStrict (encode projected)))
+  let files=base {guestPrivatePaths=["/authority"],dialog=Just (Dialog "Open" (Opening "/authority" "*" [])
+        [FileList [Entry "secret.txt" False Nothing Nothing] 0] 0 ["Open"] [])}
+  check "file chooser option names inherit canonical protected-path masking"
+    (not ("secret.txt" `BS.isInfixOf` BL.toStrict (encode (dialogSemantics GuestSemantics files))))
+  let clipped=modal [Input "Offscreen" "OFFSCREEN-VALUE" 0,Input "Focused" "shown" 0] 1
+      shifted=project clipped {screenSize=(30,8)}
+  check "scrolled-off modal fields do not publish their values"
+    (not ("OFFSCREEN-VALUE" `BS.isInfixOf` BL.toStrict (encode shifted)))
+  let large=base {screenSize=(200,1000),dialog=Just (Dialog "Large" Widgets
+        [Radio "Options" [T.replicate 120 "v" | _<-[1::Int ..1000]] 0] 0 ["Close"] [])}
+      bounded=project large
+      textSize=sum [T.length (nameOf n)+maybe 0 T.length (field "value" n::Maybe T.Text) | n<-items bounded]
+  check "modal metadata stays bounded independently of oversized field catalogues"
+    (length (items bounded)<=256 && textSize<=32768 && all (within (200,1000)) (items bounded))
