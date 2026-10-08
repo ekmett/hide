@@ -135,7 +135,7 @@ int thc_canvas_begin(const char *epoch,const char *id,int width,int height,size_
     if (!resource) return SDL_SetError("Too many canvas resources");
     SDL_Texture *image=SDL_CreateTexture(renderer,SDL_PIXELFORMAT_RGBA32,SDL_TEXTUREACCESS_STATIC,width,height);
     unsigned char *row=malloc((size_t)width*4);
-    if (!image || !row || !SDL_SetTextureScaleMode(image,SDL_SCALEMODE_LINEAR) || !SDL_SetTextureBlendMode(image,SDL_BLENDMODE_NONE)) {
+    if (!image || !row || !SDL_SetTextureScaleMode(image,SDL_SCALEMODE_NEAREST) || !SDL_SetTextureBlendMode(image,SDL_BLENDMODE_NONE)) {
         free(row); SDL_DestroyTexture(image); return 0;
     }
     memcpy(resource->id,id,49); resource->width=width; resource->height=height; resource->bytes=bytes; resource->texture=image;
