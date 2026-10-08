@@ -47,7 +47,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends pandoc
       - name: Generate and validate documentation only
         run: make docs
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: build/site
           retention-days: 1
@@ -64,7 +64,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
       - name: Publish verified site
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
