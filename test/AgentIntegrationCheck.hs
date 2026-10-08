@@ -83,8 +83,9 @@ checks=bracket temporary removePathForcibly $ \root ->
       expanded<-snd <$> conversationEffects conversation (\x _->pure (False,x)) nested [AgentAction "copy" []]
       ensure "raw tool and plan details never retain bearer values" (all (not . (`T.isInfixOf` clipboard expanded)) ("private-main-key":tokens))
       peerCancels<-newIORef (0::Int)
+      peerConfigurations<-newIORef (0::Int)
       peer<-AH.registerAgent hub "Peer" root (AH.AgentDriver root "private-peer-key" (AH.Capabilities False False False [])
-        (\_ ->pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (modifyIORef' peerCancels (+1)) (pure ()) (\_ ->pure (Left "unsupported"))) >>= right
+        (\_ ->modifyIORef' peerConfigurations (+1) >> pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (modifyIORef' peerCancels (+1)) (pure ()) (\_ ->pure (Left "unsupported"))) >>= right
       ticket<-AH.sendAgent hub (AH.Agent peer) primary "Count files" >>= right
       finished<-tickUntil (\d->do result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right; pure (field "status" result==Just ("completed"::T.Text) && "Count files" `T.isInfixOf` activeText d)) connected
       result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right
@@ -184,8 +185,9 @@ checks=bracket temporary removePathForcibly $ \root ->
       cancellingPeer<-ui "cancel" [] afterPrimaryCancel
       _<-tickUntil (\_->(==1) <$> readIORef peerCancels) cancellingPeer
       settingPeer<-ui "set-config" ["model","invented"] childAgain
-      rejectedPeer<-tickUntil (pure . T.isInfixOf "This agent setting is not currently advertised by the provider." . status) settingPeer
-      ensure "child setters cannot reconfigure the primary" (conversationTarget rejectedPeer==AH.agentIdText peer)
+      rejectedPeer<-tickUntil (pure . not . agentReplying) settingPeer
+      ensure "unadvertised settings never reach the provider" . (==0) =<< readIORef peerConfigurations
+      ensure "child setters cannot reconfigure the primary" (conversationTarget rejectedPeer==AH.agentIdText peer && agentSettings rejectedPeer==agentSettings childAgain)
       liveChild<-AH.spawnAgent hub (AH.Agent primary) (AH.SpawnSpec "Live child" "Inspect source" root AH.Shared AH.Fresh Nothing Nothing) >>= right
       parentTicket<-AH.sendAgent hub (AH.Agent primary) liveChild "parent instruction" >>= right
       _<-AH.waitAgent hub AH.Human liveChild parentTicket 3000 >>= right
