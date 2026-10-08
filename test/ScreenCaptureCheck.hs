@@ -7,6 +7,7 @@ import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Lazy as BL
 import Data.List (nub)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, listToMaybe)
@@ -199,6 +200,11 @@ checksWithBody chatBase=do
   configCapture<-takeCapture config False
   let configText=fromMaybe "" (field "text" (textMetadata configCapture))
   check "agent settings are readable while environment values are private" ("public-command" `T.isInfixOf` configText && not ("private-env-token" `T.isInfixOf` configText))
+  let dialogMetadata=field "semanticDialog" (textMetadata configCapture)::Maybe Value
+      encodedConfig=TE.decodeUtf8 (BL.toStrict (encode (textMetadata configCapture)))
+  check "actual screen response carries read-only dialog semantics without private environment values"
+    (maybe False (\value->field "present" value==Just True && field "readOnly" value==Just True) dialogMetadata &&
+      "public-command" `T.isInfixOf` encodedConfig && not ("private-env-token" `T.isInfixOf` encodedConfig))
   let sessionDialog=desktop {dialog=Just (Dialog "Resume session" (AgentDialog "load")
         [Input "Session ID" "private-session-value" 0] 0 ["OK","Cancel"] [])}
   sessionCapture<-takeCapture sessionDialog False

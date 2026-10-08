@@ -37,19 +37,26 @@ local cursor/expose redraws start at their event. This is not a measurement of w
 pixels reach the physical display. Browser timing still measures frontend drawing
 and submission; browser GPU execution continues asynchronously.
 
-## Accessible sidebar
+## Accessible views
 
-The browser exposes the visible Files and plugin sidebar as a read-only
-accessible tree. Names, hierarchy, selection, expansion and loading state come
-from the same prepared rows as the editor frame. Scrolling replaces the bounded
-visible projection and includes the ancestors needed to describe each row.
-Dialogs and menus suppress this sidebar projection while they cover it.
+The browser and Mac native frontend expose the visible Files and plugin sidebar
+as a read-only accessible tree. Names, hierarchy, selection, expansion and
+loading state come from the same prepared rows as the editor frame. Scrolling
+includes the ancestors needed to describe the visible rows. Bounds follow
+window movement, display scale and clipping.
 
-Browser names follow streamer mode, matching the human display. The structured
-sidebar in `editor_screen` always applies the agent private-path policy, even
-when streamer mode is off. Resource paths and provider error messages are not
-included. This slice provides no additional editor actions, offscreen queries,
-source-document accessibility or native accessibility adapter.
+Modal dialogs expose their visible labels, field values, choices and editor
+focus. Opening a dialog hides the underlying sidebar and image descriptions
+from accessibility until it closes. Read these controls through your browser or
+Mac accessibility tools; use the editor's normal controls to change them.
+Reading a control does not change keyboard focus or grant an agent permission
+to operate it. Source-document accessibility and accessibility actions remain
+separate work.
+
+Display metadata follows streamer mode. The structured views in `editor_screen`
+always apply the agent privacy policy, even when streamer mode is off. Private
+field values and session keys are excluded. A protected dialog may expose only
+that a modal is present, keeping the covered views hidden too.
 
 ## Text styles
 
@@ -132,12 +139,6 @@ Files uses Unicode folder and file symbols, joined by single-line tree branches.
 Each nesting level adds one column. `--material-icons` selects bundled Material
 folder icons in a native window or browser; in a terminal it needs a Nerd Font
 containing Material Design Icons U+F024B and U+F0770.
-
-On macOS, the native window also exposes the visible sidebar as a read-only
-accessibility outline, including its hierarchy, selected row and loading state.
-Its bounds follow window movement, display scale and clipping. Use the editor's
-normal controls to change the tree; this outline adds reading access without
-changing keyboard focus.
 
 ## Keyboard and clipboard
 

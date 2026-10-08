@@ -205,7 +205,8 @@ parseRemoteDialog size@(cols,rows) value=withObject "dialog semantics" (\o->do
   pure (if present then Just bytes else Nothing)) value
   where
     roles=["dialog","text","textbox","checkbox","radiogroup","radio","listbox","option","combobox","button"]::[T.Text]
-    validIdentity parts=not (null parts) && length parts<=5 && head parts=="dialog" && all validPart parts
+    validIdentity ("dialog":parts)=length parts<=4 && all validPart parts
+    validIdentity _=False
     validPart part=not (T.null part) && T.length part<=24 &&
       (part `elem` ["dialog","field","body","button","option"] || T.all (\c->c>='0' && c<='9') part)
     boundedText limit text=T.length text<=limit && not (T.any (=='\0') text)

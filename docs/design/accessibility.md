@@ -1,19 +1,25 @@
 # Accessibility for the native and browser frontends
 
-Status: the read-only visible-sidebar slice is implemented. `Hide.Accessibility`
-projects the existing indexed sidebar into a bounded complete `semanticSidebar`
-frame-metadata field, also included in `editor_screen`. Browser ARIA consumes
-that field through the existing metadata merge and reconnect replay. Stable node
-identity combines an opaque provider-registration token with the existing
-sidebar epoch and a host-minted node ordinal; provider IDs are never exposed.
-Scrolling and selection travel in a separate small layout receipt.
-At most 256 viewport rows and 512 nodes are emitted, including required ancestors.
-Resource annotations enter the central privacy policy and never enter the wire.
+Status: visible sidebar, PNG image descriptions and current modal dialogs have
+read-only projections for browser ARIA and macOS accessibility. `editor_screen`
+uses the same host projection with the agent privacy policy. No actions,
+offscreen reads, source-text references or second widget registry are added.
+The wider desktop bridge and Windows/Linux adapters below remain proposed.
 
-The remaining desktop bridge and native adapters below are proposed and are not
-qualified. Keep the existing renderer. Do not infer controls or document text
-from its painted character cells. The initial sidebar slice has no actions,
-offscreen reads, source-text references or second widget registry.
+`semanticSidebar` carries at most 256 viewport rows and 512 nodes, including
+required ancestors. Identity combines the opaque provider registration, sidebar
+epoch and host-minted node ordinal; provider IDs and resource paths are not
+serialized. `semanticDialog` is a complete bounded snapshot of the current
+modal: at most 256 nodes, clipped cell bounds, labels, current values and focus.
+Its structural field IDs survive typing and resize within that projection;
+they confer no lifetime or action authority. Absence clears the dialog. A hidden
+modal still suppresses underlying accessibility views. Before adding actions,
+dialog instances need the explicit lifetime tokens described below.
+
+Dialog values follow central privacy policy before serialization. Text areas
+read only measured visible rows; preparation never flattens a source buffer or
+Undo history. Keep the existing renderer and derive semantics from the model,
+not painted character cells.
 
 The [plugin design](haskell-plugins.md#semantic-tree-and-accessibility-transport)
 uses the same retained tree for standard widgets and canvas descriptions. Track

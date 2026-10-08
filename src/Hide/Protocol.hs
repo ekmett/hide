@@ -25,7 +25,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
 import System.IO (Handle, hFlush)
-import Hide.Accessibility (SemanticAudience(OwnerSemantics), sidebarSemantics)
+import Hide.Accessibility (SemanticAudience(OwnerSemantics), sidebarSemantics, dialogSemantics)
 import Hide.GuestAccess
 import Hide.Model hiding (Paste)
 import qualified Hide.Model as Model
@@ -333,6 +333,7 @@ frameMetadata cwd d =
    "terminal" .= (activeTerminal d/=Nothing && dialog d==Nothing && menu d==Nothing),
    "wordstar" .= wordStar d,"fileExportView" .= fileExportView d,
    "semanticSidebar" .= sidebarSemantics OwnerSemantics d,
+   "semanticDialog" .= dialogSemantics OwnerSemantics d,
    "bindingsActive" .= (bindingInputAvailable d && maybe False (const True) (effectiveBindings d)),
    "bindings" .= (focusedBindingChords d),
    "editorWindows" .= [object ["id" .= ident,"title" .= title,"selected" .= selected,"enabled" .= enabled] | (ident,title,selected,enabled)<-editorWindowEntries d],
