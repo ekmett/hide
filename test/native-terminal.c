@@ -17,6 +17,9 @@ static BOOL WINAPI interrupted_console(DWORD event) {
     InterlockedExchange(&interrupted, 1);
     return TRUE;
 }
+#else
+#include <termios.h>
+#include <unistd.h>
 #endif
 
 static void feed(thc_terminal *t, const char *text) {
@@ -271,11 +274,91 @@ static void process_checks(void) {
     puts("native ConPTY process checks passed");
 }
 #endif
+
+#ifndef _WIN32
+/* The child reads actual PTY input; expected bytes are independent protocol
+ * examples, rather than a second call to the encoder under test. */
+static int mouse_child(const char *mode) {
+    struct termios raw;
+    assert(tcgetattr(STDIN_FILENO, &raw) == 0);
+    cfmakeraw(&raw);
+    assert(tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0);
+    puts("MOUSE-READY"); fflush(stdout);
+    char sentinel;
+    assert(read(STDIN_FILENO, &sentinel, 1) == 1 && sentinel == '.');
+    const char *expected;
+    if (!strcmp(mode, "--mouse-sgr")) {
+        fputs("\033[?1002h\033[?1006hMOUSE-TRACKING\n", stdout);
+        expected = "\033[<0;3;2M\033[<32;4;2M\033[<0;4;2m"
+                   "\033[<30;5;3M\033[<2;5;3m"
+                   "\033[<64;5;3M\033[<65;5;3M\033[<66;5;3M\033[<67;5;3M"
+                   "\033[<0;24;1m";
+    } else {
+        fputs("\033[?9hMOUSE-TRACKING\n", stdout);
+        expected = "\033[M #\"\033[M\"%#";
+    }
+    fflush(stdout);
+    char received[256]; size_t length = strlen(expected), total = 0;
+    while (total < length) {
+        ssize_t n = read(STDIN_FILENO, received + total, length - total);
+        assert(n > 0); total += (size_t)n;
+    }
+    assert(!memcmp(received, expected, length));
+    fputs("\033[?9l\033[?1002l\033[?1006lMOUSE-OFF\n", stdout); fflush(stdout);
+    assert(read(STDIN_FILENO, &sentinel, 1) == 1 && sentinel == '.');
+    puts("MOUSE-PASS"); fflush(stdout);
+    return 0;
+}
+static void mouse_wait(thc_terminal *t, const char *marker) {
+    char seen[1024] = {0}; size_t kept = 0;
+    for (int i = 0; i < 1000; ++i) {
+        assert(thc_terminal_poll(t));
+        size_t n; const uint8_t *bytes = thc_terminal_output(t, &n);
+        assert(n < sizeof(seen) - kept);
+        memcpy(seen + kept, bytes, n); kept += n; seen[kept] = 0;
+        if (strstr(seen, marker)) return;
+        int info[6]; thc_terminal_info(t, info); if (info[4]) { fprintf(stderr, "Mouse child exited %d waiting for %s; seen: %s\n", info[5], marker, seen); assert(0); }
+        usleep(10000);
+    }
+    fprintf(stderr, "Mouse fixture timed out: %s (%s)\n", marker, seen); assert(0);
+}
+static void mouse_checks(const char *executable, const char *mode) {
+    thc_terminal *t = thc_terminal_new(20, 6); assert(t);
+    char *args[] = {(char *)executable, (char *)mode, NULL};
+    char *env[] = {"PATH=/usr/bin:/bin", "TERM=xterm-256color", NULL};
+    assert(thc_terminal_spawn(t, executable, args, env, "/"));
+    mouse_wait(t, "MOUSE-READY");
+    assert(thc_terminal_mouse_tracking(t) == 0);
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_PRESS, THC_TERMINAL_MOUSE_LEFT, 0, 2, 1));
+    assert(thc_terminal_write(t, (const uint8_t *)".", 1));
+    mouse_wait(t, "MOUSE-TRACKING");
+    assert(thc_terminal_mouse_tracking(t) == 1);
+    assert(thc_terminal_resize(t, 24, 8));
+    assert(!thc_terminal_mouse(t, THC_TERMINAL_MOUSE_PRESS, THC_TERMINAL_MOUSE_LEFT, 0, -1, 0));
+    assert(!thc_terminal_mouse(t, THC_TERMINAL_MOUSE_RELEASE, THC_TERMINAL_MOUSE_WHEEL_UP, 0, 0, 0));
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_PRESS, THC_TERMINAL_MOUSE_LEFT, 0, 2, 1));
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_MOTION, THC_TERMINAL_MOUSE_LEFT, 0, 3, 1));
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_RELEASE, THC_TERMINAL_MOUSE_LEFT, 0, 3, 1));
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_MOTION, THC_TERMINAL_MOUSE_NONE, 0, 5, 2));
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_PRESS, THC_TERMINAL_MOUSE_RIGHT, 7, 4, 2));
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_RELEASE, THC_TERMINAL_MOUSE_RIGHT, 0, 4, 2));
+    for (int button = THC_TERMINAL_MOUSE_WHEEL_UP; button <= THC_TERMINAL_MOUSE_WHEEL_RIGHT; ++button)
+        assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_PRESS, button, 0, 4, 2));
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_RELEASE, THC_TERMINAL_MOUSE_LEFT, 0, 100, -1));
+    mouse_wait(t, "MOUSE-OFF");
+    assert(thc_terminal_mouse_tracking(t) == 0);
+    assert(thc_terminal_mouse(t, THC_TERMINAL_MOUSE_PRESS, THC_TERMINAL_MOUSE_LEFT, 0, 2, 1));
+    assert(thc_terminal_write(t, (const uint8_t *)".", 1));
+    mouse_wait(t, "MOUSE-PASS");
+    thc_terminal_free(t);
+}
+#endif
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     if (argc >= 2) return child_mode(argv[1]);
 #else
-    (void)argc; (void)argv;
+    if (argc == 2 && (!strcmp(argv[1], "--mouse-sgr") || !strcmp(argv[1], "--mouse-x10"))) return mouse_child(argv[1]);
 #endif
     thc_terminal *t = thc_terminal_new(12, 4);
     assert(t);
@@ -308,6 +391,11 @@ int main(int argc, char **argv) {
     puts("native terminal parser checks passed");
 #ifdef _WIN32
     process_checks();
+#else
+    char executable[4096]; assert(realpath(argv[0], executable));
+    mouse_checks(executable, "--mouse-sgr");
+    mouse_checks(executable, "--mouse-x10");
+    puts("native terminal mouse PTY checks passed");
 #endif
     return 0;
 }

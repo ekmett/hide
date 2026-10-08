@@ -39,6 +39,8 @@ struct thc_terminal {
     GhosttyRenderState render;
     GhosttyRenderStateRowIterator row;
     GhosttyRenderStateRowCells cell;
+    GhosttyMouseEncoder mouse_encoder;
+    GhosttyMouseEvent mouse_event;
     int columns, rows, master, exited, exit_code, drained, reaped, preserve_output;
 #ifdef _WIN32
     HPCON console, closing_console;
@@ -336,7 +338,9 @@ thc_terminal *thc_terminal_new(int columns, int rows) {
     if (ghostty_terminal_new(NULL, &t->terminal, columns, rows) != GHOSTTY_SUCCESS ||
         ghostty_render_state_new(NULL, &t->render) != GHOSTTY_SUCCESS ||
         ghostty_render_state_row_iterator_new(NULL, &t->row) != GHOSTTY_SUCCESS ||
-        ghostty_render_state_row_cells_new(NULL, &t->cell) != GHOSTTY_SUCCESS) {
+        ghostty_render_state_row_cells_new(NULL, &t->cell) != GHOSTTY_SUCCESS ||
+        ghostty_mouse_encoder_new(NULL, &t->mouse_encoder) != GHOSTTY_SUCCESS ||
+        ghostty_mouse_event_new(NULL, &t->mouse_event) != GHOSTTY_SUCCESS) {
         thc_terminal_free(t);
         errno = ENOMEM;
         return NULL;
@@ -401,10 +405,55 @@ int thc_terminal_spawn(thc_terminal *t, const char *executable, char *const argv
 void thc_terminal_feed(thc_terminal *t, const uint8_t *data, size_t length) {
     ghostty_terminal_vt_write(t->terminal, data, length);
 }
+int thc_terminal_mouse_tracking(thc_terminal *t) {
+    bool tracking = false;
+    if (!vt_check(t, ghostty_terminal_get(t->terminal, GHOSTTY_TERMINAL_DATA_MOUSE_TRACKING, &tracking))) return -1;
+    return tracking;
+}
+int thc_terminal_mouse(thc_terminal *t, int action, int button, int modifiers, int column, int row) {
+    if (action < THC_TERMINAL_MOUSE_PRESS || action > THC_TERMINAL_MOUSE_MOTION ||
+        button < THC_TERMINAL_MOUSE_NONE || button > THC_TERMINAL_MOUSE_WHEEL_RIGHT ||
+        modifiers < 0 || modifiers > 7 ||
+        (button == THC_TERMINAL_MOUSE_NONE && action != THC_TERMINAL_MOUSE_MOTION) ||
+        (button >= THC_TERMINAL_MOUSE_WHEEL_UP && action != THC_TERMINAL_MOUSE_PRESS) ||
+        (action == THC_TERMINAL_MOUSE_PRESS &&
+            (column < 0 || row < 0 || column >= t->columns || row >= t->rows))) {
+        errno = EINVAL; return fail(t, "terminal mouse event");
+    }
+    /* Cells are all the host supplies. Use the same logical 8x16 geometry
+     * as terminal resize; no renderer pixel coordinates cross this boundary. */
+    GhosttyMouseEncoderSize size = GHOSTTY_INIT_SIZED(GhosttyMouseEncoderSize);
+    size.screen_width = (uint32_t)t->columns * 8; size.screen_height = (uint32_t)t->rows * 16;
+    size.cell_width = 8; size.cell_height = 16;
+    bool pressed = action != THC_TERMINAL_MOUSE_RELEASE &&
+                   button >= THC_TERMINAL_MOUSE_LEFT && button <= THC_TERMINAL_MOUSE_RIGHT;
+    ghostty_mouse_encoder_setopt_from_terminal(t->mouse_encoder, t->terminal);
+    ghostty_mouse_encoder_setopt(t->mouse_encoder, GHOSTTY_MOUSE_ENCODER_OPT_SIZE, &size);
+    ghostty_mouse_encoder_setopt(t->mouse_encoder, GHOSTTY_MOUSE_ENCODER_OPT_ANY_BUTTON_PRESSED, &pressed);
+    ghostty_mouse_event_set_action(t->mouse_event, (GhosttyMouseAction)action);
+    const GhosttyMouseButton buttons[] = {GHOSTTY_MOUSE_BUTTON_UNKNOWN, GHOSTTY_MOUSE_BUTTON_LEFT,
+        GHOSTTY_MOUSE_BUTTON_MIDDLE, GHOSTTY_MOUSE_BUTTON_RIGHT, GHOSTTY_MOUSE_BUTTON_FOUR,
+        GHOSTTY_MOUSE_BUTTON_FIVE, GHOSTTY_MOUSE_BUTTON_SIX, GHOSTTY_MOUSE_BUTTON_SEVEN};
+    if (button == THC_TERMINAL_MOUSE_NONE) ghostty_mouse_event_clear_button(t->mouse_event);
+    else ghostty_mouse_event_set_button(t->mouse_event, buttons[button]);
+    GhosttyMods mods = (modifiers & 1 ? GHOSTTY_MODS_SHIFT : 0) |
+                       (modifiers & 2 ? GHOSTTY_MODS_CTRL : 0) |
+                       (modifiers & 4 ? GHOSTTY_MODS_ALT : 0);
+    ghostty_mouse_event_set_mods(t->mouse_event, mods);
+    /* Keep an out-of-grid position outside, while bounding conversion even
+     * for maliciously large coordinates. Ghostty clamps cell protocols. */
+    column = column < -1 ? -1 : column > t->columns ? t->columns : column;
+    row = row < -1 ? -1 : row > t->rows ? t->rows : row;
+    ghostty_mouse_event_set_position(t->mouse_event, (GhosttyMousePosition){column * 8.0f + 4, row * 16.0f + 8});
+    char bytes[128]; size_t length = 0;
+    if (!vt_check(t, ghostty_mouse_encoder_encode(t->mouse_encoder, t->mouse_event, bytes, sizeof(bytes), &length))) return 0;
+    return length ? thc_terminal_write(t, (const uint8_t *)bytes, length) : 1;
+}
 int thc_terminal_resize(thc_terminal *t, int columns, int rows) {
     if (!dimensions(columns, rows)) { errno = EINVAL; return fail(t, "terminal size"); }
     if (!vt_check(t, ghostty_terminal_resize(t->terminal, columns, rows, 8, 16))) return 0;
     t->columns = columns; t->rows = rows;
+    ghostty_mouse_encoder_reset(t->mouse_encoder);
 #ifdef _WIN32
     if (t->console) {
         HRESULT hr = t->resize_console(t->console, (COORD){(SHORT)columns, (SHORT)rows});
@@ -571,6 +620,8 @@ void thc_terminal_free(thc_terminal *t) {
     thc_terminal_kill(t);
     if (t->master >= 0) close(t->master);
 #endif
+    if (t->mouse_event) ghostty_mouse_event_free(t->mouse_event);
+    if (t->mouse_encoder) ghostty_mouse_encoder_free(t->mouse_encoder);
     if (t->cell) ghostty_render_state_row_cells_free(t->cell);
     if (t->row) ghostty_render_state_row_iterator_free(t->row);
     if (t->render) ghostty_render_state_free(t->render);

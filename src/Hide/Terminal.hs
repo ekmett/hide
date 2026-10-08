@@ -7,6 +7,8 @@
 -- terminal are separate operations so output can remain visible after exit.
 module Hide.Terminal
   ( Terminal, TerminalConfig(..), TerminalCell(..), TerminalSnapshot(..)
+  , TerminalMouseAction(..), TerminalMouseButton(..), TerminalMouseModifier(..), TerminalMouseEvent(..)
+  , sendTerminalMouse
   , terminalAvailable, startTerminal, startTerminalUnsetting, terminalProcessId, withTerminal, writeTerminal, resizeTerminal
   , setTerminalAppearance, pollTerminal, killTerminal, closeTerminal
   ) where
@@ -54,10 +56,35 @@ data TerminalCell = TerminalCell
   , cellWidth :: Int -- 0 for the continuation of a wide glyph.
   } deriving (Eq, Show)
 
+-- | Normalized pointer action; wheel ticks use 'TerminalMousePress'.
+data TerminalMouseAction = TerminalMousePress | TerminalMouseRelease | TerminalMouseMotion
+  deriving (Eq, Show)
+
+-- | Physical buttons and one-tick wheel directions.
+data TerminalMouseButton = TerminalMouseLeft | TerminalMouseMiddle | TerminalMouseRight
+  | TerminalMouseWheelUp | TerminalMouseWheelDown | TerminalMouseWheelLeft | TerminalMouseWheelRight
+  deriving (Eq, Show)
+
+-- | Keyboard modifiers understood by terminal mouse protocols.
+data TerminalMouseModifier = TerminalMouseShift | TerminalMouseControl | TerminalMouseAlt
+  deriving (Eq, Show)
+
+-- | Zero-based cell position. Motion identifies the held physical button, or
+-- 'Nothing' for unbuttoned motion; release identifies the released button.
+-- Captured motion/release may lie outside the terminal. Press must be inside.
+data TerminalMouseEvent = TerminalMouseEvent
+  { terminalMouseAction :: TerminalMouseAction
+  , terminalMouseButton :: Maybe TerminalMouseButton
+  , terminalMouseModifiers :: [TerminalMouseModifier]
+  , terminalMouseColumn :: Int
+  , terminalMouseRow :: Int
+  } deriving (Eq, Show)
+
 data TerminalSnapshot = TerminalSnapshot
   { snapshotColumns :: Int
   , snapshotRows :: Int
   , snapshotCells :: [TerminalCell] -- Row-major, including wide continuations.
+  , snapshotMouseTracking :: Bool -- Application-requested tracking, never host input authority.
   , snapshotCursor :: Maybe (Int, Int) -- Column, row, zero-based.
   , snapshotOutput :: ByteString -- Raw output since the last poll, bounded to 256 KiB.
   , snapshotExitCode :: Maybe Int -- Signals are represented as 128 + signal number.
@@ -81,6 +108,8 @@ foreign import ccall safe "thc_terminal_spawn_windows" c_spawn :: Ptr NativeTerm
 foreign import ccall safe "thc_terminal_spawn" c_spawn :: Ptr NativeTerminal -> CString -> Ptr CString -> Ptr CString -> CString -> IO CInt
 #endif
 foreign import ccall unsafe "thc_terminal_write" c_write :: Ptr NativeTerminal -> Ptr Word8 -> CSize -> IO CInt
+foreign import ccall unsafe "thc_terminal_mouse" c_mouse :: Ptr NativeTerminal -> CInt -> CInt -> CInt -> CInt -> CInt -> IO CInt
+foreign import ccall unsafe "thc_terminal_mouse_tracking" c_mouseTracking :: Ptr NativeTerminal -> IO CInt
 foreign import ccall safe "thc_terminal_resize" c_resize :: Ptr NativeTerminal -> CInt -> CInt -> IO CInt
 foreign import ccall safe "thc_terminal_poll" c_poll :: Ptr NativeTerminal -> IO CInt
 foreign import ccall unsafe "thc_terminal_cells" c_cells :: Ptr NativeTerminal -> IO (Ptr Word32)
@@ -185,6 +214,31 @@ writeTerminal terminal bytes = withOpen terminal $ \ptr -> BS.useAsCStringLen by
   ok <- c_write ptr (castPtr buffer) (fromIntegral len)
   if ok == 0 then Left <$> nativeError ptr else pure (Right ())
 
+-- | Encode one event from current application tracking state and enqueue its
+-- bytes through the normal PTY/ConPTY input owner. With no requested tracking,
+-- valid events emit no bytes. Closed handles and invalid event shapes fail.
+-- Coordinates address cell centers; pixel protocols use logical 8x16 cells.
+sendTerminalMouse :: Terminal -> TerminalMouseEvent -> IO (Either Text ())
+sendTerminalMouse terminal event = withOpen terminal $ \ptr -> do
+  let action = case terminalMouseAction event of
+        TerminalMousePress -> 0
+        TerminalMouseRelease -> 1
+        TerminalMouseMotion -> 2
+      button = case terminalMouseButton event of
+        Nothing -> 0
+        Just TerminalMouseLeft -> 1
+        Just TerminalMouseMiddle -> 2
+        Just TerminalMouseRight -> 3
+        Just TerminalMouseWheelUp -> 4
+        Just TerminalMouseWheelDown -> 5
+        Just TerminalMouseWheelLeft -> 6
+        Just TerminalMouseWheelRight -> 7
+      modifiers = sum [mask | (modifier,mask) <- [(TerminalMouseShift,1),(TerminalMouseControl,2),(TerminalMouseAlt,4)], modifier `elem` terminalMouseModifiers event]
+      -- Preserve out-of-grid direction without overflowing the native ABI.
+      coordinate n = fromIntegral (max (-1001) (min 1001 n))
+  ok <- c_mouse ptr action button modifiers (coordinate (terminalMouseColumn event)) (coordinate (terminalMouseRow event))
+  if ok == 0 then Left <$> nativeError ptr else pure (Right ())
+
 resizeTerminal :: Terminal -> Int -> Int -> IO (Either Text ())
 resizeTerminal terminal columns rows
   | not (validSize columns rows) = pure (Left "Terminal size must be between 1 and 1000 rows and columns")
@@ -202,6 +256,7 @@ pollTerminal terminal = withOpen terminal $ \ptr -> do
     values <- map fromIntegral <$> peekArray 6 info
     case values of
       [columns,rows,cx,cy,exited,code] -> do
+        tracking <- c_mouseTracking ptr
         text <- copyBuffer c_text ptr
         output <- copyBuffer c_output ptr
         cells <- c_cells ptr
@@ -212,8 +267,9 @@ pollTerminal terminal = withOpen terminal $ \ptr -> do
               { cellText = if len == 0 && width /= 0 then " " else TE.decodeUtf8With lenientDecode (BS.take (fromIntegral len) (BS.drop (fromIntegral offset) text))
               , cellForeground = fg, cellBackground = bg, cellAttributes = attrs, cellWidth = fromIntegral width }
             _ -> error "terminal cell ABI"
-        pure $ Right TerminalSnapshot
+        if tracking < 0 then Left <$> nativeError ptr else pure $ Right TerminalSnapshot
           { snapshotColumns = columns, snapshotRows = rows, snapshotCells = decoded
+          , snapshotMouseTracking = tracking /= 0
           , snapshotCursor = if cx < 0 || cy < 0 then Nothing else Just (cx,cy)
           , snapshotOutput = output, snapshotExitCode = if exited == 0 then Nothing else Just (nativeExit code) }
       _ -> error "terminal info ABI"
@@ -257,6 +313,8 @@ terminalProcessId :: Terminal -> IO (Either Text Int)
 terminalProcessId _ = unavailable
 writeTerminal :: Terminal -> ByteString -> IO (Either Text ())
 writeTerminal _ _ = unavailable
+sendTerminalMouse :: Terminal -> TerminalMouseEvent -> IO (Either Text ())
+sendTerminalMouse _ _ = unavailable
 resizeTerminal :: Terminal -> Int -> Int -> IO (Either Text ())
 resizeTerminal _ _ _ = unavailable
 pollTerminal :: Terminal -> IO (Either Text TerminalSnapshot)

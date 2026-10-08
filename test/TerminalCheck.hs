@@ -94,6 +94,17 @@ checks = bracket temporary removePathForcibly $ \directory -> do
     (_,raw) <- waitFor terminal (maybe False (const True) . snapshotExitCode)
     check "VT query replies reach interactive process" ("\ESC[1;1R" `BS.isInfixOf` raw)
   either (error . T.unpack) pure query
+  mouse <- withTerminal (config "stty raw -echo; printf '\\033[?1000h\\033[?1006hready'; dd bs=1 count=9 2>/dev/null; printf '\\033[?1000l\\033[?1006l'") $ \mouseTerminal -> do
+    (ready,_) <- waitFor mouseTerminal (BS.isInfixOf "ready" . snapshotOutput)
+    check "mouse tracking metadata reflects the application mode" (snapshotMouseTracking ready)
+    let event = TerminalMouseEvent TerminalMousePress (Just TerminalMouseLeft) [] 2 1
+    invalid <- sendTerminalMouse mouseTerminal event {terminalMouseColumn = -1}
+    check "mouse press outside the current grid is rejected" (isLeft invalid)
+    sendTerminalMouse mouseTerminal event >>= requireRight
+    (finished,raw) <- waitFor mouseTerminal (maybe False (const True) . snapshotExitCode)
+    check "Haskell mouse input reaches the PTY child" ("\ESC[<0;3;2M" `BS.isInfixOf` raw)
+    check "mouse tracking metadata clears with the application mode" (not (snapshotMouseTracking finished))
+  either (error . T.unpack) pure mouse
   interrupt <- withTerminal (config "trap 'printf interrupted; exit 0' INT; printf ready; read line") $ \terminal -> do
     _ <- waitFor terminal (BS.isInfixOf "ready" . snapshotOutput)
     writeTerminal terminal "\ETX" >>= requireRight
@@ -154,6 +165,7 @@ checks = bracket temporary removePathForcibly $ \directory -> do
   gone <- readProcessWithExitCode "/bin/kill" ["-0",pid] ""
   check "release reaps child" (case gone of (ExitFailure _,_,_) -> True; _ -> False)
   pollTerminal terminal >>= check "released handle safely rejected" . isLeft
+  sendTerminalMouse terminal (TerminalMouseEvent TerminalMousePress (Just TerminalMouseLeft) [] 0 0) >>= check "released handle rejects mouse input" . isLeft
   bad <- startTerminal (config "true") {terminalDirectory=directory </> "does-not-exist"}
   check "bad working directory fails at creation" (isLeft bad)
   missing <- startTerminal (config "true") {terminalCommand="/does/not/exist"}

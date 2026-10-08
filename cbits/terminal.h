@@ -18,6 +18,19 @@ int thc_terminal_spawn(thc_terminal *, const char *executable, char *const argv[
                        char *const env[], const char *directory);
 #endif
 int thc_terminal_write(thc_terminal *, const uint8_t *, size_t);
+enum thc_terminal_mouse_action {
+    THC_TERMINAL_MOUSE_PRESS, THC_TERMINAL_MOUSE_RELEASE, THC_TERMINAL_MOUSE_MOTION
+};
+enum thc_terminal_mouse_button {
+    THC_TERMINAL_MOUSE_NONE, THC_TERMINAL_MOUSE_LEFT, THC_TERMINAL_MOUSE_MIDDLE,
+    THC_TERMINAL_MOUSE_RIGHT, THC_TERMINAL_MOUSE_WHEEL_UP, THC_TERMINAL_MOUSE_WHEEL_DOWN,
+    THC_TERMINAL_MOUSE_WHEEL_LEFT, THC_TERMINAL_MOUSE_WHEEL_RIGHT
+};
+/* Zero-based cells; captured motion/release may be outside the current grid.
+ * Modifiers: shift=1, control=2, alt=4. Wheels are press-only. */
+int thc_terminal_mouse(thc_terminal *, int action, int button, int modifiers, int column, int row);
+/* 0/1 for tracking disabled/enabled; -1 on native query failure. */
+int thc_terminal_mouse_tracking(thc_terminal *);
 int thc_terminal_resize(thc_terminal *, int columns, int rows);
 int thc_terminal_appearance(thc_terminal *, int dark);
 int thc_terminal_poll(thc_terminal *);
