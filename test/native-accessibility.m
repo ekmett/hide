@@ -135,22 +135,39 @@ int main(int argc,char **argv) {
     NSArray *listId=@[@"dialog",@"field",@"2"],*choiceId=@[@"dialog",@"field",@"2",@"option",@"0"];
     NSMutableDictionary *list=dialogNode(listId,dialogId,@"listbox",@"Choices",NSNull.null,@[@1,@6,@12,@3]);
     NSMutableDictionary *choice=dialogNode(choiceId,listId,@"option",@"Selected item",NSNull.null,@[@1,@7,@12,@1]);choice[@"selected"]=@YES;
-    NSMutableDictionary *modal=[@{@"present":@YES,@"readOnly":@YES,@"truncated":@NO,@"nodes":@[modalRoot,input,tick,list,choice]} mutableCopy];
+    NSArray *radioId=@[@"dialog",@"field",@"3"],*comboId=@[@"dialog",@"field",@"4"];
+    NSMutableDictionary *radioGroup=dialogNode(radioId,dialogId,@"radiogroup",@"Radio choices",NSNull.null,@[@14,@5,@12,@2]);
+    NSMutableDictionary *radio=dialogNode(@[@"dialog",@"field",@"3",@"option",@"0"],radioId,@"radio",@"Choice A",NSNull.null,@[@14,@6,@12,@1]);radio[@"checked"]=@YES;
+    NSMutableDictionary *combo=dialogNode(comboId,dialogId,@"combobox",@"Combo",@"Choice A",@[@14,@8,@12,@1]);combo[@"expanded"]=@YES;
+    NSMutableDictionary *popup=dialogNode(@[@"dialog",@"field",@"4",@"option",@"0"],comboId,@"option",@"Popup choice",NSNull.null,@[@14,@9,@12,@1]);popup[@"selected"]=@YES;
+    NSMutableDictionary *button=dialogNode(@[@"dialog",@"button",@"0"],dialogId,@"button",@"OK",NSNull.null,@[@14,@11,@8,@1]);
+    NSMutableDictionary *multiline=dialogNode(@[@"dialog",@"field",@"5"],dialogId,@"textbox",@"Notes",@"line one\nline two",@[@1,@10,@12,@2]);multiline[@"multiline"]=@YES;
+    NSMutableDictionary *bodyText=dialogNode(@[@"dialog",@"body",@"0"],dialogId,@"text",@"Plain explanation",NSNull.null,@[@1,@2,@22,@1]);
+    NSMutableDictionary *modal=[@{@"present":@YES,@"readOnly":@YES,@"truncated":@NO,
+        @"nodes":@[modalRoot,input,tick,list,choice,radioGroup,radio,combo,popup,button,multiline,bodyText]} mutableCopy];
     NSDictionary *modalWrapper=@{@"size":@[@(cols),@(rows)],@"dialog":modal};
     assert(publish(modalWrapper));
     id dialogHost=nil;for (NSView *view in window.contentView.subviews) if ([view isKindOfClass:NSClassFromString(@"HideAXDialog")]) dialogHost=view;
     assert(dialogHost && [[dialogHost accessibilitySubrole] isEqual:NSAccessibilityDialogSubrole]);
-    assert([[dialogHost accessibilityLabel] isEqual:@"Options λ"] && [[dialogHost accessibilityChildren] count]==3);
+    assert([[dialogHost accessibilityLabel] isEqual:@"Options λ"] && [[dialogHost accessibilityChildren] count]==8);
     id inputElement=findRole(window,NSAccessibilityTextFieldRole,[NSMutableSet new]);assert(inputElement);
     assert([[inputElement accessibilityLabel] isEqual:@"Name"] && [[inputElement accessibilityValue] isEqual:@"plain <script> text"]);
     assert([[inputElement accessibilityHelp] containsString:@"Focused in editor"] && ![inputElement isAccessibilityFocused]);
     actual=[inputElement accessibilityFrame];near(actual.origin.x,expected.origin.x);near(actual.origin.y,expected.origin.y);
     near(actual.size.width,expected.size.width);near(actual.size.height,expected.size.height);
     id checkbox=findRole(window,NSAccessibilityCheckBoxRole,[NSMutableSet new]);assert([[checkbox accessibilityValue] isEqual:@YES]);
+    assert([inputElement isAccessibilitySelectorAllowed:@selector(accessibilityValue)]);
+    assert([[findRole(window,NSAccessibilityRadioButtonRole,[NSMutableSet new]) accessibilityValue] isEqual:@YES]);
+    assert(findRole(window,NSAccessibilityRadioGroupRole,[NSMutableSet new]));
+    id comboElement=findRole(window,NSAccessibilityComboBoxRole,[NSMutableSet new]);assert(comboElement && [comboElement isAccessibilityExpanded]);
+    assert([[comboElement accessibilityChildren] count]==1); // Popup bounds need not lie inside the combo field.
+    assert([[findRole(window,NSAccessibilityTextAreaRole,[NSMutableSet new]) accessibilityValue] isEqual:@"line one\nline two"]);
+    assert([[findRole(window,NSAccessibilityStaticTextRole,[NSMutableSet new]) accessibilityLabel] isEqual:@"Plain explanation"]);
+    assert(findRole(window,NSAccessibilityButtonRole,[NSMutableSet new]));
     id listing=findRole(window,NSAccessibilityListRole,[NSMutableSet new]);assert(listing && [[listing accessibilityChildren] count]==1);
     assert([[[listing accessibilityChildren] firstObject] accessibilityParent]==listing);
     assert([[[listing accessibilitySelectedChildren] firstObject] isAccessibilitySelected]);
-    for (id element in @[dialogHost,inputElement,checkbox,listing]) {
+    for (id element in @[dialogHost,inputElement,checkbox,listing,comboElement]) {
         assert(![element isAccessibilitySelectorAllowed:@selector(accessibilityPerformPress)] &&
             ![element isAccessibilitySelectorAllowed:@selector(setAccessibilityValue:)] &&
             ![element isAccessibilitySelectorAllowed:@selector(setAccessibilityFocused:)]);
@@ -179,7 +196,7 @@ int main(int argc,char **argv) {
     modal[@"present"]=@NO;modal[@"nodes"]=@[modalRoot];assert(!publish(modalWrapper));
     assert(thc_accessibility(NULL,0));assert(window.firstResponder==firstResponder);
     assert(!window.visible && !window.keyWindow);
-    printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only selectors and retirement checks passed\n",backend,(double)pw/ww);
+    printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only sidebar/image/modal selectors and retirement checks passed\n",backend,(double)pw/ww);
     thc_close();
  }
  return 0;

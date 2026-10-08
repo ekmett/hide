@@ -10,14 +10,15 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Base64 as B64
 import Hide.RemoteWindow
+import Hide.Accessibility (SemanticAudience(..),dialogSemantics)
 import Hide.FrameTiming
 import Hide.Window (nativeMenuEvent,nativeCommands)
+import Hide.Buffer (newBuffer,Selection(..))
 import qualified Hide.Model as Model
 import qualified Data.Map.Strict
 #ifdef WITH_REMOTE
 import Data.Aeson.Types (parseEither)
 import qualified Hide.Protocol as P
-import Hide.Buffer (newBuffer)
 import Hide.Model (initialDesktop, addDocument, Desktop(..))
 #endif
 
@@ -141,6 +142,13 @@ checks = do
   check "missing and dismissed dialog metadata retire native modal state"
     (all (\result->case result of Right value->remoteDialog value==Nothing; _->False)
       [parseRemoteFrame meta rows,dialogFrame (dialogValue False ([]::[Value]))])
+  let actualModal=Model.prompt "Native modal" Model.Widgets
+        [Model.Input "Name" "visible" 2,Model.CheckBox "Enabled" True,Model.Radio "Choice" ["A","B"] 1,
+         Model.ComboBox "Combo" ["A","B"] 0 (Just 1),Model.TextArea "Notes" False (newBuffer "first\nsecond") (Selection 0 0) 0 0]
+        (Model.initialDesktop (80,25))
+      projected=dialogSemantics OwnerSemantics actualModal
+  check "actual host modal projection passes the production native receiver"
+    (case dialogFrame projected of Right value->remoteDialog value==Just (BL.toStrict (encode (wrapper projected))); _->False)
   let editNode updates=case modalInput of Object fields->Object (KM.union (KM.fromList updates) fields); _->error "modal fixture"
       badNodes=[editNode ["role" .= ("action"::T.Text)],editNode ["parent" .= (["dialog","field","0"]::[T.Text])],
         editNode ["value" .= T.replicate 2049 "x"],editNode ["focused" .= (1::Int)],editNode ["bounds" .= ([80,2,1,1]::[Int])],
