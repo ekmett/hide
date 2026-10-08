@@ -104,8 +104,8 @@ assert.equal(packets.length,0);
 // Use the production socket/frame merger to exercise delta, reset and reconnect invalidation.
 const sockets=[],noOp=()=>{};
 Object.assign(context,{URL,ArrayBuffer,location:{href:'http://localhost/'},navigator:{platform:'MacIntel'},
- WebSocket:class {constructor(){sockets.push(this);}close(){this.onclose({code:1000,reason:''});}},
- closed:false,ready:false,glyphs:new Map(),tiles:new Map(),atlasEntries:new Map(),socket:null,
+ WebSocket:class {static OPEN=1;constructor(){this.readyState=1;this.sent=[];sockets.push(this);}send(value){this.sent.push(value);}close(){this.readyState=3;this.onclose({code:1000,reason:''});}},
+ closed:false,ready:false,attachmentEpoch:0,glyphs:new Map(),tiles:new Map(),atlasEntries:new Map(),socket:null,
  images:{chunk:null,clear:noOp,receive:noOp,describe:noOp},downloadInfo:null,frame:null,mode:3,rows:[],unsaved:false,clipboard:'',mouse:[-1,-1],dirty:false,
  systemTheme:{matches:false},performance:{now:()=>0},console:{info:noOp},setTimeout:noOp,
  clearClipboardRequest:noOp,decodeRows:rows=>rows,updateTitle:noOp,guardLeave:noOp,allocate:()=>true,
@@ -134,3 +134,37 @@ await message({type:'frame',rows:[],semanticDialog:modal});await message({type:'
 await message({type:'frame',rows:[],semanticDialog:modal});sockets.at(-1).close();assert.equal(dialogAccess.hidden,true);
 assert.ok(packets.every(packet=>['frontend','theme'].includes(packet.type))); // Projection handling emits no actions.
 console.log('Browser sidebar/dialog semantics, read-only navigation, replacement, bounds and connection lifecycle checks passed');
+
+// Ordinary human drops retain exact file bytes and their local attachment receipt.
+const dropHandlers=new Map();let inputFocus=0;
+Object.assign(context,{window:{addEventListener:(name,handler)=>dropHandlers.set(name,handler)},
+ input:{focus:()=>inputFocus++},serial:0,pendingEdit:0,detaching:false});
+vm.runInContext(source.slice(source.indexOf('function send(value)'),source.indexOf('function mods(e)')),context);
+vm.runInContext(source.slice(source.indexOf('function semanticReadingTarget('),source.indexOf("window.addEventListener('keydown'")),context);
+vm.runInContext(source.slice(source.indexOf("window.addEventListener('dragover'"),source.indexOf("fullscreen.addEventListener('click'")),context);
+vm.runInContext('connect()',context);await message({type:'assets',glyphs:[[65,1,[0]]],scale:2});
+const pngBytes=Uint8Array.from([137,80,78,71,13,10,26,10,0,255,128]).buffer;
+const uploadFile={name:'safe λ.unknown',type:'text/plain',size:pngBytes.byteLength,arrayBuffer:async()=>pngBytes};
+function drop(files,target={}){return dropHandlers.get('drop')({target,preventDefault(){},dataTransfer:{files}});}
+function uploads(){return sockets.flatMap(socket=>socket.sent).filter(value=>typeof value!=='string'||JSON.parse(value).type==='upload');}
+function clearSent(){for(const socket of sockets)socket.sent.length=0;inputFocus=0;}
+clearSent();await drop([uploadFile]);
+assert.equal(uploads().length,2);assert.equal(JSON.parse(uploads()[0]).name,uploadFile.name);assert.equal(JSON.parse(uploads()[0]).type,'upload');
+assert.deepEqual(Array.from(new Uint8Array(uploads()[1])),Array.from(new Uint8Array(pngBytes)));assert.equal(inputFocus,1);
+// Browser MIME/extension hints do not decide whether the host opens an image.
+clearSent();await drop([{...uploadFile,size:16777217,arrayBuffer:()=>{throw Error('oversize file was read');}}]);assert.equal(uploads().length,0);
+clearSent();await drop([uploadFile],dialogAccess);assert.equal(uploads().length,0);assert.equal(inputFocus,0);
+let finishRead;
+clearSent();const oldSocketDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})}]);
+sockets.at(-1).close();vm.runInContext('connect()',context);await message({type:'assets',glyphs:[[65,1,[0]]],scale:2});clearSent();
+finishRead(pngBytes);await oldSocketDrop;assert.equal(uploads().length,0);assert.equal(inputFocus,0);
+clearSent();const relayDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})}]);
+await message({type:'connection',connected:false});await message({type:'connection',connected:true});clearSent();
+finishRead(pngBytes);await relayDrop;assert.equal(uploads().length,0);assert.equal(inputFocus,0);
+clearSent();const resetDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})}]);
+await message({type:'assets',glyphs:[[65,1,[0]]],scale:2});clearSent();finishRead(pngBytes);await resetDrop;
+assert.equal(uploads().length,0);assert.equal(inputFocus,0);
+clearSent();const resizeDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})}]);
+await message({type:'frame',rows:[],reset:true});clearSent();finishRead(pngBytes);await resizeDrop;
+assert.equal(uploads().length,2);assert.equal(inputFocus,1); // A normal display reset does not change attachment authority.
+console.log('Browser ordinary raw-file drops, safe original names, size/read-only bounds and socket/relay/reset upload receipts passed');

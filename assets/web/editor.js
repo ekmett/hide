@@ -52,7 +52,7 @@ initializeGPU();
 let cellGrid=new Uint32Array(),gridCols=0,gridRows=0;
 const atlasStats={tiles:0,tileBytes:0,gridBytes:0,draws:0};
 let glyphs=new Map(), tiles=new Map(), rows=[], frame=null, scale=2, initialScale=2, cols=80, lines=25, mode=3;
-let socket, ready=false, closed=false, mouse=[-1,-1], leftDown=false, cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
+let socket, attachmentEpoch=0, ready=false, closed=false, mouse=[-1,-1], leftDown=false, cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
 let remoteHost="", sessionFrontend=false, detaching=false, detached=false;
 const drawTimes=[];
 let titleTick=0, timingText='', rasterTime=0;
@@ -502,6 +502,7 @@ const systemTheme=matchMedia('(prefers-color-scheme: dark)');
 systemTheme.addEventListener('change',()=>send({type:'theme',dark:systemTheme.matches}));
 function connect(){
  if(closed)return;
+ attachmentEpoch++;
  socket=new WebSocket(new URL('socket',location.href).href.replace(/^http/,'ws'));
  socket.binaryType='arraybuffer';
  const connection=socket,wireRows=[];let incoming=Promise.resolve(),platformSent=false,stopped=false;
@@ -523,9 +524,9 @@ function connect(){
    if(message.type?.startsWith('canvas-')){images.control(message);dirty=true;
    }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
    }else if(message.type==='connection'){
-     ready=message.connected&&glyphs.size>0;if(!ready){clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
+     ready=message.connected&&glyphs.size>0;if(!ready){attachmentEpoch++;clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
    }else if(message.type==='assets'){
-     clearSidebar();clearDialog();images.clear();dirty=true;
+     attachmentEpoch++;clearSidebar();clearDialog();images.clear();dirty=true;
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
@@ -555,16 +556,16 @@ function connect(){
    }else if(message.type==='ack'){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='detached'){
-     detached=true;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
+     attachmentEpoch++;detached=true;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Session detached. Resume from your terminal with hide --resume.';
      navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
-     closed=true;ready=false;clearDownload();clearSidebar();clearDialog();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
+     attachmentEpoch++;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{stopped=true;if(connection!==socket)return;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{stopped=true;if(connection!==socket)return;attachmentEpoch++;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();
@@ -644,16 +645,18 @@ input.addEventListener('select',()=>{
 input.addEventListener('focus',()=>{if(!input.value){input.value='\u200b';input.setSelectionRange(1,1);}});
 window.addEventListener('dragover',e=>{if(semanticReadingTarget(e.target)){e.preventDefault();e.dataTransfer.dropEffect='none';return;}if([...e.dataTransfer.types].includes('Files')){e.preventDefault();e.dataTransfer.dropEffect='copy';}});
 window.addEventListener('drop',async e=>{
- e.preventDefault();if(semanticReadingTarget(e.target))return;const files=[...e.dataTransfer.files];
+ e.preventDefault();if(semanticReadingTarget(e.target))return;const files=[...e.dataTransfer.files],connection=socket,epoch=attachmentEpoch;
+ const current=()=>connection===socket&&epoch===attachmentEpoch&&ready&&!closed&&!detaching&&connection?.readyState===WebSocket.OPEN;
+ if(!current()){if(!closed&&!detaching)status.textContent='Reconnect before dropping files.';return;}
  for(const file of files){
    if(file.size>16*1024*1024){status.textContent=`${file.name}: browser drops are limited to 16 MiB per file.`;continue;}
    try{
      const bytes=await file.arrayBuffer();
-     if(!ready){status.textContent='Reconnect before dropping files.';break;}
-     send({type:'upload',name:file.name});socket.send(bytes);
-   }catch(error){status.textContent=`Cannot open ${file.name}: ${error.message}`;}
+     if(!current()){if(!closed&&!detaching)status.textContent='Connection changed; drop the file again.';break;}
+     send({type:'upload',name:file.name});connection.send(bytes);
+   }catch(error){if(current())status.textContent=`Cannot open ${file.name}: ${error.message}`;}
  }
- input.focus({preventScroll:true});
+ if(current())input.focus({preventScroll:true});
 });
 fullscreen.addEventListener('click',async()=>{
  try{
