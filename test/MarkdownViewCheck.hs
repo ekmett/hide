@@ -9,7 +9,6 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust,isNothing)
 import qualified Data.Text as T
-import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
 import System.Directory (getTemporaryDirectory,removeFile,removePathForcibly,createDirectory)
 import System.FilePath ((</>))
@@ -86,7 +85,7 @@ checks=do
   let wideBase=selected {wideSectionTitles=True}
   wide<-prepareTextPresentations wideBase
   let (layout,_,_)=fromJust (windowMarkdown wide (win wide))
-      heading=textLayoutFirst layout
+      heading=snd (layoutPosition layout 1)
   check "Wide heading has measured two-cell geometry and preserves rendered selection" (heading==2 && selection (displayWindow (win wide))==selection shown)
   let resized=modifyActive (\w->w {bounds=(bounds w) {width=28}}) selected
   check "Stale width navigation refuses source fallback" (isNothing (windowMarkdown resized (win resized)) && navigationBlocked resized)
@@ -128,7 +127,6 @@ checks=do
         Just _->pure next
         Nothing->threadDelay 10000 >> await owner next
     temporary=do directory<-getTemporaryDirectory; (path,h)<-openTempFile directory "hide-markdown-recovery"; hClose h; pure path
-    textLayoutFirst layout=case layoutRows layout Vec.!? 0 of Just row->maybe 0 layoutAdvance (layoutGlyphs row Vec.!? 0); _->0
 
 -- Successful Save As adopts the path for every shared view, preserving Current's
 -- source interaction while retiring previews that the new file cannot support.
