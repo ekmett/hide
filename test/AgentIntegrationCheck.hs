@@ -184,7 +184,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       cancellingPeer<-ui "cancel" [] afterPrimaryCancel
       _<-tickUntil (\_->(==1) <$> readIORef peerCancels) cancellingPeer
       settingPeer<-ui "set-config" ["model","invented"] childAgain
-      rejectedPeer<-tickUntil (pure . T.isInfixOf "Select a connected child agent" . status) settingPeer
+      rejectedPeer<-tickUntil (pure . T.isInfixOf "This agent setting is not currently advertised by the provider." . status) settingPeer
       ensure "child setters cannot reconfigure the primary" (conversationTarget rejectedPeer==AH.agentIdText peer)
       liveChild<-AH.spawnAgent hub (AH.Agent primary) (AH.SpawnSpec "Live child" "Inspect source" root AH.Shared AH.Fresh Nothing Nothing) >>= right
       parentTicket<-AH.sendAgent hub (AH.Agent primary) liveChild "parent instruction" >>= right

@@ -744,8 +744,9 @@ receipts before cancelling that turn, so a delayed callback cannot cancel a new
 question. Cancelling turns refuse further steering until their terminal reply.
 
 These remain host-only operations: agent tools cannot manufacture human steering
-or change their controlling user's model. Primary query/cancel ownership, prompt preparation, ACP file
-and terminal requests, and provider startup/recovery still belong to Conversation;
+or change their controlling user's model. Primary query/cancel ownership, prompt
+preparation, ACP file and terminal requests, and provider startup/recovery still
+belong to Conversation;
 the full separate-package agent integration remains unfinished.
 
 This follows today's `AgentHub.StartProvider` and `AgentDriver` boundary rather

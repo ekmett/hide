@@ -569,15 +569,20 @@ pollPromptPreparation runtime@(ConversationState _ ref _ _) d = do
                   pure d {status="The turn ended while preparing steering; draft kept."}
               | otherwise -> do
                 current<-maybe (pure True) (\request->AR.primaryControlCurrent (conversationAgents runtime) request (connection s) (session s)) control
-                if not current then pure d {status="Agent control expired; draft kept."} else do
-                 let method=if steering then "_session/steering" else "session/prompt"
-                     meta=["_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]] | steering]
-                 ident<-A.request client method (object (["sessionId" .= sid,"prompt" .= blocks]++meta))
-                 modifyIORef' ref (\state -> state {queuedPrompt=if steering then queuedPrompt state else Nothing,
-                   pending=M.insert ident (maybe Prompting (Steering text) control) (pending state),deliveredContext=Just context})
-                 cleared<-if steering then pure d else clearSubmittedDraft receipt d
-                 pure cleared {status=if steering then "Steering request sent; draft kept until accepted." else "Agent is replying...",agentReplying=True}
-            _ -> pure d
+                if not current then do
+                  mapM_ (AR.rejectPrimaryControl "Agent control expired; draft kept.") control
+                  pure d {status="Agent control expired; draft kept."}
+                else do
+                  let method=if steering then "_session/steering" else "session/prompt"
+                      meta=["_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]] | steering]
+                  ident<-A.request client method (object (["sessionId" .= sid,"prompt" .= blocks]++meta))
+                  modifyIORef' ref (\state -> state {queuedPrompt=if steering then queuedPrompt state else Nothing,
+                    pending=M.insert ident (maybe Prompting (Steering text) control) (pending state),deliveredContext=Just context})
+                  cleared<-if steering then pure d else clearSubmittedDraft receipt d
+                  pure cleared {status=if steering then "Steering request sent; draft kept until accepted." else "Agent is replying...",agentReplying=True}
+            _ -> do
+              mapM_ (AR.rejectPrimaryControl "Primary provider disconnected; draft kept.") control
+              pure d
 
 -- Supply guidance once per connection and again when its saved value changes.
 -- A separate text block preserves the user's query and the visible transcript.
