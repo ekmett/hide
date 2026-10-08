@@ -236,7 +236,7 @@ void thc_cancel_file_drag(void) {
 }
 int thc_arm_file_drag(const char *path, int x, int y, int width, int height) {
 #ifdef __APPLE__
-    if (x<0 || y<0 || width<=0 || height<=0 || x+width>cols || y+height>rows) return SDL_SetError("The exported file row is no longer visible");
+    if (x<0 || y<0 || width<=0 || height<=0 || x>=cols || y>=rows || width>cols-x || height>rows-y) return SDL_SetError("The exported file row is no longer visible");
     int ww,wh;
     SDL_GetWindowSize(window,&ww,&wh);
     geometry();

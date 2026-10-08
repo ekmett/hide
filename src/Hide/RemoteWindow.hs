@@ -318,7 +318,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0
                 Just "file-export"->do
                   row@(x,y,w,h)<-o .: "row"
                   view<-o .: "view"
-                  unless (x>=0 && y>=0 && w>0 && h==1 && x+w<=512 && y<256 && length view==12 && all (\n->n>=0 && n<=9007199254740991) view) (fail "Invalid file export receipt")
+                  unless (x>=0 && x<=511 && y>=0 && w>0 && w<=512 && h==1 && x+w<=512 && y<256 && length view==12 && all (\n->n>=0 && n<=9007199254740991) view) (fail "Invalid file export receipt")
                   pure (Just (row,view))
                 Nothing->pure Nothing
                 _->fail "Unknown download purpose"

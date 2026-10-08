@@ -8,7 +8,7 @@
 module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMenuEvent, nativeMenuEventFor, nativeMenuToken, nativeCommands, nativeCommandsFor, nativeDockWindow
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
-  , c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
+  , c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
   , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
