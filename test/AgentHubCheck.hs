@@ -83,8 +83,11 @@ checks=do
     forked<-spawnAgent hub (Agent chosen) ((spec "Fork") {spawnContext=Fork chosen}) >>= right
     listing<-listAgents hub Human >>= right
     ensure "directory does not reveal private provider keys" (not ("private-provider-key" `BS.isInfixOf` BL.toStrict (encode listing)))
+    savedHistory<-historyAgent hub Human first 0 100 >>= right
     snap<-snapshotHub hub
     restored<-restoreHub (HubLimits 4 2) (\_ _->error "recovery must never start a process") snap >>= right
+    restoredHistory<-historyAgent restored Human first 0 100 >>= right
+    ensure "checkpoint recovery preserves typed public events and cursors" (restoredHistory==savedHistory)
     recovered<-statusAgent restored Human forked >>= right
     ensure "recovery is inert but can describe resume availability" (field "status" recovered==Just ("recovered"::T.Text) && field "reconnectable" recovered==Just True)
     endedRecovered<-statusAgent restored Human first >>= right
@@ -133,9 +136,32 @@ checks=do
     ensure "unknown persistence schema rejected" (isLeft invalid)
     forM_ [1..1100::Int] (\n->recordAgentEvent hub second "stream" (toJSON n))
     bounded<-historyAgent hub Human second 0 100 >>= right
-    ensure "bounded history reports dropped events" (maybe False (>0) (field "dropped" bounded::Maybe Int))
+    ensure "bounded history reports dropped events" (historyDropped bounded>0)
     searched<-searchAgentHistory hub Human second "1099" 0 100 >>= right
     ensure "literal history search" ("1099" `BS.isInfixOf` BL.toStrict (encode searched))
+    firstPage<-historyAgent hub Human second 0 7 >>= right
+    nextPage<-historyAgent hub Human second (historyNextAfter firstPage) 11 >>= right
+    wholePage<-historyAgent hub Human second 0 18 >>= right
+    ensure "typed pagination is exclusive and composes in original order"
+      (historyEvents firstPage++historyEvents nextPage==historyEvents wholePage &&
+       length (historyEvents firstPage)==7 && length (historyEvents nextPage)==11 &&
+       historyNextAfter nextPage==historyNextAfter wholePage && historyHasMore nextPage &&
+       historyDropped firstPage==historyDropped nextPage)
+    repeated<-historyAgent hub Human second 0 18 >>= right
+    ensure "reading typed history does not consume events" (repeated==wholePage)
+    current<-statusAgent hub Human second >>= right
+    let after=maybe (error "Missing next history index") (subtract 1) (field "nextEvent" current::Maybe Int)
+        large=T.replicate 600000 "x"
+    forM_ [1..3::Int] (\n->recordAgentEvent hub second "large" (object ["part" .= n,"text" .= large]))
+    a<-historyAgent hub Human second after 100 >>= right
+    b<-historyAgent hub Human second (historyNextAfter a) 100 >>= right
+    c<-historyAgent hub Human second (historyNextAfter b) 100 >>= right
+    ensure "byte-limited pages make progress without losing public events"
+      (all ((==1).length.historyEvents) [a,b,c] && map historyHasMore [a,b,c]==[True,True,False] &&
+       map (field "part" . historyDetail) (concatMap historyEvents [a,b,c])==map Just [1..3::Int] &&
+       all ((<=1024*1024).sum.map (BL.length.encode).historyEvents) [a,b,c])
+    empty<-historyAgent hub Human second (historyNextAfter c) 100 >>= right
+    ensure "empty history keeps the exclusive cursor" (null (historyEvents empty) && not (historyHasMore empty) && historyNextAfter empty==historyNextAfter c)
   -- Concurrent startup reservations must count before provider startup finishes.
   started<-newEmptyMVar
   release<-newEmptyMVar

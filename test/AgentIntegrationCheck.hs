@@ -81,11 +81,11 @@ checks=bracket temporary removePathForcibly $ \root ->
               (all (not . (`T.isInfixOf` T.pack (show history))) private)
       publicSafe connected
       primaryHistory<-AH.historyAgent hub AH.Human primary 0 100 >>= right
-      let primaryEvents=maybe [] id (field "events" primaryHistory :: Maybe [Value])
+      let primaryEvents=AH.historyEvents primaryHistory
       ensure "ordinary primary provider output reaches the shared history API"
-        (any (\event->field "kind" event==Just ("output"::T.Text) && maybe False (T.isInfixOf "Hello") (field "detail" event >>= field "text")) primaryEvents)
+        (any (\event->AH.historyKind event=="output" && maybe False (T.isInfixOf "Hello") (field "text" (AH.historyDetail event))) primaryEvents)
       ensure "publishing primary output does not manufacture a second human prompt"
-        (all ((/=Just ("message_queued"::T.Text)).field "kind") primaryEvents)
+        (all ((/="message_queued").AH.historyKind) primaryEvents)
       _<-tickBody presentation conversation connected
       afterIdle<-AH.historyAgent hub AH.Human primary 0 100 >>= right
       ensure "idle synchronization does not replay primary history" (afterIdle==primaryHistory)
@@ -97,10 +97,10 @@ checks=bracket temporary removePathForcibly $ \root ->
       publicSafe split
       nested<-send "nested-private" split >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "nested-private" `T.isInfixOf` activeText desktop))
       nestedHistory<-AH.historyAgent hub AH.Human primary 0 100 >>= right
-      let nestedEvents=maybe [] id (field "events" nestedHistory :: Maybe [Value])
+      let nestedEvents=AH.historyEvents nestedHistory
       ensure "primary tools and plans use public provider events"
-        (all (\kind->any ((==Just kind).field "kind") nestedEvents) (["tool","plan"]::[T.Text]) &&
-         any (\event->field "kind" event==Just ("plan"::T.Text) && "Review" `T.isInfixOf` T.pack (show event)) nestedEvents)
+        (all (\kind->any ((==kind).AH.historyKind) nestedEvents) (["tool","plan"]::[T.Text]) &&
+         any (\event->AH.historyKind event=="plan" && "Review" `T.isInfixOf` T.pack (show event)) nestedEvents)
       expanded<-snd <$> conversationEffects conversation (\x _->pure (False,x)) nested [AgentAction "copy" []]
       ensure "raw tool and plan details never retain bearer values" (all (not . (`T.isInfixOf` clipboard expanded)) ("private-main-key":tokens))
       peerCancels<-newIORef (0::Int)

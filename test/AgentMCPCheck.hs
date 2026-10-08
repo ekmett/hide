@@ -93,6 +93,15 @@ checks=do
     ensure "cancel dispatch resolves the task ticket" (field "status" cancelled==Just ("cancelled"::T.Text))
     history<-call (Agent owner) "agent_history" (object ["agentId" .= agentIdText owner,"limit" .= (1::Int)]) >>= right
     ensure "history exposes bounded pagination" (field "hasMore" history==Just True && maybe False ((==1).length) (field "events" history::Maybe [Value]))
+    typedHistory<-historyAgent hub (Agent owner) owner 0 1 >>= right
+    ensure "MCP encodes the same public page as the typed service" (history==toJSON typedHistory)
+    recordAgentEvent hub owner "wire-example" (String "Public detail")
+    wireEvent<-call (Agent owner) "agent_search" (object ["agentId" .= agentIdText owner,"query" .= ("wire-example"::T.Text)]) >>= right
+    ensure "MCP history preserves its public event envelope" (case field "events" wireEvent::Maybe [Value] of
+      Just [event]->field "kind" event==Just ("wire-example"::T.Text) && field "author" event==Just (object ["kind" .= ("agent"::T.Text),"id" .= agentIdText owner]) &&
+        field "detail" event==Just (String "Public detail") && field "index" event==(field "nextAfter" wireEvent::Maybe Int) &&
+        field "hasMore" wireEvent==Just False && field "dropped" wireEvent==Just (0::Int)
+      _->False)
     search<-call (Agent owner) "agent_search" (object ["agentId" .= agentIdText owner,"query" .= ("result for parent"::T.Text)]) >>= right
     ensure "search dispatch finds literal text ignoring case" ("Result for parent" `BS.isInfixOf` BL.toStrict (encode search))
     forM_ [("agent_directory",Null),("agent_directory",object ["parent" .= ("human"::T.Text)]),

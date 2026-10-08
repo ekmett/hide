@@ -753,6 +753,15 @@ raw arguments/results and permission choices. Publication neither enqueues human
 prompts nor replays transcript state during synchronization. Primary transcript,
 prompt tickets and disconnect/recovery ownership remain unchanged.
 
+`AgentHub.historyAgent` and `searchAgentHistory` return public `HistoryPage` and
+`HistoryEvent` values. Conversation reads typed event indices and host-attributed
+actors directly; AgentMCP encodes the same pages for tools. The Hub retains the
+single history: at most 1,024 events/4 MiB per agent, with 1–100 events and 1 MiB of
+encoded events per page. Exclusive cursors preserve original indices, including
+through search and checkpoint recovery; reads do not consume events or message
+tickets. Provider details remain extensible JSON whose publisher owns redaction.
+The MCP envelope and private checkpoint format are unchanged.
+
 These remain host-only operations: agent tools cannot manufacture human steering
 or change their controlling user's model. Primary query/cancel ownership, prompt
 preparation, ACP file and terminal requests, and provider startup/recovery still

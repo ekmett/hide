@@ -12,7 +12,7 @@ module Hide.AgentHub
   , Capabilities(..), ConfigChoice(..), parseCapabilities, filterPrivateCapabilities
   , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, cancelExternalAgentControls, renameAgent
   , configureAgent, steerAgent, steerAgentAt, listAgents, statusAgent, sendAgent, sendAgentAt, waitAgent, cancelAgent, endAgent
-  , historyAgent, searchAgentHistory, recordAgentEvent, snapshotHub, restoreHub, restoreHubWithLimits
+  , HistoryEvent(..), HistoryPage(..), historyAgent, searchAgentHistory, recordAgentEvent, snapshotHub, restoreHub, restoreHubWithLimits
   ) where
 
 import Control.Concurrent (forkIOWithUnmask)
@@ -81,7 +81,27 @@ data DriverEvent = ProviderUpdate Text Value | ProviderCapabilities Capabilities
   deriving (Eq,Show)
 type StartProvider = StartRequest -> (DriverEvent -> IO ()) -> IO (Either Text AgentDriver)
 data Phase = Starting | Idle | Running | Cancelling | Ended | Failed | Recovered deriving (Eq,Show)
-data HistoryEvent = HistoryEvent Int Text Actor Value deriving (Eq,Show)
+-- | One retained public event. The index increases within its agent and remains
+-- unchanged across pagination and recovery. The author is host-attributed; detail
+-- is bounded provider/service data whose publisher owns redaction. Private resume
+-- state is kept separately from these public events.
+-- Event kinds remain extensible for provider activity.
+data HistoryEvent = HistoryEvent
+  { historyIndex :: !Int, historyKind :: !Text, historyAuthor :: !Actor
+  , historyDetail :: !Value } deriving (Eq,Show)
+
+-- | An immutable page from the Hub's retained history, shared by presentation and
+-- the MCP adapter. Events are in increasing index order and all exceed the
+-- requested offset. The next offset is the last event index, or the requested
+-- offset for an empty page. 'historyDropped' counts evicted events, independently
+-- of filtering; 'historyHasMore' means matching retained events remain.
+--
+-- Pages contain at most the requested 1–100 events and 1 MiB of encoded events.
+-- Resume with 'historyNextAfter'; reading neither consumes events nor changes
+-- message tickets. The JSON instances preserve the MCP/checkpoint representation.
+data HistoryPage = HistoryPage
+  { historyEvents :: ![HistoryEvent], historyDropped :: !Int
+  , historyHasMore :: !Bool, historyNextAfter :: !Int } deriving (Eq,Show)
 data Entry = Entry
   { entryId :: AgentId, entryParent :: Maybe AgentId, entrySpec :: SpawnSpec, entryPhase :: Phase
   , entryDriver :: Maybe AgentDriver, entryKey :: Maybe Text, entryCaps :: Capabilities
@@ -701,8 +721,11 @@ capabilitiesValue caps=object ["fork" .= supportsFork caps,"resume" .= supportsR
 actorValue :: Actor -> Value
 actorValue Human=object ["kind" .= ("human"::Text)]
 actorValue (Agent ident)=object ["kind" .= ("agent"::Text),"id" .= agentIdText ident]
-eventValue :: HistoryEvent -> Value
-eventValue (HistoryEvent index kind author value)=object ["index" .= index,"kind" .= kind,"author" .= actorValue author,"detail" .= value]
+instance ToJSON HistoryEvent where
+  toJSON (HistoryEvent index kind author value)=object ["index" .= index,"kind" .= kind,"author" .= actorValue author,"detail" .= value]
+instance ToJSON HistoryPage where
+  toJSON page=object ["events" .= historyEvents page,"dropped" .= historyDropped page,
+    "hasMore" .= historyHasMore page,"nextAfter" .= historyNextAfter page]
 
 -- Lifecycle is a typed host event, never inferred from provider display text.
 recordDriverEvent :: AgentHub -> AgentId -> Int -> DriverEvent -> IO ()
@@ -732,19 +755,23 @@ appendEvent kind author value entry=trim entry {entryHistory=entryHistory entry 
                      | otherwise=current
 
 eventSize :: HistoryEvent -> Int
-eventSize=fromIntegral . BL.length . encode . eventValue
+eventSize=fromIntegral . BL.length . encode
 boundedValue :: Value -> Value
 boundedValue value=if BL.length (BL.take ((1024*1024-4096)+1) (encode value))<=1024*1024-4096 then value else object ["truncated" .= True,"message" .= ("Event exceeds the 1 MiB history record limit."::Text)]
 boundedError :: Text -> Text
 boundedError=T.take 4096
 
-historyAgent :: AgentHub -> Actor -> AgentId -> Int -> Int -> IO (Either Text Value)
+-- | Read retained public events after an exclusive index. Actor admission,
+-- retention and byte/count limits are the same for typed and MCP consumers.
+historyAgent :: AgentHub -> Actor -> AgentId -> Int -> Int -> IO (Either Text HistoryPage)
 historyAgent hub actor ident after count=readHistory hub actor ident after count Nothing
-searchAgentHistory :: AgentHub -> Actor -> AgentId -> Text -> Int -> Int -> IO (Either Text Value)
+-- | Read the same bounded page filtered by a case-insensitive literal match in
+-- the public JSON event representation. The cursor still names original events.
+searchAgentHistory :: AgentHub -> Actor -> AgentId -> Text -> Int -> Int -> IO (Either Text HistoryPage)
 searchAgentHistory hub actor ident needle after count
   | T.null needle || T.length needle>4096=pure (Left "History search requires 1–4096 literal characters.")
   | otherwise=readHistory hub actor ident after count (Just (T.toCaseFold needle))
-readHistory :: AgentHub -> Actor -> AgentId -> Int -> Int -> Maybe Text -> IO (Either Text Value)
+readHistory :: AgentHub -> Actor -> AgentId -> Int -> Int -> Maybe Text -> IO (Either Text HistoryPage)
 readHistory (AgentHub _ _ ref) actor ident after count needle
   | after<0 || count<1 || count>100=pure (Left "History offset must be nonnegative and count must be 1–100.")
   | otherwise=atomically $ do
@@ -752,10 +779,10 @@ readHistory (AgentHub _ _ ref) actor ident after count needle
       pure $ do
         validActor actor state
         entry<-maybe (Left "Unknown agent.") Right (M.lookup ident (hubEntries state))
-        let matches=[event | event@(HistoryEvent index _ _ _)<-toList (entryHistory entry),index>after,maybe True (\query->query `T.isInfixOf` T.toCaseFold (jsonText (eventValue event))) needle]
+        let matches=[event | event@(HistoryEvent index _ _ _)<-toList (entryHistory entry),index>after,maybe True (\query->query `T.isInfixOf` T.toCaseFold (jsonText (toJSON event))) needle]
             chosen=takeBytes (1024*1024) (take count matches)
-        pure (object ["events" .= map eventValue chosen,"dropped" .= entryDropped entry,"hasMore" .= (length matches>length chosen),
-          "nextAfter" .= (case reverse chosen of HistoryEvent index _ _ _:_->index; _->after)])
+        pure (HistoryPage chosen (entryDropped entry) (length matches>length chosen)
+          (case reverse chosen of HistoryEvent index _ _ _:_->index; _->after))
 
 takeBytes :: Int -> [HistoryEvent] -> [HistoryEvent]
 takeBytes _ []=[]
@@ -785,7 +812,7 @@ snapshotHub (AgentHub _ _ ref)=do
   where persistEntry entry=object ["id" .= agentIdText (entryId entry),"parent" .= fmap agentIdText (entryParent entry),"name" .= spawnName (entrySpec entry),
           "workspace" .= workspaceValue (spawnWorkspace (entrySpec entry)),"task" .= spawnTask (entrySpec entry),"cwd" .= spawnDirectory (entrySpec entry),"model" .= spawnModel (entrySpec entry),"effort" .= spawnEffort (entrySpec entry),
           "ended" .= (entryPhase entry==Ended),"sessionKey" .= entryKey entry,"capabilities" .= capabilitiesValue (entryCaps entry),"external" .= entryExternal entry,
-          "nextTicket" .= entryNextTicket entry,"nextEvent" .= entryNextEvent entry,"dropped" .= entryDropped entry,"history" .= map eventValue (toList (entryHistory entry))]
+          "nextTicket" .= entryNextTicket entry,"nextEvent" .= entryNextEvent entry,"dropped" .= entryDropped entry,"history" .= toList (entryHistory entry)]
 
 -- | Restore records without starting providers or replaying pending message queues.
 restoreHub :: HubLimits -> StartProvider -> Value -> IO (Either Text AgentHub)

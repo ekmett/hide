@@ -653,6 +653,9 @@ changes the selected conversation to dispatch. The primary's redacted provider
 output, bounded tool/plan updates and context usage also enter the shared Hub
 history/status APIs. Exact connection replacement retires its event sink, while
 capability refresh preserves the provider lifetime and outstanding controls.
+Conversation consumes the Hub's typed `HistoryPage`/`HistoryEvent` values directly;
+AgentMCP owns the public JSON response. Both use the same retention, byte/count
+limits and exclusive event cursors. Checkpoints preserve those event identities.
 The separate ACP completion node consumes cheap metadata published by Autocomplete.
 Only explicit choice discovery starts that existing lazy connection. Configuration
 and prompts share its serial owner; session/configuration receipts and settings

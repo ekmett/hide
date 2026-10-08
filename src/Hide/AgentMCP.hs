@@ -100,11 +100,11 @@ agentTool hub actor directory name args=case [properties | (key,_,_,_,properties
       "agent_end"->do ident<-agentId o; pure (accepted ident (endAgent hub actor ident))
       "agent_history"->do
         (ident,after,count)<-history o
-        pure (historyAgent hub actor ident after count)
+        pure (fmap toJSON <$> historyAgent hub actor ident after count)
       "agent_search"->do
         (ident,after,count)<-history o
         query<-text o "query" 4096
-        pure (searchAgentHistory hub actor ident query after count)
+        pure (fmap toJSON <$> searchAgentHistory hub actor ident query after count)
       _->fail "Unknown agent tool."
     agentId o=AgentId <$> text o "agentId" 128
     accepted ident action=fmap (const (object ["agentId" .= agentIdText ident,"accepted" .= True])) <$> action

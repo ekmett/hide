@@ -239,7 +239,7 @@ checks=bracket temporary removePathForcibly $ \root->
               case [AH.AgentId who | entry<-maybe [] id (field "agents" directoryNow :: Maybe [Value]),field "name" entry==Just ("Child"::T.Text),Just who<-[field "id" entry]] of
                 who:_->do
                   history<-AH.historyAgent hub AH.Human who 0 100 >>= right
-                  pure (has "Child" desktop && length [() | event<-maybe [] id (field "events" history :: Maybe [Value]),field "kind" event==Just ("message_queued"::T.Text)]==1)
+                  pure (has "Child" desktop && length [() | event<-AH.historyEvents history,AH.historyKind event=="message_queued"]==1)
                 _->pure False
         started<-awaitIO tick createdAndQueued starting
         replayed<-act (started,snd createSubmission)

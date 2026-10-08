@@ -1725,7 +1725,7 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
 
 -- The Hub caps each page by bytes as well as count. Follow pages within the
 -- captured event range so a large tool event cannot hide the newest reply.
-recentChildHistory :: AH.AgentHub -> AH.AgentId -> Int -> IO (Either Text ([Value],Bool))
+recentChildHistory :: AH.AgentHub -> AH.AgentId -> Int -> IO (Either Text ([AH.HistoryEvent],Bool))
 recentChildHistory hub ident next=go (max 0 (next-101)) [] False
   where
     go after accumulated dropped=do
@@ -1733,35 +1733,31 @@ recentChildHistory hub ident next=go (max 0 (next-101)) [] False
       case page of
         Left err -> pure (Left err)
         Right value -> do
-          let events=filter (\event->fromMaybe next (field "index" event)<next) (fromMaybe [] (field "events" value))
+          let events=filter ((<next) . AH.historyIndex) (AH.historyEvents value)
               combined=accumulated++events
-              omitted=dropped || fromMaybe (0::Int) (field "dropped" value)>0
-              cursor=fromMaybe after (field "nextAfter" value)
-              more=field "hasMore" value==Just True && cursor<next-1 && length combined<100
+              omitted=dropped || AH.historyDropped value>0
+              cursor=AH.historyNextAfter value
+              more=AH.historyHasMore value && cursor<next-1 && length combined<100
           if more && cursor>after then go cursor combined omitted
           else pure (Right (combined,omitted || more))
 
-childHistoryRecord :: Text -> [Record] -> Value -> [Record]
-childHistoryRecord name records value
-  | Just eventIndex<-field "index" value,eventIndex>=0 =
-      let detail=fromMaybe Null (field "detail" value)
-          eventRecord=Record (BodyItemId eventIndex) eventIndex
-      in case field "kind" value :: Maybe Text of
-        Just kind | kind `elem` ["message_queued","steered"] ->
-          let author=fromMaybe Null (field "author" value)
-              human=field "kind" author==Just ("human"::Text)
-              who=if human then "Human" else "Agent "<>fromMaybe "unknown" (field "id" author)
-              seat=if field "userSeat" detail==Just True then if human then "human user seat" else "controlling parent" else "peer message"
-          in records++[eventRecord (Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail)))]
-        Just "output" -> appendChunk (BodyItemId eventIndex) eventIndex "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
-          where chunk=fromMaybe "" (field "text" detail)
-        Just "thought" -> records -- Thoughts stay in the bounded history API.
-        Just "tool" -> case field "toolCallId" detail :: Maybe Text of
-          Just _ -> mergeTool (BodyItemId eventIndex) eventIndex detail records
-          Nothing -> records++[eventRecord (Activity ("event-"<>T.pack (show eventIndex)) detail [detail])]
-        Just "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[eventRecord (Pause (fromMaybe "Stopped" (field "error" detail)))]
-        _ -> records
-  | otherwise=records
+childHistoryRecord :: Text -> [Record] -> AH.HistoryEvent -> [Record]
+childHistoryRecord name records (AH.HistoryEvent eventIndex kind author detail)=
+  let eventRecord=Record (BodyItemId eventIndex) eventIndex
+  in case kind of
+    _ | kind `elem` ["message_queued","steered"] ->
+      let human=author==AH.Human
+          who=case author of AH.Human->"Human"; AH.Agent ident->"Agent "<>AH.agentIdText ident
+          seat=if field "userSeat" detail==Just True then if human then "human user seat" else "controlling parent" else "peer message"
+      in records++[eventRecord (Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail)))]
+    "output" -> appendChunk (BodyItemId eventIndex) eventIndex "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
+      where chunk=fromMaybe "" (field "text" detail)
+    "thought" -> records -- Thoughts stay in the bounded history API.
+    "tool" -> case field "toolCallId" detail :: Maybe Text of
+      Just _ -> mergeTool (BodyItemId eventIndex) eventIndex detail records
+      Nothing -> records++[eventRecord (Activity ("event-"<>T.pack (show eventIndex)) detail [detail])]
+    "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[eventRecord (Pause (fromMaybe "Stopped" (field "error" detail)))]
+    _ -> records
   where
     lastRole xs=case reverse xs of Record _ _ (Reply role _):_->Just role; _->Nothing
 
