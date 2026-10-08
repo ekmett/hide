@@ -49,6 +49,7 @@ const char *thc_text(void);
 const char *thc_clipboard(void);
 void thc_set_clipboard(const char *text);
 /* Arm a copy gesture in a captured file row; native mouse input owns the drag. */
+void thc_cancel_file_drag(void);
 int thc_arm_file_drag(const char *path, int x, int y, int width, int height);
 int thc_capture(const char *path);
 int thc_system_dark(void);

@@ -84,6 +84,7 @@ foreign import ccall unsafe "thc_open" c_open :: CString -> CDouble -> CInt -> C
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
 foreign import ccall unsafe "thc_raise" c_raise :: IO ()
+foreign import ccall unsafe "thc_cancel_file_drag" c_cancel_file_drag :: IO ()
 foreign import ccall unsafe "thc_arm_file_drag" c_arm_file_drag :: CString -> CInt -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_title" c_title :: CString -> IO ()
 foreign import ccall unsafe "thc_close" c_close :: IO ()

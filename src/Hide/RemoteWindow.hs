@@ -54,6 +54,7 @@ import Hide.TextStyle
 import Hide.Font
 import Hide.Protocol (WirePacket(..), decodeFrame,parseClipboardRequest,clipboardReplyInput)
 import Hide.Links (openResource)
+import Hide.FileExport (FileExports,withFileExports,stageFileExport,startHelperFileExport)
 import Hide.Remote (peerSendBatch, peerReceive)
 import Hide.Window hiding (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
 #endif
@@ -81,7 +82,7 @@ data RemoteFrame = RemoteFrame
   { remoteSize :: (Int,Int), remoteMode :: Maybe Int, remoteTitle :: T.Text
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
-  , remoteBindings :: [(T.Text,T.Text)]
+  , remoteExportView :: [Integer], remoteBindings :: [(T.Text,T.Text)]
   , remoteWindows :: [(Int,T.Text,Bool,Bool)]
   , remoteContributions :: [RemoteContribution], remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
@@ -103,6 +104,8 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   pixelated <- o .:? "pixelated" .!= False
   terminal <- o .:? "terminal" .!= False
   wordstar <- o .:? "wordstar" .!= False
+  exportView <- o .:? "fileExportView" .!= []
+  unless (length exportView<=12 && all (\n->n>=0 && n<=9007199254740991) exportView) (fail "Invalid file export view")
   bindings <- o .: "bindings"
   unless (length bindings<=8192 && all validBinding bindings) (fail "Invalid binding projection")
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
@@ -117,7 +120,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
     pure (ident,windowTitle,selected,windowEnabled))
   unless (IS.size (IS.fromList [ident | (ident,_,_,_)<-windows])==length windows && length [() | (_,_,True,_)<-windows]<=1) (fail "Invalid editor window catalogue")
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
   where
     validBinding (chord,name)=T.length name<=256 && case readChord chord of Right (key,mods)->chordName key mods==Just chord; _->False
     parseContribution=withObject "menu contribution" $ \o->do
@@ -286,10 +289,10 @@ sanitizeDownloadName input = case limit (T.map clean (last (T.splitOn "/" (T.rep
                 | otherwise = c
 
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
-data Incoming = Frame Int Word64 RemoteFrame | Assets (M.Map Char Glyph) | Control Value
+data Incoming = Frame Int Word64 RemoteFrame | Assets (M.Map Char Glyph) | Control Value | ExportCopy FilePath (Int,Int,Int,Int) [Integer]
 -- Compression and file transfers stay off the SDL thread.
-receiveFrames :: RemotePeer -> TBQueue Incoming -> IO ()
-receiveFrames peer queue = go [] (object []) Nothing 0
+receiveFrames :: FileExports -> RemotePeer -> TBQueue Incoming -> IO ()
+receiveFrames exports peer queue = go [] (object []) Nothing 0
   where
     emit item = atomically (writeTBQueue queue item) >> c_wake
     go rows metadata download demand = peerReceive peer >>= \packet -> case packet of
@@ -308,8 +311,19 @@ receiveFrames peer queue = go [] (object []) Nothing 0
             emit (Assets atlas)
             go [] (object ["menuCommands" .= supported]) Nothing 0
           "download" -> do
-            name <- parseIO (withObject "download" (.: "name")) value
-            go rows metadata (Just name) demand
+            offer <- parseIO (withObject "download" $ \o->do
+              name<-o .: "name"
+              purpose<-o .:? "purpose"
+              receipt<-case purpose :: Maybe T.Text of
+                Just "file-export"->do
+                  row@(x,y,w,h)<-o .: "row"
+                  view<-o .: "view"
+                  unless (x>=0 && y>=0 && w>0 && h==1 && x+w<=512 && y<256 && length view==12 && all (\n->n>=0 && n<=9007199254740991) view) (fail "Invalid file export receipt")
+                  pure (Just (row,view))
+                Nothing->pure Nothing
+                _->fail "Unknown download purpose"
+              pure (name,receipt)) value
+            go rows metadata (Just offer) demand
           "frame-ready" -> do
             (serial,changed)<-parseIO (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) value
             if changed then go rows metadata download serial
@@ -317,8 +331,15 @@ receiveFrames peer queue = go [] (object []) Nothing 0
           "connection" -> emit (Control value) >> go rows metadata Nothing 0
           _ -> emit (Control value) >> go rows metadata download demand
       Just (BinaryPacket bytes) -> case download of
-        Just name -> do
-          saveDownload name bytes `catch` \(e::IOException) -> hPutStrLn stderr ("Download failed: "++show e)
+        Just (name,receipt) -> do
+          (case receipt of
+            Nothing->saveDownload name bytes
+            Just (row,view) | os=="darwin"->do
+              staged<-stageFileExport exports name bytes
+              either (hPutStrLn stderr . T.unpack) (\path->emit (ExportCopy path row view)) staged
+            Just _->do
+              started<-startHelperFileExport exports name bytes (either (hPutStrLn stderr . T.unpack) (const (pure ())))
+              either (hPutStrLn stderr . T.unpack) (const (pure ())) started) `catch` \(e::IOException) -> hPutStrLn stderr ("Download failed: "++show e)
           go rows metadata Nothing demand
         Nothing -> do
           received<-getMonotonicTimeNSec
@@ -389,13 +410,14 @@ drawRemote font atlas frame = allocaArray 16 $ \scratch -> do
         Nothing -> utf8 text $ \p -> check "Draw remote Unicode" (c_unicode (fromIntegral x) (fromIntegral y) (fromIntegral full) p fg bg flags script (fromIntegral natural))
 
 runRemoteWindow :: Backend -> Double -> (Int,Int) -> Int -> String -> RemotePeer -> IO ()
-runRemoteWindow backend scale (cols,rows) mode host peer = do
+runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \exports -> do
   font <- loadFont
   drawTimes <- newIORef ([]::[Double])
   demands <- newIORef emptyFrameTiming
   inputDemand <- newIORef Nothing
   presentationDemand <- newIORef Nothing
   titleTiming <- newIORef (0::Double,""::T.Text)
+  exportGesture <- newIORef Nothing
   incoming <- newTBQueueIO 8
   outgoing <- newTBQueueIO 256
   queuedBytes <- newTVarIO (0::Int)
@@ -490,6 +512,10 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
             writeIORef titleTiming (now,timing)
             title connection frame
       controls (frame,atlas,connection,changed,closed) item = case item of
+        ExportCopy path row view -> do
+          c_cancel_file_drag
+          writeIORef exportGesture (Just (path,row,view,False))
+          pure (frame,atlas,connection,changed,closed)
         Assets glyphs -> pure (frame,glyphs,connection,True,closed)
         Frame serial received value -> do
           started<-atomicModifyIORef' demands (\pending -> let (time,next)=settleFrame serial pending in (next,time))
@@ -538,6 +564,13 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
         messages <- atomically (drain incoming)
         (current,glyphs,status,changed,closed) <- foldM controls (frame,atlas,connection,repaint,False) messages
         unless closed $ do
+          offer<-readIORef exportGesture
+          forM_ offer $ \(path,(x,y,w,h),view,armed)->case current of
+            Just value | remoteExportView value==view && T.null status -> unless armed $ do
+              ok<-utf8 (T.pack path) (\p->c_arm_file_drag p (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral h))
+              writeIORef exportGesture (if ok==0 then Nothing else Just (path,(x,y,w,h),view,True))
+            Just value | take 1 (remoteExportView value)<take 1 view && T.null status -> pure ()
+            _->c_cancel_file_drag >> writeIORef exportGesture Nothing
           let connected = T.null status
           when changed $ do
             title status current
@@ -556,6 +589,9 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
           dark <- (/=0) <$> c_system_dark
           when (previousTheme/=Just dark && (connected || previousTheme==Nothing)) (sendJSON (object ["type" .= ("theme"::T.Text),"dark" .= dark]))
           event <- allocaArray 6 $ \p -> check "Read remote window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
+          case event of
+            kind:_ | kind `elem` [1,2,5,7,9,10,11,14] -> c_cancel_file_drag >> writeIORef exportGesture Nothing
+            _->pure ()
           observed<-getMonotonicTimeNSec
           queuedAge<-c_event_age_ns
           let requested=observed-min observed queuedAge
@@ -576,7 +612,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = do
 #endif
     title " (connecting)" Nothing
     resize
-    withAsync (receiveFrames peer incoming) $ \receiver ->
+    withAsync (receiveFrames exports peer incoming) $ \receiver ->
       withAsync (forever $ do
         (size,packets) <- atomically (readTBQueue outgoing)
         peerSendBatch peer packets

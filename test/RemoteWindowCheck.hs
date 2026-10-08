@@ -54,6 +54,18 @@ checks = do
   check "press and release repaint the local pointer visibility"
     (nativeRepaint [3,10,4,1,0,1] && nativeRepaint [4,10,4])
   check "remote Unicode rows validate" (valid rows)
+  let exportMetadata receipt=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"fileExportView" .= receipt]
+  check "export gesture metadata rejects unbounded receipts"
+    (either (const True) (const False) (parseRemoteFrame (exportMetadata (replicate 13 (1::Integer))) rows))
+  check "export gesture metadata excludes negative identities"
+    (either (const True) (const False) (parseRemoteFrame (exportMetadata ([-1]::[Integer])) rows))
+#ifdef WITH_REMOTE
+  let offered=named {pendingFileExport=(9,Just (Model.ExportFileCopy "saved.hs" (BS.pack [0,255]) (Model.Rect 1 2 20 1)))}
+      detached=Wire.applyInput Wire.Blur offered
+  check "detaching invalidates prepared saved exports without touching buffers"
+    (fst (pendingFileExport detached)==10 && snd (pendingFileExport detached)==Nothing && Model.fileExportView detached/=Model.fileExportView offered)
+#endif
+
   let menuMeta fields=object (["size" .= ([80,25]::[Int]), "bindings" .= ([]::[(T.Text,T.Text)]) ]++fields)
       states metadata=either (const []) remoteMenus (parseRemoteFrame metadata rows)
       commandToken command=maybe (error "missing native command") id (elemIndex command nativeCommands)

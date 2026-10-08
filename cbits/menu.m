@@ -225,15 +225,18 @@ void thc_file_drag_arm(void *native_window, const char *path, double x, double y
     __block BOOL pressed=NO;
     __block NSPoint start;
     if (!fileDragSource) fileDragSource=[HideFileDragSource new];
-    fileDragMonitor=[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown|NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp|NSEventMaskKeyDown) handler:^NSEvent *(NSEvent *event) {
-        if (event.type==NSEventTypeKeyDown || event.window!=window) { thc_file_drag_close(); return event; }
+    fileDragMonitor=[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown|NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp|NSEventMaskKeyDown|NSEventMaskScrollWheel|NSEventMaskRightMouseDown) handler:^NSEvent *(NSEvent *event) {
+        if (event.type==NSEventTypeKeyDown || event.type==NSEventTypeScrollWheel || event.type==NSEventTypeRightMouseDown || event.window!=window) { thc_file_drag_close(); return event; }
         NSPoint point=[view convertPoint:event.locationInWindow fromView:nil];
         if (!view.isFlipped) point.y=view.bounds.size.height-point.y;
         if (event.type==NSEventTypeLeftMouseDown) {
             pressed=NSPointInRect(point,row); start=point;
             if (!pressed) thc_file_drag_close();
+            else return nil;
         } else if (event.type==NSEventTypeLeftMouseUp) {
+            BOOL consumed=pressed;
             thc_file_drag_close();
+            if (consumed) return nil;
         } else if (pressed && hypot(point.x-start.x,point.y-start.y)>=5) {
             BOOL directory=NO;
             if (![[NSFileManager defaultManager] fileExistsAtPath:url.path isDirectory:&directory] || directory) { thc_file_drag_close(); return event; }

@@ -229,9 +229,14 @@ void thc_file_drag_ended(void) {
     event.button.x=x; event.button.y=y;
     SDL_PushEvent(&event);
 }
+void thc_cancel_file_drag(void) {
+#ifdef __APPLE__
+    thc_file_drag_close();
+#endif
+}
 int thc_arm_file_drag(const char *path, int x, int y, int width, int height) {
 #ifdef __APPLE__
-    if (width<=0 || height<=0) return SDL_SetError("The exported file row is no longer visible");
+    if (x<0 || y<0 || width<=0 || height<=0 || x+width>cols || y+height>rows) return SDL_SetError("The exported file row is no longer visible");
     int ww,wh;
     SDL_GetWindowSize(window,&ww,&wh);
     geometry();
@@ -742,6 +747,7 @@ int thc_wait(int32_t *out) {
         case SDL_EVENT_WINDOW_FOCUS_GAINED:
             out[0] = 13; out[1] = modifiers(SDL_GetModState()); return delivered(&e,out);
         case SDL_EVENT_WINDOW_FOCUS_LOST:
+            thc_cancel_file_drag();
             clear_pointer(); left_down = false; suppress_option_text = false;
             SDL_CaptureMouse(false); out[0] = 7; return delivered(&e,out);
         case SDL_EVENT_KEY_DOWN: {
