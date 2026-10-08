@@ -20,6 +20,7 @@ static const char *old="000000000000000000000000000000000000000000000000";
 static const char *red="000000000000000000000000000000000000000000000002";
 static const char *green="000000000000000000000000000000000000000000000003";
 static const char *partial="000000000000000000000000000000000000000000000004";
+static const char *colorful="000000000000000000000000000000000000000000000005";
 static const char *capture="/private/tmp/hide-native-canvas.bmp";
 static uint16_t mask[80*25];
 static void cells(void) {
@@ -36,7 +37,7 @@ static void scene(double shift) {
 }
 static void pixel(SDL_Surface *image,int x,int y,int r,int g,int b) {
     Uint8 actual[4]; assert(SDL_ReadSurfacePixel(image,x,y,&actual[0],&actual[1],&actual[2],&actual[3]));
-    if (abs((int)actual[0]-r)>1 || abs((int)actual[1]-g)>1 || abs((int)actual[2]-b)>1) {
+    if (actual[0]!=r || actual[1]!=g || actual[2]!=b) {
         fprintf(stderr,"canvas pixel %d,%d: %u,%u,%u expected %d,%d,%d\n",x,y,actual[0],actual[1],actual[2],r,g,b); assert(0);
     }
 }
@@ -59,22 +60,35 @@ int main(int argc,char **argv) {
     cells(); scene(0); assert(thc_present());
     SDL_Surface *image=SDL_LoadBMP(capture); assert(image); pixel(image,16+8,32+16,0,0,170); SDL_DestroySurface(image);
     assert(thc_canvas_chunk(epoch,red,3,rgba+3,13));
-    for (int i=0;i<4;++i) { rgba[i*4]=0;rgba[i*4+1]=255;rgba[i*4+2]=0;rgba[i*4+3]=128; }
+    for (int i=0;i<4;++i) { rgba[i*4]=0;rgba[i*4+1]=151;rgba[i*4+2]=0;rgba[i*4+3]=128; }
     assert(thc_canvas_begin(epoch,green,2,2,16)); assert(thc_canvas_chunk(epoch,green,0,rgba,16));
     /* Completion redraws the retained scene without another scene packet. */
     assert(thc_present()); image=SDL_LoadBMP(capture); assert(image);
-    pixel(image,16+8,32+16,200,100,50); pixel(image,2*16+8,32+16,0,128,0);
+    pixel(image,16+8,32+16,200,100,50); pixel(image,2*16+8,32+16,0,75,0);
     pixel(image,3*16+8,32+16,100,50,25); pixel(image,4*16+8,32+16,0,0,170);
     pixel(image,6*16+8,32+16,255,255,255); pixel(image,7*16+8,32+16,0,0,0);
     pixel(image,8,16,0,0,0); SDL_DestroySurface(image);
+    unsigned char colors[16]={255,0,0,255,0,255,0,128,0,0,255,255,151,255,0,128};
+    assert(thc_canvas_begin(epoch,colorful,2,2,16));assert(thc_canvas_chunk(epoch,colorful,0,colors,16));
+    uint16_t tiny[80*25]={0};tiny[0]=tiny[1]=tiny[81]=1;tiny[80]=32769;
+    cells();assert(thc_canvas_scene(epoch,80,25,tiny,80*25));
+    assert(thc_canvas_surface(colorful,1,0,0,2,2,0,0,2,2));assert(thc_canvas_commit());assert(thc_present());
+    image=SDL_LoadBMP(capture);assert(image);
+    pixel(image,8,16,255,0,0);pixel(image,16+8,16,0,128,0);
+    pixel(image,8,32+16,0,0,127);pixel(image,16+8,32+16,75,128,0);SDL_DestroySurface(image);
+    assert(thc_canvas_release(epoch,colorful));cells();scene(0);assert(thc_present());
     uint64_t uploads,bytes,masks,retained,beforeUploads,beforeMasks;
-    thc_canvas_stats(&beforeUploads,&bytes,&beforeMasks,&retained); assert(bytes==32 && retained==32);
+    thc_canvas_stats(&beforeUploads,&bytes,&beforeMasks,&retained); assert(bytes==48 && retained==32);
     for (int i=0;i<3;++i) { cells();scene(i); assert(thc_present()); }
     thc_canvas_stats(&uploads,&bytes,&masks,&retained); assert(uploads==beforeUploads && masks==beforeMasks);
     thc_crt_filter(1); cells();scene(0);assert(thc_present()); image=SDL_LoadBMP(capture);assert(image);
     pixel(image,16+8,32+31,200,100,50); SDL_DestroySurface(image); /* crisp pass follows CRT */
     assert(thc_canvas_begin(epoch,partial,2,2,16)); assert(thc_canvas_chunk(epoch,partial,0,rgba,1));
     assert(thc_canvas_release(epoch,partial)); assert(!thc_canvas_chunk(epoch,partial,1,rgba+1,15)); assert(thc_canvas_release(epoch,partial));
+    thc_crt_filter(0);
+    assert(thc_canvas_scene(epoch,80,25,NULL,0));assert(!thc_canvas_surface(red,1,0,0,8,4,0,0,8,4));assert(thc_canvas_commit());
+    cells();assert(thc_present());image=SDL_LoadBMP(capture);assert(image);pixel(image,16+8,32+16,0,0,170);SDL_DestroySurface(image);
+    thc_crt_filter(0);
     mask[0]=65; assert(!thc_canvas_scene(epoch,80,25,mask,80*25));mask[0]=1;
     assert(thc_canvas_scene(epoch,80,25,mask,80*25)); assert(thc_canvas_surface(red,1,0,0,1,1,0,0,1,1)); assert(!thc_canvas_commit());
     assert(thc_canvas_reset(old)); assert(!thc_canvas_release(epoch,red));

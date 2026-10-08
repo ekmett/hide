@@ -242,7 +242,7 @@ updateNativeCanvas (NativeCanvasOwner epoch ref) size scene=do
         | index==columns*rows=found
         | otherwise=let slot=Canvas.canvasOwnerAt scene index .&. 32767
                     in scan (index+1) (if slot==0 then found else found Bits..|. Bits.bit (slot-1))
-      visible=scan 0 (0::Word64)
+      visible=if null (Canvas.canvasSurfaces scene) then 0 else scan 0 (0::Word64)
       imagesAX=[object ["id" .= Canvas.canvasId entry,"name" .= Canvas.canvasName entry,"description" .= Canvas.canvasDescription entry,"bounds" .= Canvas.canvasRect entry]
         | entry<-Canvas.canvasSurfaces scene,Bits.testBit visible (Canvas.canvasSlot entry-1)]
       bytes=BL.toStrict (encode (object ["images" .= imagesAX,"size" .= size]))
