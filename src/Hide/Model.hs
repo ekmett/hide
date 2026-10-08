@@ -365,6 +365,12 @@ menus =
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About Haskell..." "" About])]
   where mi = MenuItem
 
+-- | The host-owned contribution slots shared by registration and frontend
+-- admission. Context-only slots are retained in frame metadata even when their
+-- actions are unavailable; they do not become top-level native menus.
+menuContributionSlots :: [Text]
+menuContributionSlots=["context.window-rows","context.source","context.messages"]++[T.toLower title | (title,_,_)<-menus]
+
 menuMnemonic :: MenuItem -> Char
 menuMnemonic (MenuItem title _ cmd) = case cmd of
   ProjectBrowser -> 'b'
