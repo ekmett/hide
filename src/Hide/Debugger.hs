@@ -99,7 +99,7 @@ newOutputOwner scope=mask_ $ do
           case prepared of
             Left err->pure (Left err)
             Right snapshot->do
-              update<-maybe (W.openTextWindow scope snapshot) (\reference->W.refreshTextWindow reference snapshot) target
+              update<-maybe (W.openWindow scope snapshot) (\reference->W.refreshWindow reference snapshot) target
               pure (maybe (Left "Debugger output view closed.") Right update))
           `catch` synchronous "Debugger output view preparation failed.")
       previous<-atomically $ do

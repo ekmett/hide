@@ -351,7 +351,7 @@ readableAt d x y
     | otherwise -> case topWindow d x y of
         Just w | windowHasEditor d w,inside (composerRect d w) x y -> False
         Just w | PluginContent _<-windowContent w ->case windowPluginText d w of
-          Just prepared | W.preparedWindowDisclosure prepared==W.ReadableWindow->not (preparedCellPrivate W.textGuestHidden d prepared w x y)
+          Just prepared | not (privatePreparedWindow d prepared)->not (preparedCellPrivate W.textGuestHidden d prepared w x y)
           _->False
         Just w | protectedWindow d w -> case windowDocument (buffers d) w of
           Just doc | documentLabel doc==Just "Autocomplete" -> not (autocompletePane d w && inside (autocompleteComposerRect d w) x y)
@@ -375,7 +375,7 @@ streamerReadableAt d x y
     | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
         Just w | PluginContent _<-windowContent w ->case windowPluginText d w of
-          Just prepared | W.preparedWindowDisclosure prepared==W.ReadableWindow->not (preparedCellPrivate W.textStreamerHidden d prepared w x y)
+          Just prepared | not (privatePreparedWindow d prepared)->not (preparedCellPrivate W.textStreamerHidden d prepared w x y)
           _->not (streamerMode d)
         Just w | Just doc<-windowDocument (buffers d) w,privateDocument d doc -> False
         _ -> True

@@ -104,7 +104,7 @@ checks=bracket temporary removePathForcibly $ \directory -> do
     body<-W.prepareSemanticTextWindow "Conversation" [(conversationText,Plain)] semantics
       >>= either (error . T.unpack) pure
     W.withWindowScope $ \scope->do
-      update<-W.openTextWindow scope body >>= maybe (error "read window opening failed") pure
+      update<-W.openWindow scope body >>= maybe (error "read window opening failed") pure
       (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "read window admission failed") pure
       let conversation=addPluginWindow reference body base
       target<-either (error . T.unpack) pure (windowReadTarget conversation (maybe (error "missing conversation frame") windowId (activeWindow conversation)))

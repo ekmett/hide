@@ -63,7 +63,7 @@ startBuildJob (BuildJobs ref report stdoutReport scope slot) label root commands
     Nothing -> do
       ident<-T.pack <$> randomIdentity
       empty<-either (ioError . userError . T.unpack) pure =<< W.prepareRecoverableTextWindow "hide.build-output" 1 (label<>" output") ""
-      opening<-W.openTextWindow scope empty >>= maybe (ioError (userError "Build output scope is closed.")) pure
+      opening<-W.openWindow scope empty >>= maybe (ioError (userError "Build output scope is closed.")) pure
       previous<-readIORef slot
       opened<-maybe (adoptWindowUpdate P.HumanMenu opening desktop) (\old->replaceWindowUpdate P.HumanMenu old opening desktop) previous
       let reference=W.updateWindowRef opening
@@ -124,7 +124,7 @@ aggregate reference label root queue latest=loop "" "" False False
       let canonicalProblems=[p {diagnosticPath=path} | p<-problems,Just (Right path)<-[M.lookup (diagnosticPath p) resolved]]
       -- All text/style/measure preparation belongs to this aggregation worker.
       prepared<-either (ioError . userError . T.unpack) pure =<< W.prepareRecoverableTextWindow "hide.build-output" 1 (label<>" output") output
-      publication<-W.refreshTextWindow reference prepared
+      publication<-W.refreshWindow reference prepared
       forM_ canonicalProblems $ \problem -> do
         void (evaluate (length (diagnosticPath problem)))
         void (evaluate (diagnosticRow problem+diagnosticColumn problem+diagnosticSeverity problem+T.length (diagnosticMessage problem)))

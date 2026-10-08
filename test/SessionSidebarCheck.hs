@@ -51,7 +51,7 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
     (authorityFile,authorityBuffer)<-loadFile authority >>= either fail pure
     let publicInitial=(addDocument (Just authorityFile) authorityBuffer sourceInitial) {guestPrivatePaths=[authority],streamerMode=False}
     prepared<-W.prepareTextWindow "Plugin notes" "Private plugin text"
-    update<-W.openTextWindow scope prepared >>= maybe (fail "Plugin scope unexpectedly retired") pure
+    update<-W.openWindow scope prepared >>= maybe (fail "Plugin scope unexpectedly retired") pure
     initial<-adoptWindowUpdate Menu.HumanMenu update publicInitial
     withSidebarCommands $ \host->do
       (service,after)<-withSessionSidebar host (Just (sessionId current)) initial $ \service->do

@@ -135,7 +135,7 @@ tick (Owner downloads scope ref desired latest) d=do
             _->False
       (nextTarget,shown)<-case nextPage of
         Just (Page _ prepared) | needsPage && not already && (target/=Nothing || canOpen)->do
-          update<-case target of Nothing->W.openTextWindow scope prepared; Just reference->W.refreshTextWindow reference prepared
+          update<-case target of Nothing->W.openWindow scope prepared; Just reference->W.refreshWindow reference prepared
           case update of
             Nothing->pure (target,d)
             Just value->do

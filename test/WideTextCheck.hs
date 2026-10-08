@@ -192,7 +192,7 @@ checks=do
  W.withWindowScope $ \scope->withTextPresentation $ \owner->do
    prepared<-W.prepareStyledTextWindow "Script test" ([(text,ScriptStyle mode Plain) | (text,mode)<-[("A",Superscript),("界",Subscript),("e\x301",Superscript),("👩🏽\x200d\&💻",Subscript)]]++[("X",Plain)])
    check "plugin worker caches script admission independently of wide headings" (W.preparedWindowNeedsLayout False prepared && not (W.preparedWindowHasSections prepared))
-   update<-W.openTextWindow scope prepared >>= maybe (fail "missing scripted plugin open") pure
+   update<-W.openWindow scope prepared >>= maybe (fail "missing scripted plugin open") pure
    (reference,payload)<-W.admitWindowUpdate False update >>= maybe (fail "missing scripted plugin admission") pure
    let opened=M.addPluginWindow reference payload (M.initialDesktop (80,25))
        initial=opened {M.wideSectionTitles=False}
@@ -300,7 +300,7 @@ checks=do
    check "terminal ownership never enters Markdown preparation" (isNothing (M.windowPresentationTarget terminalStyled (fromJust (M.activeWindow terminalStyled))))
  W.withWindowScope $ \scope->withTextPresentation $ \owner->do
    prepared<-W.prepareMarkdownWindow 40 "Private notes" "# ABCDEF\n\nbody"
-   update<-W.openTextWindow scope prepared >>= maybe (fail "missing plugin open") pure
+   update<-W.openWindow scope prepared >>= maybe (fail "missing plugin open") pure
    (reference,payload)<-W.admitWindowUpdate False update >>= maybe (fail "missing plugin admission") pure
    let opened=M.addPluginWindow reference payload (M.initialDesktop (80,25))
        w=fromJust (M.activeWindow opened)
