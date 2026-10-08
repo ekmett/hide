@@ -131,7 +131,7 @@ getSession completion@(ACPCompletion launch root servers defaults _ state _ _)=m
           credentials=[T.pack value | (name,value)<-environment,sensitiveLabel (T.pack name),not (null value)]
       -- Freeze the launch values used by both the child and its redactor. Later
       -- editor environment changes affect only subsequently started providers.
-      client<-ACP.startClient launch {ACP.environment=environment} root
+      client<-ACP.startClientWithEnvironment launch {ACP.environment=environment} root
       session@(Session _ sid _ configuration initializedRef _ _)<-Session client <$> newIORef Nothing <*> newIORef True <*> newIORef (0,Null) <*> newIORef Null <*> (hashUnique <$> newUnique) <*> pure credentials
       installed<-modifyMVar state $ \current@(State stopped _ active) ->
         if stopped then pure (current,False) else pure (State False (Just session) active,True)

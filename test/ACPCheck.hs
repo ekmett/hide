@@ -14,6 +14,7 @@ import System.IO (hClose, openTempFile)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 import System.Info (os)
+import System.Environment (getEnvironment,lookupEnv,setEnv,unsetEnv)
 import System.Timeout (timeout)
 import Hide.ACP
 
@@ -26,6 +27,16 @@ checks = bracket temporary removePathForcibly $ \root -> do
     check "Python interpreter available" (status==ExitSuccess)
     pure (T.unpack (T.strip (T.pack path)))
     else pure "python3"
+  -- A variable introduced after capture must not enter an explicit launch;
+  -- the ordinary launch remains an inherited-environment positive control.
+  bracket (lookupEnv "THC_ACP_PARENT_ONLY") (maybe (unsetEnv "THC_ACP_PARENT_ONLY") (setEnv "THC_ACP_PARENT_ONLY")) $ \_->do
+    captured<-filter ((/="THC_ACP_PARENT_ONLY").fst) <$> getEnvironment
+    setEnv "THC_ACP_PARENT_ONLY" "parent-only"
+    let snapshot=Launch python ["-c","import json,os,time;print(json.dumps(dict(jsonrpc='2.0',method='environment',params='THC_ACP_PARENT_ONLY' not in os.environ)),flush=True);time.sleep(30)"] captured
+    forM_ [(startClient,False),(startClientWithEnvironment,True)] $ \(open,absent)->
+      bracket (open snapshot root) stopClient $ \client->do
+        events<-waitEvents client (any (\event->case event of Notification "environment" _->True; _->False))
+        check "explicit environment is exact while ordinary launch inherits" (Notification "environment" (Bool absent) `elem` events)
   let server = root </> "fake.py"
       launch = Launch python [server] [("THC_ACP_CHECK", "λ")]
       start = startClient launch root
