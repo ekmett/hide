@@ -35,13 +35,14 @@ import qualified Data.Vector as V
 import qualified Data.Map.Strict as M
 import Hide.Plugin.Tree (NodeId)
 import Hide.Plugin.Menu (MenuRef)
-import Data.List (nub,foldl',groupBy)
+import Data.List (nub,groupBy)
+import qualified Data.List as L (foldl')
 import Hide.Buffer (contentLength,contentSlice,BufferContent, bufferContent, newBuffer, prepareBuffer)
 import Hide.Unicode (sourceTextWidth)
 import Hide.Markdown (renderMarkdownRows)
 import Hide.Plugin.Command (validCommandName)
 import qualified Hide.Plugin.EditorHost as E
-import Hide.Syntax (Style(..),StyledText,StyledRow(..),Sigils(..),styledRows,sigilsText,sigilsLength,sigilsStyles,graphemeText,SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleLayoutMetadata)
+import Hide.Syntax (Style(..),StyledText,StyledRow(..),Sigils(..),styledRows,sigilsText,sigilsLength,sigilsStyles,SourceRow,plainSourceRow,sourceRowText,sourceRowRanges,sourceRangeCharEnd,sectionTitle,styleLayoutMetadata)
 
 -- | Exact content instance. A closed/reopened view cannot reuse this identity.
 data WindowRef = WindowRef Unique WindowScope !WindowDisclosure (TVar (Integer,Bool))
@@ -141,9 +142,9 @@ copyPreparedSelection prepared start end=case maybe CopyText textCopy (preparedW
     lastOffset=max first (min (contentLength source) end)
 
 messageIntervals :: [StyledRow] -> V.Vector (Int,Int,Int,Bool)
-messageIntervals rows=V.fromList (reverse (foldl' merge [] (reverse pieces)))
+messageIntervals rows=V.fromList (reverse (L.foldl' merge [] (reverse pieces)))
   where
-    (_,pieces)=foldl' row (0,[]) rows
+    (_,pieces)=L.foldl' row (0,[]) rows
     row (offset,found) (StyledRow sigils newline messages)=
       let size=sigilsLength sigils
           shifted=[(offset+a,offset+z,ident,outgoing) | (a,z,ident,outgoing)<-V.toList messages]
@@ -202,7 +203,7 @@ prepareSemanticRowsWindow title styled semantics=do
         V.map (\(a,z,_,_)->(a,z)) (textShellBlocks semantics) V.++
         textGuestHidden semantics V.++ textStreamerHidden semantics V.++ textRecoveryHidden semantics
   if not (V.all valid ranges) then pure (Left "Invalid prepared window semantic range.") else do
-    _<-evaluate (maybe 0 (foldl' (\n c->c `seq` n+1) 0) (textLinkBase semantics)+
+    _<-evaluate (maybe 0 (L.foldl' (\n c->c `seq` n+1) 0) (textLinkBase semantics)+
       V.foldl' (\n (a,z,url)->n+a+z+T.length url) 0 (textLinks semantics)+
       V.foldl' (\n (a,z,dialect,body)->n+a+z+T.length dialect+T.length body) 0 (textShellBlocks semantics)+
       V.foldl' (\n (a,z)->n+a+z) 0 ranges)

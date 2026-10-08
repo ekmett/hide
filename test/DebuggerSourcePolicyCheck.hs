@@ -191,6 +191,7 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                   (action=="close" || activeText released=="foreground"))
                   (fail "Released stale local source read reopened or jumped")
         putStrLn ("delayed local source "++T.unpack action++" checks passed")
+    foldTicks :: Int -> (Desktop -> IO Desktop) -> Desktop -> IO Desktop
     foldTicks n tick d=if n<=0 then pure d else threadDelay 1000 >> tick d >>= foldTicks (n-1) tick
 #endif
 

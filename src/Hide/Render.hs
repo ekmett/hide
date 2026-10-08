@@ -11,15 +11,15 @@
 module Hide.Render (renderDesktop, renderCellRows, renderCellRowsAndCanvas, renderCursor, snapshot, snapshotHtml, RenderKey, renderKey) where
 
 import Control.Exception (evaluate)
-import Hide.ConversationBody (QuestionProjection(..),logicalBodyIdentity)
+import Hide.ConversationBody (logicalBodyIdentity)
 import Data.Unique (Unique)
 import Data.IORef
 import System.Mem.StableName (StableName, makeStableName, eqStableName)
-import Data.List (find, group, groupBy, sort)
+import Data.List (find, group, sort)
 import qualified Graphics.Vty as V
 import qualified Graphics.Vty.Image.Internal as I
 import qualified Hide.TextLayout as TextLayout
-import Hide.Unicode (Script(..),scriptTerminalText,scalarWidth,CellSpan(..),CellLayer(..),cellRowsForLayers,cellRowsAndOwnership,cellDisplayOps)
+import Hide.Unicode (Script(..),scriptTerminalText,CellSpan(..),CellLayer(..),cellRowsAndOwnership,cellDisplayOps)
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Data.Text as T
 import Data.Text (Text)

@@ -76,7 +76,7 @@ prepareMappedTextLayout wide requested styled=do
         ordinary position remaining edge pending
           | T.null remaining=glyphs position edge pending rest
           | otherwise=case advanceMap position edge pending of
-              (nearest,current@((lo,hi,a,z):more))
+              (nearest,current@((lo,hi,a,z):_))
                 | lo<=position->
                   let (part,after)=T.splitAt (hi-position) remaining
                       count=T.length part
@@ -99,7 +99,7 @@ prepareMappedTextLayout wide requested styled=do
           (a,z)=case covered of []->(nearest,nearest); _->(minimum (map fst covered),maximum (map snd covered))
       in (g,graphemeDisplayText item,graphemeOverflow item,graphemeWidth item,a,z,style,False):
         glyphs end nearest current rest
-    advanceMap offset _ ((lo,hi,_,z):rest) | hi<=offset=advanceMap offset z rest
+    advanceMap offset _ ((_,hi,_,z):rest) | hi<=offset=advanceMap offset z rest
     advanceMap _ boundary spans=(boundary,spans)
     wrap current col start []=[finish current col start]
     wrap current col start remaining@((g,displayed,overflow,naturalWidth,a,z,style,isRun):rest)

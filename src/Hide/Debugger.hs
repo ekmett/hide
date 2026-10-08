@@ -508,7 +508,7 @@ recordSidebarResponse ref (DebugPageRequest _ target _) body=modifyIORef' ref $ 
   where
     -- Page zero may retain more rows, but admission never decodes its full array.
     rows key=case body of
-      Object object | Just (Array values)<-KM.lookup (K.fromText key) object->V.toList (V.take 128 values)
+      Object properties | Just (Array values)<-KM.lookup (K.fromText key) properties->V.toList (V.take 128 values)
       _->[]
     boundedUnion newer previous=fst (M.splitAt 32768 (M.union newer previous))
     boundedReferences newer previous=fst (M.splitAt 32768 (M.unionWith (||) newer previous))
@@ -595,7 +595,7 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
           _->False
       epoch=case receipt of WatchFrame _ value _ _ _->value
       atRows position body=case body of
-        Object object | Just (Array values)<-KM.lookup "variables" object->values V.!? position
+        Object properties | Just (Array values)<-KM.lookup "variables" properties->values V.!? position
         _->Nothing
   live<-watchProviderCurrent s
   if not live || not (watchCurrent s ident revision receipt) then pure d {status="Watch or stopped frame expired."}

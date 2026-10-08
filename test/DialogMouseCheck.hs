@@ -14,7 +14,7 @@ import Hide.Sidebar
 import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import Hide.Render (snapshotHtml, snapshot, renderDesktop, renderCellRows)
-import Hide.Buffer (revision, newBuffer, columnOffset, contents, markSaved, replaceSelection, saved, undoStack, redoStack, Selection(..))
+import Hide.Buffer (revision, newBuffer, contents, markSaved, replaceSelection, saved, undoStack, redoStack, Selection(..))
 import Hide.Window (nativeChordShortcut)
 import qualified Data.Text.Encoding as TE
 import Hide.Browser (Entry(..))
@@ -24,7 +24,8 @@ import qualified Data.Map.Strict as M
 import qualified Graphics.Vty as V
 import Hide.Unicode (CellSpan(..), displayOpsForPic)
 import Graphics.Vty.Span (SpanOp(..))
-import Data.Foldable (toList,foldl')
+import Data.Foldable (toList)
+import qualified Data.Foldable as F (foldl')
 import qualified Data.Text.Lazy as TL
 
 checks :: IO ()
@@ -525,7 +526,7 @@ textAreaRenderChecks=do
       buffer=newBuffer text
       frame n=(initialDesktop (100,35)) {sideTree=Nothing,blinkCursor=False,dialog=Just
         (Dialog "Review" (AgentDialog "preview") [TextArea "Changes" True buffer (Selection n n) n n] 0 ["OK"] [])}
-      occupied=foldl' (foldl' (\n cell->case cell of
+      occupied=F.foldl' (F.foldl' (\n cell->case cell of
         CellText paint body->paint `seq` n+T.length body
         CellGlyph paint body full start shown->paint `seq` n+T.length body+full+start+shown
         CellScript paint body natural script->paint `seq` script `seq` n+T.length body+natural)) 0

@@ -627,13 +627,13 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
     -- editor_input receipt but continues through the original execution gates.
     policy "enable"
     clearMarker
-    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \_->withPermissionsAt policyPath controlTools $ \permissions->do
       pending<-admit runtime permissions (pure (Right ())) base
       _<-awaitLaunch runtime permissions pending
       check "anonymous input uses the same admitted lifecycle" . (==1) =<< launchCount
     policy "disable"
     clearMarker
-    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+    withSessionServices $ \runtime->withConversationAt (sessionConsoles runtime) root $ \_->withPermissionsAt policyPath controlTools $ \permissions->do
       pending<-snd <$> core runtime base [ServiceAction "make" []]
       _<-awaitLaunch runtime permissions pending
       check "human build remains independent of editor_input policy" . (==1) =<< launchCount

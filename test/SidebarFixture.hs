@@ -2,7 +2,6 @@
 module SidebarFixture (sidebarFixture) where
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
-import Data.Aeson (Value(Null))
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Tree as P
 import Hide.Sidebar

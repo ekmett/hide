@@ -300,8 +300,8 @@ restoreBufferStorage s=do
         (Left "Invalid physical buffer lines")
       unless (canonical False lines') (Left "Invalid buffer change-run ordering")
       pure (FT.fromList lines')
-    restoreLine mode (StoredLine kind pieces)=do
-      unless (not (null pieces)) (Left "Missing buffer line pieces")
+    restoreLine _ (StoredLine _ [])=Left "Missing buffer line pieces"
+    restoreLine mode (StoredLine kind pieces@(first:_))=do
       let size=sum (map T.length pieces)
           terminated=maybe False ((=='\n').snd) (T.unsnoc (last pieces))
           newlineCount=sum (map (T.count "\n") pieces)
@@ -311,7 +311,7 @@ restoreBufferStorage s=do
       unless (origin/=Deleted || size>0) (Left "Invalid deleted buffer line")
       unless (not lineMode || all (T.all ((<=255).ord)) pieces) (Left "Invalid byte buffer representation")
       let line
-            | length pieces>1 || (not lineMode && TU.lengthWord8 (head pieces)>512)=
+            | length pieces>1 || (not lineMode && TU.lengthWord8 first>512)=
                 let chunks=Chunks.chunksFromPieces pieces; raw=Chunks.chunksRawMeasure chunks
                 in ChunkedLine (Chunks.rawCharacters raw) (Chunks.chunksFlags chunks) origin
                   (Chunks.rawHash raw) (Chunks.rawFactor raw) chunks
@@ -529,9 +529,6 @@ treeSlice tree start count = rangeText a (a+min (max 0 count) (size-a)) tree
     a=max 0 (min size start)
 
 -- Locate one line with a measured split, including the final empty line at EOF.
-splitLine :: Int -> LineTree -> (LineTree,Text,Int,LineTree)
-splitLine position tree=let (before,line,column,after)=splitLeaf position tree in (before,lineText line,column,after)
-
 splitLeaf :: Int -> LineTree -> (LineTree,Line,Int,LineTree)
 splitLeaf position tree = case FT.viewl right of
   line FT.:< rest -> (left,line,p-characterCount (FT.measure left),rest)

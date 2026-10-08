@@ -353,7 +353,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       copied<-timeout 5000000 (awaitCopy copying) >>= maybe (fail "Recovered logical copy timed out") pure
       ensure "recovered transcript remains copyable before reconnect" (clipboard copied=="newer Desktop child transcript")
       let hub=AR.agentHub (conversationAgents conversation)
-      AH.updateExternalAgent hub recoveredChild fakeDriver >>= right
+      _<-AH.updateExternalAgent hub recoveredChild fakeDriver >>= right
       AH.recordAgentEvent hub recoveredChild "output" (object ["text" .= ("new live child output"::T.Text)])
       let awaitLive current=do
             next<-tickBody presentation conversation current

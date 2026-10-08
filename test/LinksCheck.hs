@@ -16,7 +16,6 @@ import Hide.Buffer
 import Hide.Conversation (renderReply)
 import Hide.GuestAccess
 import Hide.Links
-import Hide.Markdown
 import Hide.Model
 import Hide.Syntax (linkSpans,styledContents)
 

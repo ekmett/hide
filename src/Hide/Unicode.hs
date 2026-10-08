@@ -404,7 +404,7 @@ composeCellGrid layers (w,h)=runST $ do
                      visible=T.drop (lo-x) strict
                      -- visible begins at a codepoint boundary. The character
                      -- count bounds the cursor; each iteration advances UTF8 bytes.
-                     next !i !byte | i>=hi=pure ()
+                     next !i !_ | i>=hi=pure ()
                      next !i !byte=case TU.iter visible byte of
                        TU.Iter c n->put slot (y*w+i) (CharCell a c) >> next (i+1) (byte+n)
                  in next lo 0
@@ -509,7 +509,7 @@ rowsFromCells cells (w,h)=Vec.generate h row
           Unfilled _->' '
           Cell _ t _ _->T.head t
           ScriptCell{}->error "Script cell entered an ordinary text run."
-        textEnd a !x | x>=w=x
+        textEnd _ !x | x>=w=x
         textEnd a !x=case at x of
           CharCell b _ | a==b->textEnd a (x+1)
           Unfilled paint | a==maybe V.defAttr id paint->textEnd a (x+1)

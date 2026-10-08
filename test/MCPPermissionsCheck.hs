@@ -38,7 +38,7 @@ import Hide.Model
 import Hide.Render (snapshot, snapshotHtml)
 import Hide.GuestAccess (readableAt, guestKeyboardAllowed, guestEffectsAllowed)
 import Hide.RuntimeMCP (runtimeTools)
-import Hide.WorkspaceFilesMCP (fileTools, fileTool)
+import Hide.WorkspaceFilesMCP (fileTools)
 
 checks :: IO ()
 checks=do
