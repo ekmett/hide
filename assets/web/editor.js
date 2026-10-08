@@ -304,7 +304,7 @@ function readSidebarItem(item){
  sidebarAccess.setAttribute('aria-activedescendant',item.id);
 }
 function receiveSidebar(value){
- const invalid=()=>{throw new Error('Invalid sidebar metadata');};
+ const invalid=()=>{clearSidebar();throw new Error('Invalid sidebar metadata');};
  const integer=n=>Number.isSafeInteger(n)&&n>=0;
  const validId=id=>Array.isArray(id)&&(id.length===1&&id[0]==='sidebar'||id.length===3&&id[0]==='tree'&&
    typeof id[1]==='string'&&/^[0-9a-f]{48}$/.test(id[1])&&typeof id[2]==='string'&&Array.from(id[2]).length>0&&Array.from(id[2]).length<=128);

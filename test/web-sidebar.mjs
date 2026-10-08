@@ -55,7 +55,7 @@ for(const invalid of [
   {...snapshot,nodes:[root,folder,{...file,name:'x'.repeat(257)}]},
   {...snapshot,nodes:[root,{...folder,parent:file.id},file]},
   {...snapshot,nodes:Array(513).fill(root)},
-])assert.throws(()=>receive(invalid),/Invalid sidebar/);
+]){receive(snapshot);assert.throws(()=>receive(invalid),/Invalid sidebar/);assert.equal(sidebarAccess.hidden,true);assert.equal(items().length,0);}
 assert.equal(packets.length,0);
 // Use the production socket/frame merger to exercise delta, reset and reconnect invalidation.
 const sockets=[],noOp=()=>{};
