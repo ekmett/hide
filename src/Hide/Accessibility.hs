@@ -97,6 +97,7 @@ sidebarSemantics audience d=case sideTree d of
     covered=isJust (dialog d) || isJust (menu d) || isJust (contextMenu d)
     revision=safeInteger . treeRevision
     layout tree=[cols,rows,treeWidth tree,treeScroll tree,treeSelected tree,if treeFocused tree then 1 else 0,bottom]
+    snapshot :: Integer -> [Int] -> Int -> Int -> Int -> [Value] -> Value
     snapshot rev geometry start count total nodes=object
       ["revision" .= rev,"layout" .= geometry,"visibleStart" .= start,"visibleCount" .= count,
        "logicalRows" .= total,"readOnly" .= True,"nodes" .= nodes]
@@ -107,4 +108,5 @@ sidebarSemantics audience d=case sideTree d of
       Just parent->case M.lookup parent (treeNodes tree) of
         Just node | Loaded Nothing<-stateLoad node->S.length (stateChildren node)
         _-> -1
+    safeInteger :: Integer -> Integer
     safeInteger value=max 0 (min 9007199254740991 value)

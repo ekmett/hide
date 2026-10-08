@@ -36,6 +36,10 @@ checks=do
       shiftedProjection=project OwnerSemantics shifted
   check "owner sees the prepared sidebar while guest independently masks protected paths"
     ("secret.json" `elem` names owner && "secret.json" `notElem` names guest && "one.hs" `elem` names guest)
+  let secretKey=keyOf (rowHit (fromMaybe (error "missing private row") (rowAt 2 tree)))
+      reannotated=base {sideTree=Just tree {treeNodes=M.adjust (\state->state {stateInfo=(stateInfo state) {infoResource=Just "/public/replacement"}}) secretKey (treeNodes tree)}}
+  check "pending provider updates cannot unmask a protected cached painted row"
+    ("secret.json" `notElem` names (project GuestSemantics reannotated))
   check "streamer display uses the same central private-path mask"
     (project OwnerSemantics base {streamerMode=True}==guest)
   check "semantic wire never serializes filesystem resource annotations"
