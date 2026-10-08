@@ -18,6 +18,7 @@ import qualified Data.ByteString.Internal as BSI
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector.Storable as VS
+import qualified Data.Vector as V
 import Hide.RemoteEndpoint (randomIdentity)
 
 -- | Exact resource identity. Equality never examines the pixel or PNG payload.
@@ -110,22 +111,26 @@ canvasOwnerAt scene index
 -- black. Nothing means this cell is not owned by this surface. Coordinates are
 -- fractional screen cells, independent of Retina scale and capture resolution.
 canvasPixel :: CanvasScene -> Int -> Double -> Double -> Maybe (Int,Int,Int)
-canvasPixel scene columns x y=do
-  let owner=canvasOwnerAt scene (floor y*columns+floor x)
-      slot=owner .&. 32767
-  surface<-findSlot slot (canvasSurfaces scene)
-  let (left,top,width,height)=canvasTarget surface
-      image=canvasImage surface
-      ix=floor ((x-left)*fromIntegral (imageWidth image)/width)
-      iy=floor ((y-top)*fromIntegral (imageHeight image)/height)
-      inside=width>0 && height>0 && x>=left && y>=top && x<left+width && y<top+height
-      bytes=imageRGBA image
-      at=4*(iy*imageWidth image+ix)
-      channel offset=fromIntegral (BS.index bytes (at+offset))::Int
-      dim=if owner .&. 32768/=0 then 2 else 1
-      paint offset=channel offset*channel 3 `div` (255*dim)
-  pure (if inside then (paint 0,paint 1,paint 2) else (0,0,0))
+canvasPixel scene columns=sample
   where
-    findSlot _ []=Nothing
-    findSlot slot (surface:rest) | slot/=0 && canvasSlot surface==slot=Just surface
-                               | otherwise=findSlot slot rest
+    -- Prepare the bounded slot table once when this sampler is captured, not
+    -- once per output pixel. Scene constructors need not order their surfaces.
+    bySlot=V.accum (\_ surface->Just surface) (V.replicate 65 Nothing)
+      [(canvasSlot surface,surface) | surface<-canvasSurfaces scene,canvasSlot surface>=1,canvasSlot surface<=64]
+    sample x y
+      | columns<=0 || isNaN x || isInfinite x || isNaN y || isInfinite y || x<0 || x>=fromIntegral columns || y<0=Nothing
+      | otherwise=do
+          let owner=canvasOwnerAt scene (floor y*columns+floor x)
+              slot=owner .&. 32767
+          surface<-if slot<=64 then bySlot V.! slot else Nothing
+          let (left,top,width,height)=canvasTarget surface
+              image=canvasImage surface
+              ix=max 0 (min (imageWidth image-1) (floor ((x-left)*fromIntegral (imageWidth image)/width)))
+              iy=max 0 (min (imageHeight image-1) (floor ((y-top)*fromIntegral (imageHeight image)/height)))
+              inside=width>0 && height>0 && x>=left && y>=top && x<left+width && y<top+height
+              bytes=imageRGBA image
+              at=4*(iy*imageWidth image+ix)
+              channel offset=fromIntegral (BS.index bytes (at+offset))::Int
+              dim=if owner .&. 32768/=0 then 2 else 1
+              paint offset=channel offset*channel 3 `div` (255*dim)
+          pure (if inside then (paint 0,paint 1,paint 2) else (0,0,0))

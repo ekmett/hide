@@ -9,7 +9,8 @@ module Hide.ScreenCapture (capture, screenTool, redactCluster) where
 
 import Codec.Picture (PixelRGB8(..), encodePng, generateImage)
 import Data.Aeson
-import Data.Bits (testBit)
+import Data.Bits (testBit,(.&.))
+import qualified Data.IntSet as IS
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Lazy as BL
@@ -63,6 +64,8 @@ capture font desktop includeImage
     cellHeight=modeHeight (fromMaybe 3 (videoMode desktop))
     position=renderCursor desktop {streamerMode=True}
     (composed,canvas)=renderCellRowsAndCanvas desktop {streamerMode=True}
+    sampleImage=canvasPixel canvas cols
+    visibleImageSlots=IS.fromList [canvasOwnerAt canvas cell .&. 32767 | cell<-[0..cols*rows-1]]
     spans=map toList (toList composed)
     maskedRows=[maskRow y line | (y,line)<-zip [0..] spans]
     maskRow y line=snd (mapAccumL (maskCluster y) 0 padded)
@@ -108,7 +111,7 @@ capture font desktop includeImage
       "semanticSidebar" .= sidebarSemantics GuestSemantics desktop,
       "semanticCanvas" .= [object ["id" .= canvasId surface,"role" .= ("image"::Text),
         "name" .= canvasName surface,"description" .= canvasDescription surface,"bounds" .= canvasRect surface]
-        | surface<-canvasSurfaces canvas],
+        | surface<-canvasSurfaces canvas,IS.member (canvasSlot surface) visibleImageSlots],
       "redactedCells" .= Vec.length (Vec.filter (not . cellReadable) accessGrid),
       "redaction" .= ("Unreadable graphemes become spaces and solid black pixels; whole wide graphemes are hidden if any covered cell is private. Cell coordinates are preserved."::Text),
       "cellWidth" .= (8::Int),"cellHeight" .= cellHeight,"pixelWidth" .= (cols*8),"pixelHeight" .= (rows*cellHeight),
@@ -128,7 +131,7 @@ capture font desktop includeImage
     png=encodePng (generateImage pixel (cols*8) (rows*cellHeight))
     pixel x y
       | cellReadable (accessGrid Vec.! ((y `div` cellHeight)*cols+x `div` 8)),
-        Just (r,g,b)<-canvasPixel canvas cols ((fromIntegral x+0.5)/8) ((fromIntegral y+0.5)/fromIntegral cellHeight)=
+        Just (r,g,b)<-sampleImage ((fromIntegral x+0.5)/8) ((fromIntegral y+0.5)/fromIntegral cellHeight)=
           PixelRGB8 (fromIntegral r) (fromIntegral g) (fromIntegral b)
       | otherwise=cellPixel x y
     cellPixel x y=let (tile,fg,bg,offset,stretched,script)=cells Vec.! ((y `div` cellHeight)*cols+x `div` 8)

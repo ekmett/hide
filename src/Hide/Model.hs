@@ -1265,6 +1265,9 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 -- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
+runCommand cmd source | dialog source==Nothing,menu source==Nothing,contextMenu source==Nothing,not (questionActive source),
+  Just key<-lookup cmd [(CursorLeft False,V.KLeft),(CursorRight False,V.KRight),(CursorUp False,V.KUp),(CursorDown False,V.KDown)],
+  Just next<-imageKey key [] source = (next,[])
 runCommand cmd source | cmd `elem` [WordStarBlockPrefix,WordStarQuickPrefix], not (commandEnabled source cmd) = (source,[])
 runCommand cmd source | sourceKeyCommand cmd, not (commandEnabled source cmd) =
   (if horizontalMutation cmd && sourceNavigationOwner source && not (activeMarkdown source) &&
@@ -3644,6 +3647,7 @@ unboundKey key mods d
   | Just _<-effectiveBindings d, sourceNavigationOwner d,
     not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
     key `elem` [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageUp,V.KPageDown,V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
+unboundKey key mods d | dialog d==Nothing, Just next<-imageKey key mods d = (next,[])
 unboundKey key mods d | activeMarkdown d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (markdownKey key mods d,[])
 unboundKey key mods d | dialog d==Nothing,activeEditorMount d/=Nothing,maybe False (windowFocused d) (activeWindow d),
   Just result<-composerEvent (V.EvKey key mods) d = result

@@ -382,13 +382,14 @@ forCells lo hi f=go lo
 composeCellGrid :: [CellLayer] -> (Int,Int) -> (Vec.Vector Cell,BS.ByteString)
 composeCellGrid layers (w,h)=runST $ do
   grid<-MV.replicate (w*h) (Unfilled Nothing)
-  owners<-UM.replicate (w*h) (0::Word16)
+  let canvasPresent=any (\layer->case layer of CellCanvas{}->True; _->False) layers
+  owners<-UM.replicate (if canvasPresent then w*h else 0) (0::Word16)
   let put slot at cell=do
         original<-MV.unsafeRead grid at
         case original of
           Unfilled paint->do
             MV.unsafeWrite grid at (maybe cell (dim cell) paint)
-            UM.unsafeWrite owners at (fromIntegral slot .|. (if slot/=0 && maybe False (const True) paint then 32768 else 0))
+            when (slot/=0) (UM.unsafeWrite owners at (fromIntegral slot .|. (if maybe False (const True) paint then 32768 else 0)))
           _->pure ()
       dim (CharCell old c) paint=CharCell paint {V.attrStyle=V.attrStyle old} c
       dim (Cell old text width offset) paint=Cell paint {V.attrStyle=V.attrStyle old} text width offset
@@ -462,14 +463,15 @@ composeCellGrid layers (w,h)=runST $ do
               visible<-MV.unsafeRead grid (y*w+i)
               case visible of
                 Cell _ glyph full part | glyph==text && full==width && i-part==cx-offset->
-                  MV.unsafeWrite grid (y*w+i) (CharCell paint '*') >> UM.unsafeWrite owners (y*w+i) 0
+                  MV.unsafeWrite grid (y*w+i) (CharCell paint '*') >> when canvasPresent (UM.unsafeWrite owners (y*w+i) 0)
                 _->pure ()
-            _->MV.unsafeWrite grid (y*w+cx) (CharCell paint '*') >> UM.unsafeWrite owners (y*w+cx) 0
+            _->MV.unsafeWrite grid (y*w+cx) (CharCell paint '*') >> when canvasPresent (UM.unsafeWrite owners (y*w+cx) 0)
   mapM_ (layer 0) layers
   mapM_ (uncurry mask) [(paint,regions) | CellMask paint regions<-layers]
   cells<-Vec.unsafeFreeze grid
   ownership<-UV.unsafeFreeze owners
-  let bytes=fst (BS.unfoldrN (2*w*h) (\i->let value=ownership UV.! (i `div` 2)
+  let bytes | not canvasPresent=BS.replicate (2*w*h) 0
+            | otherwise=fst (BS.unfoldrN (2*w*h) (\i->let value=ownership UV.! (i `div` 2)
              in Just (fromIntegral (if even i then value .&. 255 else value `shiftR` 8),i+1)) 0)
   pure (cells,bytes)
 
