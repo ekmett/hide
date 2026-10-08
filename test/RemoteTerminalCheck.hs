@@ -156,7 +156,9 @@ packetChecks=unless (os=="mingw32") $ bracket temporary removePathForcibly $ \ro
     setEnv "THC_TERMINAL_EXPORT_SNAPSHOT" copied
     packets<-newIORef [header "../invalid.bin",P.BinaryPacket saved,header "savedλ.bin",P.BinaryPacket saved,
       P.JsonPacket (object ["type" .= ("download"::T.Text),"name" .= ("../../ordinary.bin"::T.Text)]),P.BinaryPacket ordinary,
-      header "busy.bin",P.BinaryPacket saved,frame]
+      header "busy.bin",P.BinaryPacket saved,
+      P.JsonPacket (object ["type" .= ("canvas-resource"::T.Text)]),
+      P.JsonPacket (object ["type" .= ("canvas-chunk"::T.Text),"length" .= (6::Int)]),P.BinaryPacket saved,frame]
     let peer=RemotePeer
           { peerSend = \_->error "terminal receiver sent a transport packet"
           , peerSendBatch = \_->error "terminal receiver sent a transport batch"

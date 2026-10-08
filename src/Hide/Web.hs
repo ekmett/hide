@@ -37,6 +37,7 @@ import Hide.Files (filePath)
 import Hide.Font
 import Hide.Frontend (modeSize)
 import Hide.Render (renderKey)
+import Hide.RemoteEndpoint (randomIdentity)
 import Hide.RequestedPaste
 
 -- | Serve a browser frontend, intercepting clipboard, download, link and mode
@@ -63,9 +64,11 @@ runWeb scale effects tick initial = do
                     _ -> WS.sendCloseCode conn 1003 ("Expected file bytes (maximum 16 MiB)"::T.Text) >> ioError (userError "Invalid file upload")
                 Right event -> atomically (writeTBQueue queue (Just event))
         send (assetsPacket font scale)
+        canvasEpoch<-T.pack <$> randomIdentity
+        send (canvasReset canvasEpoch)
         WS.withPingThread conn 15 (pure ()) $ withAsync (finally receive (atomically (void (tryPutTMVar disconnected ())))) $ \_ ->
-          readIORef state >>= loop pasteReads conn send queue disconnected Nothing
-      loop pasteReads conn send queue disconnected previous d = do
+          readIORef state >>= loop canvasEpoch (CanvasSender canvasEpoch M.empty) pasteReads conn send queue disconnected Nothing
+      loop canvasEpoch transfers pasteReads conn send queue disconnected previous d = do
         pending<-tick d
         -- Retain the pending intent if socket delivery fails before retirement.
         writeIORef state pending
@@ -89,15 +92,20 @@ runWeb scale effects tick initial = do
         stateKey<-renderKey current
         let key=(stateKey,cwd)
             resetKey=(screenSize current,videoMode current,pixelateUnicode current)
-            oldRows=maybe [] (\(_,_,cached,_) -> cached) previous
-            oldMetadata=maybe [] (\(_,_,_,meta) -> meta) previous
-            sameFrame=maybe False (\(old,_,_,_)->old==key) previous
-            rows=if sameFrame then oldRows else frameRows current
-            metadata=if sameFrame then oldMetadata else frameMetadata cwd current
-            reset=maybe True (\(_,old,_,_)->old/=resetKey) previous
+            oldRows=maybe [] (\(_,_,cached,_,_) -> cached) previous
+            oldMetadata=maybe [] (\(_,_,_,meta,_) -> meta) previous
+            sameFrame=maybe False (\(old,_,_,_,_)->old==key) previous
+            (freshRows,freshScene)=frameRowsAndCanvas current
+            scene=case previous of Just (_,_,_,_,cached) | sameFrame->cached; _->freshScene
+            rows=if sameFrame then oldRows else freshRows
+            metadata=if sameFrame then oldMetadata else canvasMetadata canvasEpoch scene : frameMetadata cwd current
+            reset=maybe True (\(_,old,_,_,_)->old/=resetKey) previous
         when (reset || (not sameFrame && (rows/=oldRows || metadata/=oldMetadata))) $
           WS.sendBinaryData conn (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMetadata) metadata))
-        event<-timeout 50000 (atomically ((readTMVar disconnected >> pure Nothing) `orElse` readTBQueue queue))
+        let (nextTransfers,canvasPackets,moreCanvas)=canvasTransfer transfers scene
+        mapM_ (\packet->case packet of JsonPacket value->send value; BinaryPacket bytes->WS.sendBinaryData conn bytes) canvasPackets
+        event<-if moreCanvas then atomically ((readTMVar disconnected >> pure (Just Nothing)) `orElse` (Just <$> readTBQueue queue) `orElse` pure Nothing)
+          else timeout 50000 (atomically ((readTMVar disconnected >> pure Nothing) `orElse` readTBQueue queue))
         case event of
           Just Nothing -> pure ()
           _ -> do
@@ -113,7 +121,7 @@ runWeb scale effects tick initial = do
               Just (serial,_) -> send (object ["type" .= ("ack"::T.Text),"seq" .= serial,"dirty" .= webDirty updated])
               Nothing -> pure ()
             if exit then send (object ["type" .= ("closed"::T.Text)]) >> void (tryPutMVar done ())
-              else loop pasteReads conn send queue disconnected (Just (key,resetKey,rows,metadata)) updated
+              else loop canvasEpoch nextTransfers pasteReads conn send queue disconnected (Just (key,resetKey,rows,metadata,scene)) updated
       effect _ _ _ result@(True,_) _ = pure result
       effect pasteReads _ send (_,d) (FollowLink origin target) | not (linkOriginCurrent d origin)=pure (False,d {status="Link body expired."})
       effect pasteReads _ send (_,d) (FollowLink origin target) = do

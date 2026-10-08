@@ -61,9 +61,10 @@ data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Asyn
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
   | EditorJob !Editor.DraftSubmission !(Async (Either CommandError SidebarReply)) !Bool
 data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.FormUpdate | TreeInvalidation !P.TreeRef !P.NodeId
-data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
+data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
-  { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
+  { imageWindowScope :: !PluginWindow.WindowScope
+  , providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
   , definitions :: !(M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))
   , jobs :: ![ChildJob], waiting :: ![(TreeRequest,Menu.MenuOrigin)]
   , projection :: !(Maybe (Integer,Async (Projection,M.Map NodeKey (P.NodeDef SidebarContext SidebarReply),RecoveryProjection)))
@@ -96,10 +97,10 @@ tryInvalidateTree (SidebarHost _ _ queue _ _ closed) owner node=atomically $ do
     if full then pure False else writeTBQueue queue (TreeInvalidation owner node) >> pure True
 
 withSidebarCommands :: (SidebarHost -> IO a) -> IO a
-withSidebarCommands use=withRegistry $ \registry->bracket (acquire registry) close use
+withSidebarCommands use=PluginWindow.withWindowScope $ \scope->withRegistry $ \registry->bracket (acquire scope registry) close use
   where
-    acquire registry=do
-      state<-newIORef (State M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0 Nothing M.empty)
+    acquire scope registry=do
+      state<-newIORef (State scope M.empty M.empty [] [] Nothing Nothing Nothing Nothing Nothing 0 Nothing M.empty)
       publications<-newTBQueueIO 32
       cancellation<-newTBQueueIO 32
       closed<-newTVarIO False
@@ -177,6 +178,18 @@ createFiles host root=do
   cache<-newIORef (M.singleton rootId root,M.singleton root rootId,1,M.empty)
   owner<-newIORef Nothing
   open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec prepareSidebarFile)
+  scope<-imageWindowScope <$> readState host
+  image<-either (ioError . userError . show) pure =<< registerCommand registry
+    (CommandDef "hide.sidebar.files.png" "View PNG" codec codec (\ctx path->
+      if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Opening an image requires the human.")) else do
+        resolved<-canonicalizePath path
+        bytes<-withBinaryFile resolved ReadMode (\h->BS.hGet h (16*1024*1024+1))
+        if BS.length bytes>16*1024*1024 then pure (Left (CommandRejected "PNG exceeds the 16 MiB limit.")) else do
+          let disclosure=if protectedFilePath (sidebarPrivatePaths ctx) resolved then PluginWindow.PrivateWindow else PluginWindow.ReadableWindow
+          prepared<-PluginWindow.prepareImageWindow (T.pack (takeFileName resolved)) disclosure (Just resolved) bytes
+          case prepared of
+            Left err->pure (Left (CommandRejected err))
+            Right value->maybe (Left (CommandRejected "Image window scope closed.")) (Right . SidebarWindow) <$> PluginWindow.openWindow scope value))
   export<-either (ioError . userError . show) pure =<< registerCommand registry
     (CommandDef "hide.sidebar.files.export" "Export saved copy" codec codec (\ctx path->
       if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "File export requires the human.")) else do
@@ -244,6 +257,7 @@ createFiles host root=do
                           (entryDirectory entry) (Just resource))
                           (if entryDirectory entry then Nothing else Just (P.treeAction registry open resource (\_ ->pure)))
                           ([P.ResourceMenu "Open" resource "" | not (entryDirectory entry),map toLower (takeExtension resource) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"]]++
+                           [P.ActionMenu "View PNG" (P.treeAction registry image resource (\_ value->pure value)) | not (entryDirectory entry),map toLower (takeExtension resource)==".png"]++
                            [P.ActionMenu "Export saved copy…" (P.treeAction registry export resource (\_ value->pure value)) | not (entryDirectory entry)]++
                            [P.ActionMenu "Rename…" (P.treeAction registry rename resource (\_ value->pure value)) | not (entryDirectory entry)]))
                       -- Cache bounded directory pages at the filesystem owner. Old
@@ -251,7 +265,7 @@ createFiles host root=do
                       atomicModifyIORef' cache $ \(a,b,c,dirs)->((M.insert ident base a,M.insert base ident b,c,M.insert base visible (if M.size dirs>=32 then M.empty else dirs)),())
                       pure (Right (P.NodePage values (if length (drop (offset+128) visible)>0 then Just (T.pack (show (offset+128))) else Nothing))))
   writeIORef owner (Just (P.treeReference provider))
-  pure (FilesProvider provider root (commandRef open) (commandRef rename) (commandRef renameTo) (commandRef export) cache)
+  pure (FilesProvider provider root (commandRef open) (commandRef rename) (commandRef renameTo) (commandRef export) (commandRef image) cache)
   where codec=Codec Null (const (Left "Files arguments are host-captured.")) (const Null)
 
 -- | Mount initial Files and prepare its first projection outside the UI boundary.
@@ -308,7 +322,7 @@ mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
         basis=if M.null (treeNodes visible) then visible {treeEpoch=epoch,treeRevision=epoch} else visible
         tree=foldl (flip addProvider) basis live
     case filesProvider state of
-      Just (FilesProvider provider root _ _ _ _ _) | root==treeRoot tree->do
+      Just (FilesProvider provider root _ _ _ _ _ _) | root==treeRoot tree->do
         let key=NodeKey (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
             next=if M.member (P.treeReference provider) (providers state) then addProvider provider tree else tree
         if M.member key (treeNodes visible) then pure d {sideTree=Just next}
@@ -316,10 +330,10 @@ mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
       _->do
         -- This path is startup/directory selection, which already belongs to the
         -- host's file effect owner. Registration and root validation are bounded.
-        mapM_ (\(FilesProvider provider _ open rename renameTo export _)->P.retireTree provider >> mapM_ (retireCommand (sidebarRegistry host)) [open,rename,renameTo,export]) (filesProvider state)
-        created@(FilesProvider provider _ _ _ _ _ _)<-createFiles host (treeRoot tree)
+        mapM_ (\(FilesProvider provider _ open rename renameTo export image _)->P.retireTree provider >> mapM_ (retireCommand (sidebarRegistry host)) [open,rename,renameTo,export,image]) (filesProvider state)
+        created@(FilesProvider provider _ _ _ _ _ _ _)<-createFiles host (treeRoot tree)
         let owner=P.treeReference provider
-            withdrawn=maybe tree (\(FilesProvider old _ _ _ _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
+            withdrawn=maybe tree (\(FilesProvider old _ _ _ _ _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
             fresh=addProvider provider withdrawn {treeAgentRefs=[owner]}
             key=NodeKey owner (P.infoId (P.nodeInfo (P.treeRoot provider)))
             defs=M.insert key (P.treeRoot provider) (definitions state)
@@ -375,7 +389,7 @@ invokeAction (SidebarHost _ ref _ _ _ _) trace reference origin d=case (trace,si
       (Nothing,Just command) | live && allowed->do
         captured<-captureActionContext origin trace d
         files<-case filesProvider state of
-          Just (FilesProvider _ _ _ rename _ _ _) | origin==Menu.HumanMenu,reference==rename->Rename.captureRenameFiles d
+          Just (FilesProvider _ _ _ rename _ _ _ _) | origin==Menu.HumanMenu,reference==rename->Rename.captureRenameFiles d
           _->pure []
         let ctx=captured {sidebarRenameFiles=files}
         worker<-async (P.invokeTreeAction command ctx)
@@ -404,7 +418,7 @@ refreshRenamedPath :: SidebarHost -> FilePath -> FilePath -> Desktop -> IO Deskt
 refreshRenamedPath host@(SidebarHost _ ref _ _ _ _) old new d=do
   state<-readIORef ref
   case filesProvider state of
-    Just (FilesProvider provider _ _ _ _ _ cache)->do
+    Just (FilesProvider provider _ _ _ _ _ _ cache)->do
       let parents=nub [takeDirectory old,takeDirectory new]
           moved path=Rename.within old path || Rename.within new path
       paths<-atomicModifyIORef' cache $ \(a,b,c,dirs)->
@@ -419,7 +433,7 @@ refreshFiles :: SidebarHost -> FilePath -> [Entry] -> Desktop -> IO Desktop
 refreshFiles host@(SidebarHost _ ref _ _ _ _) path entries d=do
   state<-readIORef ref
   case (filesProvider state,sideTree d) of
-    (Just (FilesProvider provider _ _ _ _ _ cache),Just tree)->do
+    (Just (FilesProvider provider _ _ _ _ _ _ cache),Just tree)->do
       (_,paths,_,_)<-readIORef cache
       atomicModifyIORef' cache (\(a,b,c,dirs)->((a,b,c,M.insert path entries (if M.size dirs>=32 && not (M.member path dirs) then M.empty else dirs)),()))
       case M.lookup path paths >>= \ident->let key=NodeKey (P.treeReference provider) ident in (key,) <$> M.lookup key (treeNodes tree) of
@@ -486,7 +500,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core ini
     finishChild state (d,keep) job@(ChildJob request origin worker cancelled)=do
       live<-maybe (pure False) P.treeCurrent (M.lookup (owner request) (providers state))
       allowed<-if origin==Menu.HumanMenu then pure True else case filesProvider state of
-        Just (FilesProvider provider _ _ _ _ _ cache) | P.treeReference provider==owner request->do
+        Just (FilesProvider provider _ _ _ _ _ _ cache) | P.treeReference provider==owner request->do
           (paths,_,_,_)<-readIORef cache
           let P.TreeHit _ ident _=requestHit request
           pure (maybe False (not . protectedPath d) (M.lookup ident paths))
