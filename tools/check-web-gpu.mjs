@@ -91,6 +91,7 @@ try {
  images.control({type:'canvas-chunk',epoch:imageEpoch,id:resourceId,offset:4,length:12});images.binary(imageBytes.slice(4).buffer);dirty=true;present(performance.now());
  check(pixel(4,2)==='75,0,0','image top-left orientation '+pixel(4,2));check(pixel(12,2)==='0,255,0','image top-right orientation');
  check(pixel(4,10)==='0,0,127','image bottom-left orientation');check(pixel(12,10)==='64,64,64','straight alpha and halo dim '+pixel(12,10));
+ frame.blink=true;cursorEpoch=0;dirty=true;present(0);const staticDraws=atlasStats.draws;present(501);check(atlasStats.draws===staticDraws,'cursor-free image blink caused a redraw');frame.blink=false;
  check(pixel(20,2)==='0,0,0','canvas black outside target');check(pixel(28,2)==='0,0,170','mask preserves ordinary neighbor');
  adopt([{...imageSurface,target:[1,0,4,4]}]);check(pixel(4,2)==='0,0,0','pan black padding');check(images.resources.size===1&&images.bytes===16,'pan retransmitted pixels');
  // A front surface takes exactly one ordinary character cell, even over a wide glyph.
