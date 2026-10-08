@@ -74,6 +74,15 @@ checks=do
     (null (items (project OwnerSemantics hidden))))
     [base {dialog=Just (Dialog "Question" Widgets [] 0 ["OK"] [])},base {menu=Just (0,0)},
      base {contextMenu=Just (Rect 1 2 4 3,0)},base {sideTree=Nothing}]
+  let (replacing,Just replacementRequest)=requestChildren (nodeHit rootKey (treeNodes tree M.! rootKey)) Nothing tree
+      replacement=either (error . T.unpack) id (adoptPage replacementRequest [] Nothing replacing)
+      pending=project OwnerSemantics base {sideTree=Just replacement}
+  check "pending replacement keeps painted names but marks stale sibling counts unknown"
+    ("one.hs" `elem` names pending && field "posInSet" (byName "one.hs" pending)==Just (1::Int) &&
+     field "setSize" (byName "one.hs" pending)==Just (-1::Int))
+  replacementReady<-prepareProjection replacement
+  check "adopting the replacement retires removed painted nodes"
+    ("one.hs" `notElem` names (project OwnerSemantics base {sideTree=Just (adoptProjection replacementReady replacement)}))
   let loadingTree=tree {treeNodes=M.adjust (\state->state {stateLoad=Loading 8 Nothing}) rootKey (treeNodes tree)}
       failedTree=loadingTree {treeNodes=M.adjust (\state->state {stateLoad=Failed "/authority/secret-failure"}) rootKey (treeNodes loadingTree)}
   loadingReady<-prepareProjection loadingTree

@@ -103,6 +103,7 @@ sidebarSemantics audience d=case sideTree d of
        "logicalRows" .= total,"readOnly" .= True,"nodes" .= nodes]
     identity (NodeKey ref ident)=["tree",treeIdentity ref,nodeIdText ident]
     incomplete state=case stateLoad state of Loaded Nothing->False; _->infoBranch (stateInfo state)
+    siblingCount tree _ | treeProjectionRevision tree/=treeRevision tree= -1
     siblingCount tree state=case stateParent state of
       Nothing->S.length (treeRoots tree)
       Just parent->case M.lookup parent (treeNodes tree) of
