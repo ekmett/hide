@@ -490,6 +490,15 @@ imageChecks=do
       (map imageViewport (windows mappedPan)/=map imageViewport (windows mappedZoom) && map imageViewport (windows mappedZoom)/=map imageViewport (windows mapped))
     check "modal input cannot change the covered image" (map imageViewport (windows modalAfter)==map imageViewport (windows modal))
     check "fit restores the same transform" (map Canvas.canvasTarget (Canvas.canvasSurfaces (scene fitted))==map Canvas.canvasTarget (Canvas.canvasSurfaces initial))
+    let (armed,_)=handleEvent (V.EvMouseDown 3 7 V.BLeft []) opened
+        (_,external)=handleEvent (V.EvMouseUp 3 7 (Just V.BLeft)) armed
+        graphic=opened {videoMode=Just 3}
+        (dragging,_)=handleEvent (V.EvMouseDown 3 7 V.BLeft []) graphic
+        (dragged,_)=handleEvent (V.EvMouseDown 5 8 V.BLeft []) dragging
+    check "terminal fallback external-open link uses its captured host origin"
+      (case external of [FollowLink origin ""]->linkOriginPath origin==Just "/images/sample.png"; _->False)
+    check "graphical image contents pan instead of activating an invisible fallback link"
+      (null (snd (handleEvent (V.EvMouseUp 3 7 (Just V.BLeft)) dragging)) && map imageViewport (windows dragged)/=map imageViewport (windows graphic))
     let covered=modifyActive (\w->w {bounds=Rect 1 1 15 9}) (addDocument Nothing (newBuffer "foreground") opened)
         coveredScene=scene covered
     check "ordinary front window clears image ownership and its exposed halo dims image cells"
