@@ -388,6 +388,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
             pure (s {owner=Just client,acknowledged=ack,generation=gen,savedReplies=saved},(ack,epoch++"-"++show gen,concatMap snd saved))
           writePacket connection (json "hello" ["version" .= protocolVersion,"session" .= session,"epoch" .= attachmentEpoch,"ack" .= ack,"replay" .= length replay])
           writePacket connection (JsonPacket (assetsPacket font scale))
+          canvasEpoch<-T.pack <$> randomIdentity
+          writePacket connection (JsonPacket (canvasReset canvasEpoch))
           mapM_ (writePacket connection) replay
           -- Keep input consumption independent of frame generation. Drain replies
           -- in order as a bounded batch, then render the latest state once.
@@ -419,22 +421,24 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                 atomically $ do
                   writeTBQueue outgoing (responses++[json "ack" ["seq" .= committed,"dirty" .= isDirty]]++[json "closed" ["resumable" .= resumable] | exit])
                   modifyTVar' inflight (subtract 1)
-              send previous = do
+              send transfers previous = do
                 s <- readMVar state
                 cwd <- getCurrentDirectory
                 let d=desktop s
                 stateKey<-renderKey d
                 let key=(stateKey,cwd)
                     resetKey=(screenSize d,videoMode d,pixelateUnicode d)
-                    oldRows=maybe [] (\(_,_,r,_)->r) previous
-                    oldMeta=maybe [] (\(_,_,_,m)->m) previous
+                    oldRows=maybe [] (\(_,_,r,_,_)->r) previous
+                    oldMeta=maybe [] (\(_,_,_,m,_)->m) previous
                     -- The same bounded key as the web/native frontends: never
                     -- compare desktops, file contents, or undo history.
-                    sameFrame=maybe False (\(old,_,_,_)->old==key) previous
-                    rows=if sameFrame then oldRows else frameRows d
+                    sameFrame=maybe False (\(old,_,_,_,_)->old==key) previous
+                    (freshRows,freshScene)=frameRowsAndCanvas d
+                    scene=case previous of Just (_,_,_,_,cached) | sameFrame->cached; _->freshScene
+                    rows=if sameFrame then oldRows else freshRows
                     metadata=if sameFrame then oldMeta else
-                      [if name=="title" then (name,String (applicationTitle cwd d<>" ["<>label<>"]")) else (name,value) | (name,value)<-frameMetadata cwd d]
-                    reset=maybe True (\(_,old,_,_)->old/=resetKey) previous
+                      canvasMetadata canvasEpoch scene : [if name=="title" then (name,String (applicationTitle cwd d<>" ["<>label<>"]")) else (name,value) | (name,value)<-frameMetadata cwd d]
+                    reset=maybe True (\(_,old,_,_,_)->old/=resetKey) previous
                 case clipboardExport d of
                   (serial,Just text) | not (stopped s || suspending s) -> do
                     writePacket connection (json "copy" ["text" .= text])
@@ -467,20 +471,24 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                   writeIORef settledFrame (acknowledged s)
                 when changed $
                   writePacket connection (BinaryPacket (BL.toStrict (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMeta) metadata))))
-                next <- timeout 50000 $ atomically $
-                  (do first<-readTBQueue outgoing
-                      rest<-flushTBQueue outgoing
-                      pure (Just (concat (first:rest)))) `orElse` (do
-                    first<-readTBQueue linkReplies
-                    rest<-flushTBQueue linkReplies
-                    pure (Just (map snd (filter ((==(owner s,generation s)).fst) (first:rest))))) `orElse` (do
-                    readTVar inspectionClosing >>= check
-                    readTVar inflight >>= check . (==0)
-                    pure Nothing)
+                let (nextTransfers,canvasPackets,moreCanvas)=canvasTransfer transfers scene
+                mapM_ (writePacket connection) canvasPackets
+                let awaitReply =
+                      (do first<-readTBQueue outgoing
+                          rest<-flushTBQueue outgoing
+                          pure (Just (concat (first:rest)))) `orElse` (do
+                        first<-readTBQueue linkReplies
+                        rest<-flushTBQueue linkReplies
+                        pure (Just (map snd (filter ((==(owner s,generation s)).fst) (first:rest))))) `orElse` (do
+                        readTVar inspectionClosing >>= check
+                        readTVar inflight >>= check . (==0)
+                        pure Nothing)
+                next <- if moreCanvas then Just <$> atomically (awaitReply `orElse` pure (Just []))
+                  else timeout 50000 (atomically awaitReply)
                 case next of
                   Just (Just packets) -> do
                     mapM_ (writePacket connection) packets
-                    if any ((==Just "closed") . packetType) packets then void (tryPutMVar done ()) else send (Just (key,resetKey,rows,metadata))
+                    if any ((==Just "closed") . packetType) packets then void (tryPutMVar done ()) else send nextTransfers (Just (key,resetKey,rows,metadata,scene))
                   Just Nothing -> do
                     -- An MCP Exit has no display input to carry its close. Flush
                     -- accepted input replies first, then acknowledge and close.
@@ -488,8 +496,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                     writePacket connection (json "ack" ["seq" .= acknowledged final,"dirty" .= webDirty (desktop final)])
                     writePacket connection (json "closed" [])
                     void (tryPutMVar done ())
-                  Nothing -> send (Just (key,resetKey,rows,metadata))
-          race_ receive (race_ respond (send Nothing)) `finally` do
+                  Nothing -> send nextTransfers (Just (key,resetKey,rows,metadata,scene))
+          race_ receive (race_ respond (send (CanvasSender canvasEpoch M.empty) Nothing)) `finally` do
             s <- readMVar state
             when (stopped s) (void (tryPutMVar done ()))
         responsePackets d request = case request of

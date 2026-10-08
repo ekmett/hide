@@ -17,9 +17,13 @@ import Hide.Web
 import Hide.Model hiding (Paste)
 import Hide.Buffer
 import Hide.Frontend
+import qualified Hide.Protocol as P
+import Hide.Plugin.Canvas
+import Codec.Picture (generateImage,encodePng,PixelRGBA8(..))
 
 checks :: IO ()
 checks = withEditorFixture "" (initialDesktop (80,25)) $ \chatBase->do
+  canvasChecks
   let check name ok=unless ok (error name)
       base=addDocument Nothing (newBuffer "") (initialDesktop (80,25))
       typed=fst (applyInput (Key "λ" []) base)
@@ -110,3 +114,40 @@ checks = withEditorFixture "" (initialDesktop (80,25)) $ \chatBase->do
   check "metadata-only update chooses row encoding" (BL.head unchanged==2 && decodePacket rows unchanged==Just rows)
   check "browser system theme preserves explicit appearance" (darkAppearance (fst (applyInput (SystemTheme True) base)) && not (darkAppearance (fst (applyInput (SystemTheme True) base {appearance=LightMode}))))
   putStrLn "web protocol checks passed"
+
+-- Resource residency changes independently of the cell-frame dictionary.
+canvasChecks :: IO ()
+canvasChecks=do
+  let check label good=unless good (error label)
+      png=BL.toStrict (encodePng (generateImage (\x y->PixelRGBA8 (fromIntegral x) (fromIntegral y) 117 192) 300 300))
+      epoch=T.replicate 48 "a"
+  image<-preparePNG png >>= either (error . T.unpack) pure
+  let surface=CanvasSurface 1 1 image (0,0,10,10) (0,0,10,10) "image" "300 × 300"
+      scene=CanvasScene [surface] (BS.replicate 200 0)
+      (first,a,more)=P.canvasTransfer (P.CanvasSender epoch M.empty) scene
+      (done,b,finished)=P.canvasTransfer first scene
+      (_,steady,steadyPending)=P.canvasTransfer done scene
+      moved=scene {canvasSurfaces=[surface {canvasTarget=(2,3,8,8)}]}
+      (_,panned,_)=P.canvasTransfer done moved
+      (closed,released,_)=P.canvasTransfer done (CanvasScene [] (BS.replicate 200 0))
+      (_,reopened,_)=P.canvasTransfer closed scene
+      kind (P.JsonPacket value)=parseMaybe (withObject "control" (.: "type")) value :: Maybe T.Text
+      kind _=Nothing
+      chunks=[bytes | P.BinaryPacket bytes<-a++b]
+  check "image transfer uses bounded chunks and exact source bytes"
+    (more && not finished && map BS.length chunks==[262144,97856] && BS.concat chunks==imageRGBA image)
+  check "only first chunk starts immutable image residency"
+    (map kind a==map Just ["canvas-resource","canvas-chunk"]++[Nothing] && map kind b==[Just "canvas-chunk",Nothing])
+  check "pan and occlusion do not retransmit image payloads" (null steady && not steadyPending && null panned)
+  check "closing releases resources and fresh admission restarts at the header"
+    (map kind released==[Just "canvas-release"] && take 1 (map kind reopened)==[Just "canvas-resource"])
+  let (_,interrupted,_)=P.canvasTransfer first (CanvasScene [] BS.empty)
+  check "closing during an upload emits no late pixel chunk" (map kind interrupted==[Just "canvas-release"])
+  other<-preparePNG png >>= either (error . T.unpack) pure
+  let (earlier,later)=if imageResourceId image<imageResourceId other then (image,other) else (other,image)
+      activeScene=scene {canvasSurfaces=[surface {canvasImage=later}]}
+      (active,_,_)=P.canvasTransfer (P.CanvasSender epoch M.empty) activeScene
+      added=activeScene {canvasSurfaces=[surface {canvasImage=later},surface {canvasId=2,canvasSlot=2,canvasImage=earlier}]}
+      (_,during,_) = P.canvasTransfer active added
+  check "newly admitted image cannot interrupt an existing upload cursor"
+    (map kind during==[Just "canvas-chunk",Nothing])

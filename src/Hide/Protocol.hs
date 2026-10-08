@@ -32,7 +32,10 @@ import qualified Hide.Model as Model
 import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
 import Hide.TextStyle
 import Hide.Font
-import Hide.Render (renderDesktop, renderCellRows)
+import Hide.Render (renderCursor, renderCellRowsAndCanvas)
+import Hide.Plugin.Canvas
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
 import Hide.Unicode (Script(..), CellSpan(..), graphemes, clusterWidth)
@@ -215,7 +218,14 @@ inputKey name keyMods = case T.unpack name of
 -- Complete row-major snapshots feed DEFLATE in a stable order, refreshing its
 -- history with unchanged cells as well as edits. No application-level move search.
 frameRows :: Desktop -> [Value]
-frameRows d = map (toJSON . spans 0 . toList) (toList (renderCellRows d))
+frameRows=fst . frameRowsAndCanvas
+
+-- | Share the compositor result: ownership and text come from the same pass.
+frameRowsAndCanvas :: Desktop -> ([Value],CanvasScene)
+frameRowsAndCanvas d=let (rows,scene)=renderCellRowsAndCanvas d in (encodeCellRows rows,scene)
+
+encodeCellRows :: Vec.Vector (Vec.Vector CellSpan) -> [Value]
+encodeCellRows rows = map (toJSON . spans 0 . toList) (toList rows)
   where
     spans _ []=[]
     spans x (cell:rest)=
@@ -274,6 +284,44 @@ editableDialogField d=case dialog d of
   Just dg | field@TextArea{}:_<-drop (focus dg) (fields dg),editableArea field -> Just field
   _ -> Nothing
 
+-- | Connection-local residency records only immutable identities and sent offsets.
+-- Resource payloads remain in the current scene, never in this transfer state.
+data CanvasSender = CanvasSender !T.Text !(M.Map T.Text Int)
+
+canvasReset :: T.Text -> Value
+canvasReset epoch=object ["type" .= ("canvas-reset"::T.Text),"epoch" .= epoch]
+
+canvasMetadata :: T.Text -> CanvasScene -> Pair
+canvasMetadata epoch scene="canvas" .= object
+  ["epoch" .= epoch,"mask" .= TE.decodeUtf8 (B64.encode (canvasMask scene)),
+   "surfaces" .= [object ["id" .= canvasId surface,"slot" .= canvasSlot surface,
+     "resource" .= imageResourceId (canvasImage surface),"rect" .= canvasRect surface,
+     "target" .= canvasTarget surface,"name" .= canvasName surface,"description" .= canvasDescription surface]
+     | surface<-canvasSurfaces scene]]
+
+-- | Send at most one 256 KiB chunk after the current interactive frame. Release
+-- obsolete resources first; a late chunk cannot survive removal from this scene.
+canvasTransfer :: CanvasSender -> CanvasScene -> (CanvasSender,[WirePacket],Bool)
+canvasTransfer (CanvasSender epoch resident) scene=(CanvasSender epoch next,retired++packets,pending)
+  where
+    images=M.fromList [(imageResourceId image,image) | surface<-canvasSurfaces scene,let image=canvasImage surface]
+    retained=M.intersection resident images
+    retired=[JsonPacket (control "canvas-release" ["id" .= ident]) | ident<-M.keys (resident `M.difference` images)]
+    unfinished=[(ident,image,offset) | (ident,image)<-M.toAscList images,
+      Just offset<-[M.lookup ident retained],offset<BS.length (imageRGBA image)]++
+      [(ident,image,0) | (ident,image)<-M.toAscList images,M.notMember ident retained]
+    (next,packets)=case unfinished of
+      []->(retained,[])
+      (ident,image,offset):_->
+        let bytes=imageRGBA image
+            chunk=BS.take 262144 (BS.drop offset bytes)
+            begin=[JsonPacket (control "canvas-resource" ["id" .= ident,"width" .= imageWidth image,
+              "height" .= imageHeight image,"bytes" .= BS.length bytes]) | M.notMember ident retained]
+        in (M.insert ident (offset+BS.length chunk) retained,begin++
+          [JsonPacket (control "canvas-chunk" ["id" .= ident,"offset" .= offset,"length" .= BS.length chunk]),BinaryPacket chunk])
+    pending=any (\(ident,image)->M.findWithDefault 0 ident next<BS.length (imageRGBA image)) (M.toList images)
+    control kind fields=object (["type" .= (kind::T.Text),"epoch" .= epoch]++fields)
+
 frameMetadata :: FilePath -> Desktop -> [Pair]
 frameMetadata cwd d =
   ["title" .= applicationTitle cwd d,"size" .= screenSize d,"mode" .= videoMode d,
@@ -293,7 +341,7 @@ frameMetadata cwd d =
       "slot" .= Plugin.menuSlot item,"group" .= Plugin.menuGroup item,"order" .= Plugin.menuOrder item,
       "title" .= Plugin.menuTitle item,"key" .= menuShortcut d (MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item)),"enabled" .= menuCommandAvailable d (contributionCommand d item)]
       | item<-contributedMenus d,let reference=Plugin.menuReference item]]
-  where cursor=case V.picCursor (renderDesktop d) of V.Cursor x y -> Just (x,y); _ -> Nothing
+  where cursor=case renderCursor d of V.Cursor x y -> Just (x,y); _ -> Nothing
 
 assetsPacket :: Font -> Double -> Value
 assetsPacket font scale = object ["type" .= ("assets"::T.Text),"version" .= protocolVersion,"scale" .= scale,"menuCommands" .= map fst protocolMenuCommands,
