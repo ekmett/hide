@@ -302,6 +302,10 @@ data EditorDraft = EditorDraft
 -- never copy their Buffer into another Desktop field or allocate a fake draft.
 data EditingInput = MountedInput | HintInput | QuestionInput deriving (Eq,Show)
 
+-- One transient export offer. Frontends retire only the serial they consumed;
+-- recovery never persists file bytes or an armed native gesture.
+data FileExport = BrowserFileExport !Text !ByteString | NativeFileExport !FilePath !Rect deriving (Eq,Show)
+
 -- | Session UI state and references to immutable document payloads.
 -- This record is not a cheap equality key; use the dedicated rendering projection.
 data Desktop = Desktop
@@ -334,6 +338,7 @@ data Desktop = Desktop
   , contextTarget :: Maybe ContextTarget
   , wideSectionTitles :: !Bool, windowPresentations :: M.Map Int WindowPresentation
   , diagnosticsGeneration :: !Integer
+  , pendingFileExport :: (Int,Maybe FileExport)
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -720,7 +725,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0
+initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing False (newBuffer "") (Selection 0 0) True False M.empty [] [] False Nothing False M.empty 0 (0,Nothing)
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))

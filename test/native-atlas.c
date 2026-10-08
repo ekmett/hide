@@ -8,6 +8,10 @@
 
 #ifdef __APPLE__
 void thc_dock_close(void) {}
+void thc_file_drag_close(void) {}
+void thc_file_drag_arm(void *window,const char *path,double x,double y,double width,double height) {
+    (void)window;(void)path;(void)x;(void)y;(void)width;(void)height;
+}
 void thc_dock_raise(void *window) { (void)window; }
 #endif
 

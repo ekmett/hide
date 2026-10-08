@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #include "window.h"
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 
 @interface THCMenuTarget : NSObject
@@ -194,4 +195,56 @@ void thc_dock_raise(void *nativeWindow) {
     [window makeKeyAndOrderFront:nil];
     if (@available(macOS 14.0, *)) [NSApp activate];
     else [NSApp activateIgnoringOtherApps:YES];
+}
+
+/* Cocoa owns file dragging; it must start from a real mouse gesture rather than
+ * an editor-input request. An armed row expires on the next unrelated click. */
+@interface HideFileDragSource : NSObject <NSDraggingSource>
+@end
+@implementation HideFileDragSource
+- (NSDragOperation)draggingSession:(NSDraggingSession *)session sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
+    (void)session; (void)context; return NSDragOperationCopy;
+}
+- (BOOL)ignoreModifierKeysForDraggingSession:(NSDraggingSession *)session { (void)session; return YES; }
+- (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)point operation:(NSDragOperation)operation {
+    (void)session; (void)point; (void)operation; thc_file_drag_ended();
+}
+@end
+static id fileDragMonitor;
+static HideFileDragSource *fileDragSource;
+void thc_file_drag_close(void) {
+    if (fileDragMonitor) [NSEvent removeMonitor:fileDragMonitor];
+    fileDragMonitor=nil;
+}
+void thc_file_drag_arm(void *native_window, const char *path, double x, double y, double width, double height) {
+    thc_file_drag_close();
+    NSWindow *window=(__bridge NSWindow *)native_window;
+    NSView *view=window.contentView;
+    NSURL *url=[NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+    NSRect row=NSMakeRect(x,y,width,height);
+    __block BOOL pressed=NO;
+    __block NSPoint start;
+    if (!fileDragSource) fileDragSource=[HideFileDragSource new];
+    fileDragMonitor=[NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskLeftMouseDown|NSEventMaskLeftMouseDragged|NSEventMaskLeftMouseUp|NSEventMaskKeyDown) handler:^NSEvent *(NSEvent *event) {
+        if (event.type==NSEventTypeKeyDown || event.window!=window) { thc_file_drag_close(); return event; }
+        NSPoint point=[view convertPoint:event.locationInWindow fromView:nil];
+        if (!view.isFlipped) point.y=view.bounds.size.height-point.y;
+        if (event.type==NSEventTypeLeftMouseDown) {
+            pressed=NSPointInRect(point,row); start=point;
+            if (!pressed) thc_file_drag_close();
+        } else if (event.type==NSEventTypeLeftMouseUp) {
+            thc_file_drag_close();
+        } else if (pressed && hypot(point.x-start.x,point.y-start.y)>=5) {
+            BOOL directory=NO;
+            if (![[NSFileManager defaultManager] fileExistsAtPath:url.path isDirectory:&directory] || directory) { thc_file_drag_close(); return event; }
+            NSDraggingItem *item=[[NSDraggingItem alloc] initWithPasteboardWriter:url];
+            NSImage *icon=[[NSWorkspace sharedWorkspace] iconForFile:url.path];
+            NSPoint anchor=[view convertPoint:event.locationInWindow fromView:nil];
+            [item setDraggingFrame:NSMakeRect(anchor.x-16,anchor.y-16,32,32) contents:icon];
+            thc_file_drag_close();
+            [view beginDraggingSessionWithItems:@[item] event:event source:fileDragSource];
+            return nil;
+        }
+        return event;
+    }];
 }

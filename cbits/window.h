@@ -7,6 +7,9 @@ void thc_raise(void);
 #ifdef __APPLE__
 void thc_dock_close(void);
 void thc_dock_raise(void *native_window);
+void thc_file_drag_arm(void *native_window, const char *path, double x, double y, double width, double height);
+void thc_file_drag_close(void);
+void thc_file_drag_ended(void);
 #endif
 /* Thread-safe wake after queuing an incoming frame; no repaint implied. */
 void thc_wake(void);
@@ -45,6 +48,8 @@ void thc_grid_stats(uint64_t *uploads, uint64_t *bytes);
 const char *thc_text(void);
 const char *thc_clipboard(void);
 void thc_set_clipboard(const char *text);
+/* Arm a copy gesture in a captured file row; native mouse input owns the drag. */
+int thc_arm_file_drag(const char *path, int x, int y, int width, int height);
 int thc_capture(const char *path);
 int thc_system_dark(void);
 #endif

@@ -84,6 +84,7 @@ foreign import ccall unsafe "thc_open" c_open :: CString -> CDouble -> CInt -> C
 foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
 foreign import ccall unsafe "thc_raise" c_raise :: IO ()
+foreign import ccall unsafe "thc_arm_file_drag" c_arm_file_drag :: CString -> CInt -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_title" c_title :: CString -> IO ()
 foreign import ccall unsafe "thc_close" c_close :: IO ()
 foreign import ccall unsafe "thc_error" c_error :: IO CString
@@ -274,16 +275,22 @@ runWindow backend scale effects tick initial = do
           utf8 text c_set_clipboard
           pure pending {clipboardExport=(serial,Nothing)}
         _->pure pending
-      key<-renderKey d
+      ready<-case pendingFileExport d of
+        (serial,Just (NativeFileExport path r))->do
+          ok<-utf8 (T.pack path) (\value->c_arm_file_drag value (fromIntegral (left r)) (fromIntegral (top r)) (fromIntegral (width r)) (fromIntegral (height r)))
+          err<-if ok==0 then c_error >>= peekCString else pure ""
+          pure d {pendingFileExport=(serial,Nothing),status=if ok==0 then T.pack err else status d}
+        _->pure d
+      key<-renderKey ready
       when (fmap (\(_,old,_)->old) previous /= Just key) $ do
-        when (fmap (\(_,_,catalogue)->catalogue) previous/=Just (contributedMenus d)) (nativeMenusFor d)
+        when (fmap (\(_,_,catalogue)->catalogue) previous/=Just (contributedMenus d)) (nativeMenusFor ready)
         when (fmap (\(title,_,_)->title) previous /= Just (applicationTitle "" d)) $ do
           cwd <- getCurrentDirectory
-          utf8 (applicationTitle cwd d) c_title
-        updateMenus d
-        draw font d
+          utf8 (applicationTitle cwd ready) c_title
+        updateMenus ready
+        draw font ready
       event <- allocaArray 6 $ \p -> check "Read window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
-      (next,requests) <- dispatch event d
+      (next,requests) <- dispatch event ready
       (exit,updated) <- foldM windowEffect (False,next) requests
       when (clipboard updated /= clipboard d) (utf8 (clipboard updated) c_set_clipboard)
       let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just (applicationTitle "" d,key,contributedMenus d)

@@ -20,7 +20,10 @@ import Data.List (find,nub)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Data.Text (Text)
-import System.Directory (canonicalizePath)
+import System.Directory (canonicalizePath,doesFileExist)
+import qualified Data.ByteString as BS
+import System.IO (withBinaryFile,IOMode(ReadMode))
+import Hide.FileDragHelper (runFileDragHelper)
 import System.FilePath ((</>),takeExtension,takeFileName,takeDirectory)
 import Data.Char (toLower)
 import System.Mem.StableName
@@ -49,17 +52,18 @@ import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Menu as Menu
 
 -- | Captured host policy; extension labels and paths grant no authority.
+data FileExportTarget = BrowserExportTarget | NativeExportTarget | HelperExportTarget deriving (Eq,Show)
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
-  , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile] }
-data SidebarReply = SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+  , sidebarColumns :: !Int, sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportTarget :: !FileExportTarget }
+data SidebarReply = SidebarExportFile !FilePath !(Maybe BS.ByteString) | SidebarExportFinished | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
   | EditorJob !Editor.DraftSubmission !(Async (Either CommandError SidebarReply)) !Bool
 data Publication = TreePublication !(P.TreeProvider SidebarContext SidebarReply) | FormRefresh !Form.FormUpdate | TreeInvalidation !P.TreeRef !P.NodeId
-data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
+data FilesProvider = FilesProvider !(P.TreeProvider SidebarContext SidebarReply) !FilePath !CommandRef !CommandRef !CommandRef !CommandRef !(IORef (M.Map P.NodeId FilePath,M.Map FilePath P.NodeId,Int,M.Map FilePath [Entry]))
 data State = State
   { providers :: !(M.Map P.TreeRef (P.TreeProvider SidebarContext SidebarReply))
   , definitions :: !(M.Map NodeKey (P.NodeDef SidebarContext SidebarReply))
@@ -142,7 +146,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing []
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing [] (if browserFrontend d then BrowserExportTarget else if nativeMac d then NativeExportTarget else HelperExportTarget)
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -175,6 +179,19 @@ createFiles host root=do
   cache<-newIORef (M.singleton rootId root,M.singleton root rootId,1,M.empty)
   owner<-newIORef Nothing
   open<-either (ioError . userError . show) pure =<< registerCommand registry (CommandDef "hide.sidebar.files.open" "Open file" codec codec prepareSidebarFile)
+  export<-either (ioError . userError . show) pure =<< registerCommand registry
+    (CommandDef "hide.sidebar.files.export" "Export saved copy" codec codec (\ctx path->
+      if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "File export requires the human.")) else do
+        resolved<-canonicalizePath path
+        exists<-doesFileExist resolved
+        if not exists then pure (Left (CommandRejected "File export needs an existing saved file.")) else
+          case sidebarExportTarget ctx of
+            NativeExportTarget->pure (Right (SidebarExportFile resolved Nothing))
+            HelperExportTarget->fmap (either (Left . CommandRejected) (const (Right SidebarExportFinished))) (runFileDragHelper resolved)
+            BrowserExportTarget->do
+              bytes<-withBinaryFile resolved ReadMode (\h->BS.hGet h (16*1024*1024))
+              pure $ if BS.length bytes>=16*1024*1024 then Left (CommandRejected "File export exceeds the browser's 16 MiB limit.")
+                else Right (SidebarExportFile resolved (Just bytes))))
   renameTo<-either (ioError . userError . show) pure =<< registerCommand registry
     (CommandDef "hide.sidebar.files.rename-to" "Rename file" codec codec (\ctx (source,name)->
       if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "File rename requires the human.")) else do
@@ -232,13 +249,14 @@ createFiles host root=do
                           (entryDirectory entry) (Just resource))
                           (if entryDirectory entry then Nothing else Just (P.treeAction registry open resource (\_ ->pure)))
                           ([P.ResourceMenu "Open" resource "" | not (entryDirectory entry),map toLower (takeExtension resource) `elem` [".md",".markdown",".png",".jpg",".jpeg",".gif",".webp",".bmp",".svg",".pdf"]]++
+                           [P.ActionMenu "Export saved copy…" (P.treeAction registry export resource (\_ value->pure value)) | not (entryDirectory entry)]++
                            [P.ActionMenu "Rename…" (P.treeAction registry rename resource (\_ value->pure value)) | not (entryDirectory entry)]))
                       -- Cache bounded directory pages at the filesystem owner. Old
                       -- directories may be re-enumerated after their cache expires.
                       atomicModifyIORef' cache $ \(a,b,c,dirs)->((M.insert ident base a,M.insert base ident b,c,M.insert base visible (if M.size dirs>=32 then M.empty else dirs)),())
                       pure (Right (P.NodePage values (if length (drop (offset+128) visible)>0 then Just (T.pack (show (offset+128))) else Nothing))))
   writeIORef owner (Just (P.treeReference provider))
-  pure (FilesProvider provider root (commandRef open) (commandRef rename) (commandRef renameTo) cache)
+  pure (FilesProvider provider root (commandRef open) (commandRef rename) (commandRef renameTo) (commandRef export) cache)
   where codec=Codec Null (const (Left "Files arguments are host-captured.")) (const Null)
 
 -- | Mount initial Files and prepare its first projection outside the UI boundary.
@@ -295,7 +313,7 @@ mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
         basis=if M.null (treeNodes visible) then visible {treeEpoch=epoch,treeRevision=epoch} else visible
         tree=foldl (flip addProvider) basis live
     case filesProvider state of
-      Just (FilesProvider provider root _ _ _ _) | root==treeRoot tree->do
+      Just (FilesProvider provider root _ _ _ _ _) | root==treeRoot tree->do
         let key=NodeKey (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
             next=if M.member (P.treeReference provider) (providers state) then addProvider provider tree else tree
         if M.member key (treeNodes visible) then pure d {sideTree=Just next}
@@ -303,10 +321,10 @@ mount host@(SidebarHost _ ref _ _ _ _) d=case sideTree d of
       _->do
         -- This path is startup/directory selection, which already belongs to the
         -- host's file effect owner. Registration and root validation are bounded.
-        mapM_ (\(FilesProvider provider _ open rename renameTo _)->P.retireTree provider >> mapM_ (retireCommand (sidebarRegistry host)) [open,rename,renameTo]) (filesProvider state)
-        created@(FilesProvider provider _ _ _ _ _)<-createFiles host (treeRoot tree)
+        mapM_ (\(FilesProvider provider _ open rename renameTo export _)->P.retireTree provider >> mapM_ (retireCommand (sidebarRegistry host)) [open,rename,renameTo,export]) (filesProvider state)
+        created@(FilesProvider provider _ _ _ _ _ _)<-createFiles host (treeRoot tree)
         let owner=P.treeReference provider
-            withdrawn=maybe tree (\(FilesProvider old _ _ _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
+            withdrawn=maybe tree (\(FilesProvider old _ _ _ _ _ _)->removeRoot (P.treeReference old) tree) (filesProvider state)
             fresh=addProvider provider withdrawn {treeAgentRefs=[owner]}
             key=NodeKey owner (P.infoId (P.nodeInfo (P.treeRoot provider)))
             defs=M.insert key (P.treeRoot provider) (definitions state)
@@ -362,7 +380,7 @@ invokeAction (SidebarHost _ ref _ _ _ _) trace reference origin d=case (trace,si
       (Nothing,Just command) | live && allowed->do
         captured<-captureActionContext origin trace d
         files<-case filesProvider state of
-          Just (FilesProvider _ _ _ rename _ _) | origin==Menu.HumanMenu,reference==rename->Rename.captureRenameFiles d
+          Just (FilesProvider _ _ _ rename _ _ _) | origin==Menu.HumanMenu,reference==rename->Rename.captureRenameFiles d
           _->pure []
         let ctx=captured {sidebarRenameFiles=files}
         worker<-async (P.invokeTreeAction command ctx)
@@ -391,7 +409,7 @@ refreshRenamedPath :: SidebarHost -> FilePath -> FilePath -> Desktop -> IO Deskt
 refreshRenamedPath host@(SidebarHost _ ref _ _ _ _) old new d=do
   state<-readIORef ref
   case filesProvider state of
-    Just (FilesProvider provider _ _ _ _ cache)->do
+    Just (FilesProvider provider _ _ _ _ _ cache)->do
       let parents=nub [takeDirectory old,takeDirectory new]
           moved path=Rename.within old path || Rename.within new path
       paths<-atomicModifyIORef' cache $ \(a,b,c,dirs)->
@@ -406,7 +424,7 @@ refreshFiles :: SidebarHost -> FilePath -> [Entry] -> Desktop -> IO Desktop
 refreshFiles host@(SidebarHost _ ref _ _ _ _) path entries d=do
   state<-readIORef ref
   case (filesProvider state,sideTree d) of
-    (Just (FilesProvider provider _ _ _ _ cache),Just tree)->do
+    (Just (FilesProvider provider _ _ _ _ _ cache),Just tree)->do
       (_,paths,_,_)<-readIORef cache
       atomicModifyIORef' cache (\(a,b,c,dirs)->((a,b,c,M.insert path entries (if M.size dirs>=32 && not (M.member path dirs) then M.empty else dirs)),()))
       case M.lookup path paths >>= \ident->let key=NodeKey (P.treeReference provider) ident in (key,) <$> M.lookup key (treeNodes tree) of
@@ -473,7 +491,7 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core ini
     finishChild state (d,keep) job@(ChildJob request origin worker cancelled)=do
       live<-maybe (pure False) P.treeCurrent (M.lookup (owner request) (providers state))
       allowed<-if origin==Menu.HumanMenu then pure True else case filesProvider state of
-        Just (FilesProvider provider _ _ _ _ cache) | P.treeReference provider==owner request->do
+        Just (FilesProvider provider _ _ _ _ _ cache) | P.treeReference provider==owner request->do
           (paths,_,_,_)<-readIORef cache
           let P.TreeHit _ ident _=requestHit request
           pure (maybe False (not . protectedPath d) (M.lookup ident paths))
@@ -648,6 +666,15 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
           modifyIORef' ref (\s->s {actionJob=Nothing})
           case result of
             Right (Right (SidebarExisting path wid bid version)) | current->adoptExisting origin path wid bid version d
+            Right (Right (SidebarExportFile path bytes)) | current && origin==Menu.HumanMenu->
+              let row=case (trace,sideTree d) of
+                    (hit:_,Just tree)->case M.lookup (keyOf hit) (treeNodes tree) >>= (\node->M.lookupIndex (stateAddress node) (treeRows tree)) of
+                      Just index->Rect 1 (index-treeScroll tree+2) (max 1 (treeWidth tree-3)) 1
+                      Nothing->Rect 0 0 0 0
+                    _->Rect 0 0 0 0
+                  offer=maybe (NativeFileExport path row) (BrowserFileExport (T.pack (takeFileName path))) bytes
+              in pure d {pendingFileExport=(fst (pendingFileExport d)+1,Just offer),status=if maybe True (const False) bytes then "Drag the selected file to export its saved copy." else "Saved copy ready for Download or drag."}
+            Right (Right SidebarExportFinished) | current && origin==Menu.HumanMenu->pure d {status="File drag helper closed."}
             Right (Right (SidebarPackageDebug target entry)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageDebugAction target entry]
             Right (Right (SidebarBuild action target)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageBuildAction action target]
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
@@ -659,6 +686,8 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
             _->pure $ if not current then d {status="Sidebar result expired."} else case result of
               Left err->d {status="Sidebar action failed: "<>T.pack (displayException err)}
               Right (Left err)->d {status="Sidebar action failed: "<>T.pack (show err)}
+              Right (Right SidebarExportFile{})->d {status="Sidebar export expired."}
+              Right (Right SidebarExportFinished)->d {status="Sidebar export expired."}
               Right (Right SidebarExisting{})->d {status="Sidebar result expired."}
               Right (Right SidebarPackageDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarBuild{})->d {status="Sidebar result expired."}

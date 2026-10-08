@@ -96,6 +96,7 @@ void thc_set_clipboard(const char *s) { SDL_SetClipboardText(s); }
 void thc_close(void) {
 #ifdef __APPLE__
     thc_dock_close();
+    thc_file_drag_close();
 #endif
     clear_pointer();
     left_down = false;
@@ -219,6 +220,32 @@ int thc_scale(int direction) {
     return 0;
 }
 
+void thc_file_drag_ended(void) {
+    left_down=false;
+    SDL_CaptureMouse(false);
+    float x,y; SDL_GetMouseState(&x,&y);
+    SDL_Event event={0}; event.type=SDL_EVENT_MOUSE_BUTTON_UP;
+    event.button.windowID=SDL_GetWindowID(window); event.button.button=SDL_BUTTON_LEFT;
+    event.button.x=x; event.button.y=y;
+    SDL_PushEvent(&event);
+}
+int thc_arm_file_drag(const char *path, int x, int y, int width, int height) {
+#ifdef __APPLE__
+    if (width<=0 || height<=0) return SDL_SetError("The exported file row is no longer visible");
+    int ww,wh;
+    SDL_GetWindowSize(window,&ww,&wh);
+    geometry();
+    double sx=(double)ww/pixel_w,sy=(double)wh/pixel_h;
+    void *native=SDL_GetPointerProperty(SDL_GetWindowProperties(window),SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,NULL);
+    if (!native) return SDL_SetError("Native file drag is unavailable");
+    thc_file_drag_arm(native,path,(origin_x+cell_x(x))*sx,(origin_y+cell_y(y))*sy,
+                      (cell_x(x+width)-cell_x(x))*sx,(cell_y(y+height)-cell_y(y))*sy);
+    return 1;
+#else
+    (void)path;(void)x;(void)y;(void)width;(void)height;
+    return SDL_SetError("Native file drag is unavailable on this frontend");
+#endif
+}
 void thc_size(int *w, int *h) { geometry(); *w = cols; *h = rows; }
 int thc_begin(void) {
     geometry();
@@ -702,6 +729,9 @@ int thc_wait(int32_t *out) {
         switch (e.type) {
         case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: out[0] = 6; return delivered(&e,out);
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+#ifdef __APPLE__
+            thc_file_drag_close();
+#endif
             geometry(); refresh_pointer(); out[0] = 5; out[1] = cols; out[2] = rows; return delivered(&e,out);
         case SDL_EVENT_WINDOW_EXPOSED: out[0] = 8; return delivered(&e,out);
         case SDL_EVENT_WINDOW_MOUSE_ENTER:

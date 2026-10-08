@@ -10,6 +10,9 @@ void thc_dock_begin(void);
 void thc_dock_item(int, const char *, int, int);
 void thc_dock_end(void);
 void thc_dock_close(void);
+void thc_file_drag_arm(void *,const char *,double,double,double,double);
+void thc_file_drag_close(void);
+void thc_file_drag_ended(void) {}
 void thc_dock_raise(void *);
 int thc_dock_generation(void);
 void thc_menu_add(const char *);
@@ -39,6 +42,12 @@ void thc_post_command(int command, int generation) {
 int main(void) {
     @autoreleasepool {
         [NSApplication sharedApplication];
+        id<NSDraggingSource> fileSource=[NSClassFromString(@"HideFileDragSource") new];
+        assert(fileSource);
+        assert([fileSource draggingSession:nil sourceOperationMaskForDraggingContext:NSDraggingContextOutsideApplication]==NSDragOperationCopy);
+        assert([fileSource draggingSession:nil sourceOperationMaskForDraggingContext:NSDraggingContextWithinApplication]==NSDragOperationCopy);
+        assert([fileSource ignoreModifierKeysForDraggingSession:nil]);
+
         DockDelegate *delegate = [DockDelegate new];
         delegate.original = [NSMenu new];
         [delegate.original addItemWithTitle:@"Existing delegate action" action:nil keyEquivalent:@""];
