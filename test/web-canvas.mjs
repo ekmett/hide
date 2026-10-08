@@ -53,6 +53,7 @@ for(const bad of [
 assert.throws(()=>scene([surface],[2,0,0,0]),/Invalid canvas/);
 scene([surface],[0x8000,0,0,0]);assert.equal(access.hidden,true); // A halo bit without an image owner has no image paint.
 assert.throws(()=>scene([surface,surface]),/Invalid canvas/);
+context.value={epoch,surfaces:[],mask:''};run('images.receive(value,2,2)');assert.equal(access.hidden,true);assert.equal(run('images.scene'),null);
 context.value={epoch,surfaces:[surface],mask:''};assert.throws(()=>run('images.receive(value,2,2)'),/Invalid canvas/);
 run('images.clear()');assert.equal(run('images.upload'),null);assert.equal(run('images.resources.size'),0);assert.equal(run('images.epoch'),null);
 console.log('Canvas resources: bounded contiguous bytes, scene/mask validation, inert names, occlusion retention, release/reset/old-epoch cleanup passed');

@@ -183,7 +183,7 @@ function drawRows(changed,retried=false){
  rasterTime+=performance.now()-started;dirty=true;
 }
 function present(now){
- const phase=!frame?.blink||Math.floor((now-cursorEpoch)/500)%2===0;
+ const phase=!frame?.cursor||!frame.blink||Math.floor((now-cursorEpoch)/500)%2===0;
  if(frame&&!contextLost&&(dirty||phase!==blinkPhase)){
    gl.useProgram(program);gl.bindVertexArray(cellVAO);
    const started=performance.now();

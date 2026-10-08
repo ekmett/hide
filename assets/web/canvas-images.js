@@ -45,7 +45,9 @@ class CanvasImages {
  }
  receive(value,cols,lines){
   const invalid=()=>{this.scene=null;this.describe();throw new Error('Invalid canvas scene');};
-  if(!Number.isInteger(cols)||cols<1||cols>512||!Number.isInteger(lines)||lines<1||lines>256||!value||value.epoch!==this.epoch||!Array.isArray(value.surfaces)||value.surfaces.length>64||typeof value.mask!=='string'||value.mask.length!==4*Math.ceil(cols*lines*2/3))invalid();
+  if(!Number.isInteger(cols)||cols<1||cols>512||!Number.isInteger(lines)||lines<1||lines>256||!value||value.epoch!==this.epoch||!Array.isArray(value.surfaces)||value.surfaces.length>64||typeof value.mask!=='string')invalid();
+  if(!value.surfaces.length&&!value.mask){this.scene=null;this.describe();return;}
+  if(value.mask.length!==4*Math.ceil(cols*lines*2/3))invalid();
   let raw;try{raw=atob(value.mask);}catch{invalid();}
   if(raw.length!==cols*lines*2)invalid();
   const slots=new Set(),ids=new Set();
