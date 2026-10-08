@@ -445,6 +445,19 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                       in pure $ if not (stopped current || suspending current) && fst (clipboardExport latest)==serial
                         then current {desktop=latest {clipboardExport=(serial,Nothing)}} else current
                   _ -> pure ()
+                case pendingFileExport d of
+                  (serial,Just (ExportFileCopy name bytes row)) | not (stopped s || suspending s) -> do
+                    -- This send loop is the sole post-handshake writer. Keep the
+                    -- authorized header/payload pair outside the desktop lock.
+                    writePacket connection (json "download" ["purpose" .= ("file-export"::T.Text),"name" .= name,
+                      "row" .= [left row,top row,width row,height row],"view" .= fileExportView d])
+                    writePacket connection (BinaryPacket bytes)
+                    modifyMVar_ state $ \current ->
+                      let latest=desktop current
+                      in pure $ if not (stopped current || suspending current) &&
+                          (owner current,generation current)==(owner s,generation s) && fst (pendingFileExport latest)==serial
+                        then current {desktop=latest {pendingFileExport=(serial,Nothing)}} else current
+                  _ -> pure ()
                 let changed=reset || (not sameFrame && (rows/=oldRows || metadata/=oldMeta))
                 settled<-readIORef settledFrame
                 when (changed || settled/=acknowledged s) $ do

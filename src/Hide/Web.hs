@@ -69,11 +69,19 @@ runWeb scale effects tick initial = do
         pending<-tick d
         -- Retain the pending intent if socket delivery fails before retirement.
         writeIORef state pending
-        current<-case clipboardExport pending of
+        exported<-case pendingFileExport pending of
+          (serial,Just (ExportFileCopy name bytes row))->do
+            send (object ["type" .= ("download"::T.Text),"purpose" .= ("file-export"::T.Text),"name" .= name,
+              "row" .= [left row,top row,width row,height row],"view" .= fileExportView pending])
+            WS.sendBinaryData conn bytes
+            pure pending {pendingFileExport=(serial,Nothing)}
+          _->pure pending
+        writeIORef state exported
+        current<-case clipboardExport exported of
           (serial,Just text)->do
             send (object ["type" .= ("copy"::T.Text),"text" .= text])
-            pure pending {clipboardExport=(serial,Nothing)}
-          _->pure pending
+            pure exported {clipboardExport=(serial,Nothing)}
+          _->pure exported
         refreshRequestedPaste pasteReads current
         cwd<-getCurrentDirectory
         writeIORef state current

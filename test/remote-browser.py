@@ -67,10 +67,13 @@ class Display:
             message=self.read()
             if message.get('type')==kind and predicate(message): return message
         raise AssertionError('No expected '+kind)
+    def text_rows(self):
+        return [''.join(run if isinstance(run,str) else run[0] for span in (row or []) for run in span[4]) for row in self.rows]
 
 binary=str(pathlib.Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
     root=pathlib.Path(directory);source=root/"a b ' λ.txt";source.write_text('original\n')
+    saved=root/"a b ' λ.bin";saved_bytes=bytes(range(256));saved.write_bytes(saved_bytes)
     ssh=root/'ssh'
     ssh.write_text('#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[-1]=="hide --remote",sys.argv\nos.execv(os.environ["THC_TEST_EXE"],[os.environ["THC_TEST_EXE"],"--remote"])\n')
     ssh.chmod(0o700)
@@ -114,7 +117,26 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
             display.until('frame',lambda _:'Haskell Help' in display.meta['title'])
             assert source.read_text()=='remote λ\n'
             ws.send({'type':'menu','command':'hide.window.close','seq':5});display.until('ack',lambda m:m['seq']==5)
-            ws.send({'type':'command','command':'hide.app.quit','seq':6});display.until('closed')
+            showing_files=any(saved.name in row for row in display.text_rows())
+            ws.send({'type':'blur','seq':6} if showing_files else {'type':'menu','command':'hide.view.files','seq':6})
+            display.until('ack',lambda m:m['seq']==6)
+            if not any(saved.name in row for row in display.text_rows()):
+                display.until('frame',lambda _:any(saved.name in row for row in display.text_rows()))
+            row=next(y for y,text in enumerate(display.text_rows()) if saved.name in text)
+            ws.send({'type':'mouse','action':'down','button':2,'x':4,'y':row,'seq':7});display.until('ack',lambda m:m['seq']==7)
+            if not any('Export saved copy' in text for text in display.text_rows()):
+                display.until('frame',lambda _:any('Export saved copy' in text for text in display.text_rows()))
+            export_row=next(y for y,text in enumerate(display.text_rows()) if 'Export saved copy' in text)
+            ws.send({'type':'mouse','action':'down','x':6,'y':export_row,'seq':8})
+            exported=display.until('download')
+            assert set(exported)=={'type','purpose','name','row','view'},exported
+            assert exported['type']=='download' and exported['purpose']=='file-export' and exported['name']==saved.name,exported
+            assert len(exported['row'])==4 and exported['row'][2]>0 and exported['row'][3]==1,exported
+            assert len(exported['view'])==12 and all(isinstance(value,int) for value in exported['view']),exported
+            kind,blob=ws.read();assert kind==2 and blob==saved_bytes
+            assert saved.read_bytes()==saved_bytes and source.read_text()=='remote λ\n'
+            assert not display.meta['dirty'],display.meta
+            ws.send({'type':'command','command':'hide.app.quit','seq':9});display.until('closed')
             code=process.wait(timeout=10)
             log.flush();log.seek(0)
             assert code==0,log.read()
