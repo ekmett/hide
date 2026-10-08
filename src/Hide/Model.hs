@@ -4282,7 +4282,12 @@ submitDialog button dg original
 
 
 startingDirectory :: Desktop -> FilePath
-startingDirectory d = fromMaybe (maybe (maybe "." treeRoot (sideTree d)) (takeDirectory . filePath) (activeDocument d >>= documentFile)) (defaultDirectory d)
+startingDirectory d = fromMaybe (maybe (maybe "." treeRoot (sideTree d)) takeDirectory origin) (defaultDirectory d)
+  where
+    origin=fmap filePath (activeDocument d >>= documentFile) <|> do
+      window<-activeWindow d
+      _<-windowImage d window
+      windowPluginText d window >>= PluginWindow.preparedWindowSemantics >>= PluginWindow.textLinkBase
 
 treeWidthOf :: Desktop -> Int
 -- The dock's right frame is also the editor area's left frame.
