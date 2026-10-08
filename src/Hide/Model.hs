@@ -742,7 +742,8 @@ addPluginWindow reference prepared d=d {windows=w:windows d,pluginWindows=M.inse
   where
     i=nextId d
     (sw,sh)=screenSize d
-    w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 0 Nothing False False
+    column=fromMaybe 0 (listToMaybe [conversationScrollColumn view | view<-M.elems (conversationViews d),conversationBodyRef view==Just reference])
+    w=Window i (PluginContent reference) (fitWindow d (Rect 0 1 sw (sh-2))) (Selection 0 0) 0 column Nothing False False
       (nextWindowNumber d) CurrentView Nothing 50 Nothing (initialRowsInteraction prepared) Nothing Nothing
 
 -- | Current Details text for rows, or the original plain/styled view. This reads

@@ -3,6 +3,9 @@ module RecoveryCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket)
+import Control.Concurrent (threadDelay)
+import System.Timeout (timeout)
+import Hide.TextPresentation (withTextPresentation,textPresentationEffects,tickTextPresentation)
 import Control.Monad (unless, forM_)
 import Data.Char (chr, ord)
 import Data.Word (Word64)
@@ -178,8 +181,14 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
      not ("primary transcript 81" `T.isInfixOf` activeText restoredPrimary) &&
      V.null (W.textLinks copyMetadata) && V.null (W.textShellBlocks copyMetadata) &&
      all (\w->maybe True (const False) (windowConversationControls restoredPrimary w)) (windows restoredPrimary))
-  let projected=W.preparedWindowText recoveredBody
-      allCopied=W.copyPreparedSelection recoveredBody 0 (contentLength projected)
+  allCopied<-withTextPresentation $ \presentation->do
+    let (copying,effects)=runCommand Copy restoredPrimary
+        awaitCopy desktop=do
+          (next,_)<-tickTextPresentation presentation [] desktop
+          if fst (clipboardExport next)==fst (clipboardExport copying) && snd (clipboardExport next)/=Nothing
+            then pure (clipboard next) else threadDelay 10000 >> awaitCopy next
+    (_,queued)<-textPresentationEffects presentation (\desktop _->pure (False,desktop)) copying effects
+    timeout 8000000 (awaitCopy queued) >>= maybe (error "Recovered conversation copy timed out") pure
   check "passive copy retains hard breaks and outgoing attribution"
     ("User: hi\nx" `T.isInfixOf` allCopied && "Bot: ok" `T.isInfixOf` allCopied)
   viewBytes<-BS.readFile viewsPath
