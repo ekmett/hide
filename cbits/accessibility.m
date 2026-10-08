@@ -272,7 +272,7 @@ static NSString *dialogHelp(NSDictionary *record) {
 - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityGroupRole; }
 - (NSAccessibilitySubrole)accessibilitySubrole { return NSAccessibilityDialogSubrole; }
 - (NSString *)accessibilityLabel { return self.record[@"name"]; }
-- (NSString *)accessibilityHelp { return self.truncated ? @"Read-only dialog snapshot. Some visible controls are omitted." : @"Read-only dialog snapshot; use editor controls to change this dialog."; }
+- (NSString *)accessibilityHelp { return self.truncated ? @"Read-only dialog snapshot. Some visible content is omitted." : @"Read-only dialog snapshot; use editor controls to change this dialog."; }
 - (NSRect)accessibilityFrame { return screenFrame(self,self.record[@"bounds"]); }
 - (NSArray *)accessibilityChildren { return self.children; }
 - (BOOL)isAccessibilityFocused { return NO; }

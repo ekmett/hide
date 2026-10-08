@@ -174,6 +174,7 @@ int main(int argc,char **argv) {
     }
     assert(![dialogHost acceptsFirstResponder] && [dialogHost hitTest:NSMakePoint(2,2)]==nil);
     assert(window.firstResponder==firstResponder && !findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]) && !findRole(window,NSAccessibilityImageRole,[NSMutableSet new]));
+    modal[@"truncated"]=@YES;assert(publish(modalWrapper));assert([[dialogHost accessibilityHelp] containsString:@"Some visible content is omitted"]);modal[@"truncated"]=@NO;
     input[@"value"]=@"updated";input[@"bounds"]=@[@2,@4,@5,@2];assert(publish(modalWrapper));
     assert(findRole(window,NSAccessibilityTextFieldRole,[NSMutableSet new])==inputElement && [[inputElement accessibilityValue] isEqual:@"updated"]);
     input[@"value"]=NSNull.null;assert(publish(modalWrapper));
@@ -192,6 +193,11 @@ int main(int argc,char **argv) {
         modal[@"nodes"]=@[modalRoot,invalid];assert(!publish(modalWrapper));
         assert(![inputElement isAccessibilityElement]);
     }
+    NSMutableArray *overBudget=[NSMutableArray arrayWithObject:modalRoot];
+    for (int i=0;i<15;++i) [overBudget addObject:dialogNode(@[@"dialog",@"body",[@(i) stringValue]],dialogId,@"text",
+        [@"x" stringByPaddingToLength:256 withString:@"x" startingAtIndex:0],[@"y" stringByPaddingToLength:2048 withString:@"y" startingAtIndex:0],@[@1,@2,@22,@1])];
+    modal[@"nodes"]=overBudget;assert(!publish(modalWrapper));
+    NSMutableArray *tooMany=[NSMutableArray new];for (int i=0;i<257;++i) [tooMany addObject:modalRoot];modal[@"nodes"]=tooMany;assert(!publish(modalWrapper));
     modal[@"nodes"]=@[modalRoot,input,input];assert(!publish(modalWrapper));
     modal[@"present"]=@NO;modal[@"nodes"]=@[modalRoot];assert(!publish(modalWrapper));
     assert(thc_accessibility(NULL,0));assert(window.firstResponder==firstResponder);
