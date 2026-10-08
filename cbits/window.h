@@ -1,5 +1,6 @@
 #ifndef THC_WINDOW_H
 #define THC_WINDOW_H
+#include <stddef.h>
 #include <stdint.h>
 void thc_post_command(int command, int generation);
 void thc_post_window(int ident, int generation);
@@ -19,6 +20,8 @@ int thc_mode(int cell_height, int cols, int rows);
 int thc_scale(int direction);
 void thc_title(const char *text);
 void thc_close(void);
+/* Main-thread read-only sidebar snapshot; NULL/0 clears. Non-macOS is a no-op. */
+int thc_accessibility(const char *json, size_t length);
 const char *thc_error(void);
 const char *thc_backend(void);
 void thc_size(int *cols, int *rows);

@@ -2,6 +2,7 @@
  * Uses SDL's event queue and dummy video driver; no real window or user input.
  */
 #include "../cbits/window.h"
+#include "../cbits/accessibility.h"
 #include "../cbits/unicode.h"
 #include <SDL3/SDL.h>
 #include <assert.h>
@@ -412,6 +413,10 @@ static void check_fractional_zoom(void) {
     assert(windows && count == 1);
     assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 729 && height == 450);
     thc_size(&cols, &rows); assert(cols == 81 && rows == 25);
+#ifdef __APPLE__
+    double accessible[4]; assert(thc_accessibility_cell_rect(1,3,22,1,accessible));
+    assert(accessible[0]==9 && accessible[1]==54 && accessible[2]==198 && accessible[3]==18); /* 1x point/drawable conversion. */
+#endif
     SDL_FlushEvents(SDL_EVENT_FIRST, SDL_EVENT_LAST);
     SDL_Event e; SDL_zero(e); e.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
     e.button.button = SDL_BUTTON_LEFT; e.button.x = 18.5f; e.button.y = 36.5f;
@@ -420,6 +425,10 @@ static void check_fractional_zoom(void) {
     assert(thc_scale(1));
     assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 810 && height == 500);
     thc_size(&cols, &rows); assert(cols == 81 && rows == 25);
+#ifdef __APPLE__
+    assert(thc_accessibility_cell_rect(1,3,22,1,accessible));
+    assert(accessible[0]==10 && accessible[1]==60 && accessible[2]==220 && accessible[3]==20);
+#endif
     assert(thc_scale(0));
     assert(SDL_GetWindowSizeInPixels(windows[0], &width, &height) && width == 1296 && height == 800);
     SDL_free(windows);
@@ -513,6 +522,9 @@ int main(void) {
 #ifdef __APPLE__
 /* This isolated keyboard decoder test has no Cocoa application lifecycle. */
 void thc_dock_close(void) {}
+void thc_accessibility_close(void) {}
+void thc_accessibility_geometry_changed(void) {}
+int thc_accessibility_update(void *window,const char *json,size_t length) { (void)window;(void)json;(void)length;return 1; }
 void thc_file_drag_close(void) {}
 void thc_file_drag_arm(void *window,const char *path,double x,double y,double width,double height) {
     (void)window;(void)path;(void)x;(void)y;(void)width;(void)height;

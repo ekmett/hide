@@ -8,6 +8,9 @@
 
 #ifdef __APPLE__
 void thc_dock_close(void) {}
+void thc_accessibility_close(void) {}
+void thc_accessibility_geometry_changed(void) {}
+int thc_accessibility_update(void *window,const char *json,size_t length) { (void)window;(void)json;(void)length;return 1; }
 void thc_file_drag_close(void) {}
 void thc_file_drag_arm(void *window,const char *path,double x,double y,double width,double height) {
     (void)window;(void)path;(void)x;(void)y;(void)width;(void)height;

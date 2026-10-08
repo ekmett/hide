@@ -1,4 +1,5 @@
 #include "window.h"
+#include "accessibility.h"
 #include "unicode.h"
 #include "shaders/cell.h"
 #include "shaders/cell.generated.h"
@@ -95,6 +96,7 @@ void thc_set_clipboard(const char *s) { SDL_SetClipboardText(s); }
 
 void thc_close(void) {
 #ifdef __APPLE__
+    thc_accessibility_close();
     thc_dock_close();
     thc_file_drag_close();
 #endif
@@ -129,6 +131,36 @@ static void geometry(void) {
     rows = SDL_clamp(pixel_h / (cell_height * scale), 1, 256);
     origin_x = (pixel_w - cols * 8 * scale) / 2;
     origin_y = (pixel_h - rows * cell_height * scale) / 2;
+#ifdef __APPLE__
+    int ww,wh; SDL_GetWindowSize(window,&ww,&wh);
+    static double previous[11];
+    double current[]={cols,rows,origin_x,origin_y,pixel_w,pixel_h,ww,wh,scale,cell_height,(double)SDL_GetWindowID(window)};
+    if (memcmp(previous,current,sizeof(current))) {
+        memcpy(previous,current,sizeof(current));
+        thc_accessibility_geometry_changed();
+    }
+#endif
+}
+
+#ifdef __APPLE__
+int thc_accessibility_cell_rect(int x,int y,int width,int height,double rectangle[4]) {
+    if (!window || !rectangle || pixel_w<=0 || pixel_h<=0 || x<0 || y<0 || width<=0 || height<=0 || x>=cols || y>=rows || width>cols-x || height>rows-y) return 0;
+    int ww,wh; SDL_GetWindowSize(window,&ww,&wh);
+    double sx=(double)ww/pixel_w,sy=(double)wh/pixel_h;
+    rectangle[0]=(origin_x+cell_x(x))*sx; rectangle[1]=(origin_y+cell_y(y))*sy;
+    rectangle[2]=(cell_x(x+width)-cell_x(x))*sx; rectangle[3]=(cell_y(y+height)-cell_y(y))*sy;
+    return 1;
+}
+#endif
+int thc_accessibility(const char *json,size_t length) {
+#ifdef __APPLE__
+    if (length && window) geometry();
+    void *native=window?SDL_GetPointerProperty(SDL_GetWindowProperties(window),SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,NULL):NULL;
+    if (!thc_accessibility_update(native,json,length)) return SDL_SetError("Invalid or unavailable sidebar accessibility metadata");
+#else
+    (void)json; (void)length;
+#endif
+    return 1;
 }
 
 static void refresh_pointer(void) {
