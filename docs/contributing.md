@@ -608,12 +608,12 @@ scoped nodes via `refreshTreeFromHost`, which reuses ordinary request generation
 worker cancellation and page adoption. `SelectedInput` supplies a reusable
 single-line selected range; ordinary caret-only Input behavior is unchanged.
 
-## Prepared plugin text windows
+## Prepared plugin windows
 
 `Hide.Plugin.Window.prepareTextWindow` and `prepareMarkdownWindow` prepare
 read-only content on a command's worker. `withWindowScope` bounds its publication
-lifetime. `openTextWindow` returns an opaque `WindowUpdate` for a new exact
-instance; `refreshTextWindow` publishes a later complete prepared presentation.
+lifetime. `openWindow` returns an opaque `WindowUpdate` for a new exact
+instance; `refreshWindow` publishes a later complete prepared presentation.
 A `MenuReply` can return `PreparedWindow`
 through the existing contributed-menu adapter. The host checks the exact menu
 registration and captured target before installing the result; plugins never
@@ -640,6 +640,29 @@ installed body; an escaped update cannot reopen it. Scope retirement revokes
 publication while retaining an inert read-only snapshot. Its old references cannot
 refresh or reopen it. A content owner may retain the closed snapshot for an
 explicit later opening under a fresh reference.
+
+`prepareImageWindow title disclosure origin png` prepares a PNG on the same
+worker and publishes through `openWindow`. The optional canonical origin remains
+host metadata: the current protected-path policy can hide a formerly readable
+image. Preparation caps compressed input at 16 MiB, dimensions at 4096 per side,
+and decoded area at 4 megapixels. Host admission allows 64 image views and 64 MiB
+of distinct decoded resources. Closing or scope retirement releases image bytes;
+retirement retains only the small text fallback.
+
+PNG windows use Fit by default, `F` to fit again, `1` for actual size, plus/minus
+or the wheel to zoom, and arrows or a content drag to pan. Host chrome and modal
+input retain their normal owners. Terminal fallback reports dimensions and offers
+an explicit Open externally link for file-backed images. Original PNG bytes and
+active image resources are never checkpointed.
+
+`renderCellRowsAndCanvas` produces fallback cells and image ownership in one
+composition. Each mask cell is little-endian uint16: a frame-local image slot in
+the low 15 bits and half-intensity halo shading in bit 15. Ordinary glyph cells
+and privacy masks retain zero ownership. Native, browser and logical agent PNG
+capture use the same image transform and mask; nearest sampling composites
+straight RGBA8 onto black. Capture includes only permitted images and describes
+only image surfaces with visible owned cells. Pixel resources remain immutable
+while pan, zoom and window layout change.
 
 Ordinary views are transient. `prepareRecoverableTextWindow` explicitly declares
 non-secret text eligible for private recovery, with a namespaced type ID and
