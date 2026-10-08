@@ -108,7 +108,80 @@ static BOOL readOnlySelector(SEL selector) {
 - (BOOL)isAccessibilitySelectorAllowed:(SEL)selector { return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector]; }
 @end
 
+/* Images share the renderer's clipped cell ownership, with no action or focus
+ * selectors. Resource IDs and pixels never enter the accessibility adapter. */
+@class HideAXCanvas;
+@interface HideAXImage : NSAccessibilityElement
+@property(weak) HideAXCanvas *host;
+@property(copy) NSDictionary *record;
+@end
+@interface HideAXCanvas : NSView
+@property(copy) NSArray<HideAXImage *> *images;
+@property(copy) NSDictionary<NSNumber *,HideAXImage *> *nodes;
+@end
+static HideAXCanvas *canvasHost;
+@implementation HideAXImage
+- (BOOL)isAccessibilityElement { return self.record!=nil; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityImageRole; }
+- (NSString *)accessibilityLabel { return self.record[@"name"]; }
+- (NSString *)accessibilityHelp { return self.record[@"description"]; }
+- (id)accessibilityParent { return self.host; }
+- (NSRect)accessibilityFrame { return screenFrame(self.host,self.record[@"bounds"]); }
+- (BOOL)isAccessibilityFocused { return NO; }
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector { return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector]; }
+@end
+@implementation HideAXCanvas
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return NO; }
+- (NSView *)hitTest:(NSPoint)point { (void)point; return nil; }
+- (BOOL)isAccessibilityElement { return self.images.count>0; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityGroupRole; }
+- (NSString *)accessibilityLabel { return @"Images"; }
+- (NSArray *)accessibilityChildren { return self.images; }
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector { return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector]; }
+@end
+static void clearCanvasAccessibility(void) {
+    NSView *parent=canvasHost.superview;
+    for (HideAXImage *image in canvasHost.images) { image.record=nil; image.host=nil; }
+    canvasHost.images=nil; canvasHost.nodes=nil; [canvasHost removeFromSuperview]; canvasHost=nil;
+    if (parent) NSAccessibilityPostNotification(parent,NSAccessibilityLayoutChangedNotification);
+}
+static int updateCanvasAccessibility(void *native_window,NSDictionary *snapshot) {
+    NSArray *size=snapshot[@"size"],*values=snapshot[@"images"];
+    if (![size isKindOfClass:NSArray.class] || size.count!=2 || !integer(size[0],512) || !integer(size[1],256) ||
+        [size[0] integerValue]<1 || [size[1] integerValue]<1 || ![values isKindOfClass:NSArray.class] || values.count>64) goto invalid;
+    @autoreleasepool {
+        NSMutableSet *identities=[NSMutableSet new];
+        for (NSDictionary *entry in values) {
+            if (![entry isKindOfClass:NSDictionary.class] || !integer(entry[@"id"],2147483647) || ![entry[@"id"] integerValue] ||
+                !text(entry[@"name"],256,NO) || !text(entry[@"description"],1024,NO) || entry[@"bounds"]==NSNull.null ||
+                !bounds(entry[@"bounds"],[size[0] integerValue],[size[1] integerValue]) || [identities containsObject:entry[@"id"]]) goto invalid;
+            [identities addObject:entry[@"id"]];
+        }
+        if (!values.count) { clearCanvasAccessibility(); return 1; }
+        NSWindow *window=(__bridge NSWindow *)native_window;
+        if (canvasHost && canvasHost.window!=window) clearCanvasAccessibility();
+        if (!canvasHost) {
+            canvasHost=[[HideAXCanvas alloc] initWithFrame:window.contentView.bounds];
+            canvasHost.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;
+            [window.contentView addSubview:canvasHost];
+        }
+        NSMutableDictionary *nodes=[NSMutableDictionary new]; NSMutableArray *images=[NSMutableArray new];
+        for (NSDictionary *entry in values) {
+            HideAXImage *image=canvasHost.nodes[entry[@"id"]] ?: [HideAXImage new];
+            image.record=entry;image.host=canvasHost;nodes[entry[@"id"]]=image;[images addObject:image];
+        }
+        for (NSNumber *ident in canvasHost.nodes) if (!nodes[ident]) { canvasHost.nodes[ident].record=nil; canvasHost.nodes[ident].host=nil; }
+        canvasHost.nodes=nodes;canvasHost.images=images;
+        NSAccessibilityPostNotification(canvasHost,NSAccessibilityLayoutChangedNotification);
+        return 1;
+    }
+invalid:
+    clearCanvasAccessibility(); return 0;
+}
+
 void thc_accessibility_close(void) {
+    clearCanvasAccessibility();
     NSView *parent=host.superview;
     for (HideAXRow *row in host.rows) [row retire];
     host.rows=nil; host.nodes=nil; host.record=nil;
@@ -117,6 +190,7 @@ void thc_accessibility_close(void) {
 }
 void thc_accessibility_geometry_changed(void) {
     if (host.rows.count) NSAccessibilityPostNotification(host,NSAccessibilityLayoutChangedNotification);
+    if (canvasHost.images.count) NSAccessibilityPostNotification(canvasHost,NSAccessibilityLayoutChangedNotification);
 }
 int thc_accessibility_update(void *native_window, const char *json, size_t length) {
     if (!NSThread.isMainThread) return 0;
@@ -124,6 +198,7 @@ int thc_accessibility_update(void *native_window, const char *json, size_t lengt
     if (!native_window || !json || length>2097152) goto invalid;
     @autoreleasepool {
         NSDictionary *snapshot=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:json length:length] options:0 error:nil];
+        if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"images"]) return updateCanvasAccessibility(native_window,snapshot);
         if (![snapshot isKindOfClass:NSDictionary.class] || !boolean(snapshot[@"readOnly"]) || ![snapshot[@"readOnly"] boolValue] || !integer(snapshot[@"revision"],9007199254740991)) goto invalid;
         NSArray *layout=snapshot[@"layout"],*values=snapshot[@"nodes"];
         if (![layout isKindOfClass:NSArray.class] || layout.count!=7 || ![values isKindOfClass:NSArray.class] || values.count>512) goto invalid;

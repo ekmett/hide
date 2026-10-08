@@ -9,6 +9,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
   , c_accessibility, c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
+  , installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
   , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
@@ -26,6 +27,13 @@ import Data.Char (chr, toLower)
 import Data.Maybe (mapMaybe)
 #ifdef WITH_WINDOW
 import Data.List (elemIndex)
+import qualified Data.Bits as Bits
+import Data.IORef
+import qualified Data.Map.Strict as M
+import Data.Aeson (object,(.=),encode)
+import qualified Data.ByteString.Lazy as BL
+import qualified Hide.Plugin.Canvas as Canvas
+import Hide.RemoteEndpoint (randomIdentity)
 import Control.Exception (bracket_)
 import Control.Monad (forM_, when, unless, foldM)
 import Data.Foldable (toList)
@@ -93,6 +101,14 @@ foreign import ccall unsafe "thc_error" c_error :: IO CString
 foreign import ccall unsafe "thc_backend" c_backend :: IO CString
 foreign import ccall unsafe "thc_size" c_size :: Ptr CInt -> Ptr CInt -> IO ()
 foreign import ccall unsafe "thc_begin" c_begin :: IO CInt
+foreign import ccall unsafe "thc_canvas_reset" c_canvas_reset :: CString -> IO CInt
+foreign import ccall unsafe "thc_canvas_begin" c_canvas_begin :: CString -> CString -> CInt -> CInt -> CSize -> IO CInt
+foreign import ccall unsafe "thc_canvas_chunk" c_canvas_chunk :: CString -> CString -> CSize -> CString -> CSize -> IO CInt
+foreign import ccall unsafe "thc_canvas_release" c_canvas_release :: CString -> CString -> IO CInt
+foreign import ccall unsafe "thc_canvas_scene" c_canvas_scene :: CString -> CInt -> CInt -> CString -> CSize -> IO CInt
+foreign import ccall unsafe "thc_canvas_surface" c_canvas_surface :: CString -> CInt -> CInt -> CInt -> CInt -> CInt -> CDouble -> CDouble -> CDouble -> CDouble -> IO CInt
+foreign import ccall unsafe "thc_canvas_commit" c_canvas_commit :: IO CInt
+foreign import ccall unsafe "thc_canvas_clear" c_canvas_clear :: IO ()
 foreign import ccall unsafe "thc_clip" c_clip :: CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_glyph" c_glyph :: CInt -> CInt -> CInt -> CInt -> Ptr Word16 -> Word32 -> Word32 -> Word32 -> CInt -> CInt -> IO ()
 foreign import ccall unsafe "thc_unicode" c_unicode :: CInt -> CInt -> CInt -> CString -> Word32 -> Word32 -> Word32 -> CInt -> CInt -> IO CInt
@@ -135,6 +151,20 @@ check context action = do
 -- | Lend a temporary NUL-terminated UTF-8 C string for the callback only.
 utf8 :: T.Text -> (CString -> IO a) -> IO a
 utf8 text = BS.useAsCString (TE.encodeUtf8 text)
+
+-- | Commit one validated small scene on the SDL thread. The packed mask is
+-- copied/widened by C; borrowed strings and bytes never survive these calls.
+-- Retained image resources are admitted separately and remain invisible until
+-- their bounded upload finishes. Slots confer no host input authority.
+installNativeCanvas :: T.Text -> (Int,Int) -> BS.ByteString
+  -> [(T.Text,Int,(Int,Int,Int,Int),(Double,Double,Double,Double))] -> IO ()
+installNativeCanvas epoch (cols,rows) mask surfaces=do
+  utf8 epoch $ \owner->BS.useAsCString mask $ \packed->
+    check "Commit canvas mask" (c_canvas_scene owner (fromIntegral cols) (fromIntegral rows) packed (fromIntegral (BS.length mask `div` 2)))
+  forM_ surfaces $ \(resource,slot,(x,y,w,h),(a,b,c,d))->utf8 resource $ \ident->
+    check "Commit canvas surface" (c_canvas_surface ident (fromIntegral slot) (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral h)
+      (realToFrac a) (realToFrac b) (realToFrac c) (realToFrac d))
+  check "Commit canvas scene" c_canvas_commit
 
 nativeMenus :: IO ()
 nativeMenus=nativeMenusFor (initialDesktop (80,25))
@@ -186,19 +216,83 @@ updateMenus d = do
 updateMenus _ = pure ()
 #endif
 
+-- Retained renderer residency contains only IDs/offsets plus the latest immutable
+-- scene. One owner turn uploads at most 256 KiB; it never decodes PNG or compares
+-- pixel payloads. The active partial upload wins over newly admitted resources.
+data NativeCanvasOwner = NativeCanvasOwner !T.Text (IORef (M.Map T.Text Int,Canvas.CanvasScene))
+
+newNativeCanvasOwner :: IO NativeCanvasOwner
+newNativeCanvasOwner=do
+  epoch<-T.pack <$> randomIdentity
+  ref<-newIORef (M.empty,Canvas.CanvasScene [] BS.empty)
+  pure (NativeCanvasOwner epoch ref)
+
+updateNativeCanvas :: NativeCanvasOwner -> (Int,Int) -> Canvas.CanvasScene -> IO ()
+updateNativeCanvas (NativeCanvasOwner epoch ref) size scene=do
+  (resident,_)<-readIORef ref
+  let images=M.fromList [(Canvas.imageResourceId image,image) | surface<-Canvas.canvasSurfaces scene,let image=Canvas.canvasImage surface]
+      retained=M.intersection resident images
+  forM_ (M.keys (resident `M.difference` images)) $ \ident->utf8 epoch $ \owner->utf8 ident $ \resource->
+    check "Retire local image" (c_canvas_release owner resource)
+  writeIORef ref (retained,scene)
+  installNativeCanvas epoch size (Canvas.canvasMask scene)
+    [(Canvas.imageResourceId (Canvas.canvasImage entry),Canvas.canvasSlot entry,Canvas.canvasRect entry,Canvas.canvasTarget entry) | entry<-Canvas.canvasSurfaces scene]
+  let (columns,rows)=size
+      scan !index !found
+        | index==columns*rows=found
+        | otherwise=let slot=Canvas.canvasOwnerAt scene index .&. 32767
+                    in scan (index+1) (if slot==0 then found else found Bits..|. Bits.bit (slot-1))
+      visible=scan 0 (0::Word64)
+      imagesAX=[object ["id" .= Canvas.canvasId entry,"name" .= Canvas.canvasName entry,"description" .= Canvas.canvasDescription entry,"bounds" .= Canvas.canvasRect entry]
+        | entry<-Canvas.canvasSurfaces scene,Bits.testBit visible (Canvas.canvasSlot entry-1)]
+      bytes=BL.toStrict (encode (object ["images" .= imagesAX,"size" .= size]))
+  BS.useAsCStringLen bytes $ \(ptr,len)->check "Update local image accessibility" (c_accessibility ptr (fromIntegral len))
+
+pumpNativeCanvas :: NativeCanvasOwner -> IO Bool
+pumpNativeCanvas (NativeCanvasOwner epoch ref)=do
+  (resident,scene)<-readIORef ref
+  let images=M.fromList [(Canvas.imageResourceId image,image) | surface<-Canvas.canvasSurfaces scene,let image=Canvas.canvasImage surface]
+      unfinished=[(ident,image,M.findWithDefault 0 ident resident) | (ident,image)<-M.toAscList images,
+        M.findWithDefault 0 ident resident<BS.length (Canvas.imageRGBA image)]
+      active=[entry | entry@(_,_,offset)<-unfinished,offset>0]
+      candidates=if null active then unfinished else active
+  case candidates of
+    []->pure False
+    (ident,image,offset):_->do
+      let chunk=BS.take 262144 (BS.drop offset (Canvas.imageRGBA image))
+      ok<-utf8 epoch $ \owner->utf8 ident $ \resource->do
+        when (offset==0) $ check "Allocate local image" (c_canvas_begin owner resource (fromIntegral (Canvas.imageWidth image)) (fromIntegral (Canvas.imageHeight image)) (fromIntegral (BS.length (Canvas.imageRGBA image))))
+        BS.useAsCStringLen chunk $ \(bytes,count)->c_canvas_chunk owner resource (fromIntegral offset) bytes (fromIntegral count)
+      check "Upload local image" (pure ok)
+      let next=M.insert ident (offset+BS.length chunk) resident
+          more=any (\(name,value)->M.findWithDefault 0 name next<BS.length (Canvas.imageRGBA value)) (M.toList images)
+      writeIORef ref (next,scene)
+      when more c_wake
+      pure (ok==2)
+
+settleNativeCanvas :: NativeCanvasOwner -> IO ()
+settleNativeCanvas owner@(NativeCanvasOwner _ ref)=do
+  completed<-pumpNativeCanvas owner
+  when completed (check "Capture local image" c_present)
+  (resident,scene)<-readIORef ref
+  let pending=any (\entry->let image=Canvas.canvasImage entry in M.findWithDefault 0 (Canvas.imageResourceId image) resident<BS.length (Canvas.imageRGBA image)) (Canvas.canvasSurfaces scene)
+  when pending (settleNativeCanvas owner)
+
 -- Consume the composed grid directly; partial glyphs retain full origin/width.
-draw :: Font -> Desktop -> IO ()
+draw :: Font -> NativeCanvasOwner -> Desktop -> IO ()
 -- C copies all sixteen scanlines before returning. One frame-owned array can
 -- stage every bitmap glyph without retaining a pointer into temporary storage.
-draw font d = allocaArray 16 $ \scratch -> do
+draw font canvasOwner d = allocaArray 16 $ \scratch -> do
   c_cursor_blink (if blinkCursor d then 1 else 0)
   c_crt_filter (if crtFilter d then 1 else 0)
   c_pixelate_unicode (if pixelateUnicode d then 1 else 0)
   check "Allocate window frame" c_begin
-  forM_ (zip [0::Int ..] (toList (renderCellRows d))) $ \(y,spans) -> go scratch y 0 (toList spans)
+  let (rows,scene)=renderCellRowsAndCanvas d
+  forM_ (zip [0::Int ..] (toList rows)) $ \(y,spans) -> go scratch y 0 (toList spans)
   case renderCursor d of
     V.Cursor x y -> c_cursor (fromIntegral x) (fromIntegral y)
     _ -> pure ()
+  updateNativeCanvas canvasOwner (screenSize d) scene
   check "Present window frame" c_present
   where
     go :: Ptr Word16 -> Int -> Int -> [CellSpan] -> IO ()
@@ -253,6 +347,7 @@ draw font d = allocaArray 16 $ \scratch -> do
 runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWindow backend scale effects tick initial = do
   font <- loadFont
+  canvasOwner@(NativeCanvasOwner epoch _) <- newNativeCanvasOwner
 #ifdef darwin_HOST_OS
   c_menu_prepare
 #endif
@@ -260,6 +355,7 @@ runWindow backend scale effects tick initial = do
   -- SDL must stay on the main OS thread; GHC's main action is a bound thread.
   bracket_ (pure ()) c_close $ do
     withCString driver $ \name -> check ("Cannot start " ++ driver ++ " window") (c_open name (realToFrac scale) (fromIntegral (fst (screenSize initial))) (fromIntegral (snd (screenSize initial))) (fromIntegral (modeHeight (maybe 3 id (videoMode initial)))))
+    utf8 epoch (\owner->check "Initialize local image epoch" (c_canvas_reset owner))
     c_backend >>= peekCString >>= hPutStrLn stderr . ("Haskell renderer: " ++)
     nativeMenusFor initial
     sized <- alloca $ \wp -> alloca $ \hp -> do
@@ -268,10 +364,14 @@ runWindow backend scale effects tick initial = do
       h <- fromIntegral <$> peek hp
       pure ((fst (handleEvent (V.EvResize w h) initial {nativeMac=os == "darwin"})) {menu=menu initial,contextMenu=if (w,h)==screenSize initial then contextMenu initial else Nothing})
     captureOnly <- (== Just "1") <$> lookupEnv "THC_EDIT_CAPTURE_EXIT"
-    if captureOnly then systemTheme sized >>= draw font else systemTheme sized >>= tick >>= loop font Nothing
+    if captureOnly then do
+      themed<-systemTheme sized
+      draw font canvasOwner themed
+      settleNativeCanvas canvasOwner
+    else systemTheme sized >>= tick >>= loop font canvasOwner Nothing
   where
     systemTheme d = do value<-c_system_dark; pure d {systemDark=value/=0}
-    loop font previous pending = do
+    loop font canvasOwner previous pending = do
       d<-case clipboardExport pending of
         (serial,Just text)->do
           utf8 text c_set_clipboard
@@ -285,13 +385,15 @@ runWindow backend scale effects tick initial = do
           cwd <- getCurrentDirectory
           utf8 (applicationTitle cwd ready) c_title
         updateMenus ready
-        draw font ready
+        draw font canvasOwner ready
+      completed<-pumpNativeCanvas canvasOwner
+      when completed (check "Present completed local image" c_present)
       event <- allocaArray 6 $ \p -> check "Read window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
       (next,requests) <- dispatch event ready
       (exit,updated) <- foldM windowEffect (False,next) requests
       when (clipboard updated /= clipboard d) (utf8 (clipboard updated) c_set_clipboard)
       let displayed = case event of kind:_ | kind `elem` [3,4,5,7,8,9,12] -> Nothing; _ -> Just (applicationTitle "" d,key,contributedMenus d)
-      unless exit (systemTheme updated >>= tick >>= loop font displayed)
+      unless exit (systemTheme updated >>= tick >>= loop font canvasOwner displayed)
     windowEffect state@(True,_) _ = pure state
     windowEffect (_,d) request = applyWindowEffect d request
     applyWindowEffect d (SetScreenMode mode) = do
