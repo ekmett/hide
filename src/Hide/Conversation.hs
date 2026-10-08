@@ -306,7 +306,8 @@ perform runtime action values d
   | action=="cancel"=do
       let agents=conversationAgents runtime
           ident=if T.null (conversationTarget d) then AR.primaryAgent agents else AH.AgentId (conversationTarget d)
-      startAgentCancellation runtime ident d
+      cleared<-cancelQuestion runtime "Question cancelled." d
+      startAgentCancellation runtime ident cleared
   | action `elem` ["show","new"] = do
       prepared<-ensureConversationEditor runtime "" "Primary" d
       performPrimary runtime action values (selectConversationView "" "Primary" prepared)
@@ -565,7 +566,7 @@ pollPromptPreparation runtime@(ConversationState _ ref _ _) d = do
                   mapM_ (AR.rejectPrimaryControl "The turn ended while preparing steering; draft kept.") control
                   pure d {status="The turn ended while preparing steering; draft kept."}
               | otherwise -> do
-                current<-maybe (pure True) (\request->AR.primaryControlCurrent request (connection s) (session s)) control
+                current<-maybe (pure True) (\request->AR.primaryControlCurrent (conversationAgents runtime) request (connection s) (session s)) control
                 if not current then pure d {status="Agent control expired; draft kept."} else do
                  let method=if steering then "_session/steering" else "session/prompt"
                      meta=["_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]] | steering]
@@ -1520,7 +1521,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ agents) d=do
         sendQueued runtime desktop
     apply desktop (AR.ControlPrimary control)=do
       state<-readIORef ref
-      current<-AR.primaryControlCurrent control (connection state) (session state)
+      current<-AR.primaryControlCurrent agents control (connection state) (session state)
       if not current then AR.rejectPrimaryControl "Primary provider changed or the control was cancelled." control >> pure desktop
       else case control of
         AR.ConfigurePrimary _ sid [(option,value)] _

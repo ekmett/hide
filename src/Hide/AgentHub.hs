@@ -7,7 +7,7 @@
 -- Recovery retains identities and history without replaying queues or implicitly
 -- starting providers. Public descriptions and private resume snapshots differ.
 module Hide.AgentHub
-  ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, AgentConfigRef, agentConfigAgent, agentConfiguration, agentConfigurationCurrent, configureAgentAt, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
+  ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, AgentConfigRef, agentConfigAgent, agentConfiguration, agentConfigurationCurrent, agentControlPending, configureAgentAt, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
   , Capabilities(..), ConfigChoice(..), parseCapabilities, filterPrivateCapabilities
   , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, renameAgent
@@ -430,13 +430,23 @@ agentConfiguration (AgentHub _ _ ref) ident=do
     Just entry | active entry,not (hubClosed state)->Right (configurationRef entry,configChoices (entryCaps entry))
     _->Left "Select a connected agent."
 
--- | Cheap current-incarnation check for the primary owner's synchronous dispatch.
--- Child adoption instead validates inside configureAgentAt's atomic reservation.
+-- | Cheap current-incarnation inspection. Control adoption still validates
+-- inside configureAgentAt's atomic reservation.
 agentConfigurationCurrent :: AgentHub -> AgentConfigRef -> IO Bool
 agentConfigurationCurrent (AgentHub _ _ ref) expected=do
   state<-readTVarIO ref
   pure $ case M.lookup (agentConfigAgent expected) (hubEntries state) of
     Just entry->not (hubClosed state) && active entry && configurationRef entry==expected
+    _->False
+
+-- | Host mailbox adoption must still belong to its live control reservation.
+-- One control occupies the slot until its driver returns; cancellation retires
+-- it before calling that driver, including the gap before mailbox publication.
+agentControlPending :: AgentHub -> AgentId -> IO Bool
+agentControlPending (AgentHub _ _ ref) ident=do
+  state<-readTVarIO ref
+  pure $ case M.lookup ident (hubEntries state) of
+    Just entry | active entry,not (hubClosed state),Just (_,kind)<-entryControl entry->kind/="cancelled"
     _->False
 
 steerAgent :: AgentHub -> AgentId -> Text -> IO (Either Text Value)

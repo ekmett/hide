@@ -83,9 +83,9 @@ checks = bracket temporary removePathForcibly $ \root -> do
           control<-case [request | ControlPrimary request<-pending] of
             [request]->pure request
             _->error "Expected primary configuration request"
-          assert "primary control admits its exact connection" =<< primaryControlCurrent control (Just client) (Just "private-primary")
+          assert "primary control admits its exact connection" =<< primaryControlCurrent runtime control (Just client) (Just "private-primary")
           bracket (ACP.startClient (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \replacement->do
-            current<-primaryControlCurrent control (Just replacement) (Just "private-primary")
+            current<-primaryControlCurrent runtime control (Just replacement) (Just "private-primary")
             assert "same-key replacement cannot consume old primary control" (not current)
             _<-syncPrimary runtime project (Just replacement) "private-primary" choices False >>= right
             stale<-agentConfigurationCurrent hub captured
@@ -100,8 +100,14 @@ checks = bracket temporary removePathForcibly $ \root -> do
             _->error "Expected cancellable primary configuration"
           _<-cancelAgent hub Human primary >>= right
           assert "primary cancel resolves an admitted configuration" . either (const True) (const False) =<< wait setting
-          current<-primaryControlCurrent control (Just client) (Just "private-primary")
+          current<-primaryControlCurrent runtime control (Just client) (Just "private-primary")
           assert "drained control remains retired after cancellation" (not current)
+          lateReply<-newEmptyMVar
+          let late=case control of
+                ConfigurePrimary owner key options _->ConfigurePrimary owner key options lateReply
+                _->error "Expected configuration control"
+          admittedLate<-primaryControlCurrent runtime late (Just client) (Just "private-primary")
+          assert "control published after cancellation cannot acquire a new admission" (not admittedLate)
         _<-drainAgentRequests runtime
         pure ()
       _<-syncPrimary runtime project Nothing "private-primary" (Capabilities True True False []) False >>= right

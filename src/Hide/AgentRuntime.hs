@@ -167,6 +167,9 @@ drainAgentRequests runtime = modifyMVar (runtimeState runtime) $ \s -> do
     unresolved (ProviderPermission _ _ cell) = isEmptyMVar cell
     unresolved _ = pure True
 
+-- | Publish primary capabilities and exact connection identity. A replacement
+-- client invalidates captured controls even if it reuses the same session key;
+-- capability refresh retains the existing provider lifetime.
 syncPrimary :: AgentRuntime -> FilePath -> Maybe ACP.Client -> Text -> Capabilities -> Bool -> IO (Either Text ())
 syncPrimary runtime directory client key caps busy = do
   connection<-traverse (\value->makeStableName =<< evaluate value) client
@@ -260,11 +263,12 @@ primaryDriver state access identity connection directory key caps = AgentDriver
 
 -- | Admission checks the live provider object, not its reusable session key.
 -- Cancellation before this check refuses the request without protocol IO.
-primaryControlCurrent :: PrimaryControl -> Maybe ACP.Client -> Maybe Text -> IO Bool
-primaryControlCurrent control client session=do
+primaryControlCurrent :: AgentRuntime -> PrimaryControl -> Maybe ACP.Client -> Maybe Text -> IO Bool
+primaryControlCurrent runtime control client session=do
+  reserved<-agentControlPending (agentHub runtime) (primaryAgent runtime)
   waiting<-primaryControlWaiting control
   case (client,session) of
-    (Just current,Just key) | waiting->do
+    (Just current,Just key) | reserved && waiting->do
       owner<-makeStableName =<< evaluate current
       pure $ case control of
         ConfigurePrimary expected sid _ _->owner==expected && key==sid
@@ -275,6 +279,8 @@ primaryControlWaiting :: PrimaryControl -> IO Bool
 primaryControlWaiting (ConfigurePrimary _ _ _ reply)=isEmptyMVar reply
 primaryControlWaiting (SteerPrimary _ _ _ reply)=isEmptyMVar reply
 
+-- | Terminally refuse one retained control. Repeated retirement preserves its
+-- first result and cannot turn a cancelled reply into success.
 rejectPrimaryControl :: Text -> PrimaryControl -> IO ()
 rejectPrimaryControl reason (ConfigurePrimary _ _ _ reply)=void (tryPutMVar reply (Left reason))
 rejectPrimaryControl reason (SteerPrimary _ _ _ reply)=void (tryPutMVar reply (Left reason))

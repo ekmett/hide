@@ -731,6 +731,20 @@ capability/configuration updates and usage through the bounded event channel.
 A terminal delivery event resolves each accepted ticket. Cancellation is a
 request with an eventual outcome, not a claim that the model has already stopped.
 
+Primary and child model/effort changes and human steering now use the same
+`AgentHub.configureAgentAt` and `steerAgentAt` control reservation. The primary
+driver enters the existing session mailbox with the exact ACP client identity
+and session key; a new connection invalidates old controls even when it reuses
+the same key. Provider acknowledgements complete the control. Only an `injected`
+steering outcome consumes the submitted draft; cancellation, rejection and
+uncertain ownership retain it. Cancellation and shutdown terminally resolve
+pending control replies, and a drained request cannot become live again.
+
+These remain host-only operations: agent tools cannot manufacture human steering
+or change their controlling user's model. Primary prompt preparation, ACP file
+and terminal requests, and provider startup/recovery still belong to Conversation;
+the full separate-package agent integration remains unfinished.
+
 This follows today's `AgentHub.StartProvider` and `AgentDriver` boundary rather
 than making the conversation window own transport. Model/effort choices come from provider capabilities.
 Fork/resume must mean actual provider support, not an invented fresh session.
