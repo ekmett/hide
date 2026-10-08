@@ -71,6 +71,8 @@ checks=bracket temporary removePathForcibly $ \root->do
       check "provider is lazy before any request" . null =<< logs
       requested<-send runtime "propose" [] configured
       first<-awaitPrompt 1
+      -- The running child retains its launch environment after parent changes.
+      setEnv "SECRET" "replacement-autocomplete-secret"
       ident<-submit runtime first "value = new\n"
       waitRetired runtime ident
       preview<-awaitDesktop runtime "inline preview" (isJust.inlinePreview) requested
@@ -123,7 +125,7 @@ checks=bracket temporary removePathForcibly $ \root->do
           selected=fst (runCommand SelectAll focused)
           copied=fst (runCommand Copy selected)
       check "published completion body preserves upstream secret redaction"
-        (all (not . (`T.isInfixOf` contentSlice (W.preparedWindowText traceBody) 0 (contentLength (W.preparedWindowText traceBody)))) ["private-completion","runtime-autocomplete-secret"])
+        (all (not . (`T.isInfixOf` contentSlice (W.preparedWindowText traceBody) 0 (contentLength (W.preparedWindowText traceBody)))) ["private-completion","runtime-autocomplete-secret","replacement-autocomplete-secret"])
       check "completion output uses plugin copy without hint text" (clipboard copied==W.copyPreparedSelection traceBody 0 (contentLength (W.preparedWindowText traceBody)))
       check "completion trace remains readable but has no guest input authority"
         (readableAt focused (left (bounds traceWindow)+2) (top (bounds traceWindow)+2) && not (pointerAllowedAt focused (left (bounds traceWindow)+2) (top (bounds traceWindow)+2)))

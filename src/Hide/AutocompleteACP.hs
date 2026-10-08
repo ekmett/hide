@@ -28,12 +28,14 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
+import System.Environment (getEnvironment)
+import Hide.GuestAccess (sensitiveLabel)
 import qualified Hide.ACP as ACP
 import Hide.AgentHub (ConfigChoice(..), Capabilities(..), parseCapabilities, filterPrivateCapabilities)
 import Hide.Buffer (lineColumn)
 import Hide.InlineTypes
 
-data Session = Session ACP.Client (IORef (Maybe Text)) (IORef Bool) (IORef (Int,Value)) (IORef Value) !Int
+data Session = Session ACP.Client (IORef (Maybe Text)) (IORef Bool) (IORef (Int,Value)) (IORef Value) !Int [Text]
 data Pending = Pending Text Value Text [(Int,Int)] (Maybe [Proposal])
 data State = State Bool (Maybe Session) (Maybe Pending)
 data Transcript = Transcript (IORef [Text]) (IORef (M.Map Text Text))
@@ -55,7 +57,7 @@ retire :: ACPCompletion -> IO ()
 retire completion@(ACPCompletion _ _ _ _ _ state _ _)=mask_ $ do
   flushTranscript completion
   session<-modifyMVar state $ \(State closed current _) -> pure (State closed Nothing Nothing,current)
-  forM_ session $ \(Session client sid _ _ _ _) -> do
+  forM_ session $ \(Session client sid _ _ _ _ _) -> do
     readIORef sid >>= mapM_ (\ident -> ACP.notify client "session/cancel" (object ["sessionId" .= ident]))
     ACP.stopClient client
 
@@ -80,7 +82,7 @@ hintACP completion text=do
 
 runPrompt :: ACPCompletion -> Maybe Pending -> Value -> IO [Proposal]
 runPrompt completion@(ACPCompletion _ _ _ _ serial state feedback _) pending context=withMVar serial $ \_ -> mask $ \restore -> do
-  session@(Session _ sid first _ _ _) <- restore (getSession completion) `onException` retire completion
+  session@(Session _ sid first _ _ _ _) <- restore (getSession completion) `onException` retire completion
   ident<-readIORef sid >>= maybe (failure "Autocomplete session is unavailable.") pure
   firstUse<-readIORef first
   recent<-atomicModifyIORef' feedback (\old -> ([],old))
@@ -124,8 +126,13 @@ getSession completion@(ACPCompletion launch root servers defaults _ state _ _)=m
   case existing of
     Just session -> pure session
     Nothing -> do
-      client<-ACP.startClient launch root
-      session@(Session _ sid _ configuration initializedRef _)<-Session client <$> newIORef Nothing <*> newIORef True <*> newIORef (0,Null) <*> newIORef Null <*> (hashUnique <$> newUnique)
+      inherited<-getEnvironment
+      let environment=M.toList (M.union (M.fromList (ACP.environment launch)) (M.fromList inherited))
+          credentials=[T.pack value | (name,value)<-environment,sensitiveLabel (T.pack name),not (null value)]
+      -- Freeze the launch values used by both the child and its redactor. Later
+      -- editor environment changes affect only subsequently started providers.
+      client<-ACP.startClient launch {ACP.environment=environment} root
+      session@(Session _ sid _ configuration initializedRef _ _)<-Session client <$> newIORef Nothing <*> newIORef True <*> newIORef (0,Null) <*> newIORef Null <*> (hashUnique <$> newUnique) <*> pure credentials
       installed<-modifyMVar state $ \current@(State stopped _ active) ->
         if stopped then pure (current,False) else pure (State False (Just session) active,True)
       unless installed (ACP.stopClient client >> failure "Autocomplete is closed.")
@@ -154,7 +161,7 @@ completionConfiguration :: ACPCompletion -> IO (Maybe ((Int,Int),[ConfigChoice])
 completionConfiguration completion@(ACPCompletion _ _ _ _ _ state _ _)=do
   State closed current _<-readMVar state
   case current of
-    Just (Session _ sid _ configuration initialized ident) | not closed->do
+    Just (Session _ sid _ configuration initialized ident _) | not closed->do
       ready<-readIORef sid
       initial<-readIORef initialized
       (version,value)<-readIORef configuration
@@ -178,7 +185,7 @@ configureACPAt completion@(ACPCompletion _ _ _ defaults serial state _ _) expect
   snapshot<-completionConfiguration completion
   State closed current _<-readMVar state
   case (snapshot,current) of
-    (Just (actual,choices),Just session@(Session _ sid _ _ _ _))
+    (Just (actual,choices),Just session@(Session _ sid _ _ _ _ _))
       | not closed,actual==expected,
         [choice]<-[choice | choice<-choices,configId choice==option,value `elem` map fst (configValues choice)]->do
           ident<-readIORef sid >>= maybe (failure "Autocomplete session is unavailable.") pure
@@ -194,7 +201,7 @@ updateConfiguration ref value=atomicModifyIORef' ref (\(version,_)->let next=ver
 -- One serialized caller consumes ACP replies. The authenticated MCP route can
 -- fill the independent submission slot while this worker services the provider.
 rpc :: ACPCompletion -> Session -> Text -> Value -> IO Value
-rpc completion@(ACPCompletion _ _ _ _ _ state _ _) (Session client sid first configuration _ _) method params=mask $ \restore -> do
+rpc completion@(ACPCompletion _ _ _ _ _ state _ _) (Session client sid first configuration _ _ _) method params=mask $ \restore -> do
   requestId<-ACP.request client method params
   when (method=="session/prompt") (writeIORef first False)
   let interrupted
@@ -348,12 +355,12 @@ pollACPCompletionTranscript (ACPCompletion _ _ _ _ _ _ _ (Transcript entries _))
 privateKeys :: ACPCompletion -> IO [Text]
 privateKeys (ACPCompletion launch _ servers _ _ state _ _)=do
   State _ current _<-readMVar state
-  sid<-case current of Just (Session _ ref _ _ _ _) -> readIORef ref; Nothing -> pure Nothing
+  (sid,inherited)<-case current of Just (Session _ ref _ _ _ _ credentials) -> (,credentials) <$> readIORef ref; Nothing -> pure (Nothing,[])
   let headerKeys server=case field "headers" server of
         Just (Object headers) -> [value | String value<-KM.elems headers]
         _ -> [value | entry<-fromMaybe [] (field "headers" server),Just value<-[field "value" entry]]
       serverKeys=[value | server<-servers,entry<-fromMaybe [] (field "env" server),Just value<-[field "value" entry]]++concatMap headerKeys servers
-      values=maybe [] pure sid++map sndText (ACP.environment launch)++serverKeys
+      values=maybe [] pure sid++inherited++map sndText (ACP.environment launch)++serverKeys
       sndText=T.pack . snd
   pure (filter (not . T.null) (values++[token | value<-values,Just token<-[T.stripPrefix "Bearer " value]]))
 
