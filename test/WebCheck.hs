@@ -22,7 +22,8 @@ import Hide.Plugin.Canvas
 import Codec.Picture (generateImage,encodePng,PixelRGBA8(..))
 
 checks :: IO ()
-checks = canvasChecks >> withEditorFixture "" (initialDesktop (80,25)) $ \chatBase->do
+checks = withEditorFixture "" (initialDesktop (80,25)) $ \chatBase->do
+  canvasChecks
   let check name ok=unless ok (error name)
       base=addDocument Nothing (newBuffer "") (initialDesktop (80,25))
       typed=fst (applyInput (Key "λ" []) base)
@@ -142,3 +143,11 @@ canvasChecks=do
     (map kind released==[Just "canvas-release"] && take 1 (map kind reopened)==[Just "canvas-resource"])
   let (_,interrupted,_)=P.canvasTransfer first (CanvasScene [] BS.empty)
   check "closing during an upload emits no late pixel chunk" (map kind interrupted==[Just "canvas-release"])
+  other<-preparePNG png >>= either (error . T.unpack) pure
+  let (earlier,later)=if imageResourceId image<imageResourceId other then (image,other) else (other,image)
+      activeScene=scene {canvasSurfaces=[surface {canvasImage=later}]}
+      (active,_,_)=P.canvasTransfer (P.CanvasSender epoch M.empty) activeScene
+      added=activeScene {canvasSurfaces=[surface {canvasImage=later},surface {canvasId=2,canvasSlot=2,canvasImage=earlier}]}
+      (_,during,_) = P.canvasTransfer active added
+  check "newly admitted image cannot interrupt an existing upload cursor"
+    (map kind during==[Just "canvas-chunk",Nothing])

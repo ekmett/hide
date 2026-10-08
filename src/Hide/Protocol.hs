@@ -307,8 +307,9 @@ canvasTransfer (CanvasSender epoch resident) scene=(CanvasSender epoch next,reti
     images=M.fromList [(imageResourceId image,image) | surface<-canvasSurfaces scene,let image=canvasImage surface]
     retained=M.intersection resident images
     retired=[JsonPacket (control "canvas-release" ["id" .= ident]) | ident<-M.keys (resident `M.difference` images)]
-    unfinished=[(ident,image,M.findWithDefault 0 ident retained) | (ident,image)<-M.toAscList images,
-      maybe True (<BS.length (imageRGBA image)) (M.lookup ident retained)]
+    unfinished=[(ident,image,offset) | (ident,image)<-M.toAscList images,
+      Just offset<-[M.lookup ident retained],offset<BS.length (imageRGBA image)]++
+      [(ident,image,0) | (ident,image)<-M.toAscList images,M.notMember ident retained]
     (next,packets)=case unfinished of
       []->(retained,[])
       (ident,image,offset):_->
