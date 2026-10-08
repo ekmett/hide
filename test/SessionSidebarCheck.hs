@@ -4,9 +4,14 @@ module SessionSidebarCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket,evaluate)
 import Control.Monad (foldM,unless)
+import Data.Aeson (encode)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Hide.Accessibility
 import System.Directory
 import System.Environment (lookupEnv,setEnv,unsetEnv)
 import System.FilePath ((</>),takeFileName)
@@ -74,6 +79,11 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
           (fail "Same-directory sessions are ambiguous or expose private arguments")
         views<-activate ((==currentNode).P.nodeIdText.P.infoId) expanded >>= wait "current session windows"
           (\d->has "First" d && has "Second" d && has "Private plugin window" d && has "Private buffer" d && ready d)
+        let semanticFrames=[BL.toStrict (encode (sidebarSemantics audience frame)) |
+              audience<-[OwnerSemantics,GuestSemantics],frame<-[views,views {streamerMode=True}]]
+            fullKeys=map (TE.encodeUtf8 . T.pack . sessionId) [current,other]
+        unless (all (\bytes->all (not . (`BS.isInfixOf` bytes)) fullKeys) semanticFrames)
+          (fail "Session semantic metadata exposes a full private session identifier")
         let windowLabels=[P.infoLabel (rowInfo row) | row<-rows views,"window:" `T.isPrefixOf` P.nodeIdText (P.infoId (rowInfo row))]
         unless (not (any (`elem` windowLabels) ["Plugin notes","authority-name.json"]) && not (streamerMode views))
           (fail "Sessions exposes private window names with Streamer disabled")
