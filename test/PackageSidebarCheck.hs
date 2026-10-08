@@ -212,6 +212,7 @@ checks=bracket temporary removePathForcibly $ \root->do
           then pure restored
           else activate "exe:demo" restored >>= wait "fresh source projection" (\d->any (\row->P.infoLabel (rowInfo row)=="Main.hs" && rowDepth row==2) (rows d))
       let opened=afterBuilds
+          rootHit d=case [rowHit row | row<-rows d,P.infoLabel (rowInfo row)=="sample"] of hit:_->Just hit; _->Nothing
 
       -- The root's manifest action must remain usable after a manifest refresh.
       writeFile file (manifest "sample"<>"-- changed\n")
@@ -230,8 +231,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       unchanged<-maybe (pure False) (versionCurrent sourceVersion . documentBuffer) (M.lookup sourceId (buffers stale))
       unless (unchanged && (windowId <$> activeWindow stale)==(windowId <$> activeWindow opened))
         (fail "Refused source action cannot replace content or change focused window")
-      threadDelay 600000
-      refreshed<-wait "refreshed package projection" ready =<< tick stale
+      refreshed<-wait "refreshed package projection" (\d->ready d && rootHit d/=Nothing && rootHit d/=rootHit opened) stale
       packageRow<-case [row | row<-rows refreshed,P.infoLabel (rowInfo row)=="sample"] of
         row:_->pure row
         _->fail "Package root disappeared"
