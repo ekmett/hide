@@ -4,7 +4,7 @@
 -- byte mode. Saving writes a sibling temporary file, preserves existing permissions
 -- and rechecks path/symlink/baseline before rename. The final comparison/rename
 -- still has a concurrent-writer race; atomic replacement is not power-loss durability.
-module Hide.Files (FileState(..), loadFile, saveFile) where
+module Hide.Files (FileState(..), FileRepresentation(..), loadFile, loadFileForDisplay, fileBuffer, saveFile) where
 
 import Control.Exception (bracket, evaluate, mask)
 import Control.Monad (unless)
@@ -14,7 +14,8 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath, copyPermissions, pathIsSymbolicLink, removeFile, renameFile)
 import System.FilePath (takeDirectory)
-import System.IO (hClose, hFlush, openBinaryTempFile)
+import System.IO (hClose, hFlush, openBinaryTempFile, withBinaryFile, IOMode(ReadMode), hSeek, SeekMode(AbsoluteSeek))
+import Hide.Plugin.Canvas (isImageContent)
 import System.IO.Error (catchIOError, isDoesNotExistError, tryIOError)
 import Hide.Buffer (Buffer, newBuffer, newByteBuffer, bufferByteStream, byteMode, textBuffer)
 
@@ -28,11 +29,36 @@ loadFile :: FilePath -> IO (Either String (FileState, Buffer))
 loadFile path = fileResult path $ do
   resolved <- canonicalizePath path
   baseline <- readDisk resolved
-  let bytes = maybe BS.empty id baseline
-  let buffer = case TE.decodeUtf8' bytes of
-        Right text | not (BS.elem 0 bytes) -> newBuffer text
-        _ -> newByteBuffer bytes
-  pure (FileState resolved baseline, buffer)
+  pure (FileState resolved baseline, fileBuffer (maybe BS.empty id baseline))
+
+-- | File presentation chosen from bytes. Images carry a bounded encoded source;
+-- decoding and window admission remain with the existing presentation owner.
+data FileRepresentation = BufferedFile !FileState !Buffer | ImageFile !FilePath !ByteString
+
+-- | Worker-only ordinary file opening. Recognized images are read with a 16 MiB
+-- ceiling; all other contents retain 'loadFile' byte/text and missing-file rules.
+-- Compiler and buffer services continue to use 'loadFile' directly.
+loadFileForDisplay :: FilePath -> IO (Either String FileRepresentation)
+loadFileForDisplay path=fileResult path $ do
+  resolved<-canonicalizePath path
+  catchIOError (withBinaryFile resolved ReadMode $ \handle->do
+    prefix<-BS.hGet handle 8
+    hSeek handle AbsoluteSeek 0
+    if isImageContent prefix then do
+      bytes<-BS.hGet handle (16777216+1)
+      if BS.length bytes>16777216 then ioError (userError "Image exceeds the 16 MiB file limit.")
+        else pure (ImageFile resolved bytes)
+    else do
+      bytes<-BS.hGetContents handle
+      pure (BufferedFile (FileState resolved (Just bytes)) (fileBuffer bytes)))
+    (\err->if isDoesNotExistError err then pure (BufferedFile (FileState resolved Nothing) (fileBuffer BS.empty)) else ioError err)
+
+-- | Lossless buffer representation for file and uploaded contents. Invalid
+-- UTF-8 and NUL-containing input select byte mode without changing the payload.
+fileBuffer :: ByteString -> Buffer
+fileBuffer bytes=case TE.decodeUtf8' bytes of
+  Right text | not (BS.elem 0 bytes)->newBuffer text
+  _->newByteBuffer bytes
 
 -- | Save only if the expected path/baseline still matches; adopt the returned
 -- FileState and mark the buffer saved separately on success. Text-mode NUL data

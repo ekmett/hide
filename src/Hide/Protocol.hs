@@ -29,7 +29,7 @@ import Hide.Accessibility (SemanticAudience(OwnerSemantics), sidebarSemantics, d
 import Hide.GuestAccess
 import Hide.Model hiding (Paste)
 import qualified Hide.Model as Model
-import Hide.Buffer (dirty, newBuffer, newByteBuffer, selectedText)
+import Hide.Buffer (dirty, selectedText)
 import Hide.TextStyle
 import Hide.Font
 import Hide.Render (renderCursor, renderCellRowsAndCanvas)
@@ -152,7 +152,7 @@ applyGuestInput input d
       pure (if valid then Right (updated,effects) else Left "This editor action requires human input.")
   where
     (updated,rawEffects)=applyInputUnchecked input d
-    effects=map (\effect->case effect of InvokeMenu reference _ target->InvokeMenu reference Plugin.AgentMenu target; LoadTree request _->LoadTree request Plugin.AgentMenu; InvokeTree trace reference _->InvokeTree trace reference Plugin.AgentMenu; _->effect) rawEffects
+    effects=map (\effect->case effect of InvokeMenu reference _ target->InvokeMenu reference Plugin.AgentMenu target; LoadTree request _->LoadTree request Plugin.AgentMenu; InvokeTree trace reference _->InvokeTree trace reference Plugin.AgentMenu; OpenFile _ path->OpenFile Plugin.AgentMenu path; OpenChoice _ base name pattern->OpenChoice Plugin.AgentMenu base name pattern; _->effect) rawEffects
     allowed=not (guestModalBlocked d) && case input of
       Key name mods -> maybe False (\key->guestKeyAllowed d key mods) (inputKey name mods)
       Paste _ -> guestKeyboardAllowed d
@@ -181,17 +181,12 @@ applyInputUnchecked input d = case input of
   ContributedMenu name epoch generation -> case contributedCommand name epoch generation d of
     Just cmd | menuCommandAvailable d cmd -> runCommand cmd d
     _ -> (d {status="Menu action is stale or unavailable."},[])
-  UploadFile name bytes ->
-    let b=case TE.decodeUtf8' bytes of
-          Right text | not (BS.elem 0 bytes) -> newBuffer text
-          _ -> newByteBuffer bytes
-        opened=addDocument Nothing b d
-    in (opened {buffers=M.adjust (\doc -> restyle doc {documentSuggestedName=Just (T.unpack name)}) (nextId d) (buffers opened),status="Dropped file opened; Download exports changes."},[])
+  UploadFile name bytes -> (d,[OpenFileBytes name bytes])
   Key name mods -> maybe (d,[]) (\key -> handleEvent (V.EvKey key mods) d) (inputKey name mods)
   PasteReply _ _ -> (d,[]) -- Only the serialized human owner can consume a receipt.
   Paste text -> handleEvent (V.EvPaste (TE.encodeUtf8 text)) d
   Frontend mode mac -> (d {videoMode=mode,nativeMac=mac && mode/=Nothing},[])
-  OpenPath path -> (d,[ReadPath path])
+  OpenPath path -> (d,[OpenFile Plugin.HumanMenu path])
   Resize w h -> handleEvent (V.EvResize w h) d
   Blur -> hoverAt (-1) (-1) d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[],pendingFileExport=(fst (pendingFileExport d)+1,Nothing)}
   Modifiers mods -> (d {heldModifiers=mods},[])

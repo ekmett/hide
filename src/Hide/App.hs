@@ -256,7 +256,7 @@ runEditor args = do
         let initial=if Demo `elem` flags then addDocument Nothing (newBuffer (activeText demoDesktop)) (initialDesktop dimensions) else initialDesktop dimensions
             configured=(fst (handleEvent (uncurry V.EvResize dimensions) initial)) {keyBindings=initialKeymap,wideSectionTitles=fromMaybe False (defaultWideSectionTitles defaults),macKeySymbols=fromMaybe False (defaultMacKeySymbols defaults),defaultBufferView=fromMaybe CurrentView (defaultView defaults),chatSubmit=fromMaybe QuerySubmit (defaultChatSubmit defaults),appearance=colorMode,systemDark=maybe True (not . (`elem` ["7","15"]) . reverse . takeWhile (/=';') . reverse) terminalColors,wordStar=flagBool WordStar StandardKeys (fromMaybe (wordStar initial) (defaultWordStar defaults)),crtFilter=flagBool CRT NoCRT (fromMaybe (crtFilter initial) (defaultCRT defaults)),materialIcons=flagBool MaterialIcons ClassicIcons (fromMaybe (materialIcons initial) (defaultMaterialIcons defaults)),blinkCursor=fromMaybe (fromMaybe (blinkCursor initial) (defaultBlinkCursor defaults)) (lastMaybe [value | CursorBlink value<-flags]),pixelateUnicode=fromMaybe (fromMaybe (pixelateUnicode initial) (defaultPixelateUnicode defaults)) (lastMaybe [value | Pixelate value<-flags]),streamerMode=fromMaybe (fromMaybe False (defaultStreamerMode defaults)) (lastMaybe [value | Streamer value<-flags]),videoMode=if backend == Terminal then Nothing else Just screenMode}
         localPaths<-if daemon/=Nothing then mapM expandRemoteHome paths else pure paths
-        (_,loaded)<-applyEffects configured (map ReadPath localPaths)
+        loaded<-foldM (\current path->snd <$> sidebarEffects sidebarHost applyEffects current [OpenFile PluginMenu.HumanMenu path] >>= awaitFileOpening sidebarHost) configured localPaths
         cwd<-getCurrentDirectory
         base<-packageDirectory cwd
         (_,browsing)<-if sideTree loaded/=Nothing || Demo `elem` flags || Snapshot `elem` flags || Html `elem` flags then pure (False,loaded)
@@ -554,7 +554,9 @@ demoDesktop :: Desktop
 demoDesktop = addDocument Nothing (newBuffer sample) (initialDesktop (80,25))
   where sample=T.unlines ["module Main where","", "factorial :: Integer -> Integer", "factorial n = product [1 .. n]", "", "main :: IO ()", "main = do", "  putStrLn \"Enter a number:\"", "  input <- getLine", "  print (factorial (read input))"]
 
--- | Interpret basic file, help, browser and save effects in order.
+-- | Interpret raw buffer reads, help, browser and save effects in order.
+-- Ordinary file presentation is owned by SidebarCommands; ReadPath deliberately
+-- stays synchronous for source navigation and explicit buffer services.
 -- The Bool result requests exit; runtime-specific handlers delegate unhandled
 -- effects here. This interpreter can perform blocking filesystem work.
 applyEffects :: Desktop -> [Effect] -> IO (Bool,Desktop)
@@ -640,16 +642,9 @@ applyEffects = foldM apply . (False,)
           case changed of
             Left err -> pure (False,browserError (T.pack (show err)) d)
             Right () -> apply (False,installSidebar (sidebarDirectory base d) d {defaultDirectory=Just base,dialog=Nothing,status="Directory changed."}) (RefreshGit base)
-    apply (_,d) (OpenChoice base input pattern)=do
-      let chosen=if T.null input then pattern else input
-          path=if isAbsolute (T.unpack chosen) then T.unpack chosen else base </> T.unpack chosen
-      directory<-doesDirectoryExist path
-      if directory then apply (False,d) (BrowsePath path pattern)
-      else if T.any (`elem` ("*?" :: String)) chosen then apply (False,d) (BrowsePath (takeDirectory path) (T.pack (takeFileName path)))
-      else do
-        exists<-doesFileExist path
-        if exists then apply (False,d {dialog=Nothing}) (ReadPath path)
-        else pure (False,browserError "File not found." d)
+    apply (_,d) OpenFile{}=pure (False,d {status="File opening requires its presentation owner."})
+    apply (_,d) OpenFileBytes{}=pure (False,d {status="Dropped file opening requires its presentation owner."})
+    apply (_,d) OpenChoice{}=pure (False,d {status="File opening requires its presentation owner."})
     apply (_,d) (ReadTree path)=pure (False,installSidebar (sidebarDirectory path d) d)
     apply (_,d) DebugSourceAction{}=pure (False,d {status="Debugger source actions are unavailable in this preview."})
     apply (_,d) DebugSidebarAction{}=pure (False,d {status="Debugger sidebar is unavailable in this preview."})
@@ -724,10 +719,6 @@ applyEffects = foldM apply . (False,)
               Just cmd->uncurry applyEffects (runCommand cmd refreshed)
 
 
-browserError :: T.Text -> Desktop -> Desktop
-browserError err d = case dialog d of
-  Just dg -> d {dialog=Just dg {body=take 1 (body dg) ++ [T.take 54 err]},status=err}
-  Nothing -> message "Cannot open directory" (wrapMessage err) d
 
 gitDirectory :: Desktop -> FilePath
 gitDirectory d = case activeDocument d >>= documentFile of

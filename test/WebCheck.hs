@@ -13,6 +13,8 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Hide.Model as Model
 import qualified Graphics.Vty as V
+import Hide.App (applyEffects)
+import Hide.SidebarCommands (withSidebarCommands,sidebarEffects,awaitFileOpening)
 import Hide.Web
 import Hide.Model hiding (Paste)
 import Hide.Buffer
@@ -60,9 +62,9 @@ checks = withEditorFixture "" (initialDesktop (80,25)) $ \chatBase->do
   let browser=pasted {browserFrontend=True}
       selected=fst (runCommand SelectAll browser)
       (copied,copyEffects)=runCommand Copy selected
-      imported=fst (applyInput (UploadFile "sample.bin" (BS.pack [0,255,65])) browser)
-      textImport=fst (applyInput (UploadFile "demo.cabal" "name: demo") browser)
       menuCommands d=[cmd | MenuItem _ _ cmd<-menuItemsFor d 0]
+  imported<-withSidebarCommands $ \host->uncurry (sidebarEffects host applyEffects) (applyInput (UploadFile "sample.bin" (BS.pack [0,255,65])) browser) >>= awaitFileOpening host . snd
+  textImport<-withSidebarCommands $ \host->uncurry (sidebarEffects host applyEffects) (applyInput (UploadFile "demo.cabal" "name: demo") browser) >>= awaitFileOpening host . snd
   check "Download only in browser File menu" (Download `elem` menuCommands browser && Download `notElem` menuCommands base)
   check "menu Copy always exports system clipboard, including repeated copies"
     (copyEffects==[WriteBrowserClipboard (activeText pasted)] && snd (runCommand Copy copied)==copyEffects)

@@ -8,6 +8,11 @@ import Data.Aeson (object,(.=),withObject,(.:))
 import Data.Aeson.Types (parseEither)
 import Hide.RemoteWindow (parseRemoteFrame,remoteExportView)
 import Hide.WorkspaceFilesMCP (fileTool)
+import qualified Codec.Picture as Picture
+import qualified Data.ByteString.Lazy as BL
+import qualified Hide.Plugin.Canvas as Canvas
+import qualified Hide.Plugin.Window as Window
+import Hide.PluginWindowHost (tickPluginWindows)
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
 import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
@@ -188,6 +193,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
+  imageOpeningChecks
   publicationLifetimeChecks
   fileRenameChecks
   createDirectory (dir </> "src")
@@ -236,6 +242,82 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   recoveryPagingChecks
   budgetChecks dir
   putStrLn "shared sidebar checks passed"
+
+-- Ordinary file presentation exercises the actual owner, not the PNG factory.
+imageOpeningChecks :: IO ()
+imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
+  let png=BL.toStrict (Picture.encodePng (Picture.generateImage (\_ _->Picture.PixelRGBA8 40 160 220 127) 3 2))
+      first=dir </> "landscape.data"
+      second=dir </> "second.png"
+      source=dir </> "Main.hs"
+      initial=(initialDesktop (100,30)) {defaultDirectory=Just dir}
+      pictures d=[image | window<-windows d,Just image<-[windowImage d window]]
+      open host d effects=snd <$> sidebarEffects host applyEffects d effects >>= awaitFileOpening host
+      body d=maybe (error "missing image window") id (activePluginWindow d)
+  BS.writeFile first png
+  BS.writeFile second png
+  BS.writeFile source "main = 1\n"
+  (_,raw)<-loadFile first >>= right
+  check "raw buffer reads preserve image bytes" (byteMode raw && bufferBytes raw==png)
+  escaped<-withSidebarCommands $ \host->do
+    -- CLI uses this same awaited path; a burst uses the one ordered worker.
+    pair<-open host initial [OpenFile Menu.HumanMenu first,OpenFile Menu.HumanMenu second]
+    check "ordinary two-image burst opens both in order without a byte buffer"
+      (length (pictures pair)==2 && M.null (buffers pair) && all (\image->Canvas.imageWidth image==3 && Canvas.imageHeight image==2 && Canvas.imagePNG image==png) (pictures pair) &&
+       (Window.preparedWindowSemantics (body pair) >>= Window.textLinkBase)==Just second)
+    mixed<-open host initial [OpenFile Menu.HumanMenu source,OpenFile Menu.HumanMenu first]
+    check "text and image burst keeps both representations"
+      (length (pictures mixed)==1 && map (contents.documentBuffer) (M.elems (buffers mixed))==["main = 1\n"])
+    let original=Window.preparedWindowImage (body mixed)
+    removeFile first
+    refocused<-open host mixed [OpenFile Menu.HumanMenu first]
+    check "an already-open image refocuses without rereading a missing file"
+      (length (windows refocused)==length (windows mixed) && Window.preparedWindowImage (body refocused)==original)
+    BS.writeFile first png
+    (_,rawOpened)<-applyEffects initial [ReadPath first]
+    displayed<-open host rawOpened [OpenFile Menu.HumanMenu first]
+    check "ordinary image opening preserves an explicit raw byte buffer"
+      (length (pictures displayed)==1 && any ((==png).bufferBytes.documentBuffer) (M.elems (buffers displayed)))
+    uploaded<-uncurry (sidebarEffects host applyEffects) (Wire.applyInput (Wire.UploadFile "unusual.bin" png) initial) >>= awaitFileOpening host . snd
+    check "uploaded image keeps exact bytes and name without a server path"
+      (map Canvas.imagePNG (pictures uploaded)==[png] && M.null (buffers uploaded) && Window.preparedWindowTitle (body uploaded)=="unusual.bin" &&
+       (Window.preparedWindowSemantics (body uploaded) >>= Window.textLinkBase)==Nothing)
+    let invalid=BS.take 8 png<>"broken PNG"
+    fallback<-open host initial [OpenFileBytes "broken.png" invalid]
+    check "undecodable image bytes remain lossless and editable"
+      (null (pictures fallback) && fmap (bufferBytes.documentBuffer) (activeDocument fallback)==Just invalid &&
+       (activeDocument fallback >>= documentSuggestedName)==Just "broken.png")
+    (_,queued)<-sidebarEffects host applyEffects initial [OpenFile Menu.HumanMenu first,OpenFile Menu.HumanMenu second]
+    stale<-awaitFileOpening host (addDocument Nothing (newBuffer "new context") queued)
+    check "a real target change expires the active and queued opens" (null (pictures stale) && activeText stale=="new context")
+    (_,modalQueued)<-sidebarEffects host applyEffects initial [OpenFile Menu.HumanMenu first]
+    modal<-awaitFileOpening host (message "Later dialog" ["keep"] modalQueued)
+    check "file completion cannot replace later modal input" (null (pictures modal) && fmap dialogTitle (dialog modal)==Just "Later dialog")
+    (_,privateQueued)<-sidebarEffects host applyEffects initial [OpenFile Menu.HumanMenu first]
+    hidden<-awaitFileOpening host privateQueued {guestPrivatePaths=[first]}
+    check "image disclosure rechecks current canonical-path privacy" (privatePreparedWindow hidden (body hidden))
+    let chooser=openBrowser dir "*" [Entry "landscape.data" False Nothing Nothing] initial
+    guest<-Wire.applyGuestInput (Wire.Key "Enter" []) (beginGuestInput chooser) >>= right
+    check "ordinary file dialog attributes its open to the agent"
+      (snd guest==[OpenFile Menu.AgentMenu first])
+    refused<-uncurry (sidebarEffects host applyEffects) guest >>= awaitFileOpening host . snd
+    check "agent ordinary open cannot acquire image publication authority" (null (pictures refused) && M.null (pluginWindows refused))
+    let typedChoice=chooser {dialog=fmap (\dg->dg {fields=[Input "Name" "landscape.data" 14,FileList [] 0],focus=0}) (dialog chooser)}
+    typedGuest<-Wire.applyGuestInput (Wire.Key "Enter" []) (beginGuestInput typedChoice) >>= right
+    check "typed file dialog also retains agent origin" (case snd typedGuest of [OpenChoice Menu.AgentMenu _ _ _]->True; _->False)
+    guestUpload<-Wire.applyGuestInput (Wire.UploadFile "unusual.bin" png) initial
+    check "uploaded files have no agent-attributed route"
+      (either (const True) (const False) guestUpload && not (guestEffectsAllowed [OpenFileBytes "unusual.bin" png]))
+    (_,agentQueued)<-sidebarEffects host applyEffects initial [OpenFile Menu.AgentMenu source]
+    agentPrivate<-awaitFileOpening host agentQueued {guestPrivatePaths=[source]}
+    check "queued text opening rechecks agent privacy before adoption" (M.null (buffers agentPrivate))
+    mounted<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) initial)
+    selected<-act host (activateTree False (atLabel "landscape.data" mounted) mounted)
+      >>= await (tickSidebar host applyEffects) (not.null.pictures)
+    check "Files default action opens the image without a format-specific command" (length (pictures selected)==1 && M.null (buffers selected))
+    pure uploaded
+  retired<-tickPluginWindows escaped
+  check "closing the opening owner retires uploaded pixels" (null (pictures retired) && all ((==Nothing).Window.preparedWindowImage) (M.elems (pluginWindows retired)))
 
 -- A publisher belongs to its caller, not the host's owned preparation jobs.
 -- Saturating the real queue must not strand that caller when the host closes.

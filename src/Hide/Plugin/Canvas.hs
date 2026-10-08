@@ -4,7 +4,7 @@
 -- Preparation runs on a worker. IDs identify bytes, never permission or input
 -- authority; a surface may retain a resource while every cell is occluded.
 module Hide.Plugin.Canvas
-  ( PreparedImage, preparePNG, imageResourceId, imageWidth, imageHeight, imageRGBA, imagePNG
+  ( PreparedImage, isImageContent, preparePNG, imageResourceId, imageWidth, imageHeight, imageRGBA, imagePNG
   , CanvasView(..), fitCanvasView, canvasImageTarget
   , CanvasSurface(..), CanvasScene(..), canvasOwnerAt, canvasPixel
   ) where
@@ -41,12 +41,17 @@ imageRGBA (PreparedImage _ _ _ bytes _)=bytes
 imagePNG :: PreparedImage -> BS.ByteString
 imagePNG (PreparedImage _ _ _ _ bytes)=bytes
 
+-- | O(1). Recognize supported image content from its signature, independently
+-- of the filename. Recognition grants no decode or allocation authority.
+isImageContent :: BS.ByteString -> Bool
+isImageContent bytes=BS.take 8 bytes==BS.pack [137,80,78,71,13,10,26,10]
+
 -- | Decode on a worker after checking the signature and IHDR allocation bounds.
 -- No successful resource exceeds 4 Mi pixels or retains over 16 MiB input bytes.
 preparePNG :: BS.ByteString -> IO (Either Text PreparedImage)
 preparePNG bytes
   | BS.length bytes>16777216=pure (Left "PNG exceeds the 16 MiB file limit.")
-  | BS.length bytes<33 || BS.take 8 bytes/=BS.pack [137,80,78,71,13,10,26,10] || word 8/=13 || BS.take 4 (BS.drop 12 bytes)/="IHDR"=
+  | BS.length bytes<33 || not (isImageContent bytes) || word 8/=13 || BS.take 4 (BS.drop 12 bytes)/="IHDR"=
       pure (Left "Invalid PNG header.")
   | width<=0 || height<=0 || width>4096 || height>4096 || toInteger width*toInteger height>4194304=
       pure (Left "PNG exceeds 4096 pixels per side or the 4-megapixel limit.")

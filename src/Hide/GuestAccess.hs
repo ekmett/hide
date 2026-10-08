@@ -140,13 +140,14 @@ validateGuestEffects d=mapM_ check
       _->denied
     check effect=case effect of
       ReadPath name->path name
+      OpenFile _ name->path name
       ReadTree name->path name
       RefreshRenamedPath old new->path old >> path new
       LoadTree request _->treePath (requestAncestors request)
       InvokeTree trace _ _->treePath trace
       JumpTo name _ _->path name
       InvokeMenu _ _ (Just (MessagesTarget _ _ (Just (name,_,_))))->path name
-      OpenChoice base input pattern->let chosen=T.unpack (if T.null input then pattern else input) in path (if isAbsolute chosen then chosen else base </> chosen)
+      OpenChoice _ base input pattern->let chosen=T.unpack (if T.null input then pattern else input) in path (if isAbsolute chosen then chosen else base </> chosen)
       SaveDocument ident target _->buffer ident >> maybe (pure ()) path target
       DownloadDocument ident->buffer ident
       ResolveConflict conflict _->buffer (conflictBuffer conflict)
@@ -157,6 +158,9 @@ serviceActionAllowed action=action `elem` ["compile","make","build-stop","run","
 guestEffectsAllowed :: [Effect] -> Bool
 guestEffectsAllowed=all allowed
   where
+    allowed (OpenFile origin _)=origin==Plugin.AgentMenu
+    allowed (OpenChoice origin _ _ _)=origin==Plugin.AgentMenu
+    allowed OpenFileBytes{}=False
     allowed CopyConversation{}=False
     allowed ExecuteShellBlockAction{}=False
     allowed PackageDebugAction{}=False

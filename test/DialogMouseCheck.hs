@@ -11,6 +11,7 @@ import Data.Maybe (fromMaybe)
 import Hide.Commands (configuredBindings)
 import Hide.BufferView
 import Hide.Sidebar
+import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import Hide.Render (snapshotHtml, snapshot, renderDesktop, renderCellRows)
 import Hide.Buffer (revision, newBuffer, columnOffset, contents, markSaved, replaceSelection, saved, undoStack, redoStack, Selection(..))
@@ -101,7 +102,7 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       (_,directoryEffects)=handleDoubleClick (fx+2) (fy+2) browser
       (_,blankEffects)=handleDoubleClick (fx+2) (fy+7) browser
   check "single click selects without opening" (null singleEffects && dialog selected/=Nothing)
-  check "double click opens file" (fileEffects==[ReadPath "/project/Main.hs"] && dialog opened==Nothing)
+  check "double click opens file" (fileEffects==[OpenFile PluginMenu.HumanMenu "/project/Main.hs"] && dialog opened==Nothing)
   check "double click enters directory" (directoryEffects==[BrowsePath "/project/folder" "*"])
   check "double click blank row does not open" (null blankEffects)
   let (popup,_) = handleEvent (V.EvMouseDown 3 2 V.BRight []) desktop
