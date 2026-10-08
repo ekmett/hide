@@ -56,7 +56,7 @@ import Hide.AgentAccess (resolveAgentAccess,resolveActiveAgentAccess)
 import Hide.AgentMCP (agentTools, agentToolNames, agentTool)
 import Hide.BufferReadCommand (withBufferReadCommands)
 import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
-import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, readBufferTool, readWindowTool)
+import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool)
 import Hide.RemoteEndpoint (sessionEndpoint)
 import Hide.Session
 import Hide.Completion (bashCompletion)
@@ -306,7 +306,7 @@ runEditor args = do
                     adoptConversationBodies conversation completed prepared
                   tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgents >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
                   inspectTool d name parameters
-                    | name `elem` ["list_windows","list_buffers","read_buffer","read_selection"] = pure (d,pure (builtinTool d name parameters))
+                    | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
                     | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
                     | name `elem` workspaceToolNames = workspaceTool guestCore d name parameters
@@ -329,6 +329,7 @@ runEditor args = do
                         hub=AR.agentHub agents
                         reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
                     let permitted callback current name parameters
+                          | name=="list_buffers" = listBuffersTool bufferCommands (bufferReader permissions currentCaller) current name parameters
                           | name=="read_buffer" = readBufferTool bufferCommands (bufferReader permissions currentCaller) current name parameters
                           | name=="read_window" = readWindowTool bufferCommands (windowReader permissions currentCaller) current name parameters
                           | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters

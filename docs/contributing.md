@@ -95,6 +95,21 @@ The identity check is conservative: replacing the immutable buffer to establish
 a new saved baseline also requires a fresh version. ACP source freshness tracking
 uses the same version check.
 
+Linked handlers can discover open documents with
+`listBuffers :: BufferReader -> IO (Either Text [ListedBuffer])` before requesting
+an admitted capture. Each opaque entry exposes `listedRef`, `listedMetadata` and
+`listedBinary`. Entries follow ascending host document IDs and preserve the
+existing metadata mask: private titles are `[private]` and private paths are
+absent. References grant no read authority; capture rechecks current existence,
+actor, policy and privacy. Listing uses the same ingress, cancellation claim and
+Permissions lifetime. Its shallow metadata excludes source images and Undo;
+exceptional dirty comparison remains consumer-worker work.
+
+The actual `list_buffers` tool calls registered `hide.buffer.list` on its reply
+worker and formats the same complete metadata response. No Desktop or Document
+survives its adapter callback. The operation adds no product response limit or
+new subscription/registration owner.
+
 Linked command handlers can call
 `captureBuffer :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)` from
 `Hide.Plugin.Buffer` without a Desktop. The opaque reader belongs to the running

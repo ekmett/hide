@@ -5,7 +5,7 @@
 -- Tool initiation and reply waiting are separate phases so HLS, DAP and human
 -- approvals can continue while a request is pending. Actor-bound routes expose
 -- only their supplied tools, with no fallback into ordinary desktop reads.
-module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, readBufferTool, readWindowTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
+module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
 
 import Hide.Sidebar
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
@@ -29,7 +29,7 @@ import Paths_hide (getDataFileName)
 import System.Environment (lookupEnv, getExecutablePath)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import Hide.Buffer
-import Hide.BufferReadCommand (BufferReadCommands,readPage,readBufferCommand,readWindowCommand,formatBufferRead)
+import Hide.BufferReadCommand (BufferReadCommands,readPage,listBufferCommand,readBufferCommand,readWindowCommand,formatBufferRead)
 import Hide.BufferReads (WindowReadTarget,CapturedWindowRead,windowReadTarget)
 import qualified Hide.Plugin.Window as W
 import Hide.Plugin.BufferHost (readerReference)
@@ -226,6 +226,11 @@ builtinTool desktop=tool
     title doc | privateDocument desktop doc="[private]"
               | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
     bufferInfo = bufferMetadata desktop
+
+-- | Return the fixed typed metadata worker continuation. Discovery uses current
+-- policy/actor/privacy at its own admission; no Desktop or Document is retained.
+listBuffersTool :: BufferReadCommands -> P.BufferReader -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
+listBuffersTool commands reader desktop _ _=pure (desktop,listBufferCommand commands reader)
 
 -- | Capture only target identity and page coordinates while serialized. The
 -- typed command queues/awaits a fresh policy decision on the returned worker;

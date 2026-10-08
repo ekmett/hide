@@ -3,7 +3,7 @@
 -- No plugin callbacks run here. The caller holds the existing session lock;
 -- formatting and any conversation masking are evaluated by its reply worker.
 module Hide.BufferReads
-  ( CapturedRead(..),captureBuffer
+  ( CapturedRead(..),captureBuffer,listBuffers
   , WindowReadTarget,windowReadTarget,windowReadIdentifier
   , CapturedWindowRead(..),captureWindow
   ) where
@@ -13,13 +13,13 @@ import Data.List (find)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
-import Hide.GuestAccess (sanitizedBufferContent)
+import Hide.GuestAccess (sanitizedBufferContent,privateDocument)
 import Hide.Model (Desktop(..),Document(..),Window(..),WindowContent(..),conversationTargetFor,conversationLogicalBody)
 import Hide.ConversationBody (LogicalBody,logicalBodyIdentity)
-import Hide.BufferReadAdmission (ReadAdmission,resolveReadReference)
-import Hide.Plugin.BufferHost (BufferRef,CapturedRead(..),BufferMetadata(..))
+import Hide.BufferReadAdmission (ReadAdmission,resolveReadReference,readReference)
+import Hide.Plugin.BufferHost (BufferRef,CapturedRead(..),BufferMetadata(..),ListedBuffer(..))
 import Hide.Plugin.BufferHost (captureVersion)
-import Hide.Buffer (captureDirty,snapshotDirty,revision)
+import Hide.Buffer (captureDirty,snapshotDirty,revision,byteMode)
 import Hide.Files (filePath)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
@@ -48,6 +48,25 @@ captureBuffer admission desktop reference=do
                 sourcePath (snapshotDirty changed) (revision (documentBuffer doc))
           bounded<-evaluate metadata
           pure (Right (CapturedRead reference version image redacted bounded))
+
+-- | /O(n)/. Capture open-buffer metadata at the admitted callback, using the
+-- existing document privacy predicate. Dirty comparison remains worker work;
+-- neither an immutable read image nor Undo is captured by this operation.
+listBuffers :: ReadAdmission -> Desktop -> IO (Either Text [ListedBuffer])
+listBuffers admission desktop=sequence <$> traverse capture (M.toAscList (buffers desktop))
+  where
+    capture (ident,doc)=do
+      reference<-readReference admission ident
+      case reference of
+        Left err->pure (Left err)
+        Right ref->do
+          let private=privateDocument desktop doc
+          sourcePath<-if private then pure Nothing else traverse (evaluate . filePath) (documentFile doc)
+          changed<-evaluate (captureDirty (documentBuffer doc))
+          let title=if private then "[private]" else fromMaybe (maybe "Untitled" T.pack sourcePath) (documentLabel doc)
+              metadata=BufferMetadata ident title sourcePath (snapshotDirty changed) (revision (documentBuffer doc))
+          entry<-evaluate (ListedBuffer ref metadata (byteMode (documentBuffer doc)))
+          pure (Right entry)
 
 -- | An exact installed frame and immutable prepared body, captured without
 -- granting a live action capability. Refresh/replacement requires a new request.

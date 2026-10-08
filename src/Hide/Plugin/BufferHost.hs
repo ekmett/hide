@@ -7,7 +7,8 @@
 module Hide.Plugin.BufferHost
   ( BufferRef, BufferNamespace, newBufferNamespace, bufferReference, referenceId
   , ContentVersion, captureRead, captureVersion, versionCurrent
-  , BufferReader, newBufferReader, readerReference, requestCapture
+  , BufferReader, newBufferReader, readerReference, requestCapture, requestListing
+  , ListedBuffer(..)
   , BufferEditor, newBufferEditor, editorReference, requestDiff, DiffResult(..)
   , CapturedRead(..), BufferMetadata(..) ) where
 
@@ -60,17 +61,29 @@ versionCurrent expected b=(==expected) <$> captureVersion b
 -- | A session-bound ability to request fresh policy decisions. It contains no
 -- cached approval or Human context; the host supplies the fixed actor binding.
 data BufferReader = BufferReader BufferNamespace (BufferRef -> IO (Either Text CapturedRead))
+  (IO (Either Text [ListedBuffer]))
 
 -- | Host-only assembly of a reader over its bounded request transport.
-newBufferReader :: BufferNamespace -> (BufferRef -> IO (Either Text CapturedRead)) -> BufferReader
+newBufferReader :: BufferNamespace -> (BufferRef -> IO (Either Text CapturedRead))
+  -> IO (Either Text [ListedBuffer]) -> BufferReader
 newBufferReader = BufferReader
 
 -- | Host wire adapter: references alone confer no capture authority.
 readerReference :: BufferReader -> Int -> BufferRef
-readerReference (BufferReader namespace _) = bufferReference namespace
+readerReference (BufferReader namespace _ _) = bufferReference namespace
 
 requestCapture :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)
-requestCapture (BufferReader _ request) = request
+requestCapture (BufferReader _ request _) = request
+
+-- | Request a complete metadata listing from the same session/actor.
+-- References confer no capture or edit authority.
+requestListing :: BufferReader -> IO (Either Text [ListedBuffer])
+requestListing (BufferReader _ _ request) = request
+
+-- | One listed document. The host preserves metadata privacy and retains only
+-- narrow dirty-comparison inputs; there is no content version or source image.
+data ListedBuffer = ListedBuffer
+  { listedRef :: !BufferRef, listedMetadata :: !BufferMetadata, listedBinary :: !Bool }
 
 -- | Metadata from the same admitted source as the immutable image. The modified
 -- flag may require full encoding comparison after a representation switch;

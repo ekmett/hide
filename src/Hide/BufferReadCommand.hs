@@ -3,7 +3,7 @@
 -- reader plus an opaque target, never Desktop. Capture waits and complete JSON
 -- formatting run on the invoking worker; registration follows session lifetime.
 module Hide.BufferReadCommand
-  ( BufferReadCommands, withBufferReadCommands, ReadPage, readPage, readBufferCommand, readWindowCommand, formatBufferRead ) where
+  ( BufferReadCommands, withBufferReadCommands, ReadPage, readPage, listBufferCommand, readBufferCommand, readWindowCommand, formatBufferRead ) where
 
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
@@ -23,9 +23,10 @@ import Hide.Plugin.Command
 data ReadPage = ReadPage !Int !Int !Int
 
 data ReadContext = BufferReadContext P.BufferReader P.BufferRef
+  | BufferListContext P.BufferReader
   | WindowReadContext (IO (Either T.Text CapturedWindowRead))
 data BufferReadCommands = BufferReadCommands (Registry ReadContext)
-  (Command ReadContext ReadPage Value) (Command ReadContext ReadPage Value)
+  (Command ReadContext ReadPage Value) (Command ReadContext ReadPage Value) (Command ReadContext () Value)
 
 -- | Validate page coordinates on either wire or typed routes.
 readPage :: Int -> Int -> Int -> Either T.Text ReadPage
@@ -37,17 +38,41 @@ withBufferReadCommands :: (BufferReadCommands -> IO a) -> IO a
 withBufferReadCommands use=withRegistry $ \registry->do
   buffer<-registerCommand registry (definition "hide.buffer.read" "Read buffer page") >>= either (ioError . userError . show) pure
   window<-registerCommand registry (definition "hide.window.read" "Read window page") >>= either (ioError . userError . show) pure
-  use (BufferReadCommands registry buffer window)
+  listing<-registerCommand registry listingDefinition >>= either (ioError . userError . show) pure
+  use (BufferReadCommands registry buffer window listing)
 
 readBufferCommand :: BufferReadCommands -> P.BufferReader -> P.BufferRef -> ReadPage -> IO (Either T.Text Value)
-readBufferCommand (BufferReadCommands registry command _) reader reference page=
+readBufferCommand (BufferReadCommands registry command _ _) reader reference page=
   fmap (either (Left . message) Right) (invoke registry command (BufferReadContext reader reference) page)
 
 -- | Run an exact window capture and privacy-aware formatting on the invoking
 -- worker. The fixed host capture only queues/awaits; it retains no Desktop.
 readWindowCommand :: BufferReadCommands -> IO (Either T.Text CapturedWindowRead) -> ReadPage -> IO (Either T.Text Value)
-readWindowCommand (BufferReadCommands registry _ command) capture page=
+readWindowCommand (BufferReadCommands registry _ command _) capture page=
   fmap (either (Left . message) Right) (invoke registry command (WindowReadContext capture) page)
+
+-- | List through the same session-bound service; metadata evaluation/JSON
+-- preparation stays on this invoking worker, outside the desktop lock.
+listBufferCommand :: BufferReadCommands -> P.BufferReader -> IO (Either T.Text Value)
+listBufferCommand (BufferReadCommands registry _ _ command) reader=
+  fmap (either (Left . message) Right) (invoke registry command (BufferListContext reader) ())
+
+listingDefinition :: CommandDef ReadContext () Value
+listingDefinition=CommandDef "hide.buffer.list" "List buffers" input output $ \context ()->case context of
+  BufferListContext reader->do
+    listing<-P.listBuffers reader
+    case listing of
+      Left err->pure (Left (CommandRejected err))
+      Right entries->Right <$> evaluate (force (object ["buffers" .= map metadata entries]))
+  _->pure (Left (CommandRejected "Buffer listing requires a session reader"))
+  where
+    metadata entry=let info=P.listedMetadata entry in object
+      ["bufferId" .= P.bufferIdentifier info,"title" .= P.displayName info,"path" .= P.path info,
+       "modified" .= P.modified info,"binary" .= P.listedBinary entry,"revision" .= P.editRevision info]
+    input=Codec (object ["type" .= ("object"::T.Text),"additionalProperties" .= False])
+      (\value->case value of Object fields | null fields->Right (); _->Left "Buffer listing accepts an empty object")
+      (const (object []))
+    output=Codec (object ["type" .= ("object"::T.Text)]) Right id
 
 message :: CommandError -> T.Text
 message (CommandRejected err)=err
@@ -57,6 +82,7 @@ message err=T.pack (show err)
 definition :: T.Text -> T.Text -> CommandDef ReadContext ReadPage Value
 definition name title=CommandDef name title input output $ \context (ReadPage start count offset)->do
   result<-case context of
+    BufferListContext _->pure (Left "Buffer page requires a target reference")
     BufferReadContext reader reference->do
       captured<-P.captureBuffer reader reference
       pure $ do

@@ -253,6 +253,13 @@ recovery representation containing flattened saved text and histories. Capturing
 content should not implicitly retain Undo. Numeric edit revision alone is not
 sufficient: reload/replacement with the same number must invalidate an old edit.
 
+The implemented `Hide.Plugin.Buffer.listBuffers` discovers opaque session-bound
+references and shallow metadata through the existing reader and Permissions
+owner. It preserves the current `list_buffers` metadata mask, confers no capture
+authority and retains no source image or Undo. The actual MCP listing consumes
+that typed service on its reply worker. Generic plugin activation/subscriptions
+and public atomic multi-buffer preparation/commit remain proposed.
+
 Measured line/range reads share the existing finger-tree machinery. Whole-buffer
 reads are explicit worker operations. Reads from a retained snapshot remain
 stable; they are not live views that change underneath a parser.

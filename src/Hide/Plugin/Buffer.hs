@@ -9,7 +9,8 @@
 -- desktop, saving or arbitrary prepared-edit grant is exposed.
 module Hide.Plugin.Buffer
   ( BufferEditor, applyBufferDiff, DiffResult, diffRevision, appliedDiff, userModified
-  , BufferReader, captureBuffer, CapturedRead, capturedRef, capturedVersion, capturedContent
+  , BufferReader, listBuffers, ListedBuffer, listedRef, listedMetadata, listedBinary
+  , captureBuffer, CapturedRead, capturedRef, capturedVersion, capturedContent
   , capturedRedacted, capturedMetadata, BufferMetadata, bufferIdentifier, displayName, path, modified, editRevision
   , BufferRef, BufferRead, ContentVersion, CharOffset(..), ByteOffset(..), LineNumber(..)
   , TextRange(..), ByteRange(..), RangeError(..), BufferRepresentation(..)
@@ -19,7 +20,7 @@ module Hide.Plugin.Buffer
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Hide.Buffer as B
-import Hide.Plugin.BufferHost (BufferRef,ContentVersion,BufferReader,requestCapture,CapturedRead(..),BufferMetadata(..),BufferEditor,requestDiff,DiffResult(..))
+import Hide.Plugin.BufferHost (BufferRef,ContentVersion,BufferReader,requestCapture,requestListing,ListedBuffer(..),CapturedRead(..),BufferMetadata(..),BufferEditor,requestDiff,DiffResult(..))
 
 -- | Immutable content reference with no structural Eq/Show instance.
 type BufferRead = B.BufferContent
@@ -82,6 +83,18 @@ require :: BufferRepresentation -> BufferRead -> Either RangeError ()
 require wanted b=if representation b==wanted then Right () else Left WrongRepresentation
 validRange :: Int -> Int -> Int -> Either RangeError ()
 validRange size a z=if a<0 || z<a || z>size then Left InvalidRange else Right ()
+
+-- | /O(n)/. List open documents in ascending host ID order, using current
+-- actor, policy and privacy at admission. Metadata preserves the existing
+-- private-document "[private]" title and absent path.
+--
+-- Call on a worker. The result contains no source image, Undo or capture grant.
+-- 'listedRef' belongs to this session; a separate 'captureBuffer' call rechecks
+-- authority and current existence. Evaluating 'modified' may compare narrowly
+-- retained dirty inputs after a representation switch and belongs on that worker.
+-- Cancellation and shutdown resolve accepted requests with a terminal error.
+listBuffers :: BufferReader -> IO (Either Text [ListedBuffer])
+listBuffers = requestListing
 
 -- | Request a current capture from the owning session. Every call checks current
 -- policy and actor, and may await host-owned approval. Call on a worker, outside

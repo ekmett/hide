@@ -57,7 +57,7 @@ import Text.Read (readMaybe)
 import qualified Toml
 import qualified Toml.Syntax as TS
 import Hide.Buffer (newBuffer, revision, Selection(..))
-import Hide.Plugin.BufferHost (BufferRef,BufferNamespace,newBufferNamespace,referenceId,BufferReader,newBufferReader,CapturedRead,BufferEditor,newBufferEditor,DiffResult)
+import Hide.Plugin.BufferHost (BufferRef,BufferNamespace,newBufferNamespace,referenceId,BufferReader,newBufferReader,CapturedRead,ListedBuffer,BufferEditor,newBufferEditor,DiffResult)
 import Hide.WorkspaceFilesMCP (PatchSource,PreparedPatch,capturePatchSource,preparePatch,commitPatch)
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..), saveFile)
@@ -82,6 +82,7 @@ data AdmittedBuild = AdmittedBuild Permissions Text Value Bool (IO (Either Text 
 data BuildAdmissionState = BuildUnused | BuildReserved | BuildChecking Waiting
   | BuildAllowed Waiting Int | BuildRejected Text | BuildConsumed
 data CaptureSubmission = CaptureSubmission BufferRef (IO (Either Text ())) (MVar (Either Text CapturedRead)) (IORef Bool) (MVar ())
+  | ListingSubmission (IO (Either Text ())) (MVar (Either Text [ListedBuffer])) (IORef Bool) (MVar ())
   | WindowCaptureSubmission Reads.WindowReadTarget (IO (Either Text ())) (MVar (Either Text Reads.CapturedWindowRead)) (IORef Bool) (MVar ())
 data DiffSubmission = DiffSubmission BufferRef ContentVersion Text (IO (Either Text ())) (MVar (Either Text DiffResult)) (IORef Bool) (MVar ()) (IORef (Maybe DiffAttempt))
 data BufferSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
@@ -297,38 +298,34 @@ sessionClosed (Permissions _ _ _ _ _ (BufferIngress _ closed) _)=STM.readTVarIO 
 -- grants no Human provenance or reusable approval. Linked handlers only enqueue
 -- and await; the owning tick admits the fixed operation under serialization.
 bufferReader :: Permissions -> IO (Either Text ()) -> BufferReader
-bufferReader (Permissions _ _ _ namespace _ (BufferIngress inbox closed) owner) caller=newBufferReader namespace $ \reference->mask $ \restore->do
-  promise<-newEmptyMVar
-  enabled<-newIORef True
-  claim<-newMVar ()
-  let submission=CaptureSubmission reference caller promise enabled claim
-  accepted<-STM.atomically $ do
-    stopped<-STM.readTVar closed
-    full<-STM.isFullTBQueue inbox
-    if stopped then pure (Left "Editor session closed before capture")
-    else if full then pure (Left "Too many buffer captures are awaiting admission")
-    else STM.writeTBQueue inbox (ReadSubmission submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
-  case accepted of
-    Left err->pure (Left err)
-    Right ()->restore (readMVar promise) `onException` finishCapture enabled claim promise (Left "Buffer capture cancelled")
+bufferReader (Permissions _ _ _ namespace _ ingress owner) caller=newBufferReader namespace
+  (\reference->queueCapture ingress owner (CaptureSubmission reference caller))
+  (queueCapture ingress owner (ListingSubmission caller))
 
 -- | Same fixed ingress/claim/policy owner as buffer reads. The target retains
 -- exact immutable body identity, never a Desktop or a live input capability.
 windowReader :: Permissions -> IO (Either Text ()) -> Reads.WindowReadTarget -> IO (Either Text Reads.CapturedWindowRead)
-windowReader (Permissions _ _ _ _ _ (BufferIngress inbox closed) owner) caller target=mask $ \restore->do
+windowReader (Permissions _ _ _ _ _ ingress owner) caller target=
+  queueCapture ingress owner (WindowCaptureSubmission target caller)
+
+-- The existing fixed capture operation owns acceptance and reply cancellation;
+-- the factory only binds one host submission to its new promise and claim.
+queueCapture :: BufferIngress -> PolicyOwner
+  -> (MVar (Either Text a) -> IORef Bool -> MVar () -> CaptureSubmission)
+  -> IO (Either Text a)
+queueCapture (BufferIngress inbox closed) owner submissionFor=mask $ \restore->do
   promise<-newEmptyMVar
   enabled<-newIORef True
   claim<-newMVar ()
-  let submission=WindowCaptureSubmission target caller promise enabled claim
   accepted<-STM.atomically $ do
     stopped<-STM.readTVar closed
     full<-STM.isFullTBQueue inbox
     if stopped then pure (Left "Editor session closed before capture")
     else if full then pure (Left "Too many captures are awaiting admission")
-    else STM.writeTBQueue inbox (ReadSubmission submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+    else STM.writeTBQueue inbox (ReadSubmission (submissionFor promise enabled claim)) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
   case accepted of
     Left err->pure (Left err)
-    Right ()->restore (readMVar promise) `onException` finishCapture enabled claim promise (Left "Window capture cancelled")
+    Right ()->restore (readMVar promise) `onException` finishCapture enabled claim promise (Left "Capture cancelled")
 
 finishCapture :: IORef Bool -> MVar () -> MVar (Either Text a) -> Either Text a -> IO ()
 finishCapture enabled claim promise result=withMVar claim (\()->finishCaptureOwned enabled promise result)
@@ -341,10 +338,12 @@ finishCaptureOwned enabled promise result=mask_ $ do
 
 captureLifetime :: CaptureSubmission -> (IORef Bool,MVar (),IO (Either Text ()))
 captureLifetime (CaptureSubmission _ caller _ enabled claim)=(enabled,claim,caller)
+captureLifetime (ListingSubmission caller _ enabled claim)=(enabled,claim,caller)
 captureLifetime (WindowCaptureSubmission _ caller _ enabled claim)=(enabled,claim,caller)
 
 rejectCaptureOwned :: CaptureSubmission -> Text -> IO ()
 rejectCaptureOwned (CaptureSubmission _ _ promise enabled _) err=finishCaptureOwned enabled promise (Left err)
+rejectCaptureOwned (ListingSubmission _ promise enabled _) err=finishCaptureOwned enabled promise (Left err)
 rejectCaptureOwned (WindowCaptureSubmission _ _ promise enabled _) err=finishCaptureOwned enabled promise (Left err)
 
 -- | Host-only fixed actor binding. Public callers submit exact read versions;
@@ -400,28 +399,28 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
             ReadSubmission capture->captureLifetime capture
             EditSubmission (DiffSubmission _ _ _ c _ e k _)->(e,k,c)
           target=case submission of
-            ReadSubmission (CaptureSubmission reference _ _ _ _)->referenceId namespace reference
-            ReadSubmission (WindowCaptureSubmission reference _ _ _ _)->Just (Reads.windowReadIdentifier reference)
-            EditSubmission (DiffSubmission reference _ _ _ _ _ _ _)->referenceId namespace reference
+            ReadSubmission capture@ListingSubmission{}->Right ("list_buffers",object [],CaptureOperation capture)
+            ReadSubmission capture@(CaptureSubmission reference _ _ _ _)->bufferTarget reference $ \ident->
+              ("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
+            ReadSubmission capture@(WindowCaptureSubmission reference _ _ _ _)->Right
+              ("read_window",object ["windowId" .= Reads.windowReadIdentifier reference],CaptureOperation capture)
+            EditSubmission diff@(DiffSubmission reference _ patch _ _ _ _ _)->bufferTarget reference $ \ident->
+              ("buffer_apply_diff",object ["bufferId" .= ident,"revision" .= maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current)),"diff" .= patch],DiffOperation diff)
+          bufferTarget reference build=maybe (Left "Buffer reference belongs to another editor session") (Right . build) (referenceId namespace reference)
       withMVar claim $ \()->do
         live<-readIORef enabled
         when live $ case target of
-          Nothing->finishBufferSubmissionOwned submission "Buffer reference belongs to another editor session"
-          Just ident->do
+          Left err->finishBufferSubmissionOwned submission err
+          Right (name,args,op)->do
             original<-readIORef state
             liveRequests<-filterMActive (waiting original)
             if length liveRequests>=32 then finishBufferSubmissionOwned submission "Too many MCP requests are awaiting permission" else do
               attempt<-case submission of ReadSubmission _->newIORef Nothing; EditSubmission (DiffSubmission _ _ _ _ _ _ _ a)->pure a
               stage<-newIORef (PolicyPending AdmitPolicy Nothing)
-              let (name,args,op)=case submission of
-                    ReadSubmission capture@CaptureSubmission{}->("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
-                    ReadSubmission capture@WindowCaptureSubmission{}->("read_window",object ["windowId" .= ident],CaptureOperation capture)
-                    EditSubmission diff@(DiffSubmission _ _ patch _ _ _ _ _)->
-                      ("buffer_apply_diff",object ["bufferId" .= ident,"revision" .= maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current)),"diff" .= patch],DiffOperation diff)
               captured<-case submission of
                 ReadSubmission _->pure (Right Nothing)
                 EditSubmission (DiffSubmission _ expected _ _ _ _ _ _)->do
-                  matches<-maybe (pure False) (versionCurrent expected . documentBuffer) (M.lookup ident (buffers current))
+                  matches<-maybe (pure False) (versionCurrent expected . documentBuffer) (field "bufferId" args >>= (`M.lookup` buffers current))
                   if not matches then pure (Left "Buffer identity or revision changed; read the buffer again") else
                     case capturePatchSource current args of
                       Left err->pure (Left err)
@@ -444,6 +443,9 @@ captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _) submission de
   case actor of
     Left err->rejectCaptureOwned submission err
     Right ()->case submission of
+      ListingSubmission _ promise enabled _->do
+        outcome<-withReadAdmission namespace (sessionClosed runtime) (`Reads.listBuffers` desktop)
+        finishCaptureOwned enabled promise outcome
       CaptureSubmission reference _ promise enabled _->do
         outcome<-withReadAdmission namespace (sessionClosed runtime) (\receipt->Reads.captureBuffer receipt desktop reference)
         finishCaptureOwned enabled promise outcome

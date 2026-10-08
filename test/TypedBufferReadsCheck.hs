@@ -7,6 +7,8 @@ import Control.Concurrent.Async
 import Control.Exception (bracket,try,evaluate,SomeException,IOException,catch,throwIO,finally)
 import Control.Monad (unless,forM)
 import Data.IORef
+import Data.List (find)
+import Hide.Files (FileState(..))
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -21,7 +23,7 @@ import Hide.Protocol
 import Hide.Remote
 import Hide.RemoteEndpoint
 import qualified Hide.Session as S
-import Hide.BufferReadCommand (withBufferReadCommands,readPage,readWindowCommand)
+import Hide.BufferReadCommand (withBufferReadCommands,listBufferCommand,readPage,readWindowCommand)
 import Hide.BufferReads (windowReadTarget,capturedWindowPrepared)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
@@ -35,7 +37,7 @@ import Hide.Model
 import Hide.MCPPermissions
 import qualified Hide.Plugin.Buffer as P
 import Hide.Plugin.BufferHost (readerReference)
-import Hide.EditorMCP (builtinTools,readBufferTool,readWindowTool,editorResponseOnly)
+import Hide.EditorMCP (builtinTools,builtinTool,listBuffersTool,readBufferTool,readWindowTool,editorResponseOnly)
 
 ownerUntil owner desktop worker=do
   let loop current=do
@@ -63,6 +65,7 @@ checks=do
         timeout 3000000 observe >>= maybe (error "typed read did not enqueue") pure
       text image=P.readText (P.capturedContent image) (P.TextRange (P.CharOffset 0) (P.CharOffset (P.readLength (P.capturedContent image))))
   bracket (createDirectoryIfMissing True root) (const (removePathForcibly root)) $ \_->do
+    listingChecks path
     windowReadChecks path
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'enable'\n"
     withPermissionsAt path builtinTools $ \owner->do
@@ -140,8 +143,8 @@ checks=do
     accepted<-withPermissionsAt path builtinTools $ \owner->do
       let reader=bufferReader owner (pure (Right ()))
           reference=readerReference reader ident
-      workers<-forM [1..32::Int] $ \_->do
-        worker<-async (P.captureBuffer reader reference)
+      workers<-forM [1..32::Int] $ \index->do
+        worker<-async (if even index then (() <$) <$> P.captureBuffer reader reference else (() <$) <$> P.listBuffers reader)
         queued worker
         pure worker
       overflow<-timeout 3000000 (P.captureBuffer reader reference)
@@ -156,6 +159,7 @@ checks=do
       let reader=bufferReader owner (pure (Right ()))
           inspect d _ request=do
             let dispatch current name args
+                  | name=="list_buffers"=listBuffersTool commands reader current name args
                   | name=="buffer_apply_diff"=bufferDiffTool diffCommands (bufferEditor owner (pure (Right ()))) current name args
                   | otherwise=readBufferTool commands reader current name args
             (next,reply)<-editorResponseOnly (builtinTools++fileTools) dispatch d request
@@ -189,6 +193,9 @@ checks=do
           check "typed reader frontend receives assets" (case assets of Just (Just (JsonPacket (Object fields)))->KM.lookup "type" fields==Just (String "assets"); _->False)
           check "typed read_buffer progresses through daemon owner with attached frontend" . succeeded =<< readRemote
         check "same typed reader survives frontend detach" . succeeded =<< readRemote
+        listing<-callRemote "list_buffers" (object [])
+        check "actual typed list_buffers survives frontend detach with unchanged metadata"
+          (succeeded listing && payload listing==either (const Nothing) Just (builtinTool base "list_buffers" (object [])))
         let patch="@@ -1 +1 @@\n-original\n+daemon edit\n"::T.Text
         edited<-callRemote "buffer_apply_diff" (object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch])
         check "actual typed MCP diff applies after frontend detach" (succeeded edited && (payload edited >>= parseMaybe (withObject "diff" (.: "appliedDiff")))==Just patch)
@@ -206,7 +213,100 @@ checks=do
     Just (reader,reference)<-readIORef saved
     rejected<-P.captureBuffer reader reference
     check "closed service rejects new capture" (case rejected of Left _->True; _->False)
+    noListing<-P.listBuffers reader
+    check "closed service rejects new listing" (case noListing of Left _->True; _->False)
   putStrLn "typed buffer reader checks passed"
+
+-- Discovery preserves the established projection but returns usable scoped refs.
+listingChecks :: FilePath -> IO ()
+listingChecks path=do
+  let check label ok=unless ok (error label)
+      base=addDocument Nothing (newBuffer "untitled source") (initialDesktop (80,25))
+      ident=maybe (error "missing listing source") sourceFixtureBuffer (activeWindow base)
+      public=addDocument (Just (FileState "/project/Public.hs" Nothing)) (newByteBuffer "binary") base
+      privatePath=takeDirectory path </> "authority.json"
+      protectedDocument=addDocument (Just (FileState privatePath Nothing)) (newBuffer "private source") public
+      current=protectedDocument {guestPrivatePaths=[privatePath],buffers=M.adjust
+        (\doc->doc {documentLabel=Just "Current name"}) ident (buffers protectedDocument)}
+      queued worker=do
+        let observe=threadStatus (asyncThreadId worker) >>= \state->case state of
+              ThreadBlocked BlockedOnMVar->pure ()
+              ThreadFinished->error "listing finished before owner admission"
+              ThreadDied->error "listing died before owner admission"
+              _->threadDelay 1000 >> observe
+        timeout 3000000 observe >>= maybe (error "listing did not enqueue") pure
+      wait worker=timeout 3000000 (Control.Concurrent.Async.wait worker) >>= maybe (error "listing reply timed out") pure
+      right value=either (error . T.unpack) pure value
+      rejected result=case result of Left _->True; _->False
+  TIO.writeFile path "[editor.mcp.permissions]\nlist_buffers = 'enable'\nread_buffer = 'enable'\n"
+  withPermissionsAt path builtinTools $ \owner->withBufferReadCommands $ \commands->do
+    let reader=bufferReader owner (pure (Right ()))
+        opaque=current {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc)
+          {saved=error "listing forced saved source",undoStack=error "listing forced Undo",redoStack=error "listing forced Redo"},
+          documentHighlight=error "listing forced highlights"}) (buffers current)}
+    withAsync (P.listBuffers reader) $ \worker->do
+      queued worker
+      _<-ownerUntil owner opaque worker
+      entries<-wait worker >>= right
+      let metadata=map P.listedMetadata entries
+      check "listing follows current host ID order and labels"
+        (map P.bufferIdentifier metadata==M.keys (buffers current) && any ((=="Current name") . P.displayName) metadata)
+      check "listing masks private names and paths without omitting references"
+        (length entries==3 && any (\info->P.displayName info=="[private]" && P.path info==Nothing) metadata
+          && all ((/=Just privatePath) . P.path) metadata)
+      check "listing metadata does not read source, saved text or history" (all (not . P.modified) metadata)
+      reference<-maybe (error "listing omitted live source") (pure . P.listedRef)
+        (find ((==ident) . P.bufferIdentifier . P.listedMetadata) entries)
+      withAsync (P.captureBuffer reader reference) $ \capture->do
+        queued capture
+        _<-ownerUntil owner current capture
+        image<-wait capture >>= right
+        check "listed opaque refs work through separate capture admission"
+          (P.readText (P.capturedContent image) (P.TextRange (P.CharOffset 0) (P.CharOffset 15))==Right "untitled source")
+      withAsync (P.captureBuffer reader reference) $ \capture->do
+        queued capture
+        _<-ownerUntil owner current {buffers=M.delete ident (buffers current)} capture
+        check "listing does not keep a closed target readable" . rejected =<< wait capture
+      withPermissionsAt path builtinTools $ \other->withAsync (P.captureBuffer (bufferReader other (pure (Right ()))) reference) $ \capture->do
+        queued capture
+        _<-ownerUntil other current capture
+        check "listed refs cannot cross session namespaces" . rejected =<< wait capture
+    (_,reply)<-listBuffersTool commands reader (error "listing callback retained its Desktop") "list_buffers" (object [])
+    withAsync reply $ \worker->do
+      queued worker
+      _<-ownerUntil owner current worker
+      result<-wait worker
+      check "actual typed listing matches existing public metadata exactly"
+        (result==builtinTool current "list_buffers" (object []))
+    actor<-newIORef (Right ())
+    withAsync (P.listBuffers (bufferReader owner (readIORef actor))) $ \worker->do
+      queued worker
+      writeIORef actor (Left "listing actor revoked")
+      _<-ownerUntil owner current worker
+      check "listing rechecks the queued actor" . rejected =<< wait worker
+    withAsync (P.listBuffers reader) $ \worker->do
+      queued worker
+      cancel worker
+      _<-tickPermissions owner current
+      check "listing cancellation withdraws acceptance" . either (const True) (const False) =<< waitCatch worker
+    TIO.writeFile path "[editor.mcp.permissions]\nlist_buffers = 'disable'\nread_buffer = 'enable'\n"
+    withAsync (P.listBuffers reader) $ \worker->do
+      queued worker
+      _<-ownerUntil owner current worker
+      check "listing uses its own current permission policy" . rejected =<< wait worker
+    TIO.writeFile path "[editor.mcp.permissions]\nlist_buffers = 'enable'\nread_buffer = 'enable'\n"
+    let switched=current {buffers=M.adjust (\doc->doc {documentBuffer=(documentBuffer doc)
+          {byteMode=True,saved=error "listing dirty comparison ran under owner"}}) ident (buffers current)}
+    withAsync (P.listBuffers reader) $ \worker->do
+      queued worker
+      _<-ownerUntil owner switched worker
+      entries<-wait worker >>= right
+      info<-maybe (error "mode-switched listing missing") (pure . P.listedMetadata)
+        (find ((==ident) . P.bufferIdentifier . P.listedMetadata) entries)
+      outcome<-try (evaluate (P.modified info)) :: IO (Either SomeException Bool)
+      check "listing defers exceptional dirty comparison to consumer worker" (case outcome of Left _->True; _->False)
+    retired<-withBufferReadCommands pure
+    check "closed command registry refuses listing before enqueue" . rejected =<< listBufferCommand retired reader
 
 -- One actual prepared-window read workflow, sharing the existing admission pump.
 windowReadChecks :: FilePath -> IO ()
