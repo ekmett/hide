@@ -6,7 +6,7 @@
 -- ACP file/terminal requests are disabled here in favor of the supplied MCP
 -- services. Uncertain steering or cancellation outcomes retire the connection
 -- rather than risk replaying input the provider may already have consumed.
-module Hide.AgentACP (ACPPermission(..), startACPDriver) where
+module Hide.AgentACP (ACPPermission(..), startACPDriver, publicACPUpdate) where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
@@ -267,18 +267,11 @@ pump runtime=do
         case field "sessionUpdate" update::Maybe Text of
           Just "agent_message_chunk"->chunk "output" update
           Just "agent_thought_chunk"->chunk "thought" update
-          Just kind | kind `elem` ["tool_call","tool_call_update"]->do
-            title<-traverse (scrub runtime) (field "title" update)
-            ident<-traverse (fmap (T.take 512) . scrub runtime) (field "toolCallId" update)
-            let status=fromMaybe "pending" (field "status" update)
-                safeStatus=if status `elem` ["pending","in_progress","completed","failed"] then status else "pending"::Text
-            publishUpdate runtime "tool" (object (["status" .= safeStatus]++
-              maybe [] (\value->["title" .= value]) title++maybe [] (\value->["toolCallId" .= value]) ident))
           Just "config_option_update"->writeIORef (configuration runtime) update >> publishCapabilities runtime
-          Just "usage_update"->case (field "used" update,field "size" update) of
-            (Just used,Just size) | used>=0 && size>0 && max used size<=1000000000000000->publish runtime (ProviderUsage used size)
-            _->pure ()
-          _->pure ()
+          _->do
+            keys<-privateKeys runtime
+            let redact text=foldr (\key->T.replace key "[private]") text keys
+            mapM_ (publish runtime) (publicACPUpdate redact update)
     handle (A.Notification _ _)=pure ()
     handle (A.Request ident method params)=do
       expected<-readIORef (sessionKey runtime)
@@ -298,6 +291,35 @@ pump runtime=do
         writeIORef (streamTails runtime) (M.insert kind tailText tails)
         emitChunk runtime kind (T.take 8192 safe) (T.length safe>8192)
       _->pure ()
+
+-- | Bounded public tool/plan/usage projection shared by primary and child ACP
+-- owners. Scrub complete strings before truncation; raw tool arguments/results
+-- and permission choices never enter this projection. Streamed text requires
+-- each owner's existing cross-chunk redaction and is deliberately separate.
+publicACPUpdate :: (Text -> Text) -> Value -> Maybe DriverEvent
+publicACPUpdate redact update=case field "sessionUpdate" update :: Maybe Text of
+  Just kind | kind `elem` ["tool_call","tool_call_update"]->
+    let title=fmap (T.take 8192 . redact) (field "title" update)
+        ident=fmap (T.take 512 . redact) (field "toolCallId" update)
+        status=choice ["pending","in_progress","completed","failed"] "pending" "status" update
+    in Just (ProviderUpdate "tool" (object (["status" .= status]++
+      maybe [] (\value->["title" .= value]) title++maybe [] (\value->["toolCallId" .= value]) ident)))
+  Just "plan"->
+    let entries=fromMaybe [] (field "entries" update :: Maybe [Value])
+        entry value=do
+          content<-field "content" value
+          pure (object ["content" .= T.take 8192 (redact content),
+            "priority" .= choice ["high","medium","low"] "medium" "priority" value,
+            "status" .= choice ["pending","in_progress","completed"] "pending" "status" value])
+    in Just (ProviderUpdate "plan" (object ["entries" .= mapMaybe entry (take 64 entries),"truncated" .= not (null (drop 64 entries))]))
+  Just "usage_update"->case (field "used" update,field "size" update) of
+    (Just used,Just size) | used>=0 && size>0 && max used size<=1000000000000000->Just (ProviderUsage used size)
+    _->Nothing
+  _->Nothing
+  where
+    choice allowed fallback key value=case field key value of
+      Just text | text `elem` allowed->text
+      _->fallback :: Text
 
 publishUpdate :: Runtime -> Text -> Value -> IO ()
 publishUpdate runtime kind value = publish runtime (ProviderUpdate kind value)

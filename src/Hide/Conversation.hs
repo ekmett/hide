@@ -803,7 +803,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
       pure (dismissPermission cleared) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
       writeIORef ref s {pending=M.delete ident (pending s)}
-      when (maybe False isPrompt (M.lookup ident (pending s))) (flushConversationChunks ref)
+      when (maybe False isPrompt (M.lookup ident (pending s))) (flushConversationChunks runtime)
       case (M.lookup ident (pending s),result,connection s) of
         (Nothing,_,_) -> pure d
         (_,Left err,_) -> do
@@ -840,6 +840,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
             modifyIORef' ref (\state -> state {session=Just sid,agentConfig=value,lastSession=Just (provider state,project state,sid)})
             savedId<-persist (resumeRecordPath s) (object ["provider" .= launchValue (provider s),"cwd" .= project s,"sessionId" .= sid])
             safeSettings<-publicAgentSettings runtime value
+            syncConversationAgent runtime
             sendQueued runtime d {agentSettings=safeSettings,status=either ("Session opened; could not save ID: "<>) (const ("Session "<>sid)) savedId}
         (Just (Setting control),Right value,_) -> do
           modifyIORef' ref (\state -> state {agentConfig=value})
@@ -883,7 +884,10 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
             "tool_call_update" -> recordTool update
             "plan" -> do
               redact<-conversationRedactor runtime s
-              modifyIORef' ref (appendRecords [activity "Plan" (redactValue redact update)])
+              let public=redactValue redact update
+              modifyIORef' ref (appendRecords [activity "Plan" public])
+              mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id public)
+            "usage_update" -> mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id update)
             _ -> pure ()
           when (kind=="config_option_update") (modifyIORef' ref (\state -> state {agentConfig=update}))
           safeSettings<-if kind=="config_option_update" then publicAgentSettings runtime update else pure []
@@ -906,20 +910,37 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
         keys<-conversationKeys runtime current
         now<-getCurrentTime
         zone<-getCurrentTimeZone
-        modifyIORef' ref $ \state ->
+        emitted<-atomicModifyIORef' ref $ \state ->
           let combined=M.findWithDefault "" role (streamTails state)<>text
               redacted=redactText keys combined
               held=maximum (0:[n | key<-keys,n<-[1..T.length key-1],T.take n key `T.isSuffixOf` redacted])
               (safe,tailText)=T.splitAt (T.length redacted-held) redacted
               timed=if T.null safe then state else stampReply now zone state
-          in (if T.null safe then timed else recordChunk role safe timed)
-            {streamTails=M.insert role tailText (streamTails timed)}
+              next=(if T.null safe then timed else recordChunk role safe timed)
+                {streamTails=M.insert role tailText (streamTails timed)}
+          in (next,safe)
+        when (role=="Agent") (publishPrimaryOutput runtime emitted)
       _ -> pure ()
     recordTool update=do
       current<-readIORef ref
       redact<-conversationRedactor runtime current
       now<-getCurrentTime
-      modifyIORef' ref (\state -> recordToolUpdate (redactValue redact update) state {lastMessageAt=Just now})
+      let public=redactValue redact update
+      modifyIORef' ref (\state -> recordToolUpdate public state {lastMessageAt=Just now})
+      mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id public)
+
+-- Provider publication uses the same exact connection receipt as controls.
+-- It never captures human prompts or copies transcript history during sync.
+publishPrimaryEvent :: ConversationState -> AH.DriverEvent -> IO ()
+publishPrimaryEvent (ConversationState _ ref _ agents) event=do
+  state<-readIORef ref
+  case (connection state,session state) of
+    (Just client,Just sid)->AR.recordPrimaryEvent agents client sid event
+    _->pure ()
+
+publishPrimaryOutput :: ConversationState -> Text -> IO ()
+publishPrimaryOutput runtime text=unless (T.null text) $
+  publishPrimaryEvent runtime (AH.ProviderUpdate "output" (object ["text" .= T.take 8192 text,"truncated" .= (T.length text>8192)]))
 
 pauseLabel :: Maybe UTCTime -> UTCTime -> TimeZone -> Maybe Text
 pauseLabel previous now zone = case previous of
@@ -1780,10 +1801,12 @@ redactValue redact value=case value of
 
 -- A matching prompt response is the only boundary that can release an
 -- incomplete credential prefix. Unrelated RPC replies leave held text private.
-flushConversationChunks :: IORef State -> IO ()
-flushConversationChunks ref=modifyIORef' ref $ \state ->
-  (foldl' (\current (role,text) -> if T.null text then current else recordChunk role text current)
-    state (M.toList (streamTails state))) {streamTails=M.empty}
+flushConversationChunks :: ConversationState -> IO ()
+flushConversationChunks runtime@(ConversationState _ ref _ _)=do
+  emitted<-atomicModifyIORef' ref $ \state ->
+    ((foldl' (\current (role,text) -> if T.null text then current else recordChunk role text current)
+      state (M.toList (streamTails state))) {streamTails=M.empty},M.findWithDefault "" "Agent" (streamTails state))
+  publishPrimaryOutput runtime emitted
 
 
 -- One ordinary registered handler serves both immutable argument slots. It

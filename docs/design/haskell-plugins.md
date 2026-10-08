@@ -743,11 +743,20 @@ Cancel keeps its existing synchronous conversation owner: it retires hub control
 receipts before cancelling that turn, so a delayed callback cannot cancel a new
 question. Cancelling turns refuse further steering until their terminal reply.
 
+Primary provider output, public tool/plan updates and context usage enter the
+same bounded Hub history/status path as child events. An external connection
+binding returns the existing epoch-bound event sink; replacing that binding
+retires the sink even when the session key repeats. Capability updates use the
+current sink without replacing the driver or retiring an outstanding control.
+Text is published only after the owner's cross-chunk redaction; tool events omit
+raw arguments/results and permission choices. Publication neither enqueues human
+prompts nor replays transcript state during synchronization. Primary transcript,
+prompt tickets and disconnect/recovery ownership remain unchanged.
+
 These remain host-only operations: agent tools cannot manufacture human steering
 or change their controlling user's model. Primary query/cancel ownership, prompt
 preparation, ACP file and terminal requests, and provider startup/recovery still
-belong to Conversation;
-the full separate-package agent integration remains unfinished.
+belong to Conversation; the full separate-package agent integration remains unfinished.
 
 This follows today's `AgentHub.StartProvider` and `AgentDriver` boundary rather
 than making the conversation window own transport. Model/effort choices come from provider capabilities.

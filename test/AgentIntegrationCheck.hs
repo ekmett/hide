@@ -89,13 +89,18 @@ checks=bracket temporary removePathForcibly $ \root ->
       _<-tickBody presentation conversation connected
       afterIdle<-AH.historyAgent hub AH.Human primary 0 100 >>= right
       ensure "idle synchronization does not replay primary history" (afterIdle==primaryHistory)
+      primaryStatus<-AH.statusAgent hub AH.Human primary >>= right
+      ensure "primary provider context usage reaches the shared status API"
+        ((field "contextUsage" primaryStatus >>= field "used")==Just (120::Int) &&
+         (field "contextUsage" primaryStatus >>= field "size")==Just (1000::Int))
       split<-send "split-private" connected >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "split-private" `T.isInfixOf` activeText desktop))
       publicSafe split
       nested<-send "nested-private" split >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "nested-private" `T.isInfixOf` activeText desktop))
       nestedHistory<-AH.historyAgent hub AH.Human primary 0 100 >>= right
       let nestedEvents=maybe [] id (field "events" nestedHistory :: Maybe [Value])
       ensure "primary tools and plans use public provider events"
-        (all (\kind->any ((==Just kind).field "kind") nestedEvents) (["tool","plan"]::[T.Text]))
+        (all (\kind->any ((==Just kind).field "kind") nestedEvents) (["tool","plan"]::[T.Text]) &&
+         any (\event->field "kind" event==Just ("plan"::T.Text) && "Review" `T.isInfixOf` T.pack (show event)) nestedEvents)
       expanded<-snd <$> conversationEffects conversation (\x _->pure (False,x)) nested [AgentAction "copy" []]
       ensure "raw tool and plan details never retain bearer values" (all (not . (`T.isInfixOf` clipboard expanded)) ("private-main-key":tokens))
       peerCancels<-newIORef (0::Int)
@@ -430,6 +435,7 @@ fixture=unlines
   ,"  if pending is not None: send({'jsonrpc':'2.0','id':pending,'result':{'stopReason':'end_turn'}}); pending=None"
   ," elif m=='session/prompt':"
   ,"  text=\"\\n\".join(block['text'] for block in p['prompt'])+' private-main-key '+str(tokens)"
+  ,"  send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'usage_update','used':120,'size':1000}}})"
   ,"  if any(block['text'].strip().endswith('steer-wait') for block in p['prompt']):"
   ,"   pending=r['id']; send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'usage_update','used':120,'size':1000}}}); continue"
   ,"  if 'private-configuration' in text:"
@@ -441,7 +447,7 @@ fixture=unlines
   ,"      send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':kind,'content':{'type':'text','text':part}}}}); send({'jsonrpc':'2.0','id':999,'result':{}}); time.sleep(0.03)"
   ,"   send({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'}}); continue"
   ,"  if 'nested-private' in text:"
-  ,"   for kind in ['tool_call','plan']: send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':kind,'toolCallId':'nested','title':str(tokens),'rawInput':{'nested':[{'private-main-key':tokens}]}}}})"
+  ,"   for kind in ['tool_call','plan']: send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':kind,'toolCallId':'nested','title':str(tokens),'rawInput':{'nested':[{'private-main-key':tokens}]},'entries':[{'content':'Review '+str(tokens)+' private-main-key','priority':'high','status':'in_progress'}]}}})"
   ,"  if any(block['text'].strip().endswith('permission') for block in p['prompt']):"
   ,"   pending=r['id']; send({'jsonrpc':'2.0','id':'permit','method':'session/request_permission','params':{'sessionId':'private-main-key','toolCall':{'title':'Write file'},'options':[{'optionId':'yes','name':'Allow','kind':'allow_once'},{'optionId':'no','name':'Reject','kind':'reject_once'}]}}); continue"
   ,"  send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':text}}}})"

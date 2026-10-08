@@ -8,7 +8,7 @@
 module Hide.AgentRuntime
   ( AgentRuntime, AgentRequest(..), PrimaryControl(..), primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
-  , syncPrimary, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentReconnect
+  , syncPrimary, recordPrimaryEvent, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentReconnect
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -82,6 +82,7 @@ data RuntimeState = RuntimeState
   , launches :: M.Map AgentId ACP.Launch
   , primaryState :: Maybe (FilePath,Maybe (StableName ACP.Client),Text,Capabilities)
   , primaryControl :: Maybe PrimaryControl
+  , primaryEvents :: Maybe (DriverEvent -> IO ())
   , closed :: Bool, notice :: Maybe Text, checkpointActive :: Bool }
 
 -- | Scope providers, private bridge access, pending replies and checkpoint workers.
@@ -96,7 +97,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
   where
     acquire = mask $ \restore -> do
       access <- newAgentAccess
-      state <- newMVar (RuntimeState [] [] M.empty M.empty M.empty Nothing Nothing False Nothing False)
+      state <- newMVar (RuntimeState [] [] M.empty M.empty M.empty Nothing Nothing Nothing False Nothing False)
       root <- lookupEnv "THC_EDIT_SESSION" >>= traverse (\sid -> do
         saved <- loadSession sid
         case saved of
@@ -130,7 +131,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
         Nothing -> restore (registerAgent hub "Primary" directory driver) >>= either (ioError . userError . T.unpack) pure
         Just checkpoint -> do
           let primary = savedPrimary checkpoint
-          restore (updateExternalAgent hub primary driver) >>= either (ioError . userError . T.unpack) pure
+          restore (updateExternalAgent hub primary driver) >>= either (ioError . userError . T.unpack) (const (pure ()))
           pure primary) `onException` cleanup
       putMVar identity ident
       modifyMVar_ recoveryFault (const (pure fault))
@@ -178,26 +179,46 @@ drainAgentRequests runtime = modifyMVar (runtimeState runtime) $ \s -> do
 syncPrimary :: AgentRuntime -> FilePath -> Maybe ACP.Client -> Text -> Capabilities -> Bool -> IO (Either Text ())
 syncPrimary runtime directory client key caps busy = do
   connection<-traverse (\value->makeStableName =<< evaluate value) client
-  previous <- primaryState <$> readMVar (runtimeState runtime)
-  result <- if previous==Just (directory,connection,key,caps) then pure (Right ()) else do
-    loaded <- try (configuredLaunch runtime)
-    case loaded of
-      Left (_::IOException) -> pure (Left "Could not read configured agent provider.")
-      Right launch -> do
-        updated <- updateExternalAgent (agentHub runtime) (primaryAgent runtime)
-          (primaryDriver (runtimeState runtime) (agentAccess runtime) (pure (Just (primaryAgent runtime))) connection directory key caps)
-        case updated of
-          Left err -> pure (Left err)
-          Right () -> do
-            modifyMVar_ (runtimeState runtime) $ \s -> pure s
-              { primaryState=Just (directory,connection,key,caps)
-              , launches=M.insert (primaryAgent runtime) launch (launches s)
-              , sessions=M.adjust (\record -> record {sessionDirectory=directory}) (primaryAgent runtime) (sessions s) }
-            pure (Right ())
+  previous <- readMVar (runtimeState runtime)
+  let signature=(directory,connection,key,caps)
+      sameProvider (oldDirectory,oldConnection,oldKey,_)=
+        (oldDirectory,oldConnection,oldKey)==(directory,connection,key)
+  result <- if primaryState previous==Just signature then pure (Right ()) else case primaryEvents previous of
+    Just emit | maybe False sameProvider (primaryState previous)->do
+      emit (ProviderCapabilities caps)
+      modifyMVar_ (runtimeState runtime) (\s->pure s {primaryState=Just signature})
+      pure (Right ())
+    _->do
+      loaded <- try (configuredLaunch runtime)
+      case loaded of
+        Left (_::IOException) -> pure (Left "Could not read configured agent provider.")
+        Right launch -> do
+          failPrimaryControl runtime "Primary provider changed."
+          updated <- updateExternalAgent (agentHub runtime) (primaryAgent runtime)
+            (primaryDriver (runtimeState runtime) (agentAccess runtime) (pure (Just (primaryAgent runtime))) connection directory key caps)
+          case updated of
+            Left err -> pure (Left err)
+            Right emit -> do
+              modifyMVar_ (runtimeState runtime) $ \s -> pure s
+                { primaryState=Just signature,primaryEvents=Just emit
+                , launches=M.insert (primaryAgent runtime) launch (launches s)
+                , sessions=M.adjust (\record -> record {sessionDirectory=directory}) (primaryAgent runtime) (sessions s) }
+              pure (Right ())
   -- Busy state changes independently of session metadata, including while a
   -- malformed policy prevents a metadata update.
   setExternalAgentBusy (agentHub runtime) (primaryAgent runtime) busy
   pure result
+
+-- | Publish an already-scrubbed update from the exact live primary connection.
+-- The sink retains its Hub incarnation after this check, so concurrent provider
+-- replacement also rejects publication. This never synchronizes or replays state.
+recordPrimaryEvent :: AgentRuntime -> ACP.Client -> Text -> DriverEvent -> IO ()
+recordPrimaryEvent runtime client key event=do
+  owner<-makeStableName =<< evaluate client
+  publish<-withMVar (runtimeState runtime) $ \state->pure $ case primaryState state of
+    Just (_,Just current,sid,_) | not (closed state),owner==current,key==sid->primaryEvents state
+    _->Nothing
+  mapM_ ($ event) publish
 
 failPendingPrimary :: AgentRuntime -> Text -> IO ()
 failPendingPrimary runtime = failDeliveries (runtimeState runtime)

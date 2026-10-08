@@ -295,9 +295,11 @@ registerAgent hub@(AgentHub readLimits _ _) name directory driver=mask $ \restor
       accepted<-installDriver hub (entryId entry) (entryEpoch entry) driver
       if accepted then pure (Right (entryId entry)) else pure (Left "Agent directory closed during registration.")
 
--- The primary conversation retains its public identity across provider reconnects.
--- These host-only hooks are deliberately absent from tool argument decoders.
-updateExternalAgent :: AgentHub -> AgentId -> AgentDriver -> IO (Either Text ())
+-- | Bind a new external provider incarnation while retaining the public agent ID.
+-- The returned event sink belongs to that incarnation: replacement retires it
+-- even if the provider session key is reused. Capability refresh uses the sink
+-- instead of replacing the driver. This host hook is absent from tool decoders.
+updateExternalAgent :: AgentHub -> AgentId -> AgentDriver -> IO (Either Text (DriverEvent -> IO ()))
 updateExternalAgent hub@(AgentHub readLimits _ ref) ident driver=mask $ \restore->do
   loaded<-restore (safeCall (readLimits (driverDirectory driver)))
   result<-atomically $ do
@@ -308,15 +310,15 @@ updateExternalAgent hub@(AgentHub readLimits _ ref) ident driver=mask $ \restore
         Just entry | entryExternal entry && (active entry || entryPhase entry==Recovered),not (hubClosed state)->do
           let reviving=entryPhase entry==Recovered
           if reviving && length (filter active (M.elems (hubEntries state)))>=totalActiveAgents limits then pure (Left "Total active-agent limit reached.") else do
-            let next=appendEvent "provider_updated" Human Null entry {entryDriver=Just driver,entryKey=if T.null (driverSessionKey driver) then Nothing else Just (driverSessionKey driver),entryCaps=driverCapabilities driver,entryCapsVersion=entryCapsVersion entry+1,entrySpec=(entrySpec entry) {spawnDirectory=driverDirectory driver},entryPhase=if reviving then Idle else entryPhase entry}
+            let next=appendEvent "provider_updated" Human Null entry {entryDriver=Just driver,entryKey=if T.null (driverSessionKey driver) then Nothing else Just (driverSessionKey driver),entryCaps=driverCapabilities driver,entryCapsVersion=0,entryEpoch=entryEpoch entry+1,entryControl=Nothing,entryUsage=Nothing,entrySpec=(entrySpec entry) {spawnDirectory=driverDirectory driver},entryPhase=if reviving then Idle else entryPhase entry}
             writeTVar ref state {hubEntries=M.insert ident next (hubEntries state),hubLastLimits=limits}
-            pure (Right reviving)
+            pure (Right (reviving,entryEpoch next))
         _->pure (Left "Unknown or ended external agent.")
   case result of
     Left err->pure (Left err)
-    Right reviving->do
+    Right (reviving,epoch)->do
       if reviving then void (forkIOWithUnmask (\unmask->unmask (worker hub ident))) else pure ()
-      pure (Right ())
+      pure (Right (recordDriverEvent hub ident epoch))
 
 setExternalAgentBusy :: AgentHub -> AgentId -> Bool -> IO ()
 setExternalAgentBusy (AgentHub _ _ ref) ident busy=atomically $ modifyTVar' ref $ \state->state {hubEntries=M.adjust update ident (hubEntries state)}

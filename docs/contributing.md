@@ -645,9 +645,14 @@ widget APIs remain tracked in [#5](https://github.com/ekmett/hide/issues/5); the
 `WindowDef` signatures remain proposed.
 
 Agent sidebar configuration returns prepared public choices with an opaque receipt
-from the existing hub epoch/capability version. Child configuration rechecks it
-inside the ordinary child-control reservation; Primary retains its own ACP
-request/pending owner. Neither route changes the selected conversation to dispatch.
+from the existing hub epoch/capability version. Primary and child configuration
+and human steering recheck it inside the shared Hub control reservation. Primary
+requests enter its existing ACP mailbox and complete only on acknowledgement;
+cancellation remains with the synchronous conversation owner. Neither route
+changes the selected conversation to dispatch. The primary's redacted provider
+output, bounded tool/plan updates and context usage also enter the shared Hub
+history/status APIs. Exact connection replacement retires its event sink, while
+capability refresh preserves the provider lifetime and outstanding controls.
 The separate ACP completion node consumes cheap metadata published by Autocomplete.
 Only explicit choice discovery starts that existing lazy connection. Configuration
 and prompts share its serial owner; session/configuration receipts and settings

@@ -72,6 +72,8 @@ checks=bracket temporary removePathForcibly $ \root -> do
     observed<-readIORef events
     check "public updates include bounded text and tools without provider keys" (any ((=="output").fst) observed && any ((=="tool").fst) observed && not ("private-child-key" `T.isInfixOf` T.pack (show observed)))
     check "provider context usage reaches child updates" (any (\(kind,value)->kind=="usage" && field "used" value==Just (120::Integer) && field "size" value==Just (1000::Integer)) observed)
+    check "child plan events retain public content without provider keys"
+      (any (\(kind,value)->kind=="plan" && "Plan [private]" `T.isInfixOf` T.pack (show value) && not ("raw-plan-detail" `T.isInfixOf` T.pack (show value))) observed)
     let toolUpdates=[value | ("tool",value)<-observed]
     check "child tool updates retain call identity and omit absent titles"
       (length toolUpdates==2 && all ((==Just ("inspect-1"::T.Text)).field "toolCallId") toolUpdates &&
@@ -268,7 +270,7 @@ fixture=unlines
   , "   for n in range(24): update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'x'*9000}})"
   , "   reply(i,{'stopReason':'end_turn'})"
   , "  else:"
-  , "   update({'sessionUpdate':'usage_update','used':120,'size':1000}); update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'Output '+sid}}); update({'sessionUpdate':'tool_call','toolCallId':'inspect-1','title':'Inspect source','status':'pending','rawInput':{'sessionId':sid}}); update({'sessionUpdate':'tool_call_update','toolCallId':'inspect-1','status':'completed'}); reply(i,{'stopReason':'end_turn'})"
+  , "   update({'sessionUpdate':'usage_update','used':120,'size':1000}); update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'Output '+sid}}); update({'sessionUpdate':'tool_call','toolCallId':'inspect-1','title':'Inspect source','status':'pending','rawInput':{'sessionId':sid}}); update({'sessionUpdate':'tool_call_update','toolCallId':'inspect-1','status':'completed'}); update({'sessionUpdate':'plan','entries':[{'content':'Plan '+sid,'priority':'high','status':'in_progress','raw':'raw-plan-detail'}]}); reply(i,{'stopReason':'end_turn'})"
   , " elif method=='session/cancel' and os.environ.get('IGNORE_CANCEL')!='yes': reply(active,{'stopReason':'cancelled'})"
   , " elif i=='permission':"
   , "  if m.get('result',{}).get('outcome',{}).get('outcome')=='selected': send({'id':'native-read','method':'fs/read_text_file','params':{'sessionId':sid,'path':'/secret'}})"
