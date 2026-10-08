@@ -67,15 +67,16 @@ checks = do
       scene surfaces bytes=object ["epoch" .= epoch,"surfaces" .= surfaces,"mask" .= TE.decodeUtf8 (B64.encode bytes)]
       frame value=parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"canvas" .= value]) rows
       validScene=scene [surface 1 [0,0,2,2]] mask
+      canvasOf=either (const Nothing) remoteCanvas . frame
   check "canvas frame retains a complete bounded scene and exact little endian dim mask"
-    (case frame validScene of Right value->case remoteCanvas value of Just scene'->canvasMask scene'==mask && map canvasWindow (canvasSurfaces scene')==[91]; _->False; _->False)
+    (maybe False (\scene'->canvasMask scene'==mask && map canvasWindow (canvasSurfaces scene')==[91]) (canvasOf validScene))
   check "canvas semantics omit opaque resource IDs and wholly covered surfaces"
-    (case frame validScene of Right value->case remoteCanvas value of Just scene'->not (TE.encodeUtf8 resource `BS.isInfixOf` canvasAccessibility scene') && TE.encodeUtf8 "safe λ <script>.png" `BS.isInfixOf` canvasAccessibility scene'; _->False; _->False)
+    (maybe False (\scene'->not (TE.encodeUtf8 resource `BS.isInfixOf` canvasAccessibility scene') && TE.encodeUtf8 "safe λ <script>.png" `BS.isInfixOf` canvasAccessibility scene') (canvasOf validScene))
   check "canvas scene rejects malformed mask bytes, absent owners and duplicate slots"
     (all (either (const True) (const False) . frame)
       [scene [surface 1 [0,0,2,2]] (BS.drop 1 mask),scene [] mask,scene [surface 1 [1,0,2,2]] mask,scene [surface 1 [0,0,2,2],surface 1 [0,0,2,2]] mask])
   check "canvas occlusion retains resource surface but omits image AX element"
-    (case frame (scene [surface 1 [0,0,2,2]] (BS.replicate (80*25*2) 0)) of Right value->case remoteCanvas value of Just scene'->not ("91" `BS.isInfixOf` canvasAccessibility scene') && length (canvasSurfaces scene')==1; _->False; _->False)
+    (maybe False (\scene'->not ("91" `BS.isInfixOf` canvasAccessibility scene') && length (canvasSurfaces scene')==1) (canvasOf (scene [surface 1 [0,0,2,2]] (BS.replicate (80*25*2) 0))))
   let windowMeta=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"editorWindows" .= [object ["id" .= (71::Int),"title" .= ("Main.hs"::T.Text),"selected" .= True,"enabled" .= True]]]
       dockFrame=either error id (parseRemoteFrame windowMeta rows)
   check "actual remote native Dock event carries stable host target" (remoteDockWindowInput dockFrame 8 [16,71,8]==Just (object ["type" .= ("focus-window"::T.Text),"id" .= (71::Int)]))
