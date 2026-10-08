@@ -6,20 +6,23 @@ const source=fs.readFileSync('assets/web/editor.js','utf8');
 const start=source.indexOf('// Complete sidebar metadata');
 assert.ok(start>=0,'browser semantic sidebar consumer is present');
 class Element {
-  constructor(tag='div'){this.tag=tag;this.children=[];this.attributes=new Map();this.dataset={};this.events=new Map();this.hidden=false;}
+  constructor(tag='div'){this.tag=tag;this.tagName=tag.toUpperCase();this.children=[];this.attributes=new Map();this.dataset={};this.events=new Map();this.hidden=false;}
   setAttribute(name,value){this.attributes.set(name,String(value));}
   getAttribute(name){return this.attributes.get(name)??null;}
   removeAttribute(name){this.attributes.delete(name);}
   addEventListener(name,callback){this.events.set(name,callback);}
   append(...children){for(const child of children){child.parentElement=this;this.children.push(child);}}
-  replaceChildren(...children){this.children=[];this.append(...children);}
+  replaceChildren(...children){for(const child of this.children)child.parentElement=null;this.children=[];this.append(...children);}
+  remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(child=>child!==this);this.parentElement=null;}
+  insertBefore(child,before){child.remove();child.parentElement=this;this.children.splice(this.children.indexOf(before),0,child);}
+  contains(target){return target===this||this.children.some(child=>child.contains(target));}
   querySelectorAll(){return this.children.flatMap(child=>[...(child.getAttribute('role')==='treeitem'?[child]:[]),...child.querySelectorAll()]);}
 }
-const sidebarAccess=new Element(),document={activeElement:{},createElement:tag=>new Element(tag)};
+const sidebarAccess=new Element(),dialogAccess=new Element(),imageAccess=new Element(),document={activeElement:{},createElement:tag=>new Element(tag)};
 assert.match(fs.readFileSync('assets/web/index.html','utf8'),/id="semantic-sidebar"[^>]*role="tree"[^>]*aria-description="Read-only visible sidebar/);
 sidebarAccess.setAttribute('role','tree');sidebarAccess.hidden=true;
 const packets=[];
-const context=vm.createContext({sidebarAccess,document,status:{textContent:''},cols:80,lines:25,send:packet=>packets.push(packet)});
+const context=vm.createContext({sidebarAccess,dialogAccess,imageAccess,document,status:{textContent:''},cols:80,lines:25,send:packet=>packets.push(packet)});
 vm.runInContext(source.slice(start,source.indexOf('// Authorized download bytes',start)),context);
 const token='a'.repeat(48),id=name=>['tree',token,name];
 const root={id:['sidebar'],parent:null,role:'tree',name:'Sidebar',bounds:null,selected:false,focused:false,expanded:null,loading:false,childrenKnown:1,moreChildren:false,index:null,generation:1,level:0,posInSet:0,setSize:1};
@@ -60,6 +63,44 @@ for(const invalid of [
   {...snapshot,nodes:Array(513).fill(root)},
 ]){receive(snapshot);assert.throws(()=>receive(invalid),/Invalid sidebar/);assert.equal(sidebarAccess.hidden,true);assert.equal(items().length,0);}
 assert.equal(packets.length,0);
+// Current modal semantics reuse this production bounded DOM seam.
+const dialogRoot={id:['dialog'],parent:null,role:'dialog',name:'Safe λ <script> dialog',value:null,bounds:[4,2,60,20],focused:false,checked:null,selected:null,expanded:null,multiline:false};
+const field={...dialogRoot,id:['dialog','field','0'],parent:dialogRoot.id,role:'textbox',name:'Current text',value:'λ <script> value',bounds:[7,5,54,3],focused:true};
+const checkbox={...field,id:['dialog','field','1'],role:'checkbox',name:'Auto indent',value:null,checked:true,focused:false,bounds:[7,9,54,1]};
+const button={...field,id:['dialog','button','0'],role:'button',name:'Accept',value:null,focused:false,bounds:[30,20,10,1]};
+const modal={present:true,readOnly:true,truncated:false,nodes:[dialogRoot,field,checkbox,button]};
+function dialog(value){context.value=value;vm.runInContext('receiveDialog(value)',context);}
+function dialogItems(){return dialogAccess.children;}
+const priorFocus=document.activeElement;
+dialog(modal);assert.equal(dialogAccess.hidden,false);assert.equal(document.activeElement,priorFocus);
+assert.equal(dialogAccess.getAttribute('aria-label'),dialogRoot.name);
+assert.equal(dialogItems()[0].value,field.value);assert.equal(dialogItems()[0].readOnly,true);assert.equal(dialogItems()[0].tabIndex,-1);
+assert.match(dialogItems()[0].getAttribute('aria-description'),/Focused in editor/);
+assert.equal(dialogItems()[1].getAttribute('aria-checked'),'true');assert.equal(dialogItems()[2].getAttribute('role'),'button');
+assert.equal(sidebarAccess.getAttribute('aria-hidden'),'true');assert.equal(imageAccess.getAttribute('aria-hidden'),'true');
+dialog({...modal,nodes:[dialogRoot,{...field,value:'Replacement at same structural ID',multiline:true},checkbox,button]});
+assert.equal(dialogItems()[0].value,'Replacement at same structural ID');assert.equal(dialogItems()[0].getAttribute('aria-multiline'),'true');
+const readingField=dialogItems()[0];document.activeElement=readingField;
+dialog({...modal,nodes:[dialogRoot,{...field,value:'Changed while reading'},checkbox,button]});
+assert.equal(dialogItems()[0],readingField);assert.equal(document.activeElement,readingField);assert.equal(readingField.value,'Changed while reading');
+const combo={...field,id:['dialog','field','2'],role:'combobox',name:'Encoding',value:'UTF-8',expanded:true};
+const option={...field,id:['dialog','field','2','option','0'],parent:combo.id,role:'option',name:'UTF-8',value:null,selected:true,focused:false};
+document.activeElement=dialogAccess;dialog({...modal,nodes:[dialogRoot,combo,option]});
+const readingCombo=dialogItems()[0].children[0],comboWrapper=dialogItems()[0];document.activeElement=readingCombo;
+dialog({...modal,nodes:[dialogRoot,{...combo,value:'UTF-16'}, {...option,name:'UTF-16',selected:false}]});
+assert.equal(dialogItems()[0],comboWrapper);assert.equal(comboWrapper.children[0],readingCombo);assert.equal(document.activeElement,readingCombo);
+assert.equal(readingCombo.value,'UTF-16');assert.equal(comboWrapper.children[1].children[0].getAttribute('aria-selected'),'false');
+
+dialog({...modal,nodes:[]});assert.equal(dialogAccess.hidden,true);assert.equal(dialogItems().length,0);
+assert.equal(sidebarAccess.getAttribute('aria-hidden'),'true'); // A private current modal still covers the underlying surface.
+dialog({present:false,readOnly:true,truncated:false,nodes:[]});assert.equal(sidebarAccess.getAttribute('aria-hidden'),null);assert.equal(imageAccess.getAttribute('aria-hidden'),null);
+for(const invalid of [
+ {...modal,readOnly:false},{...modal,present:false}, {...modal,nodes:[dialogRoot,{...field,id:['dialog','field',0]}]}, {...modal,nodes:[dialogRoot,{...field,value:'x'.repeat(2049)}]},
+ {...modal,nodes:[dialogRoot,{...field,name:'x'.repeat(257)}]}, {...modal,nodes:[dialogRoot,{...field,bounds:[79,2,2,1]}]},
+ {...modal,nodes:[dialogRoot,{...field,parent:field.id}]},
+ {...modal,nodes:[dialogRoot,...Array.from({length:17},(_,i)=>({...field,id:['dialog','field',String(i)],value:'x'.repeat(2048)}))]}, {...modal,nodes:Array(257).fill(dialogRoot)},
+]){dialog(modal);assert.throws(()=>dialog(invalid),/Invalid dialog/);assert.equal(dialogAccess.hidden,true);assert.equal(dialogItems().length,0);}
+assert.equal(packets.length,0);
 // Use the production socket/frame merger to exercise delta, reset and reconnect invalidation.
 const sockets=[],noOp=()=>{};
 Object.assign(context,{URL,ArrayBuffer,location:{href:'http://localhost/'},navigator:{platform:'MacIntel'},
@@ -84,5 +125,12 @@ assert.equal(sidebarAccess.hidden,true);
 await message({type:'frame',rows:[],semanticSidebar:snapshot});sockets.at(-1).close();assert.equal(sidebarAccess.hidden,true);
 vm.runInContext('connect()',context);
 await message({type:'frame',size:[80,25],rows:[],semanticSidebar:snapshot});assert.equal(sidebarAccess.hidden,false);
+await message({type:'frame',rows:[],semanticDialog:modal});assert.equal(dialogAccess.hidden,false);
+await message({type:'frame',rows:[]});assert.equal(dialogAccess.hidden,false); // Omitted metadata retains the complete snapshot.
+await message({type:'frame',rows:[],semanticDialog:{present:false,readOnly:true,truncated:false,nodes:[]}});assert.equal(dialogAccess.hidden,true);
+await message({type:'frame',rows:[],semanticDialog:modal});await message({type:'frame',rows:[],reset:true});assert.equal(dialogAccess.hidden,true);
+await message({type:'frame',rows:[],semanticDialog:modal});await message({type:'assets',glyphs:[]});assert.equal(dialogAccess.hidden,true);
+await message({type:'frame',rows:[],semanticDialog:modal});await message({type:'connection',connected:false});assert.equal(dialogAccess.hidden,true);
+await message({type:'frame',rows:[],semanticDialog:modal});sockets.at(-1).close();assert.equal(dialogAccess.hidden,true);
 assert.ok(packets.every(packet=>['frontend','theme'].includes(packet.type))); // Projection handling emits no actions.
-console.log('Browser sidebar hierarchy, read-only navigation, replacement, bounds and connection lifecycle checks passed');
+console.log('Browser sidebar/dialog semantics, read-only navigation, replacement, bounds and connection lifecycle checks passed');

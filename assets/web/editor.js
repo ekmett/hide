@@ -8,9 +8,11 @@ const clipboardAction = document.querySelector('#clipboard-action');
 const resourceAction = document.querySelector('#open-resource');
 const downloadAction = document.querySelector('#download-file');
 const sidebarAccess = document.querySelector('#semantic-sidebar');
+const dialogAccess = document.querySelector('#semantic-dialog');
+const imageAccess = document.querySelector('#semantic-images');
 const gl = canvas.getContext('webgl2', {alpha:false, antialias:false, preserveDrawingBuffer:true});
 if (!gl) {status.textContent='WebGL2 is unavailable in this browser.';throw new Error(status.textContent);}
-const images = new CanvasImages(gl,document.querySelector('#semantic-images'));
+const images = new CanvasImages(gl,imageAccess);
 let contextLost=false;
 const vertex = `#version 300 es
 in vec2 position; out highp vec2 vertexUV;
@@ -387,6 +389,73 @@ sidebarAccess.addEventListener('keydown',event=>{
  }
  event.preventDefault();readSidebarItem(next);
 });
+// A complete current-modal projection grants reading, never editor actions.
+function clearDialog(){
+ dialogAccess.replaceChildren();dialogAccess.hidden=true;dialogAccess.removeAttribute('aria-label');
+ sidebarAccess.removeAttribute('aria-hidden');imageAccess.removeAttribute('aria-hidden');
+}
+function receiveDialog(value){
+ const invalid=()=>{clearDialog();throw new Error('Invalid dialog metadata');};
+ const integer=n=>Number.isSafeInteger(n)&&n>=0;
+ const validId=id=>Array.isArray(id)&&id.every(part=>typeof part==='string'&&part.length<=24)&&id[0]==='dialog'&&(id.length===1||
+   id.length===3&&['field','body','button'].includes(id[1])&&/^[0-9]{1,24}$/.test(id[2])||
+   id.length===5&&id[1]==='field'&&/^[0-9]{1,24}$/.test(id[2])&&id[3]==='option'&&/^[0-9]{1,24}$/.test(id[4]));
+ if(!value||value.readOnly!==true||typeof value.present!=='boolean'||typeof value.truncated!=='boolean'||
+   !Array.isArray(value.nodes)||value.nodes.length>256||!value.present&&value.nodes.length)invalid();
+ const nodes=new Map();let textSize=0;
+ for(const node of value.nodes){
+   if(!node||!validId(node.id)||!['dialog','text','textbox','checkbox','radiogroup','radio','listbox','option','combobox','button'].includes(node.role)||
+     typeof node.name!=='string'||Array.from(node.name).length>256||!(node.value===null||typeof node.value==='string'&&Array.from(node.value).length<=2048)||
+     typeof node.focused!=='boolean'||typeof node.multiline!=='boolean'||![node.checked,node.selected,node.expanded].every(v=>v===null||typeof v==='boolean'))invalid();
+   const r=node.bounds;if(!Array.isArray(r)||r.length!==4||!r.every(integer)||r[2]<1||r[3]<1||r[0]+r[2]>cols||r[1]+r[3]>lines)invalid();
+   textSize+=Array.from(node.name).length+(node.value===null?0:Array.from(node.value).length);
+   const key=JSON.stringify(node.id);if(nodes.has(key)||textSize>32768)invalid();nodes.set(key,node);
+ }
+ const root=nodes.get('["dialog"]');
+ if(value.nodes.length&&(!root||root.role!=='dialog'||root.parent!==null))invalid();
+ for(const node of value.nodes)if(node!==root){
+   if(node.role==='dialog'||!validId(node.parent))invalid();
+   const parent=nodes.get(JSON.stringify(node.parent));
+   if(!parent||node.id.length<=parent.id.length||!parent.id.every((part,i)=>part===node.id[i])||
+      parent!==root&&!['radiogroup','listbox','combobox'].includes(parent.role))invalid();
+ }
+ if(!value.present){clearDialog();return;}
+ const reading=dialogAccess.contains(document.activeElement)&&document.activeElement.tagName==='TEXTAREA'?document.activeElement:null;
+ if(!root)clearDialog();
+ sidebarAccess.setAttribute('aria-hidden','true');imageAccess.setAttribute('aria-hidden','true');
+ if(!root)return; // A private modal still covers the underlying semantic surface.
+ const elements=new Map(),containers=new Map(),rootItems=[];let retainedRoot=null;containers.set('["dialog"]',dialogAccess);
+ for(const [index,node] of value.nodes.entries())if(node!==root){
+   const key=JSON.stringify(node.id),retained=reading?.dataset.dialogKey===key&&reading.getAttribute('role')===node.role;
+   let item=retained?reading:document.createElement(node.role==='textbox'||node.role==='combobox'?'textarea':'div'),container=item;
+   item.dataset.dialogKey=key;
+   for(const state of ['checked','selected','expanded'])item.removeAttribute(`aria-${state}`);
+   item.setAttribute('role',node.role==='text'?'none':node.role);
+   if(node.role!=='text')item.setAttribute('aria-label',node.name);
+   item.setAttribute('aria-description',[node.focused?'Focused in editor':'',node.value===null&&['textbox','combobox'].includes(node.role)?'Value hidden':''].filter(Boolean).join('. '));
+   for(const state of ['checked','selected','expanded'])if(node[state]!==null)item.setAttribute(`aria-${state}`,node[state]);
+   if(['textbox','checkbox','radiogroup','listbox','combobox'].includes(node.role))item.setAttribute('aria-readonly','true');
+   if(node.role==='textbox'||node.role==='combobox'){
+     item.readOnly=true;item.tabIndex=-1;item.value=node.value||'';item.rows=node.multiline?3:1;item.setAttribute('aria-multiline',node.multiline);
+   }else item.textContent=node.name+(node.value===null?'':`: ${node.value}`);
+   if(node.role==='combobox'){
+     const wrapper=retained?reading.parentElement:document.createElement('div'),options=document.createElement('div');
+     if(retained){for(const child of [...wrapper.children])if(child!==reading)child.remove();}
+     options.id=`dialog-options-${index}`;options.setAttribute('role','listbox');
+     options.setAttribute('aria-label',node.name);item.setAttribute('aria-haspopup','listbox');item.setAttribute('aria-controls',options.id);if(!retained)wrapper.append(item);wrapper.append(options);item=wrapper;container=options;
+   }
+   if(retained)retainedRoot=item;elements.set(key,item);containers.set(key,container);
+ }
+ for(const node of value.nodes)if(node!==root){const parent=containers.get(JSON.stringify(node.parent)),item=elements.get(JSON.stringify(node.id));if(parent===dialogAccess)rootItems.push(item);else parent.append(item);}
+ if(retainedRoot){
+   // Do not detach the user's already-focused read-only control or move focus.
+   for(const child of [...dialogAccess.children])if(child!==retainedRoot)child.remove();
+   let before=true;for(const item of rootItems){if(item===retainedRoot){before=false;continue;}if(before)dialogAccess.insertBefore(item,retainedRoot);else dialogAccess.append(item);}
+ }else dialogAccess.replaceChildren(...rootItems);
+ dialogAccess.setAttribute('aria-label',root.name);
+ dialogAccess.setAttribute('aria-description','Read-only current dialog. Use editor controls to edit or activate.'+(value.truncated?' More dialog content is not included.':''));
+ dialogAccess.hidden=false;
+}
 // Authorized download bytes arrive over the authenticated socket, never a host
 // path. Chromium's DownloadURL is synchronous; keep an explicit click fallback.
 let preparedDownload=null,draggedDownload=null;
@@ -454,9 +523,9 @@ function connect(){
    if(message.type?.startsWith('canvas-')){images.control(message);dirty=true;
    }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
    }else if(message.type==='connection'){
-     ready=message.connected&&glyphs.size>0;if(!ready){clearClipboardRequest();clearSidebar();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
+     ready=message.connected&&glyphs.size>0;if(!ready){clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
    }else if(message.type==='assets'){
-     clearSidebar();images.clear();dirty=true;
+     clearSidebar();clearDialog();images.clear();dirty=true;
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
@@ -464,6 +533,8 @@ function connect(){
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
      frame={...frame,...message};updateTitle();unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
+     if(Object.hasOwn(message,'semanticDialog'))receiveDialog(message.semanticDialog);
+     else if(message.reset)clearDialog();
      if(Object.hasOwn(message,'semanticSidebar'))receiveSidebar(message.semanticSidebar);
      else if(message.reset)clearSidebar();
      if(Object.hasOwn(message,'canvas'))images.receive(message.canvas,cols,lines);
@@ -484,16 +555,16 @@ function connect(){
    }else if(message.type==='ack'){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='detached'){
-     detached=true;closed=true;ready=false;clearDownload();clearSidebar();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
+     detached=true;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Session detached. Resume from your terminal with hide --resume.';
      navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
-     closed=true;ready=false;clearDownload();clearSidebar();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
+     closed=true;ready=false;clearDownload();clearSidebar();clearDialog();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{stopped=true;if(connection!==socket)return;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{stopped=true;if(connection!==socket)return;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();
@@ -510,7 +581,9 @@ canvas.addEventListener('wheel',e=>{e.preventDefault();mouseEvent(e.deltaY<0?'wh
 function release(){send({type:'blur'});leftDown=false;mouse=[-1,-1];dirty=true;}
 window.addEventListener('blur',release);document.addEventListener('visibilitychange',()=>{if(document.hidden)release();});
 window.addEventListener('resize',resize);new ResizeObserver(resize).observe(screen);
+function semanticReadingTarget(target){return sidebarAccess.contains(target)||dialogAccess.contains(target);}
 window.addEventListener('keydown',e=>{
+ if(semanticReadingTarget(e.target))return;
  if(sessionFrontend&&e.key===']'&&e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey){
    e.preventDefault();
    if(!closed&&!detaching&&socket?.readyState===WebSocket.OPEN){
@@ -519,7 +592,7 @@ window.addEventListener('keydown',e=>{
    }
    return;
  }
- if(e.target instanceof HTMLButtonElement||e.target===downloadAction||e.target===sidebarAccess)return;
+ if(e.target instanceof HTMLButtonElement||e.target===downloadAction)return;
  send({type:'modifiers',mods:mods(e)});
  if(composing||e.isComposing||e.key==='Process'||e.key==='Dead')return;
  if(['Control','Shift','Alt','Meta','CapsLock'].includes(e.key))return;
@@ -553,13 +626,13 @@ window.addEventListener('keydown',e=>{
  else send({type:'key',key,mods:mods(e)});
  return;
 });
-window.addEventListener('keyup',e=>{if(e.target!==sidebarAccess)send({type:'modifiers',mods:mods(e)});});
+window.addEventListener('keyup',e=>{if(!semanticReadingTarget(e.target))send({type:'modifiers',mods:mods(e)});});
 input.addEventListener('compositionstart',()=>{composing=true;});
 input.addEventListener('compositionend',e=>{composing=false;if(e.data)send({type:'paste',text:e.data});input.value='';});
 input.addEventListener('input',e=>{if(!composing){const text=input.value.replace(/^\u200b/,'');if(text)send({type:'paste',text});input.value='\u200b';input.setSelectionRange(1,1);}});
-window.addEventListener('paste',e=>{if(e.target===fullscreen||e.target===sidebarAccess)return;e.preventDefault();send({type:'paste',text:e.clipboardData.getData('text/plain')});});
-window.addEventListener('copy',e=>{if(e.target===sidebarAccess)return;e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('hide.edit.copy');});
-window.addEventListener('cut',e=>{if(e.target===sidebarAccess)return;e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('hide.edit.cut');});
+window.addEventListener('paste',e=>{if(e.target===fullscreen||semanticReadingTarget(e.target))return;e.preventDefault();send({type:'paste',text:e.clipboardData.getData('text/plain')});});
+window.addEventListener('copy',e=>{if(semanticReadingTarget(e.target))return;e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('hide.edit.copy');});
+window.addEventListener('cut',e=>{if(semanticReadingTarget(e.target))return;e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('hide.edit.cut');});
 input.addEventListener('beforeinput',e=>{
  const name={historyUndo:'hide.edit.undo',historyRedo:'hide.edit.redo'}[e.inputType];
  if(name){e.preventDefault();command(name);}
@@ -569,9 +642,9 @@ input.addEventListener('select',()=>{
  if(input.value==='\u200b'&&input.selectionStart===0&&input.selectionEnd===1){command('hide.edit.select-all');input.setSelectionRange(1,1);}
 });
 input.addEventListener('focus',()=>{if(!input.value){input.value='\u200b';input.setSelectionRange(1,1);}});
-window.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files')){e.preventDefault();e.dataTransfer.dropEffect='copy';}});
+window.addEventListener('dragover',e=>{if(semanticReadingTarget(e.target)){e.preventDefault();e.dataTransfer.dropEffect='none';return;}if([...e.dataTransfer.types].includes('Files')){e.preventDefault();e.dataTransfer.dropEffect='copy';}});
 window.addEventListener('drop',async e=>{
- e.preventDefault();const files=[...e.dataTransfer.files];
+ e.preventDefault();if(semanticReadingTarget(e.target))return;const files=[...e.dataTransfer.files];
  for(const file of files){
    if(file.size>16*1024*1024){status.textContent=`${file.name}: browser drops are limited to 16 MiB per file.`;continue;}
    try{

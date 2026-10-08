@@ -10,10 +10,10 @@ const context=vm.createContext({
  input:{addEventListener:()=>{},value:'',setSelectionRange:()=>{}},
  navigator:{platform:'MacIntel'},HTMLButtonElement:class {},performance:{now:()=>0},
  sessionFrontend:false,composing:false,cursorEpoch:0,frame:{bindingsActive:true,bindings:[]},
- fullscreen:{},downloadAction:{},sidebarAccess:{},clipboard:'selected',nativeCopies:[],send:packet=>packets.push(packet),command:name=>commands.push(name),
+ fullscreen:{},downloadAction:{},sidebarAccess:{contains:target=>target===context.sidebarAccess},dialogAccess:{contains:target=>target===context.dialogAccess||target===context.dialogChild},dialogChild:{},clipboard:'selected',nativeCopies:[],send:packet=>packets.push(packet),command:name=>commands.push(name),
 });
 vm.runInContext(source.slice(source.indexOf('function mods(e)'),source.indexOf('function mods(e)')+source.slice(source.indexOf('function mods(e)')).indexOf('\n')),context);
-vm.runInContext(source.slice(source.indexOf("window.addEventListener('keydown'"),source.indexOf("window.addEventListener('dragover'")),context);
+vm.runInContext(source.slice(source.indexOf('function semanticReadingTarget('),source.indexOf("window.addEventListener('dragover'")),context);
 function key(key,flags={}){
  packets.length=0;commands.length=0;
  const event={key,code:'',target:{},ctrlKey:false,metaKey:false,altKey:false,shiftKey:false,getModifierState:()=>false,preventDefault(){this.prevented=true;},...flags};
@@ -25,6 +25,13 @@ assert.equal(key('ArrowDown',{target:context.sidebarAccess}).prevented,undefined
 handlers.get('keyup')({target:context.sidebarAccess});assert.equal(packets.length,0);
 for(const type of ['copy','cut','paste'])handlers.get(type)({target:context.sidebarAccess});
 assert.equal(packets.length,0);assert.equal(commands.length,0); // Reading and browser clipboard gestures grant no host actions.
+assert.equal(key('Enter',{target:context.dialogChild}).prevented,undefined);assert.equal(packets.length,0);
+handlers.get('keyup')({target:context.dialogChild});assert.equal(packets.length,0);
+for(const type of ['copy','cut','paste'])handlers.get(type)({target:context.dialogChild});
+assert.equal(packets.length,0);assert.equal(commands.length,0);
+context.sessionFrontend=true;
+key(']',{target:context.dialogAccess,ctrlKey:true});assert.equal(packets.length,0); // Reading focus cannot detach the host either.
+context.sessionFrontend=false;
 assert.equal(key('ArrowDown').prevented,true);assert.equal(packets.at(-1).type,'key'); // Returning to the editor restores normal routing.
 assert.equal(key('c',{metaKey:true}).prevented,undefined); // Native clipboard event owns activation.
 context.frame.wordstar=true;context.frame.bindings=[['Ctrl+C','hide.edit.copy']];
