@@ -44,9 +44,11 @@ int main(void) {
         [NSApplication sharedApplication];
         id<NSDraggingSource> fileSource=[NSClassFromString(@"HideFileDragSource") new];
         assert(fileSource);
-        assert([fileSource draggingSession:nil sourceOperationMaskForDraggingContext:NSDraggingContextOutsideApplication]==NSDragOperationCopy);
-        assert([fileSource draggingSession:nil sourceOperationMaskForDraggingContext:NSDraggingContextWithinApplication]==NSDragOperationCopy);
-        assert([fileSource ignoreModifierKeysForDraggingSession:nil]);
+        /* Policy callbacks do not inspect the Cocoa-owned session. */
+        NSDraggingSession *dragSession=(id)[NSObject new];
+        assert([fileSource draggingSession:dragSession sourceOperationMaskForDraggingContext:NSDraggingContextOutsideApplication]==NSDragOperationCopy);
+        assert([fileSource draggingSession:dragSession sourceOperationMaskForDraggingContext:NSDraggingContextWithinApplication]==NSDragOperationCopy);
+        assert([fileSource ignoreModifierKeysForDraggingSession:dragSession]);
 
         DockDelegate *delegate = [DockDelegate new];
         delegate.original = [NSMenu new];
