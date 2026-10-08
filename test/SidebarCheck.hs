@@ -266,6 +266,8 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
       (length (pictures pair)==2 && M.null (buffers pair) && all (\image->Canvas.imageWidth image==3 && Canvas.imageHeight image==2 && Canvas.imagePNG image==png) (pictures pair) &&
        (Window.preparedWindowSemantics (body pair) >>= Window.textLinkBase)==Just second)
     mixed<-open host initial [OpenFile Menu.HumanMenu source,OpenFile Menu.HumanMenu first]
+    check "named image opening keeps its file directory for ordinary navigation"
+      (startingDirectory pair {defaultDirectory=Nothing}==dir)
     check "text and image burst keeps both representations"
       (length (pictures mixed)==1 && map (contents.documentBuffer) (M.elems (buffers mixed))==["main = 1\n"])
     let original=Window.preparedWindowImage (body mixed)
@@ -282,6 +284,8 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
     check "uploaded image keeps exact bytes and name without a server path"
       (map Canvas.imagePNG (pictures uploaded)==[png] && M.null (buffers uploaded) && Window.preparedWindowTitle (body uploaded)=="unusual.bin" &&
        (Window.preparedWindowSemantics (body uploaded) >>= Window.textLinkBase)==Nothing)
+    check "uploaded image keeps the existing navigation directory without inventing a path"
+      (startingDirectory uploaded==dir && startingDirectory uploaded {defaultDirectory=Nothing}==".")
     let invalid=BS.take 8 png<>"broken PNG"
     fallback<-open host initial [OpenFileBytes "broken.png" invalid]
     check "undecodable image bytes remain lossless and editable"

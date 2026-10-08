@@ -77,8 +77,8 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
-import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, doesDirectoryExist, doesFileExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
-import System.FilePath ((</>), isAbsolute, takeDirectory, takeFileName, takeExtension)
+import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, doesDirectoryExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
+import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension)
 import Control.Exception (try, IOException)
 import Paths_hide (getDataFileName)
 import Hide.Browser
@@ -717,8 +717,6 @@ applyEffects = foldM apply . (False,)
             case after of
               Nothing->pure (False,refreshed)
               Just cmd->uncurry applyEffects (runCommand cmd refreshed)
-
-
 
 gitDirectory :: Desktop -> FilePath
 gitDirectory d = case activeDocument d >>= documentFile of
