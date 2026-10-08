@@ -37,6 +37,8 @@ serveBrowser done session = do
   html<-getDataFileName "assets/web/index.html" >>= BL.readFile
   script<-getDataFileName "assets/web/editor.js" >>= BL.readFile
   cellShader<-getDataFileName "assets/web/cell-shader.js" >>= BL.readFile
+  canvasShader<-getDataFileName "assets/web/canvas-shader.js" >>= BL.readFile
+  canvasImages<-getDataFileName "assets/web/canvas-images.js" >>= BL.readFile
   token<-withBinaryFile "/dev/urandom" ReadMode $ \h->do
     bytes<-BS.hGet h 24
     unless (BS.length bytes==24) (ioError (userError "Cannot create browser session token"))
@@ -56,6 +58,8 @@ serveBrowser done session = do
           | W.rawPathInfo req==prefix = respond (W.responseLBS status200 (("Content-Type","text/html; charset=utf-8"):headers) html)
           | W.rawPathInfo req==prefix<>"editor.js" = respond (W.responseLBS status200 (("Content-Type","text/javascript; charset=utf-8"):headers) script)
           | W.rawPathInfo req==prefix<>"cell-shader.js" = respond (W.responseLBS status200 (("Content-Type","text/javascript; charset=utf-8"):headers) cellShader)
+          | W.rawPathInfo req==prefix<>"canvas-shader.js" = respond (W.responseLBS status200 (("Content-Type","text/javascript; charset=utf-8"):headers) canvasShader)
+          | W.rawPathInfo req==prefix<>"canvas-images.js" = respond (W.responseLBS status200 (("Content-Type","text/javascript; charset=utf-8"):headers) canvasImages)
           | otherwise = respond (W.responseLBS status404 headers "Not found")
         websocket pending = do
           let req=WS.pendingRequest pending
