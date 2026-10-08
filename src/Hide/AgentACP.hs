@@ -24,6 +24,7 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Data.Vector as V
 import System.Directory (canonicalizePath)
 import System.Timeout (timeout)
 import qualified Hide.ACP as A
@@ -305,13 +306,13 @@ publicACPUpdate redact update=case field "sessionUpdate" update :: Maybe Text of
     in Just (ProviderUpdate "tool" (object (["status" .= status]++
       maybe [] (\value->["title" .= value]) title++maybe [] (\value->["toolCallId" .= value]) ident)))
   Just "plan"->
-    let entries=fromMaybe [] (field "entries" update :: Maybe [Value])
+    let entries=case field "entries" update of Just (Array values)->values; _->V.empty
         entry value=do
           content<-field "content" value
           pure (object ["content" .= T.take 8192 (redact content),
             "priority" .= choice ["high","medium","low"] "medium" "priority" value,
             "status" .= choice ["pending","in_progress","completed"] "pending" "status" value])
-    in Just (ProviderUpdate "plan" (object ["entries" .= mapMaybe entry (take 64 entries),"truncated" .= not (null (drop 64 entries))]))
+    in Just (ProviderUpdate "plan" (object ["entries" .= V.mapMaybe entry (V.take 64 entries),"truncated" .= (V.length entries>64)]))
   Just "usage_update"->case (field "used" update,field "size" update) of
     (Just used,Just size) | used>=0 && size>0 && max used size<=1000000000000000->Just (ProviderUsage used size)
     _->Nothing

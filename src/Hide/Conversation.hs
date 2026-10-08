@@ -929,8 +929,10 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
       modifyIORef' ref (\state -> recordToolUpdate public state {lastMessageAt=Just now})
       mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id public)
 
--- Provider publication uses the same exact connection receipt as controls.
--- It never captures human prompts or copies transcript history during sync.
+-- Provider publication runs on the daemon's existing serialized session tick
+-- (including its suspend drain), not the renderer or ordinary input branch.
+-- It uses the same exact connection receipt as controls, never captures human
+-- prompts, and never copies transcript history during sync.
 publishPrimaryEvent :: ConversationState -> AH.DriverEvent -> IO ()
 publishPrimaryEvent (ConversationState _ ref _ agents) event=do
   state<-readIORef ref
