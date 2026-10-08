@@ -73,7 +73,7 @@ import System.Environment (lookupEnv)
 import Hide.Syntax (Style(..),styledText)
 
 -- One configured stdio provider; its protocol supplies models and tools.
-data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Steering Text AR.PrimaryControl | Setting AR.PrimaryControl deriving Eq
+data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | CancellingPrompt | Steering Text AR.PrimaryControl | Setting AR.PrimaryControl deriving Eq
 -- A human submission can consume only its captured immutable draft. Stable
 -- names in ContentVersion retain no Buffer/Undo; selection/focus are independent.
 type DraftReceipt = Editor.DraftSubmission
@@ -439,7 +439,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
         forM_ (session s) $ \sid -> A.notify client "session/cancel" (object ["sessionId" .= sid])
         mapM_ (cancelApproval client . snd) (filter (not . child) (approvals s))
       retired<-retireRequests ref
-      writeIORef ref retired {queuedPrompt=Nothing,approvals=retained,presented=if keepDialog then presented s else Nothing,deferredApproval=False}
+      writeIORef ref retired {pending=M.map (\phase->if phase==Prompting then CancellingPrompt else phase) (pending retired),queuedPrompt=Nothing,approvals=retained,presented=if keepDialog then presented s else Nothing,deferredApproval=False}
       pure (if keepDialog then d else dismissPermission d) {status="Cancellation requested."}
     ("new",_) | primaryBusy s -> pure d {status="Cancel the current reply before starting a new session."}
     ("new",_) -> do
@@ -474,6 +474,11 @@ submitPrimaryPrompt runtime@(ConversationState _ ref _ _) s receipt prompt (sele
   opened<-if isNothing (connection s) then start runtime Nothing d else sendQueued runtime d
   latest<-readIORef ref
   paint True latest opened
+
+isPrompt :: Phase -> Bool
+isPrompt Prompting=True
+isPrompt CancellingPrompt=True
+isPrompt _=False
 
 isSteering :: Phase -> Bool
 isSteering Steering{}=True
@@ -796,12 +801,12 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
       pure (dismissPermission cleared) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
       writeIORef ref s {pending=M.delete ident (pending s)}
-      when (M.lookup ident (pending s)==Just Prompting) (flushConversationChunks ref)
+      when (maybe False isPrompt (M.lookup ident (pending s))) (flushConversationChunks ref)
       case (M.lookup ident (pending s),result,connection s) of
         (Nothing,_,_) -> pure d
         (_,Left err,_) -> do
           redact<-conversationRedactor runtime s
-          when (M.lookup ident (pending s)==Just Prompting) (completeConversationDelivery runtime (Left "Agent prompt failed."))
+          when (maybe False isPrompt (M.lookup ident (pending s))) (completeConversationDelivery runtime (Left "Agent prompt failed."))
           modifyIORef' ref (\state -> appendRecords [activity "Request failed" (redactValue redact err)] state {queuedPrompt=Nothing,deliveredContext=Nothing})
           case M.lookup ident (pending s) of
             Just (Setting control)->AR.rejectPrimaryControl "Agent configuration failed." control
@@ -858,7 +863,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
             mapM_ A.stopClient (connection s)
             stopped<-receive runtime d (A.Disconnected "Provider started an unowned steering turn or returned an unknown outcome.")
             pure stopped {status="Steering ownership was not confirmed; provider stopped. Draft kept; queued turns cancelled without replay."}
-        (Just Prompting,Right value,_) -> do
+        (Just phase,Right value,_) | isPrompt phase -> do
           current<-readIORef ref
           let text=case reverse (transcript current) of Record _ _ (Reply "Agent" body):_ -> body; _ -> ""
           redact<-conversationRedactor runtime current

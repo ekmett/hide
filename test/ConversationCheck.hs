@@ -358,6 +358,28 @@ draftReceiptChecks=withTextPresentation $ \presentation->
         check "replacement query reaches the provider once in submission order" (length added==2 && all ((==Just ("stream"::T.Text)).firstText) added)
       check "acceptance preserves a replacement draft and clears only the submitted one"
         (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
+    bracket (lookupEnv "THC_CANCEL_GATE" <* setEnv "THC_CANCEL_GATE" gate) (restoreDraftEnvironment "THC_CANCEL_GATE") $ \_->
+      C.withConsoles $ \consoles->withConversationAt consoles root $ \runtime->do
+        configured<-configure runtime base
+        active<-prompt runtime "wait" configured >>= await runtime "cancellation active turn" (pure . (=="Agent is replying...") . status)
+        before<-readMessages (root </> "messages.jsonl")
+        createNamedPipe gate 0o600
+        withHeldRead server gate "cancelled" $ \opened release writer->do
+          cancelling<-send runtime "cancel" [] active >>= await runtime "cancellation reached provider" (const (not <$> isEmptyMVar opened))
+          refused<-submit runtime SteerSubmit (draftBuffer (newBuffer "after cancel") cancelling)
+          let agents=conversationAgents runtime
+          (receipt,_)<-AH.agentConfiguration (AR.agentHub agents) (AR.primaryAgent agents) >>= either (error.T.unpack) pure
+          withAsync (AH.steerAgentAt (AR.agentHub agents) receipt "late direct steering") $ \request->do
+            pending<-await runtime "cancelled turn refuses direct control" (const (maybe False (const True) <$> poll request)) refused
+            outcome<-wait request
+            check "fresh direct steering cannot enter a cancelling primary turn" (either (const True) (const False) outcome)
+            putMVar release (); wait writer
+            settled<-primaryDone runtime "cancellation acknowledgement" pending
+            check "steering during primary cancellation retains the draft" (contents (composerBuffer settled)=="after cancel")
+          after<-readMessages (root </> "messages.jsonl")
+          check "cancelling primary sends no later steering to the provider"
+            (not (any ((==Just ("_session/steering"::T.Text)).field "method") (drop (length before) after)))
+        removeFile gate
     bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" (replicate 48 'c')) (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->
       bracket (lookupEnv "THC_STEER_GATE" <* setEnv "THC_STEER_GATE" gate) (restoreDraftEnvironment "THC_STEER_GATE") $ \_->
         forM_ [False,True] $ \replaced->C.withConsoles $ \consoles -> withConversationAt consoles root $ \runtime->do
@@ -1757,7 +1779,9 @@ providerScript=unlines
   , "    if params['configId']=='model': model=params['value']"
   , "    else: effort=params['value']"
   , "    reply(ident,{'configOptions':settings()})"
-  , "  elif method=='session/cancel': finish('cancelled')"
+  , "  elif method=='session/cancel':"
+  , "    if os.environ.get('THC_CANCEL_GATE'): open(os.environ['THC_CANCEL_GATE'],'rb').read()"
+  , "    finish('cancelled')"
   , "  elif method=='_session/steering':"
   , "    if os.environ.get('THC_STEER_GATE'): open(os.environ['THC_STEER_GATE'],'rb').read()"
   , "    reply(ident,{'outcome':'failed' if params['prompt'][0]['text']=='reject-context' else 'promptRequired' if params['prompt'][0]['text']=='idle-race' else 'startedNewTurn' if params['prompt'][0]['text']=='legacy-steer' else 'injected'}); finish()"
