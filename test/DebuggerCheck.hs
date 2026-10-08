@@ -45,7 +45,7 @@ outputOwnerChecks=withDebugger $ \runtime->do
   let opened=addReadOnly "Debugger output" "unrelated snapshot" (initialDesktop (80,25))
       trapped=opened {buffers=M.map (\doc->doc {documentBuffer=error "idle debugger forced unrelated output-labelled Buffer"}) (buffers opened)}
   after<-tickDebugger runtime trapped
-  count<-evaluate (sum [maybe 0 (const 1) (documentLabel doc) | doc<-M.elems (buffers after)])
+  count<-evaluate (sum [maybe (0::Int) (const 1) (documentLabel doc) | doc<-M.elems (buffers after)])
   check "idle debugger leaves unrelated output-labelled buffers untouched" (count==1)
 -- Real DAP messages exercise automatic opening, exact refresh, closure and a
 -- replacement transport. No callback or prepared-window test seam is exposed.
@@ -561,8 +561,7 @@ debuggerTimeout=if os=="mingw32" then 10000000 else 5000000
 
 presentationCheck :: IO ()
 presentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugger $ \runtime -> do
-  let core d _=pure (False,d)
-      tool name args d=do
+  let tool name args d=do
         (updated,finish)<-debuggerTool runtime d name (object args)
         result<-finish >>= either (error . T.unpack) pure
         pure (updated,result)
@@ -634,8 +633,7 @@ presentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugge
 -- between those ticks must suppress an automatic reveal already in flight.
 pendingPresentationCheck :: IO ()
 pendingPresentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugger $ \runtime -> do
-  let core d _=pure (False,d)
-      tool name args d=do
+  let tool name args d=do
         (updated,finish)<-debuggerTool runtime d name (object args)
         result<-finish >>= either (error . T.unpack) pure
         pure (updated,result)

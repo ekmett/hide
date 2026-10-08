@@ -42,7 +42,7 @@ import Hide.Render (snapshot,renderKey,renderCellRows,renderCellRowsAndCanvas,re
 import Hide.Unicode (CellSpan(..),CellLayer(..),cellRowsAndOwnership)
 import WindowExtension
 #ifdef WITH_PROTOCOL
-import Data.Aeson (Value(..),object,(.=),(.:),withObject)
+import Data.Aeson (Value(..),object,(.:),withObject)
 import qualified Data.Aeson.KeyMap
 import Data.Aeson.Types (parseEither)
 import Hide.Protocol hiding (Paste)
@@ -440,7 +440,7 @@ rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommand
   temporary<-getTemporaryDirectory
   (path,handle)<-openTempFile temporary "hide-rows-recovery"
   hClose handle
-  writeCheckpoint path refreshed
+  _<-writeCheckpoint path refreshed
   restored<-readCheckpoint path (initialDesktop (80,25)) >>= either (fail . T.unpack) pure
   removeFile path
   let inert=activePluginWindow restored
@@ -559,7 +559,7 @@ imageChecks=do
   inactive<-tickPluginWindows retired
   check "scope retirement drops retained pixel/PNG bytes and keeps the inert text"
     (all ((==Nothing).W.preparedWindowImage) (M.elems (pluginWindows inactive)) && null (resource inactive) && "PNG 16" `T.isInfixOf` snapshot inactive)
-  let (_,mask)=cellRowsAndOwnership [CellImage (V.string V.defAttr "界"),CellHalo V.defAttr [(2,0,1,1)],CellCanvas 1 [CellImage (V.charFill V.defAttr ' ' 4 1)],CellMask V.defAttr [(3,0,1)]] (4,1)
+  let (_,mask)=cellRowsAndOwnership [CellImage (V.string V.defAttr "界"),CellHalo V.defAttr [(2,0,1,1)],CellCanvas 1 [CellImage (V.charFill V.defAttr ' ' (4::Int) 1)],CellMask V.defAttr [(3,0,1)]] (4,1)
       masked=Canvas.CanvasScene [] mask
   check "wide glyph halves remain ordinary while halo and privacy share canvas ownership"
     (map (Canvas.canvasOwnerAt masked) [0..3]==[0,0,32769,0])

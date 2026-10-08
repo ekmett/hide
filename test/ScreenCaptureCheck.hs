@@ -24,7 +24,6 @@ import Hide.Markdown (renderMarkdown)
 import Hide.TextPresentation (prepareTextPresentations)
 import Hide.Font (loadFont)
 import SidebarFixture
-import Hide.Sidebar
 import Hide.Model
 import Hide.Render (snapshot)
 import Hide.ScreenCapture

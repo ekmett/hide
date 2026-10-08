@@ -9,7 +9,6 @@ import Data.Aeson (Value(Null))
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust)
 import Data.Text (Text)
-import qualified Data.Text as T
 import Hide.Syntax (Style(..))
 import qualified Data.Vector as V
 import Hide.Model

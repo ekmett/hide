@@ -28,7 +28,7 @@ import Data.Char (toLower)
 import System.Mem.StableName
 import Text.Read (readMaybe)
 import Hide.Browser
-import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,bufferContent,Selection(..))
+import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,Selection(..))
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..),FileRepresentation(..),loadFileForDisplay,fileBuffer)
 import Hide.Plugin.Canvas (isImageContent)
@@ -517,14 +517,14 @@ tickSidebar host@(SidebarHost _ ref publications cancellation _ closed) core ini
     case supplied of
       Nothing->pure d
       Just (FormRefresh update)->refreshForm host update d
-      Just (TreeInvalidation owner node)->refreshTreeFromHost host owner node d
+      Just (TreeInvalidation reference node)->refreshTreeFromHost host reference node d
       Just (TreePublication provider)->do
         live<-P.treeCurrent provider
         registered<-readIORef ref
         let accepted=live && (M.member (P.treeReference provider) (providers registered) || M.size (providers registered)<32)
         if not accepted then pure d {status=if live then "Sidebar provider budget reached." else status d} else do
-          let owner=P.treeReference provider; root=P.treeRoot provider; key=NodeKey owner (P.infoId (P.nodeInfo root))
-          modifyIORef' ref (\s->s {providers=M.insert owner provider (providers s),definitions=M.insert key root (definitions s)})
+          let reference=P.treeReference provider; root=P.treeRoot provider; key=NodeKey reference (P.infoId (P.nodeInfo root))
+          modifyIORef' ref (\s->s {providers=M.insert reference provider (providers s),definitions=M.insert key root (definitions s)})
           pure d {sideTree=fmap (addProvider provider) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}) mounted [1..4::Int]
   registered<-readIORef ref
   withdrawn<-foldM (\d (reference,provider)->do
@@ -1073,13 +1073,13 @@ adoptEditor host@(SidebarHost _ ref _ _ _ _) origin update original=do
   pure next
 
 submitEditor :: SidebarHost -> Editor.EditorMount -> Editor.EditorSlot -> Menu.MenuOrigin -> Desktop -> IO Desktop
-submitEditor (SidebarHost _ ref _ _ _ _) mount slot origin d=mask $ \_->do
+submitEditor (SidebarHost _ ref _ _ _ _) editorMount slot origin d=mask $ \_->do
   state<-readIORef ref
-  case M.lookup (Editor.mountDraft mount) (editorBindings state) of
-    Just (_,editor) | origin==Menu.HumanMenu,activeEditorMount d==Just mount,composerActive d,Editor.editorMount editor==mount->case actionJob state of
+  case M.lookup (Editor.mountDraft editorMount) (editorBindings state) of
+    Just (_,editor) | origin==Menu.HumanMenu,activeEditorMount d==Just editorMount,composerActive d,Editor.editorMount editor==editorMount->case actionJob state of
       Just _->pure d {status="Sidebar worker is busy; submit again."}
       Nothing->do
-        captured<-Editor.captureDraftSubmission mount slot (composerBuffer d)
+        captured<-Editor.captureDraftSubmission editorMount slot (composerBuffer d)
         case captured of
           Nothing->pure d {status="Editor input expired."}
           Just submitted->do

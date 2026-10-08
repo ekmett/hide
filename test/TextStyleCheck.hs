@@ -78,7 +78,7 @@ checks=do
       normal=textStyleAttr (TextStyle (fromIntegral foreground) 0x654321 3)
       chosen=normal `VT.withForeColor` VT.RGBColor 0 0 170 `VT.withBackColor` VT.RGBColor 170 170 170
   check "ASCII styled runs retain tab, control, selection and font geometry"
-    (map fst displayed=="abc     de··" && map snd displayed==[if i>=1 && i<=8 then chosen else normal | i<-[0..11]])
+    (map fst displayed=="abc     de··" && map snd displayed==[if i>=1 && i<=8 then chosen else normal | i<-[0::Int ..11]])
   let markdown=addHelpStyled (renderMarkdown 80 "# Heading\n\n***both*** regular") (initialDesktop (80,25))
       selected=modifyActive (\w->w {selection=Selection 9 13}) markdown
       selectedFrame=frameRows selected

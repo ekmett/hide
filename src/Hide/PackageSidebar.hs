@@ -170,9 +170,9 @@ packageTitle file=T.take 256 . T.filter (>= ' ') . either (const (T.pack (takeFi
 
 createSlot :: Registry SidebarContext -> FilePath -> [FilePath] -> Int -> FilePath -> IO Slot
 createSlot registry root _private serial file=do
-  signature<-stamp file
+  initialStamp<-stamp file
   parsed<-readPackage file
-  ref<-newIORef (Snapshot 0 signature parsed M.empty)
+  ref<-newIORef (Snapshot 0 initialStamp parsed M.empty)
   ids<-newIORef (M.empty,0)
   let namespace="hide.sidebar.package.p"<>T.pack (show serial)
       codec=Codec Null (const (Left "Package actions are host-captured.")) (const Null)
@@ -242,8 +242,8 @@ createSlot registry root _private serial file=do
   -- doc-artifact: tools/docs-screenshots.hs package-target-menu -> docs/site/screenshots/package-target-menu.png (docs/running.md)
   let targetActions version component=
         [P.ActionMenu label (P.treeAction registry command (version,sourceTarget component) (\_ result->pure result))
-        | (label,action,command)<-[("Build",Make,build),("Run",Run,run),("Test",Test,test),("Benchmark",Benchmark,benchmark)]
-        , eligible action component]++
+        | (label,buildAction,command)<-[("Build",Make,build),("Run",Run,run),("Test",Test,test),("Benchmark",Benchmark,benchmark)]
+        , eligible buildAction component]++
         [P.ActionMenu "Debug" (P.treeAction registry debug (version,sourceTarget component) (\_ result->pure result))
         | debugEligible component]
       action version path=P.treeAction registry open (Just version,path) (\_ result->pure result)

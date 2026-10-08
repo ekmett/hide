@@ -168,7 +168,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
       scopes<-wait "interleaved frame scopes" (\d->has "Locals 11" d && has "Locals 12" d) navigated
       two<-expand "Locals 12" scopes
       locals<-wait "both frame locals" (\d->has "counter211" d && has "counter212" d) two
-      let moreRows title d=[i | (i,row)<-zip [0..] (rows d),LoadNext{}<-[rowAction row],
+      let moreRows title d=[i | (i,row)<-zip [0::Int ..] (rows d),LoadNext{}<-[rowAction row],
                     rowHit row==rowHit (one "locals root" [r | r<-rows d,P.infoLabel (rowInfo r)==title])]
           more title d=case moreRows title d of
             [i]->let (next,outbox)=activateTree True i d in snd <$> effects next outbox

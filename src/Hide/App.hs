@@ -78,7 +78,7 @@ import qualified Data.Text.IO as TIO
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
 import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, doesDirectoryExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
-import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension)
+import System.FilePath ((</>), takeDirectory, takeExtension)
 import Control.Exception (try, IOException)
 import Paths_hide (getDataFileName)
 import Hide.Browser

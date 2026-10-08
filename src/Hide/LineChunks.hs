@@ -316,9 +316,6 @@ ownerByteAt owner@(SourceOwner _ seed _ _ _ blocks _) scalar
         (# _,_,Chunk _ source _ _ _:_ #)->byte+TU.lengthWord8 (T.take (scalar-base) source)
         _->rawBytes seed
 
-pieceFragments :: Piece -> Int -> Int -> T.Text
-pieceFragments piece skip count=T.concat (pieceFragmentParts piece skip count)
-
 pieceFragmentParts :: Piece -> Int -> Int -> [T.Text]
 pieceFragmentParts (Piece measure (SourceOwner _ _ _ _ _ _ (Just pieces)) scalar _) skip count=
   rawFragments False pieces (scalar+max 0 skip) (min count (rawCharacters measure-max 0 skip))

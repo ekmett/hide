@@ -329,11 +329,11 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                 (token,) <$> o .: "request")) value
               mask $ \restore -> do
                 thread<-myThreadId
-                wake<-newMVar shutdown
-                let stop=withMVar wake id >> killThread thread
+                inspectionStop<-newMVar shutdown
+                let stop=withMVar inspectionStop id >> killThread thread
                     release=do
                       -- Exclude a late shutdown from a closed/reused descriptor.
-                      modifyMVar_ wake (const (pure (pure ())))
+                      modifyMVar_ inspectionStop (const (pure (pure ())))
                       atomically (modifyTVar' inspections (M.delete thread))
                 flip finally release $ do
                   (exited,finish) <- modifyMVar state $ \s -> do

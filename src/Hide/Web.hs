@@ -123,7 +123,7 @@ runWeb scale effects tick initial = do
             if exit then send (object ["type" .= ("closed"::T.Text)]) >> void (tryPutMVar done ())
               else loop canvasEpoch nextTransfers pasteReads conn send queue disconnected (Just (key,resetKey,rows,metadata,scene)) updated
       effect _ _ _ result@(True,_) _ = pure result
-      effect pasteReads _ send (_,d) (FollowLink origin target) | not (linkOriginCurrent d origin)=pure (False,d {status="Link body expired."})
+      effect _ _ _ (_,d) (FollowLink origin _) | not (linkOriginCurrent d origin)=pure (False,d {status="Link body expired."})
       effect pasteReads _ send (_,d) (FollowLink origin target) = do
         (opened,packet)<-followLink True d (linkOriginPath origin) target
         mapM_ send packet

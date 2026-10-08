@@ -60,7 +60,7 @@ checks = do
         T.replicate 511 "a"<>"界"<>T.replicate 70 "\x301"<>"🇦🇧🇨Z"]
       capture text=go 0 0 initialSourceCursor
         where
-          go byte col cursor | byte>=TU.lengthWord8 text=[]
+          go byte _ _ | byte>=TU.lengthWord8 text=[]
           go byte col cursor=case sourceItemStep text byte cursor of
             (# end,count,advance,tab,overflow,next #)->
               let width=if tab then 8-col `mod` 8 else advance

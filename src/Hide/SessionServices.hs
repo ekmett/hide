@@ -33,7 +33,6 @@ import System.Environment (lookupEnv)
 import System.FilePath ((</>), takeDirectory)
 import System.Info (os)
 import System.IO (openBinaryTempFile, hClose)
-import Text.Read (readMaybe)
 import qualified Hide.Terminal as Terminal
 import qualified Hide.Consoles as C
 import qualified Hide.Compilers as Compilers

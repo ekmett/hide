@@ -17,9 +17,7 @@ import Hide.App (applyEffects)
 import Hide.Buffer
 import Hide.BufferView
 import Hide.TextPresentation (prepareTextPresentations)
-import Hide.Browser (Entry(..))
 import Hide.Files
-import Hide.Sidebar
 import Hide.Model
 import Hide.Reconcile
 import qualified Hide.AgentFiles as AgentFiles
