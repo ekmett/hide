@@ -10,6 +10,7 @@ import qualified Data.Vector as V
 import qualified Data.ByteString as BS
 import Hide.Plugin.Canvas (imageResourceId,imageRGBA,fitCanvasView)
 import Control.Monad (filterM)
+import Data.List (foldl')
 import Hide.Buffer (Buffer,Selection(..),contentLength,contentLineCount)
 import qualified Hide.Plugin.EditorHost as E
 import Hide.Plugin.BufferHost (versionCurrent)
@@ -75,8 +76,10 @@ tickPluginWindows :: Desktop -> IO Desktop
 tickPluginWindows desktop=do
   retired<-filterM (fmap not . W.windowRefCurrent) (M.keys (pluginWindows desktop))
   let dead=S.fromList retired
-  pure desktop {retiredPluginWindows=dead,pluginWindows=M.mapWithKey (\reference prepared->
-    if S.member reference dead then W.retirePreparedImage prepared else prepared) (pluginWindows desktop)}
+      newlyRetired=S.difference dead (retiredPluginWindows desktop)
+      released=foldl' (\installed reference->M.adjust W.retirePreparedImage reference installed)
+        (pluginWindows desktop) (S.toList newlyRetired)
+  pure desktop {retiredPluginWindows=dead,pluginWindows=released}
 
 -- The prepared resource accessor and ByteString length are constant-time;
 -- shared immutable resources count once, while every image instance counts.

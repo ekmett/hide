@@ -468,7 +468,7 @@ imageChecks=do
   W.withWindowScope $ \scope->do
     opened<-ready <$> open scope public (initialDesktop (40,18))
     let initial=scene opened
-        surface=head (Canvas.canvasSurfaces initial)
+        surface=case Canvas.canvasSurfaces initial of value:_->value; _->error "missing canvas surface"
         (tx,ty,tw,th)=Canvas.canvasTarget surface
         owner x y=Canvas.canvasOwnerAt initial (y*40+x)
     check "image owns content cells but never host chrome" (owner 3 3==1 && owner 2 2==0 && BS.length (Canvas.canvasMask initial)==40*18*2)
@@ -480,6 +480,15 @@ imageChecks=do
         fitted=fst (handleEvent (V.EvKey (V.KChar 'f') []) panned)
     check "zoom/pan change placement and retain the immutable resource"
       (resource opened==resource panned && map Canvas.canvasTarget (Canvas.canvasSurfaces (scene panned))/=map Canvas.canvasTarget (Canvas.canvasSurfaces initial))
+    let configured=either (error . T.unpack) id (configuredBindings [] M.empty)
+        mapped=opened {keyBindings=configured}
+        mappedZoom=fst (handleEvent (V.EvKey (V.KChar '+') [V.MShift]) mapped)
+        mappedPan=fst (handleEvent (V.EvKey V.KRight []) mappedZoom)
+        modal=message "Protected approval" ["Continue?"] mapped
+        modalAfter=fst (handleEvent (V.EvKey (V.KChar '+') []) modal)
+    check "compiled source bindings reach image pan and unbound image zoom"
+      (map imageViewport (windows mappedPan)/=map imageViewport (windows mappedZoom) && map imageViewport (windows mappedZoom)/=map imageViewport (windows mapped))
+    check "modal input cannot change the covered image" (map imageViewport (windows modalAfter)==map imageViewport (windows modal))
     check "fit restores the same transform" (map Canvas.canvasTarget (Canvas.canvasSurfaces (scene fitted))==map Canvas.canvasTarget (Canvas.canvasSurfaces initial))
     let covered=modifyActive (\w->w {bounds=Rect 1 1 15 9}) (addDocument Nothing (newBuffer "foreground") opened)
         coveredScene=scene covered
