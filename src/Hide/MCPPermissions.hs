@@ -419,8 +419,8 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
               stage<-newIORef (PolicyPending AdmitPolicy Nothing)
               captured<-case submission of
                 ReadSubmission _->pure (Right Nothing)
-                EditSubmission (DiffSubmission _ expected _ _ _ _ _ _)->do
-                  matches<-maybe (pure False) (versionCurrent expected . documentBuffer) (field "bufferId" args >>= (`M.lookup` buffers current))
+                EditSubmission (DiffSubmission reference expected _ _ _ _ _ _)->do
+                  matches<-maybe (pure False) (versionCurrent expected . documentBuffer) (referenceId namespace reference >>= (`M.lookup` buffers current))
                   if not matches then pure (Left "Buffer identity or revision changed; read the buffer again") else
                     case capturePatchSource current args of
                       Left err->pure (Left err)
