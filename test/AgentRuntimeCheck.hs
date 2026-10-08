@@ -84,12 +84,23 @@ checks = bracket temporary removePathForcibly $ \root -> do
             [request]->pure request
             _->error "Expected primary configuration request"
           assert "primary control admits its exact connection" =<< primaryControlCurrent runtime control (Just client) (Just "private-primary")
+          let refreshed=choices {configChoices=[ConfigChoice "model" "model" "large" [("small","Small"),("large","Large")]]}
+          _<-syncPrimary runtime project (Just client) "private-primary" refreshed False >>= right
+          assert "capability refresh preserves an admitted primary control" =<< primaryControlCurrent runtime control (Just client) (Just "private-primary")
+          recordPrimaryEvent runtime client "private-primary" (ProviderUsage 12 100)
           bracket (ACP.startClient (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \replacement->do
             current<-primaryControlCurrent runtime control (Just replacement) (Just "private-primary")
             assert "same-key replacement cannot consume old primary control" (not current)
             _<-syncPrimary runtime project (Just replacement) "private-primary" choices False >>= right
             stale<-agentConfigurationCurrent hub captured
             assert "same-key replacement retires the hub control receipt" (not stale)
+            recordPrimaryEvent runtime replacement "private-primary" (ProviderUsage 24 100)
+            recordPrimaryEvent runtime client "private-primary" (ProviderUsage 99 100)
+            currentStatus<-statusAgent hub Human primary >>= right
+            assert "same-key old primary cannot publish into the replacement"
+              ((field "contextUsage" currentStatus >>= field "used")==Just (24::Int))
+            waiting<-case control of ConfigurePrimary _ _ _ reply->isEmptyMVar reply; _->pure True
+            assert "connection replacement terminally resolves retained control" (not waiting)
           rejectPrimaryControl "Primary provider changed." control
           assert "retired primary configuration resolves without success" . either (const True) (const False) =<< wait setting
         _<-syncPrimary runtime project (Just client) "private-primary" choices False >>= right

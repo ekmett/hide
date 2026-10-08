@@ -76,10 +76,26 @@ checks=bracket temporary removePathForcibly $ \root ->
             screen<-capture font desktop False
             ensure "primary transcript never exposes private keys through buffer reads" (all (not . (`T.isInfixOf` readable)) private)
             ensure "primary transcript never exposes private keys through screen capture" (all (not . (`T.isInfixOf` T.pack (show screen))) private)
+            history<-AH.historyAgent hub AH.Human primary 0 100 >>= right
+            ensure "primary public history never exposes private keys, including split chunks"
+              (all (not . (`T.isInfixOf` T.pack (show history))) private)
       publicSafe connected
+      primaryHistory<-AH.historyAgent hub AH.Human primary 0 100 >>= right
+      let primaryEvents=maybe [] id (field "events" primaryHistory :: Maybe [Value])
+      ensure "ordinary primary provider output reaches the shared history API"
+        (any (\event->field "kind" event==Just ("output"::T.Text) && maybe False (T.isInfixOf "Hello") (field "detail" event >>= field "text")) primaryEvents)
+      ensure "publishing primary output does not manufacture a second human prompt"
+        (all ((/=Just ("message_queued"::T.Text)).field "kind") primaryEvents)
+      _<-tickBody presentation conversation connected
+      afterIdle<-AH.historyAgent hub AH.Human primary 0 100 >>= right
+      ensure "idle synchronization does not replay primary history" (afterIdle==primaryHistory)
       split<-send "split-private" connected >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "split-private" `T.isInfixOf` activeText desktop))
       publicSafe split
       nested<-send "nested-private" split >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "nested-private" `T.isInfixOf` activeText desktop))
+      nestedHistory<-AH.historyAgent hub AH.Human primary 0 100 >>= right
+      let nestedEvents=maybe [] id (field "events" nestedHistory :: Maybe [Value])
+      ensure "primary tools and plans use public provider events"
+        (all (\kind->any ((==Just kind).field "kind") nestedEvents) (["tool","plan"]::[T.Text]))
       expanded<-snd <$> conversationEffects conversation (\x _->pure (False,x)) nested [AgentAction "copy" []]
       ensure "raw tool and plan details never retain bearer values" (all (not . (`T.isInfixOf` clipboard expanded)) ("private-main-key":tokens))
       peerCancels<-newIORef (0::Int)

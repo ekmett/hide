@@ -165,7 +165,18 @@ checks=do
     closeAgentHub restoredPlaceholder
     (capturedTarget,_)<-agentConfiguration hub owner >>= right
     let actual=(driver owner) {driverDeliver= \message->pure (Right (object ["newDriver" .= True,"body" .= messageText message]))}
-    _<-updateExternalAgent hub owner actual >>= right
+    oldEvents<-updateExternalAgent hub owner actual >>= right
+    oldEvents (ProviderUsage 10 100)
+    newEvents<-updateExternalAgent hub owner actual >>= right
+    newEvents (ProviderUpdate "output" (object ["text" .= ("current primary"::T.Text)]))
+    newEvents (ProviderUsage 20 100)
+    oldEvents (ProviderUpdate "output" (object ["text" .= ("stale primary"::T.Text)]))
+    oldEvents (ProviderUsage 99 100)
+    publicHistory<-historyAgent hub Human owner 0 100 >>= right
+    publicStatus<-statusAgent hub Human owner >>= right
+    ensure "same-key external replacement retires the old event sink"
+      ("current primary" `T.isInfixOf` T.pack (show publicHistory) && not ("stale primary" `T.isInfixOf` T.pack (show publicHistory)) &&
+       (field "contextUsage" publicStatus >>= field "used")==Just (20::Int))
     staleSend<-sendAgentAt hub Human capturedTarget "Old editor query"
     ensure "captured editor submission cannot cross provider replacement" (isLeft staleSend)
     ticket<-sendAgent hub Human owner "After reconnect" >>= right
