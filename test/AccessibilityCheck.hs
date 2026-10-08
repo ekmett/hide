@@ -27,7 +27,7 @@ checks=do
       project audience=sidebarSemantics audience
       owner=project OwnerSemantics base
       guest=project GuestSemantics base
-      root=head (items owner)
+      root=byName "Sidebar" owner
       byName name value=fromMaybe (error ("missing semantic node "++T.unpack name))
         (lookup name [(nameOf item,item) | item<-items value])
       one=byName "one.hs" owner
@@ -76,7 +76,8 @@ checks=do
     (null (items (project OwnerSemantics hidden))))
     [base {dialog=Just (Dialog "Question" Widgets [] 0 ["OK"] [])},base {menu=Just (0,0)},
      base {contextMenu=Just (Rect 1 2 4 3,0)},base {sideTree=Nothing}]
-  let (replacing,Just replacementRequest)=requestChildren (nodeHit rootKey (treeNodes tree M.! rootKey)) Nothing tree
+  let (replacing,maybeReplacement)=requestChildren (nodeHit rootKey (treeNodes tree M.! rootKey)) Nothing tree
+      replacementRequest=fromMaybe (error "replacement did not start a request") maybeReplacement
       replacement=either (error . T.unpack) id (adoptPage replacementRequest [] Nothing replacing)
       pending=project OwnerSemantics base {sideTree=Just replacement}
   check "pending replacement keeps painted names but marks stale sibling counts unknown"
@@ -131,7 +132,8 @@ privateIdentityChecks=withRegistry $ \registry->do
       rootKey=NodeKey ref (infoId rootInfo)
       mounted=addRoot ref rootInfo Nothing [] (emptySidebar "/public" 30 False)
       replace values tree=do
-        let (loading,Just request)=requestChildren (nodeHit rootKey (treeNodes tree M.! rootKey)) Nothing tree
+        let (loading,maybeRequest)=requestChildren (nodeHit rootKey (treeNodes tree M.! rootKey)) Nothing tree
+            request=fromMaybe (error "identity fixture did not start a request") maybeRequest
         loaded<-either (error . T.unpack) pure (adoptPage request [(info,Nothing,[]) | info<-values] Nothing loading)
         prepared<-prepareProjection loaded
         pure (adoptProjection prepared loaded)
