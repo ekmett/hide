@@ -79,7 +79,7 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
     ssh.chmod(0o700)
     env=dict(os.environ,PATH=str(root)+os.pathsep+os.environ['PATH'],THC_TEST_EXE=binary,THC_EDIT_WEB_OPEN='0',hide_datadir=str(pathlib.Path(__file__).resolve().parents[1]))
     with open(root/'log','w+') as log:
-        process=subprocess.Popen([binary,'--web',"test-host:"+str(source)],env=env,stdout=subprocess.DEVNULL,stderr=log)
+        process=subprocess.Popen([binary,'--web',"test-host:"+str(source)],env=env,cwd=root,stdout=subprocess.DEVNULL,stderr=log)
         ws=None
         try:
             url=None
@@ -132,7 +132,7 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
             assert set(exported)=={'type','purpose','name','row','view'},exported
             assert exported['type']=='download' and exported['purpose']=='file-export' and exported['name']==saved.name,exported
             assert len(exported['row'])==4 and exported['row'][2]>0 and exported['row'][3]==1,exported
-            assert len(exported['view'])==12 and all(isinstance(value,int) for value in exported['view']),exported
+            assert len(exported['view'])==13 and all(isinstance(value,int) for value in exported['view']),exported
             kind,blob=ws.read();assert kind==2 and blob==saved_bytes
             assert saved.read_bytes()==saved_bytes and source.read_text()=='remote λ\n'
             assert not display.meta['dirty'],display.meta
