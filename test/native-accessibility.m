@@ -32,11 +32,12 @@ static id findOutline(id element,NSMutableSet *seen) {
     return nil;
 }
 static void near(double x,double y) { if (fabs(x-y)>0.000001) { fprintf(stderr,"Expected %.6f, got %.6f\n",y,x); abort(); } }
-int main(void) {
+int main(int argc,char **argv) {
  @autoreleasepool {
     assert(SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE_EXIT","1",true));
     SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP,"1");
-    assert(thc_open("software",2.125,80,25,16));
+    const char *backend=argc>1?argv[1]:"software";
+    assert(thc_open(backend,2.125,80,25,16));
     int count=0; SDL_Window **windows=SDL_GetWindows(&count); assert(count==1);
     SDL_Window *sdl=windows[0]; SDL_free(windows);
     assert(SDL_GetWindowFlags(sdl)&SDL_WINDOW_HIDDEN);
@@ -103,7 +104,7 @@ int main(void) {
     assert(publish(snapshot));assert(!thc_accessibility("x",2097153));assert(!findOutline(window,[NSMutableSet new])); // Oversize is refused before reading bytes.
     assert(publish(snapshot));assert(thc_accessibility(NULL,0));assert(!findOutline(window,[NSMutableSet new]));
     assert(!window.visible && !window.keyWindow);
-    printf("Native hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only selectors and retirement checks passed\n",(double)pw/ww);
+    printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only selectors and retirement checks passed\n",backend,(double)pw/ww);
     thc_close();
  }
  return 0;

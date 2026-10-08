@@ -16,4 +16,5 @@ if [ "$(uname -s)" = Darwin ]; then
   .deps/native-menu
   cc -Wall -Wextra -fobjc-arc -DWITH_WINDOW $(pkg-config --cflags $packages) cbits/window.c cbits/unicode.c cbits/menu.m cbits/accessibility.m test/native-accessibility.m $(pkg-config --libs $packages) $fonts -framework Cocoa -lm -o .deps/native-accessibility
   .deps/native-accessibility
+  if [ -n "${HIDE_TEST_GPU:-}" ]; then .deps/native-accessibility "$HIDE_TEST_GPU"; fi
 fi
