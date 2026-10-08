@@ -8,7 +8,7 @@
 module Hide.AgentRuntime
   ( AgentRuntime, AgentRequest(..), PrimaryControl(..), primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
-  , syncPrimary, recordPrimaryEvent, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentReconnect
+  , syncPrimary, recordPrimaryEvent, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentCreation, requestAgentReconnect
   ) where
 
 import Control.Concurrent (threadDelay)
@@ -53,6 +53,7 @@ data AgentRequest = DeliverPrimary HubMessage (MVar (Either Text Value))
   | CancelPrimary | EndPrimary
   | ProviderPermission AgentId ACPPermission (MVar (Maybe Text))
   | AgentReconnected AgentId (Either Text ())
+  | AgentCreated (Either Text (AgentId,Int))
 -- | One host-only control bound to the exact primary connection. Reply cells
 -- stay filled after cancellation so a drained request cannot be admitted later.
 data PrimaryControl
@@ -70,7 +71,8 @@ data AgentRuntime = AgentRuntime
   , runtimeState :: MVar RuntimeState, primaryToken :: Text
   , rootSession :: Maybe SessionRecord, configuredLaunch :: IO ACP.Launch
   , checkpointFile :: Maybe FilePath, checkpointWritable :: Bool
-  , checkpointLock :: MVar (), reconnectWorkers :: MVar (M.Map AgentId (Async ())) }
+  , checkpointLock :: MVar (), reconnectWorkers :: MVar (M.Map AgentId (Async ()))
+  , creationWorker :: MVar (Maybe (Async (Either Text (AgentId,Int)))) }
 
 -- Reply cells stay filled after consumption so a UI callback can reject a stale
 -- request even when cancellation raced with draining the mailbox.
@@ -143,11 +145,16 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
         , notice=(<>" The original checkpoint was retained; agent spawning is disabled.") <$> fault }
       lock <- newMVar ()
       workers <- newMVar M.empty
-      pure (AgentRuntime hub access ident state token root getLaunch path (fault==Nothing) lock workers)
+      creation <- newMVar Nothing
+      pure (AgentRuntime hub access ident state token root getLaunch path (fault==Nothing) lock workers creation)
     release runtime =
-      -- The periodic worker is already joined by withAsync. Capture live phases
-      -- before driver shutdown; an explicit session Exit removed its catalog.
-      void (checkpointAgents runtime) `finally` shutdown runtime
+      -- The periodic worker is already joined by withAsync. Join pending host
+      -- acquisition before saving, preserving startup cancellation in the final
+      -- checkpoint. Live providers are captured before their later shutdown.
+      (do
+        modifyMVar_ (runtimeState runtime) (\s->pure s {closed=True})
+        modifyMVar_ (creationWorker runtime) (\worker->mapM_ cancel worker >> pure Nothing)
+        void (checkpointAgents runtime)) `finally` shutdown runtime
     shutdown runtime = do
       modifyMVar_ (runtimeState runtime) $ \s -> do
         mapM_ (rejectPrimaryControl "Editor closed.") (primaryControl s)
@@ -162,11 +169,19 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
 primaryServers :: AgentRuntime -> IO [Value]
 primaryServers runtime = maybe (pure []) (\record -> editorServersAt (sessionId record) (Just (primaryToken runtime))) (rootSession runtime)
 
--- | Drain unresolved mailbox requests for adoption by the owning UI tick.
+-- | Drain unresolved mailbox requests and at most one host launch completion.
+-- Polling never waits for provider startup. Draining a launch releases its single
+-- pending slot and publishes the original Hub identity/ticket exactly once.
 drainAgentRequests :: AgentRuntime -> IO [AgentRequest]
-drainAgentRequests runtime = modifyMVar (runtimeState runtime) $ \s -> do
-  ready <- filterM unresolved (requests s)
-  pure (s {requests=[]},ready)
+drainAgentRequests runtime = do
+  created<-modifyMVar (creationWorker runtime) $ \worker->case worker of
+    Nothing->pure (Nothing,[])
+    Just running->poll running >>= \result->case result of
+      Nothing->pure (worker,[])
+      Just completed->pure (Nothing,[AgentCreated (either (const (Left "Agent creation interrupted.")) id completed)])
+  modifyMVar (runtimeState runtime) $ \s -> do
+    ready <- filterM unresolved (requests s)
+    pure (s {requests=[]},if closed s then [] else ready++created)
   where
     unresolved (DeliverPrimary _ cell) = isEmptyMVar cell
     unresolved (ControlPrimary control) = primaryControlWaiting control
@@ -225,6 +240,22 @@ failPendingPrimary runtime = failDeliveries (runtimeState runtime)
 
 agentSession :: AgentRuntime -> AgentId -> IO (Maybe SessionRecord)
 agentSession runtime ident = M.lookup ident . sessions <$> readMVar (runtimeState runtime)
+
+-- | Admit one human host launch without waiting for provider startup. The caller
+-- must first validate its human submission and captured workspace. Agent tools
+-- use the Hub's authenticated actor path instead; this operation grants no tool
+-- authority. The Hub still validates limits and queues the initial task once.
+--
+-- Until 'AgentCreated' is drained, another request is refused. Closing the
+-- runtime refuses new requests and joins pending acquisition before checkpointing.
+requestAgentCreation :: AgentRuntime -> SpawnSpec -> IO (Either Text ())
+requestAgentCreation runtime spec=mask $ \restore->modifyMVar (creationWorker runtime) $ \worker->do
+  stopped<-closed <$> readMVar (runtimeState runtime)
+  if stopped then pure (worker,Left "Editor closed.") else case worker of
+    Just _->pure (worker,Left "An agent is already starting.")
+    Nothing->do
+      started<-async (restore (spawnAgentWithTask (agentHub runtime) Human spec))
+      pure (Just started,Right ())
 
 -- | Schedule provider initialization off the UI thread; shutdown joins the worker.
 requestAgentReconnect :: AgentRuntime -> AgentId -> IO (Either Text ())

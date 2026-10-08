@@ -4,7 +4,7 @@ module AgentRuntimeCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,wait)
 import Control.Concurrent.MVar
-import Control.Exception (bracket)
+import Control.Exception (bracket,finally)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -175,11 +175,73 @@ checks = bracket temporary removePathForcibly $ \root -> do
       assert "nested shared child uses its parent's editor" (sessionId nestedSession==sessionId workspace)
       _ <- endAgent hub Human isolated >>= right
       assert "ending worktree agent preserves checkout" =<< doesFileExist (sessionDirectory workspace </> "source.txt")
+  creationChecks root
   persistenceChecks root
   where
     spawnedId value=maybe (fail "Missing spawned agent ID") (pure . AgentId) (field "agent" value >>= field "id")
     isCancel CancelPrimary = True
     isCancel _ = False
+
+-- The host launch lifetime belongs to the runtime, independently of a view.
+creationChecks :: FilePath -> IO ()
+creationChecks root=do
+  let project=root </> "project"
+      config=root </> "config"
+      launch=ACP.Launch "python3" [root </> "provider.py"] [("PROBE_LOG",root </> "creation-provider.jsonl")]
+      spec=SpawnSpec "Host child" "One initial task" project Shared Fresh Nothing Nothing
+      noEditor _=error "Shared creation must not open another editor"
+      environment sid=[("XDG_CONFIG_HOME",config),("XDG_DATA_HOME",root </> "creation-data"),("THC_EDIT_SESSION",replicate 48 sid)]
+      failed=either (const True) (const False)
+  writeFile (root </> "creation-provider.jsonl") ""
+  started<-newEmptyMVar
+  release<-newEmptyMVar
+  withEnvironment (environment 'c') $ do
+    closedRuntime<-withAgentRuntimeUsing noEditor noEditor project (putMVar started () >> readMVar release >> pure launch) $ \runtime->do
+      _<-requestAgentCreation runtime spec >>= right
+      await "host launch starts on its owned worker" (not <$> isEmptyMVar started)
+      overlapping<-requestAgentCreation runtime spec {spawnName="Overlapping"}
+      assert "one pending host launch refuses a second request" (failed overlapping)
+      summaries<-agentSummaries (agentHub runtime)
+      assert "pending host launch reserves only one child" (length summaries==2 && length (filter ((=="starting").summaryStatus) summaries)==1)
+      putMVar release ()
+      completed<-waitRequests runtime
+      (child,ticket)<-case [result | AgentCreated result<-completed] of
+        [Right value]->pure value
+        _->error "Expected one completed host creation"
+      result<-waitAgent (agentHub runtime) Human child ticket 2000 >>= right
+      assert "host creation returns the actual initial task ticket" (field "status" result==Just ("completed"::T.Text))
+      history<-historyAgent (agentHub runtime) Human child 0 100 >>= right
+      assert "host creation queues its task exactly once" (length (filter ((=="message_queued").historyKind) (historyEvents history))==1)
+      drained<-drainAgentRequests runtime
+      assert "host creation completion drains once" (null [() | AgentCreated _<-drained])
+      _<-requestAgentCreation runtime spec {spawnName=""} >>= right
+      rejected<-waitRequests runtime
+      assert "drained launch slot is reusable and retains Hub validation" (case [result | AgentCreated result<-rejected] of [Left _]->True; _->False)
+      pure runtime
+    refused<-requestAgentCreation closedRuntime spec
+    assert "closed runtime refuses new provider acquisition" (failed refused)
+  acquiring<-newEmptyMVar
+  joined<-newIORef False
+  gate<-newEmptyMVar
+  withEnvironment (environment 'd') $ do
+    record<-newSessionRecord Nothing [project]
+    let saved=record {sessionId=replicate 48 'd',sessionDirectory=project}
+    rememberSession saved
+    path<-(++".agents.json") <$> checkpointPath (sessionId saved)
+    runtime<-withAgentRuntimeUsing noEditor noEditor project
+      ((putMVar acquiring () >> readMVar gate >> pure launch) `finally` writeIORef joined True) $ \owner->do
+        activateAgentCheckpoint owner
+        _<-requestAgentCreation owner spec >>= right
+        await "shutdown fixture reaches provider acquisition" (not <$> isEmptyMVar acquiring)
+        pure owner
+    assert "runtime close joins pending provider acquisition" =<< readIORef joined
+    summaries<-agentSummaries (agentHub runtime)
+    assert "runtime close releases the startup reservation" (all ((=="ended").summaryStatus) summaries)
+    checkpoint<-either error pure . eitherDecodeStrict' =<< BS.readFile path
+    let entries=maybe [] id (field "hub" checkpoint >>= field "agents"::Maybe [Value])
+        savedHistory=concat [events | entry<-entries,field "name" entry==Just ("Host child"::T.Text),Just events<-[field "history" entry::Maybe [Value]]]
+    assert "final checkpoint follows cancelled startup cleanup" (any ((==Just ("failed"::T.Text)).field "kind") savedHistory)
+    forgetSession (sessionId saved)
 
 persistenceChecks :: FilePath -> IO ()
 persistenceChecks root = do

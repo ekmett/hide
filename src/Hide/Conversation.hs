@@ -133,7 +133,6 @@ data State = State
   , childCancels :: M.Map Text (Async (Either Text ()))
   , fileCaptures :: [FileCapture], retiringRequests :: [(Int,Async ())]
   , promptPreparation :: Maybe PromptPreparation
-  , creatingAgent :: Maybe (Async (Either Text (AH.AgentId,Int)))
   , editorRegistry :: Command.Registry ChatEditorContext
   , editorCommand :: Command.Command ChatEditorContext (Editor.DraftSubmission,Bool) ChatInput
   , conversationEditors :: IORef (M.Map Text (Editor.PreparedEditor ChatEditorContext ChatInput))
@@ -173,7 +172,7 @@ withConversationAt consoles root action = W.withWindowScope $ \scope->Command.wi
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
-    , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,creatingAgent=Nothing,directoryAgents=[],agentDelivery=Nothing
+    , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,directoryAgents=[],agentDelivery=Nothing
     , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
@@ -193,7 +192,6 @@ closeConversation (ConversationState _ ref consoles _) = do
   mapM_ denyChild (map snd (approvals s))
   mapM_ preparationCancel (promptPreparation s)
   readIORef (conversationEditors s) >>= mapM_ (Editor.retireDraftRef . Editor.mountDraft . Editor.editorMount)
-  mapM_ cancel (creatingAgent s)
   mapM_ (\(FileCapture _ worker) -> cancel worker) (fileCaptures s)
   mapM_ (wait . snd) (retiringRequests s)
   mapM_ cancel (childCancels s)
@@ -259,7 +257,7 @@ conversationEffects runtime@(ConversationState _ ref _ _) fallback original effe
 -- Sidebar requests are fixed human operations, adopted after host hit/lifetime
 -- validation. Dialog purposes carry the exact ID instead of a directory index.
 applyAgentSidebar :: ConversationState -> AgentSidebarRequest -> Desktop -> IO Desktop
-applyAgentSidebar runtime@(ConversationState _ ref _ agents) request d=case request of
+applyAgentSidebar runtime@(ConversationState _ _ _ agents) request d=case request of
   ShowAgent ident | ident==AR.primaryAgent agents->perform runtime "show" [] d
                   | otherwise->showAgentHistory runtime ident d
   ConfigureAgent receipt option value->
@@ -269,27 +267,11 @@ applyAgentSidebar runtime@(ConversationState _ ref _ agents) request d=case requ
     pure d {status=either id (const "Agent renamed.") result}
   CreateAgent workspace _ _ | workspace/=startingDirectory d->pure d {status="Agent workspace changed; reopen the form."}
   CreateAgent workspace name task->do
-    state<-readIORef ref
-    case creatingAgent state of
-      Just _->pure d {status="An agent is already starting."}
-      Nothing->mask $ \restore->do
-        let spec=AH.SpawnSpec name task workspace AH.Shared AH.Fresh Nothing Nothing
-        worker<-async (restore (AH.spawnAgentWithTask hub AH.Human spec))
-        modifyIORef' ref (\current->current {creatingAgent=Just worker})
-        pure d {status="Starting agent…"}
+    let spec=AH.SpawnSpec name task workspace AH.Shared AH.Fresh Nothing Nothing
+    accepted<-AR.requestAgentCreation agents spec
+    pure d {status=either id (const "Starting agent…") accepted}
   _->pure d {status="Completion owner is unavailable."}
   where hub=AR.agentHub agents
-
-pollAgentCreation :: ConversationState -> Desktop -> IO Desktop
-pollAgentCreation (ConversationState _ ref _ _) d=do
-  state<-readIORef ref
-  case creatingAgent state of
-    Nothing->pure d
-    Just worker->poll worker >>= \completed->case completed of
-      Nothing->pure d
-      Just outcome->do
-        modifyIORef' ref (\current->current {creatingAgent=Nothing})
-        pure d {status=either (const "Agent creation interrupted.") (either id (const "Agent created; task queued.")) outcome}
 
 perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
 perform (ConversationState _ ref _ _) "focus" [] d=do
@@ -646,8 +628,7 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
   let rendered=laidOut {agentReplying=primaryBusy afterDismiss,agentQueued=queryCount "" (queuedQueries afterDismiss)}
   syncConversationAgent runtime
   visible<-refreshChildConversation runtime rendered
-  created<-pollAgentCreation runtime visible
-  shown<-present runtime created
+  shown<-present runtime visible
   notice<-AR.runtimeNotice (conversationAgents runtime)
   captureConversationSources runtime (maybe shown (\text -> shown {status=text}) notice)
 
@@ -1574,6 +1555,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ agents) d=do
       AR.failPendingPrimary agents "Agent session ended."
       modifyIORef' ref (\state -> state {connection=Nothing,session=Nothing,agentDelivery=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries state),approvals=[],presented=Nothing})
       pure cleared {status="Agent session ended."}
+    apply desktop (AR.AgentCreated result)=pure desktop {status=either id (const "Agent created; task queued.") result}
     apply desktop (AR.AgentReconnected ident result)=do
       refreshed<-case dialog desktop of
         Just dg | purpose dg==AgentDialog "directory-select" -> showAgentDirectory runtime desktop

@@ -762,6 +762,12 @@ through search and checkpoint recovery; reads do not consume events or message
 tickets. Provider details remain extensible JSON whose publisher owns redaction.
 The MCP envelope and private checkpoint format are unchanged.
 
+New Agent acquisition also belongs to `AgentRuntime`: its host-only
+`requestAgentCreation` admits one pending launch and returns the Hub's original
+agent ID/task ticket through the existing mailbox. Conversation only adopts the
+checked human form/workspace and displays completion. The runtime joins pending
+acquisition before the final checkpoint; view state owns no launch worker.
+
 These remain host-only operations: agent tools cannot manufacture human steering
 or change their controlling user's model. Primary query/cancel ownership, prompt
 preparation, ACP file and terminal requests, and provider startup/recovery still

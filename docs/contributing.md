@@ -656,6 +656,10 @@ capability refresh preserves the provider lifetime and outstanding controls.
 Conversation consumes the Hub's typed `HistoryPage`/`HistoryEvent` values directly;
 AgentMCP owns the public JSON response. Both use the same retention, byte/count
 limits and exclusive event cursors. Checkpoints preserve those event identities.
+New Agent startup uses the existing runtime's single pending launch slot. Its
+mailbox completion retains the Hub ID and initial task ticket; Conversation keeps
+human form/workspace admission and status display. Shutdown joins acquisition
+before saving the final agent checkpoint.
 The separate ACP completion node consumes cheap metadata published by Autocomplete.
 Only explicit choice discovery starts that existing lazy connection. Configuration
 and prompts share its serial owner; session/configuration receipts and settings
