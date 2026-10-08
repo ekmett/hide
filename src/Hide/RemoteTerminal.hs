@@ -5,7 +5,12 @@
 -- handling. Disconnects retain the last picture with a notice and suppress remote
 -- input; local detach remains available. Clipboard export uses OSC 52 and does
 -- not read the terminal host clipboard.
-module Hide.RemoteTerminal (runRemoteTerminal, terminalEventInput, remoteTerminalDisplay, terminalClipboard) where
+module Hide.RemoteTerminal
+  (runRemoteTerminal, terminalEventInput, remoteTerminalDisplay, terminalClipboard
+#ifdef WITH_REMOTE
+  , Incoming(..), receiveTerminalFrames
+#endif
+  ) where
 
 import Data.Aeson
 import Data.Bits ((.&.), shiftR)
@@ -36,6 +41,7 @@ import System.FilePath ((</>))
 import System.IO (stdout, stderr, hPutStrLn, hFlush, openBinaryTempFile, hClose)
 import System.Timeout (timeout)
 import Hide.Protocol (WirePacket(..), decodeFrame,parseClipboardRequest,clipboardReplyInput)
+import Hide.FileExport (FileExports,withFileExports,startHelperFileExport)
 import Hide.Remote (peerReceive, peerSend)
 import Hide.RemoteWindow (parseRemoteFrame, sanitizeDownloadName)
 import Hide.Unicode (updateDisplayOps)
@@ -133,7 +139,7 @@ data Incoming = Frame RemoteFrame | Control Value
 -- | Scope terminal setup, remote display/input handling and cursor restoration.
 -- Detach performs a bounded outbound handoff wait.
 runRemoteTerminal :: RemotePeer -> IO ()
-runRemoteTerminal peer = bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty `finally` cursorStyle Nothing) $ \vty -> do
+runRemoteTerminal peer = withFileExports $ \exports -> bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty `finally` cursorStyle Nothing) $ \vty -> do
   forM_ [V.Mouse,V.BracketedPaste,V.Focus] $ \mode ->
     when (V.supportsMode (V.outputIface vty) mode) (V.setMode (V.outputIface vty) mode True)
   incoming <- newTBQueueIO 8
@@ -205,7 +211,7 @@ runRemoteTerminal peer = bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty
                 loop receiver sender frame connected clipboard (if event==Nothing then notice else "")
   resize
   render Nothing "Connecting; Ctrl+] detaches"
-  withAsync (receiveFrames peer incoming) $ \receiver ->
+  withAsync (receiveTerminalFrames exports peer incoming) $ \receiver ->
     withAsync (forever $ do
       (size,value) <- atomically (readTBQueue outgoing)
       peerSend peer (JsonPacket value)
@@ -217,25 +223,36 @@ runRemoteTerminal peer = bracket (mkVty V.defaultConfig) (\vty -> V.shutdown vty
 parseIO :: (Value -> Parser a) -> Value -> IO a
 parseIO parser = either (ioError . userError) pure . parseEither parser
 
-receiveFrames :: RemotePeer -> TBQueue Incoming -> IO ()
-receiveFrames peer queue = go [] (object []) Nothing
+-- | Receive validated frames and paired binary downloads on the existing worker.
+-- Saved-file exports use the frontend's owned staging/helper lifetime; no helper
+-- runs on the session host and no transport sends occur from this receiver.
+receiveTerminalFrames :: FileExports -> RemotePeer -> TBQueue Incoming -> IO ()
+receiveTerminalFrames exports peer queue = go [] (object []) Nothing
   where
     emit = atomically . writeTBQueue queue
+    notice message=emit (Control (object ["type" .= ("notice"::T.Text),"message" .= (message::T.Text)]))
     go rows metadata download = peerReceive peer >>= \packet -> case packet of
       Nothing -> emit (Control (object ["type" .= ("closed"::T.Text)]))
       Just (JsonPacket value) -> do
         kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
         case kind of
           "assets" -> go [] (object []) Nothing
-          "download" -> parseIO (withObject "download" (.: "name")) value >>= go rows metadata . Just
+          "download" -> parseIO (withObject "download" $ \o->(,) <$> o .: "name" <*> o .:? "purpose") value >>= go rows metadata . Just
           "connection" -> emit (Control value) >> go rows metadata Nothing
           _ -> emit (Control value) >> go rows metadata download
       Just (BinaryPacket bytes) -> case download of
-        Just name -> do
-          directory <- (</> "Downloads") <$> getHomeDirectory
-          createDirectoryIfMissing True directory
-          path <- bracket (openBinaryTempFile directory (T.unpack (sanitizeDownloadName name))) (hClose . snd) $ \(path,output) -> BS.hPut output bytes >> pure path
-          emit (Control (object ["type" .= ("notice"::T.Text),"message" .= ("Downloaded "<>T.pack path)]))
+        Just (name,purpose) -> do
+          case purpose :: Maybe T.Text of
+            Just "file-export" -> do
+              notice "Opening a file drag helper; drag the saved copy from its window, or close it to cancel."
+              started<-startHelperFileExport exports name bytes (notice . either id (const "File drag helper closed."))
+              either notice (const (pure ())) started
+            Nothing -> do
+              directory <- (</> "Downloads") <$> getHomeDirectory
+              createDirectoryIfMissing True directory
+              path <- bracket (openBinaryTempFile directory (T.unpack (sanitizeDownloadName name))) (hClose . snd) $ \(path,output) -> BS.hPut output bytes >> pure path
+              notice ("Downloaded "<>T.pack path)
+            Just _ -> notice "Unsupported download purpose."
           go rows metadata Nothing
         Nothing -> do
           (delta,newRows) <- decodeFrame rows bytes

@@ -21,7 +21,7 @@ checks=do
   let check label ok=unless ok (error label)
       right=either (error . T.unpack) pure
       bytes=BS.pack [0,255,13,10,128,1]
-  (owner,path)<-withFileExports $ \exports->do
+  (owner,firstPath)<-withFileExports $ \exports->do
     mapM_ (\name->stageFileExport exports name bytes >>= check "invalid export basenames are refused" . isLeft)
       ["",".","..","../escape","dir/file","dir\\file","bad\0name","bad\nname","bad\DELname",T.replicate 256 "x"]
     path<-stageFileExport exports "λ.bin" bytes >>= right
@@ -35,7 +35,7 @@ checks=do
     full<-stageFileExport exports "five" bytes
     check "four retained offers bound frontend storage" (isLeft full)
     pure (exports,path)
-  gone<-doesPathExist (takeDirectory (takeDirectory path))
+  gone<-doesPathExist (takeDirectory (takeDirectory firstPath))
   check "frontend close removes its owned exports" (not gone)
   closed<-stageFileExport owner "closed" bytes
   check "retained owner cannot stage after scope close" (isLeft closed)

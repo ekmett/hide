@@ -1,5 +1,5 @@
-{-# LANGUAGE OverloadedStrings #-}
-module RemoteTerminalCheck (checks) where
+{-# LANGUAGE CPP, OverloadedStrings #-}
+module RemoteTerminalCheck (checks,packetChecks) where
 import Control.Monad (unless)
 import Control.Exception (evaluate)
 import Control.DeepSeq (force)
@@ -23,9 +23,25 @@ import Hide.TextStyle (textForeground,textFlags)
 import Hide.RemoteTerminal
 import Hide.RemoteWindow (parseRemoteFrame, RemoteFrame(..), RemoteCell(..))
 import qualified Hide.Protocol as P
+#ifdef WITH_REMOTE
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.STM (atomically,newTBQueueIO,flushTBQueue)
+import Control.Exception (bracket)
+import Data.IORef (atomicModifyIORef')
+import Hide.FileExport (withFileExports)
+import Hide.Remote (RemotePeer(..))
+import System.Directory
+import System.Environment (lookupEnv,setEnv,unsetEnv)
+import System.FilePath ((</>),takeFileName,takeExtension)
+import System.Info (os)
+import System.IO (hClose,openTempFile)
+import System.Timeout (timeout)
+import qualified Data.ByteString.Lazy as BL
+#endif
 
 checks :: IO ()
 checks = do
+  packetChecks
   let check name good=unless good (error name)
       parsed event=terminalEventInput event >>= either (const Nothing) Just . parseEither P.parseInput
   check "terminal shift tab uses shared key protocol" (parsed (V.EvKey V.KBackTab [])==Just (P.Key "Tab" [V.MShift]))
@@ -114,3 +130,78 @@ checks = do
   updateDisplayOps output (6,2) hidden notice
   overlay<-readIORef captured
   check "direct writer banner changes only bottom row and suppresses cursor" ("Hi" `BS.isInfixOf` overlay && not (TE.encodeUtf8 "界" `BS.isInfixOf` overlay) && not ("S" `BS.isInfixOf` overlay))
+
+-- | Exercise the production terminal receiver with actual binary payload pairs,
+-- local staging and a live helper. No terminal or editor UI is needed.
+packetChecks :: IO ()
+#ifdef WITH_REMOTE
+packetChecks=unless (os=="mingw32") $ bracket temporary removePathForcibly $ \root->
+  bracket (mapM (\name->do value<-lookupEnv name; pure (name,value)) names) (mapM_ restore) $ \_->do
+    let check label ok=unless ok (error label)
+        helper=root </> "helper"
+        copied=root </> "snapshot"
+        arguments=root </> "arguments"
+        saved=BS.pack [0,255,13,10,128,1]
+        ordinary=BS.pack [255,0,128]
+        header name= P.JsonPacket (object ["type" .= ("download"::T.Text),"purpose" .= ("file-export"::T.Text),
+          "name" .= (name::T.Text),"row" .= ([2,3,20,1]::[Int]),"view" .= ([1,2,3]::[Int])])
+        rows=replicate 12 (toJSON ([]::[Value]))
+        frame=P.BinaryPacket (BL.toStrict (P.framePacket True [] rows ["size" .= ([40,12]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)])]))
+    writeFile helper "#!/bin/sh\nprintf '%s\\000' \"$@\" > \"$THC_TERMINAL_EXPORT_ARGS\"\n/bin/cp \"$2\" \"$THC_TERMINAL_EXPORT_SNAPSHOT\"\nexec /bin/sleep 60\n"
+    permissions<-getPermissions helper
+    setPermissions helper permissions {executable=True}
+    setEnv "HOME" root
+    setEnv "THC_EDIT_FILE_DRAG_HELPER" helper
+    setEnv "THC_TERMINAL_EXPORT_ARGS" arguments
+    setEnv "THC_TERMINAL_EXPORT_SNAPSHOT" copied
+    packets<-newIORef [header "../invalid.bin",P.BinaryPacket saved,header "savedλ.bin",P.BinaryPacket saved,
+      P.JsonPacket (object ["type" .= ("download"::T.Text),"name" .= ("../../ordinary.bin"::T.Text)]),P.BinaryPacket ordinary,
+      header "busy.bin",P.BinaryPacket saved,frame]
+    let peer=RemotePeer
+          { peerSend = \_->error "terminal receiver sent a transport packet"
+          , peerSendBatch = \_->error "terminal receiver sent a transport batch"
+          , peerReceive=atomicModifyIORef' packets (\pending->case pending of []->([],Nothing); packet:rest->(rest,Just packet))
+          }
+    withFileExports $ \exports->do
+      queue<-newTBQueueIO 8
+      received<-timeout 2000000 (receiveTerminalFrames exports peer queue)
+      check "file drag helper cannot block subsequent terminal packets" (received==Just ())
+      ready<-timeout 2000000 (awaitFile copied)
+      check "file-export payload reaches the terminal host helper" (ready==Just ())
+      snapshot<-BS.readFile copied
+      check "terminal export preserves exact saved binary bytes" (snapshot==saved)
+      argv<-BS.readFile arguments
+      path<-case BS.split 0 argv of
+        ["--and-exit",staged,""] | takeFileName (T.unpack (TE.decodeUtf8 staged))=="savedλ.bin"->pure (T.unpack (TE.decodeUtf8 staged))
+        _->error "terminal helper did not receive one local saved basename via argv"
+      retained<-BS.readFile path
+      check "staged copy stays available while the helper is open" (retained==saved)
+      downloaded<-listDirectory (root </> "Downloads")
+      downloadedPath<-case downloaded of
+        [name] | "ordinary" `T.isPrefixOf` T.pack name, takeExtension name==".bin"->pure (root </> "Downloads" </> name)
+        _->error "ordinary download did not remain a separate Downloads file"
+      downloadedBytes<-BS.readFile downloadedPath
+      check "ordinary download preserves its existing binary behavior" (downloadedBytes==ordinary)
+      incoming<-atomically (flushTBQueue queue)
+      let notices=[message | Control value<-incoming,Right message<-[parseEither (withObject "notice" (.: "message")) value]]
+      check "invalid exported basenames are reported explicitly" (any (T.isInfixOf "valid basename") notices)
+      check "busy helper refusal is visible" (any (T.isInfixOf "busy") notices)
+      check "frames continue through the production receiver with an open helper" (length [() | Frame _<-incoming]==1)
+      check "receiver completes through the existing control path" (any isClosed incoming)
+    putStrLn "terminal file export packet checks passed"
+  where
+    names=["HOME","THC_EDIT_FILE_DRAG_HELPER","THC_TERMINAL_EXPORT_ARGS","THC_TERMINAL_EXPORT_SNAPSHOT"]
+    restore (name,value)=maybe (unsetEnv name) (setEnv name) value
+    awaitFile path=do exists<-doesFileExist path; unless exists (threadDelay 10000 >> awaitFile path)
+    isClosed (Control value)=parseEither (withObject "control" (.: "type")) value==Right ("closed"::T.Text)
+    isClosed _=False
+    temporary=do
+      base<-getTemporaryDirectory
+      (path,handle)<-openTempFile base "hide-terminal-export-check"
+      hClose handle
+      removeFile path
+      createDirectory path
+      canonicalizePath path
+#else
+packetChecks=pure ()
+#endif
