@@ -93,7 +93,7 @@ checks=do
           treeNodes=Lazy.adjust (const (error "semantics forced an unrelated node")) unseen (treeNodes tree)},screenSize=(20,6)}
   check "bounded viewport projection leaves unrelated rows and editor payloads untouched"
     (BL.length (encode (project GuestSemantics poison))>0)
-  bounded<-sidebarFixture "/public" [(T.pack (show i),"/public/item-"++show i) | i<-[1::Int..128]] (initialDesktop (512,1000))
+  bounded<-sidebarFixture "/public" [(T.pack (show i),"/public/item-"++show i) | i<-[1::Int ..128]] (initialDesktop (512,1000))
   let boundedProjection=project OwnerSemantics bounded
   check "projection has fixed row/node caps and clips bounds to the grid"
     (field "visibleCount" boundedProjection==Just (256::Int) && length (items boundedProjection)<=512 &&
