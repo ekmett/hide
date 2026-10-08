@@ -30,6 +30,9 @@ import Hide.BufferView
 import Hide.Sidebar
 import Hide.Model
 import Hide.Recovery
+import Hide.App (applyEffects)
+import Hide.SidebarCommands (withSidebarCommands,sidebarEffects,awaitFileOpening,initializeSidebar)
+import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Window as W
 import Hide.Syntax (Style(..), StyledText, styledText)
@@ -40,8 +43,29 @@ check label ok=unless ok (error label)
 right :: Either T.Text a -> IO a
 right=either (error . T.unpack) pure
 
+-- Ordinary CLI directory opening must persist an absolute Files root, including
+-- the README's relative "." argument. Recovery must retain that same directory.
+relativeDirectoryChecks :: FilePath -> IO ()
+relativeDirectoryChecks root=do
+  let project=root </> "relative-project"
+      checkpoint=root </> "relative-project.checkpoint"
+      fresh=initialDesktop (80,25)
+  createDirectory project
+  writeFile (project </> "Main.hs") "main = pure ()\n"
+  expected<-canonicalizePath project
+  withCurrentDirectory project $ withSidebarCommands $ \host->do
+    (_,opened)<-sidebarEffects host applyEffects fresh [OpenFile Menu.HumanMenu "."]
+    prepared<-awaitFileOpening host opened >>= initializeSidebar host
+    check "relative directory opening owns a canonical Files root"
+      (fmap treeRoot (sideTree prepared)==Just expected)
+    writeCheckpoint checkpoint prepared >>= right
+    recovered<-readCheckpoint checkpoint fresh >>= right
+    check "relative directory startup roundtrips through recovery"
+      (fmap treeRoot (sideTree recovered)==Just expected)
+
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope->do
+  relativeDirectoryChecks root
   keyChecks root
   sharedTextChecks root
   primaryRef<-E.newDraftRef

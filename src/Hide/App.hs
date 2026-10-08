@@ -645,7 +645,9 @@ applyEffects = foldM apply . (False,)
     apply (_,d) OpenFile{}=pure (False,d {status="File opening requires its presentation owner."})
     apply (_,d) OpenFileBytes{}=pure (False,d {status="Dropped file opening requires its presentation owner."})
     apply (_,d) OpenChoice{}=pure (False,d {status="File opening requires its presentation owner."})
-    apply (_,d) (ReadTree path)=pure (False,installSidebar (sidebarDirectory path d) d)
+    apply (_,d) (ReadTree path)=do
+      root<-canonicalizePath path
+      pure (False,installSidebar (sidebarDirectory root d) d)
     apply (_,d) DebugSourceAction{}=pure (False,d {status="Debugger source actions are unavailable in this preview."})
     apply (_,d) DebugSidebarAction{}=pure (False,d {status="Debugger sidebar is unavailable in this preview."})
     apply (_,d) SessionSidebarAction{}=pure (False,d {status="Session selection is unavailable in this preview."})
