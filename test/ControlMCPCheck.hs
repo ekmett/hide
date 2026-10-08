@@ -40,7 +40,7 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
         field name=parseMaybe (withObject "reply" (.: name))
         success=either (const False) (const True)
         rejected=either (const True) (const False)
-        ui d=(screenSize d,videoMode d,appearance d,wordStar d,pixelateUnicode d,materialIcons d,streamerMode d,chatSubmit d,
+        ui d=(screenSize d,videoMode d,appearance d,wordStar d,pixelateUnicode d,materialIcons d,streamerMode d,chatSubmit d,hapticFeedback d,
           [(windowId w,bounds w,selection w,scrollRow w,scrollColumn w) | w<-windows d],menu d,dialog d,clipboard d)
         checkUnchanged label a b extra=do
           sameVersions<-sameBufferVersions a b
@@ -68,8 +68,23 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
     deniedEffects<-readIORef observed
     check "fully refused guest batch preserves the human terminal capture" (drag untouched==drag human && null deniedEffects)
     writeIORef observed []
+    let preferences=fst (runCommand EditorOptions (initialDesktop (80,25)) {nativeMac=True,videoMode=Just 3})
+        dg=maybe (error "missing Preferences") id (dialog preferences)
+        outer=dialogRect preferences dg
+        hapticFields=[(value,rect) | (CheckBox "Haptic Feedback" value,rect)<-zip (fields dg) (fieldRects preferences dg)]
+    check "haptic checkbox starts unchecked and fits 80x25 Preferences" (case hapticFields of
+      [(False,rect)]->top rect>=top outer+2 && top rect+height rect<=top outer+height outer-3 && width rect>=19
+      _->False)
+    let chosen=preferences {dialog=Just dg {fields=map (\control->case control of CheckBox "Haptic Feedback" _->CheckBox "Haptic Feedback" True; _->control) (fields dg)}}
+        (enabledPreferences,preferenceEffects)=handleEvent (V.EvKey V.KEnter []) chosen
+    check "Preferences applies the optional haptic setting to the session" (hapticFeedback enabledPreferences && dialog enabledPreferences==Nothing && null preferenceEffects)
     (same,readSettings)<-call shaped "editor_settings" (object [])
     checkUnchanged "reading settings preserves window geometry and focus" same shaped (success readSettings)
+    check "settings read exposes disabled haptic feedback" (either (const False) ((==Just False).field "hapticFeedback") readSettings)
+    (hapticEnabled,hapticReply)<-settings shaped ["hapticFeedback" .= True]
+    checkUnchanged "haptic update preserves geometry and other settings" hapticEnabled (shaped {hapticFeedback=True}) (hapticFeedback hapticEnabled && either (const False) ((==Just True).field "hapticFeedback") hapticReply)
+    (hapticInvalid,hapticInvalidReply)<-settings hapticEnabled ["hapticFeedback" .= ("true"::T.Text)]
+    checkUnchanged "invalid haptic setting is rejected without changes" hapticInvalid hapticEnabled (rejected hapticInvalidReply)
     (stillSame,_)<-settings shaped []
     checkUnchanged "empty settings object is a geometry-preserving no-op" stillSame shaped True
     let small=shaped {screenSize=(30,8),videoMode=Nothing}
@@ -81,11 +96,11 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
     check "explicit screen mode selects its default grid" (screenSize mode==(80,50) && videoMode mode==Just 259 && success modeReply)
     (invalid,invalidReply)<-settings shaped ["appearance" .= ("dark"::T.Text),"rows" .= (999::Int)]
     checkUnchanged "invalid settings leave session untouched" invalid shaped (rejected invalidReply)
-    (_,stored)<-call shaped "editor_settings" (object ["defaults" .= object ["wordStar" .= True,"columns" .= (101::Int)]])
+    (_,stored)<-call shaped "editor_settings" (object ["defaults" .= object ["wordStar" .= True,"columns" .= (101::Int),"hapticFeedback" .= True]])
     check "valid startup defaults can be stored" (success stored)
     (_,merged)<-call shaped "editor_settings" (object ["defaults" .= object ["appearance" .= ("light"::T.Text)]])
     persisted<-readEditorDefaults
-    check "partial startup defaults preserve other keys" (success merged && case persisted of Right (Object values) -> KM.lookup "columns" values==Just (toJSON (101::Int)) && KM.lookup "wordStar" values==Just (Bool True) && KM.lookup "appearance" values==Just (String "light"); _ -> False)
+    check "partial startup defaults preserve other keys" (success merged && case persisted of Right (Object values) -> KM.lookup "columns" values==Just (toJSON (101::Int)) && KM.lookup "wordStar" values==Just (Bool True) && KM.lookup "hapticFeedback" values==Just (Bool True) && KM.lookup "appearance" values==Just (String "light"); _ -> False)
     (invalidBoth,invalidBothReply)<-call shaped "editor_settings" (object ["settings" .= object ["wordStar" .= True],"defaults" .= object ["scale" .= (99::Int)]])
     afterInvalid<-readEditorDefaults
     checkUnchanged "invalid defaults prevent current settings and persistence changes" invalidBoth shaped (rejected invalidBothReply && afterInvalid==persisted)

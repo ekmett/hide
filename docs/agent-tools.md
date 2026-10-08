@@ -433,8 +433,9 @@ argument count and environment names; secret-labelled settings are redacted.
 
 `settings`: `appearance` (`light`, `dark`, `system`), `screenMode` (3, 259),
 `columns` (40–512), `rows` (12–256), `wordStar`, `blinkCursor`, `crtFilter`,
-`pixelateUnicode`, `materialIcons`. Selecting a mode defaults to its 80×25/80×50
-grid unless dimensions are supplied. `defaults` additionally accepts `backend`
+`pixelateUnicode`, `materialIcons`, `macKeySymbols`, `hapticFeedback`. Haptic
+feedback is off by default and applies only to native Mac dialog buttons.
+Selecting a mode defaults to its 80×25/80×50 grid unless dimensions are supplied. `defaults` additionally accepts `backend`
 (`terminal`, `auto`, `metal`, `vulkan`, `web`, `remote`) and `scale` (1–8).
 Omitted fields remain unchanged. `streamerMode` is returned read-only. Current
 backend/pixel scale and agent settings are not changed by this tool.

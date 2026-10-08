@@ -1114,7 +1114,7 @@ writeEditorDefaultsAt path values=case values of
   Object entries | all (`elem` allowed) (KM.keys entries),all scalar (KM.elems entries) -> writeTable path ["editor","defaults"] values
   _ -> pure (Left "Editor defaults must contain only supported primitive settings")
   where
-    allowed=["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView","chatSubmit","macKeySymbols"]
+    allowed=["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView","chatSubmit","macKeySymbols","hapticFeedback"]
     scalar String{}=True; scalar Number{}=True; scalar Bool{}=True; scalar _=False
 
 primitive :: Toml.Value' a -> Either Text Value

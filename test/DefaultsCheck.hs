@@ -7,17 +7,22 @@ import qualified Data.Text as T
 import Hide.BufferView
 import Hide.Defaults
 import Hide.Model (ChatSubmit(..))
+import qualified Hide.Model as Model
 
 checks :: IO ()
 checks=do
   let check label ok=unless ok (error label)
       parse=parseEither parseDefaults
       failed=either (const True) (const False)
-  check "empty defaults preserve every fallback" (parse (object [])==Right (Defaults Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
+  check "empty defaults preserve every fallback" (parse (object [])==Right (Defaults Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing))
   let chosen=parse (object ["backend" .= ("web"::T.Text),"scale" .= (1.5::Double),"screenMode" .= (259::Int),"columns" .= (101::Int),"rows" .= (37::Int),"appearance" .= ("dark"::T.Text),"wordStar" .= True,"blinkCursor" .= False,"crtFilter" .= True,"pixelateUnicode" .= False,"materialIcons" .= True])
-  check "typed startup defaults preserve supplied values" (chosen==Right (Defaults (Just "web") (Just 1.5) (Just 259) (Just 101) (Just 37) (Just "dark") (Just True) (Just False) (Just True) (Just False) (Just True) Nothing Nothing Nothing Nothing Nothing))
+  check "typed startup defaults preserve supplied values" (chosen==Right (Defaults (Just "web") (Just 1.5) (Just 259) (Just 101) (Just 37) (Just "dark") (Just True) (Just False) (Just True) (Just False) (Just True) Nothing Nothing Nothing Nothing Nothing Nothing))
   check "wide titles default is typed" (fmap defaultWideSectionTitles (parse (object ["wideSectionTitles" .= True]))==Right (Just True))
   check "wide titles reject non-Boolean values" (failed (parse (object ["wideSectionTitles" .= ("true"::T.Text)])))
+  check "haptic feedback starts disabled" (not (Model.hapticFeedback (Model.initialDesktop (80,25))))
+  forM_ [False,True] $ \enabled ->
+    check "haptic feedback default is Boolean" (fmap defaultHapticFeedback (parse (object ["hapticFeedback" .= enabled]))==Right (Just enabled))
+  check "haptic feedback rejects non-Boolean values" (failed (parse (object ["hapticFeedback" .= ("true"::T.Text)])))
   check "Mac key symbols default is typed" (fmap defaultMacKeySymbols (parse (object ["macKeySymbols" .= True]))==Right (Just True))
   check "buffer view default is typed" (fmap defaultView (parse (object ["bufferView" .= ("only-changes"::T.Text)]))==Right (Just OnlyChangesView))
   check "invalid buffer view is rejected" (failed (parse (object ["bufferView" .= ("original"::T.Text)])))

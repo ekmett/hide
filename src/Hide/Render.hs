@@ -77,6 +77,7 @@ data RenderState = RenderState
   , keyNativeMac :: Bool
   , keyWideSectionTitles :: Bool, keyWindowPresentations :: [(Int,WindowPresentation)]
   , keyMacKeySymbols :: Bool
+  , keyHapticFeedback :: Bool
   , keyVideoMode :: Maybe Int
   , keyHoverTarget :: Maybe (Int,Int,Int)
   , keyTypeHint :: Text
@@ -236,6 +237,7 @@ renderKey original = do
         , keyWideSectionTitles=wideSectionTitles original
         , keyWindowPresentations=M.toList (windowPresentations original)
         , keyMacKeySymbols=macKeySymbols original
+        , keyHapticFeedback=hapticFeedback original
         , keyVideoMode=videoMode original
         , keyHoverTarget=hoverTarget original
         , keyTypeHint=typeHint original

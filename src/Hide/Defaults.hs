@@ -22,12 +22,13 @@ data Defaults = Defaults
   , defaultAppearance :: Maybe String, defaultWordStar :: Maybe Bool
   , defaultBlinkCursor :: Maybe Bool, defaultCRT :: Maybe Bool
   , defaultPixelateUnicode :: Maybe Bool, defaultMaterialIcons :: Maybe Bool, defaultStreamerMode :: Maybe Bool, defaultView :: Maybe BufferView, defaultChatSubmit :: Maybe ChatSubmit, defaultWideSectionTitles :: Maybe Bool, defaultMacKeySymbols :: Maybe Bool
+  , defaultHapticFeedback :: Maybe Bool
   } deriving (Eq,Show)
 
 -- | Validate a defaults object; omission is not a concrete default value.
 parseDefaults :: Value -> Parser Defaults
 parseDefaults=withObject "editor.defaults" $ \o -> do
-  unless (all (`elem` ["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView","chatSubmit","macKeySymbols","wideSectionTitles"]) (KM.keys o)) (fail "Unknown editor default")
+  unless (all (`elem` ["backend","scale","screenMode","columns","rows","appearance","wordStar","blinkCursor","crtFilter","pixelateUnicode","materialIcons","streamerMode","bufferView","chatSubmit","macKeySymbols","wideSectionTitles","hapticFeedback"]) (KM.keys o)) (fail "Unknown editor default")
   backend<-o .:? "backend"
   either fail (const (pure ())) (chooseBackend backend [])
   scale<-o .:? "scale"
@@ -43,4 +44,4 @@ parseDefaults=withObject "editor.defaults" $ \o -> do
   view<-traverse (maybe (fail "bufferView must be current, changes, only-changes, side-by-side or markdown") pure . parseBufferView) viewName
   submitName<-o .:? "chatSubmit"
   submit<-traverse (maybe (fail "chatSubmit must be query or steer") pure . parseChatSubmit) submitName
-  Defaults backend scale mode columns rows appearance <$> o .:? "wordStar" <*> o .:? "blinkCursor" <*> o .:? "crtFilter" <*> o .:? "pixelateUnicode" <*> o .:? "materialIcons" <*> o .:? "streamerMode" <*> pure view <*> pure submit <*> o .:? "wideSectionTitles" <*> o .:? "macKeySymbols"
+  Defaults backend scale mode columns rows appearance <$> o .:? "wordStar" <*> o .:? "blinkCursor" <*> o .:? "crtFilter" <*> o .:? "pixelateUnicode" <*> o .:? "materialIcons" <*> o .:? "streamerMode" <*> pure view <*> pure submit <*> o .:? "wideSectionTitles" <*> o .:? "macKeySymbols" <*> o .:? "hapticFeedback"

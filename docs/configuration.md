@@ -13,6 +13,7 @@ appearance = "dark"
 wordStar = false
 wideSectionTitles = false
 macKeySymbols = false
+hapticFeedback = false
 blinkCursor = true
 crtFilter = true
 pixelateUnicode = true
@@ -35,6 +36,12 @@ terminal cursor is repositioned after each glyph even if its font draws it
 narrower. This changes labels, not bindings: terminal shortcuts still use
 Control/Alt, and Command remains owned by your terminal application. Native Mac
 windows and Mac browsers use symbol labels automatically.
+
+**Options > Preferences > Haptic Feedback** is off by default. When enabled,
+native Mac dialog buttons give a haptic tick as the pointer crosses their edge.
+The checkbox choice stays with the resumable session; set `hapticFeedback = true`
+in `[editor.defaults]` to enable it for future sessions. The setting is inert in
+browser and terminal frontends and on other platforms.
 
 Command-line options override environment variables, which override project defaults, which override global defaults. For example, `THC_EDIT_BACKEND=web` overrides `backend = "metal"`, and `--terminal` overrides both. `--mode` selects its usual dimensions unless `--size` is also supplied. `--no-crt`, `--classic-icons`, `--standard-keys`, `--no-blink-cursor` and `--no-pixelate-unicode` override enabled defaults.
 
