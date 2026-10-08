@@ -102,10 +102,15 @@ class CanvasImages {
   if(!this.scene||!this.gpu)return;
   const gl=this.gl,{program,vao,uniforms,mask}=this.gpu;
   gl.useProgram(program);gl.bindVertexArray(vao);gl.activeTexture(gl.TEXTURE3);gl.bindTexture(gl.TEXTURE_2D,mask);gl.bindBuffer(gl.UNIFORM_BUFFER,uniforms);
-  for(const surface of this.scene.surfaces){
+  gl.enable(gl.SCISSOR_TEST);
+  try{for(const surface of this.scene.surfaces){
    const resource=this.resources.get(surface.resource);if(!resource?.texture||!this.scene.visible.has(surface.slot))continue;
+   const [x,y,w,h]=surface.rect,cw=gl.drawingBufferWidth/this.scene.cols,ch=gl.drawingBufferHeight/this.scene.lines;
+   // Conservative pixel edges leave fractional boundary ownership to the mask.
+   const left=Math.floor(x*cw),top=Math.floor(y*ch),right=Math.ceil((x+w)*cw),bottom=Math.ceil((y+h)*ch);
+   gl.scissor(left,gl.drawingBufferHeight-bottom,right-left,bottom-top);
    gl.activeTexture(gl.TEXTURE2);gl.bindTexture(gl.TEXTURE_2D,resource.texture);
    gl.bufferSubData(gl.UNIFORM_BUFFER,0,new Float32Array([this.scene.cols,this.scene.lines,surface.slot,0,...surface.target]));gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
-  }
+  }}finally{gl.disable(gl.SCISSOR_TEST);}
  }
 }

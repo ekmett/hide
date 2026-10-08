@@ -96,11 +96,18 @@ try {
  adopt([{...imageSurface,target:[1,0,4,4]}]);check(pixel(4,2)==='0,0,0','pan black padding');check(images.resources.size===1&&images.bytes===16,'pan retransmitted pixels');
  // A front surface takes exactly one ordinary character cell, even over a wide glyph.
  view.setUint16(2,2,true);adopt([imageSurface,{...imageSurface,id:2,slot:2,target:[1,0,2,2]}]);check(pixel(12,2)==='75,0,0','overlap ownership');check(pixel(4,2)==='75,0,0','overlap damaged adjacent owner');
+ const oldWidth=canvas.width,oldHeight=canvas.height;
+ canvas.width=679;canvas.height=437;gl.viewport(0,0,679,437);drawRows(rows.map((r,y)=>[y,r]));
+ view.setUint16(2,1,true);view.setUint16(4,0,true);adopt([{...imageSurface,rect:[0,0,2,2]}]);
+ check(pixel(16,8)==='0,255,0','fractional right scissor boundary lost image texel');
+ check(pixel(16,34)==='64,64,64','fractional bottom scissor boundary lost image texel');
+ check(pixel(17,8)==='0,0,170','fractional scissor bypassed ownership');check(!gl.isEnabled(gl.SCISSOR_TEST),'image pass leaked scissor state');
+ canvas.width=oldWidth;canvas.height=oldHeight;gl.viewport(0,0,oldWidth,oldHeight);drawRows(rows.map((r,y)=>[y,r]));
  maskBytes.fill(0);adopt([imageSurface]);check(pixel(4,2)==='0,0,170','modal/occlusion fallback');check(images.resources.size===1,'occlusion retired live texture');
  images.receive({epoch:imageEpoch,surfaces:[],mask:''},cols,lines);dirty=true;present(performance.now());check(pixel(4,2)==='0,0,170','canonical empty scene did not clear image paint');
  images.control({type:'canvas-release',epoch:imageEpoch,id:resourceId});check(images.bytes===0&&images.resources.size===0,'release retained RGBA');
  check(gl.getError()===gl.NO_ERROR,'GL final error');
- document.body.textContent='PASS WebGL2 generated HLSL execution: foreground/background, full-origin half clip, warm atlas/grid reuse, bounded row upload, mouse/cursor, cell underline/strike and one-cell script ink without new atlas tiles; PNG orientation/alpha/halo, ownership overlap, black padding, fallback, pan/occlusion retention and release; '+JSON.stringify(atlasStats)+'; '+gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL);
+ document.body.textContent='PASS WebGL2 generated HLSL execution: foreground/background, full-origin half clip, warm atlas/grid reuse, bounded row upload, mouse/cursor, cell underline/strike and one-cell script ink without new atlas tiles; PNG orientation/alpha/halo, ownership overlap, conservative fractional scissor, black padding, fallback, pan/occlusion retention and release; '+JSON.stringify(atlasStats)+'; '+gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info').UNMASKED_RENDERER_WEBGL);
 } catch(error){document.body.textContent='FAIL '+error.stack;}
 `;
 const fixture=await fs.mkdtemp(path.join(os.tmpdir(),'hide-web-gpu-'));
