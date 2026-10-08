@@ -368,8 +368,16 @@ An empty override disables helper export. An unavailable executable or failed
 helper reports an error in hide; closing the helper cancels the interaction.
 
 This host-owned override cannot be changed through agent environment tools or
-project environment settings. The helper runs on the editor's host; it does not
-transfer a remote server file to the connecting machine.
+project environment settings. Set it on the machine displaying the terminal.
+The editor sends an authorized binary snapshot to that frontend; the helper
+receives a temporary local copy, including when the editor runs over SSH.
+
+Each frontend retains at most four export copies of at most 16 MiB each. Copies
+remain readable until that frontend exits, even after the helper closes, so a
+receiving application can finish reading. Closing or detaching the frontend
+cancels its active helper and deletes only its own temporary copies. One helper
+may be active at a time; close its window before requesting another export.
+Helper success means its window closed, not confirmation that a drop succeeded.
 
 ## Agent context
 

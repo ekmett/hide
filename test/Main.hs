@@ -102,6 +102,7 @@ import qualified PluginFormCheck
 import qualified PluginWindowsCheck
 import qualified WindowCheck
 import qualified FilesCheck
+import qualified FileExportCheck
 import qualified FileDragHelperCheck
 import qualified ExternalCheck
 import qualified ReconcileCheck
@@ -123,6 +124,7 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = do
+  FileExportCheck.checks
   FileDragHelperCheck.checks
   BindingsCheck.checks
   HintComposerCheck.checks

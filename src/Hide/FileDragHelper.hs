@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: BSD-3-Clause
--- | Optional saved-file drag delegation. The existing Files action worker owns
+-- | Optional saved-file drag delegation. The frontend's owned helper worker runs
 -- this blocking operation; cancellation terminates the helper's process group.
 -- Human admission and canonical privacy checks belong to the caller, before this
 -- operation. No helper is needed for ordinary editing.
@@ -18,7 +18,7 @@ import System.IO.Error (tryIOError)
 import System.Process
 import Hide.Process (processCleanup)
 
--- | Run on a session-owned worker with an authorized canonical absolute file.
+-- | Run on a frontend-owned worker with an authorized canonical absolute file.
 -- This exports its disk contents without saving a buffer or modifying the source.
 -- The helper's window owns the gesture and cancellation. Exit success means the
 -- helper closed, not that a receiving application accepted the file. Missing,
