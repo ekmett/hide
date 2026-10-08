@@ -126,7 +126,7 @@ tick (Owner downloads scope ref desired latest) d=do
       publication<-atomically (tryTakeTMVar latest)
       let (nextPage,err)=case publication of
             Just (generation,published,Right value) | generation==epoch,published==requested->(Just value,Nothing)
-            Just (generation,published,Left message) | generation==epoch,published==requested->(page,Just message)
+            Just (generation,published,Left failure) | generation==epoch,published==requested->(page,Just failure)
             _->(page,Nothing)
           canOpen=dialog d==Nothing && not (questionActive d) && not (activeAutocomplete d)
           needsPage=case nextPage of Just (Page preparedRevision _)->preparedRevision==requested; _->False

@@ -273,7 +273,7 @@ menuEffects host@(MenuHost menus permitted _ _ ref _) _ original [InvokeMenu ref
     Nothing->do
       navigation<-captureNavigation origin target d
       source<-captureSource target d
-      let row=case target of Just (WindowRowTarget reference ident)->Just (reference,ident); _->Nothing
+      let row=case target of Just (WindowRowTarget windowRef ident)->Just (windowRef,ident); _->Nothing
           context=MenuContext (columns d) origin navigation source row
       worker<-async (restore (Plugin.invokeMenu menus reference context))
       modifyIORef' ref (\s->s {menuPending=Just (Pending reference target context worker)})

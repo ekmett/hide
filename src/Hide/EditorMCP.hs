@@ -212,10 +212,10 @@ builtinTool desktop=tool
     parseArgs parser=either (Left . T.pack) Right . parseEither parser
     findWindow ident=case filter ((==ident).windowId) (windows desktop) of w:_->Just w; _->Nothing
     window w=object ["windowId" .= windowId w,"number" .= windowNumber w,"bufferId" .= bufferId w,
-      "title" .= windowTitle w,
+      "title" .= readableWindowTitle w,
       "kind" .= (case windowContent w of SourceContent _->"source"::T.Text; PluginContent _->"plugin"),
       "active" .= (fmap windowId (activeWindow desktop)==Just (windowId w)),"bounds" .= rect (bounds w)]
-    windowTitle w=case windowContent w of
+    readableWindowTitle w=case windowContent w of
       SourceContent _->maybe "[private]" title (windowDocument (buffers desktop) w)
       PluginContent reference->case M.lookup reference (pluginWindows desktop) of
         Just prepared | W.preparedWindowDisclosure prepared==W.ReadableWindow->W.preparedWindowTitle prepared

@@ -110,7 +110,7 @@ definition name title=CommandDef name title input output $ \context (ReadPage st
     Right value->Right <$> evaluate (force value)
   where
     input=Codec (object ["type" .= ("object"::T.Text),"additionalProperties" .= False,
-      "properties" .= object [name .= object ["type" .= ("integer"::T.Text)] | name<-["startLine","lineCount","byteOffset"]]])
+      "properties" .= object [property .= object ["type" .= ("integer"::T.Text)] | property<-["startLine","lineCount","byteOffset"]]])
       (\value->do
         (start,count,offset)<-either (Left . T.pack) Right (parseEither (withObject "read page" (\o->(,,) <$> o .:? "startLine" .!= 1 <*> o .:? "lineCount" .!= 200 <*> o .:? "byteOffset" .!= 0)) value)
         readPage start count offset)

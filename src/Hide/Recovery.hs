@@ -29,8 +29,8 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import qualified Data.Vector as V
-import Hide.ConversationBody (ConversationBody(..), LogicalBody, BodyItemId(..), Record(..), RecordContent(..),
-  BodyPoint(..), BodyAnchor(..), BodySelection(..), logicalBodyItems, logicalItemRecord, logicalBodyIdentity, logicalBodyItemIndex,
+import Hide.ConversationBody (LogicalBody, BodyItemId(..), Record(..), RecordContent(..),
+  logicalBodyItems, logicalItemRecord, logicalBodyIdentity, logicalBodyItemIndex,
   restoreLogicalBody, restoreLogicalViewport, validateLogicalPoint, logicalBodyProvider, clampPoint,
   capturedSourceIdentity, prepareCapturedSource)
 import Data.Unique (Unique)
@@ -131,7 +131,7 @@ readCheckpoint path baseline=do
     symbolic<-pathIsSymbolicLink path
     when symbolic (ioError (userError "Recovery checkpoint must not be a symlink"))
     withBinaryFile path ReadMode (\handle->BS.hGet handle (checkpointLimit+1))
-  case loaded >>= decode of
+  case loaded >>= decodeCheckpoint of
     Left err->pure (Left err)
     Right value->case parseEither (desktopParser baseline) value of
       Left _->pure (Left "Invalid or unsupported recovery checkpoint.")
@@ -154,7 +154,7 @@ readCheckpoint path baseline=do
               editorDrafts=M.fromList [(ref,draft) | (_,_,(ref,draft),_,_)<-restored]}
         pure (layoutBottomWindows (normalizeBottom desktop))
   where
-    decode bytes=do
+    decodeCheckpoint bytes=do
       unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")
       either (const (Left "Invalid recovery checkpoint JSON.")) Right (eitherDecodeStrict' bytes)
     install scope prepared=do
@@ -467,7 +467,7 @@ sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll
     prepared=[(P.infoLabel info,path,rowDepth row,P.infoBranch info,rowExpanded row) | row<-M.elems (treeRows tree),NodeRow{}<-[rowKey row],let info=rowInfo row,Just path<-[P.infoResource info]]
     current=M.fromList [(path,()) | (_,path,_,_,_)<-prepared]
     (pending,chosen,topPath)=case treeHints tree of
-      Just (SidebarHints hints selected top)->(hints,selected,top)
+      Just (SidebarHints hints hintSelected top)->(hints,hintSelected,top)
       Nothing->(M.empty,Nothing,Nothing)
     savedExpansion path expanded=case M.lookup path pending of
       Just True->True

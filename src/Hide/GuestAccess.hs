@@ -399,7 +399,7 @@ privateTreeCell d x y
 -- including its source name and message, in both agent and Streamer projections.
 privateMessageCell :: Desktop -> Int -> Int -> Bool
 privateMessageCell d x y
-  | maybe False (\(r,_)->inside r x y) (contextMenu d) || maybe False (\(i,_)->inside (menuRect d i) x y) (menu d)=False
+  | maybe False (\(area,_)->inside area x y) (contextMenu d) || maybe False (\(i,_)->inside (menuRect d i) x y) (menu d)=False
   | messagesDisplayed d, inside r x y,y>top r,y<top r+height r-1 =
       maybe False (protectedPath d . diagnosticPath) (at (diagnostics d) (problemsScroll d+y-top r-1))
   | otherwise=False

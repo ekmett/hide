@@ -23,7 +23,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
 import qualified Hide.Plugin.Canvas as Canvas
-import Hide.ConversationBody (CapturedConversationSource,LogicalBody,ConversationCopy(..),BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItemIndex,logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
+import Hide.ConversationBody (CapturedConversationSource,LogicalBody,ConversationCopy(..),BodyPoint(..),BodyAnchor(..),BodySelection(..),BodyDemand(..),BodyViewport(..),BodyRow(..),logicalBodyItems,logicalItemRecord,Record(..),viewportPoint,viewportOffset,questionChoiceLines,QuestionProjection(..),ConversationBody(..),BodyControlReceipt(..),HostBodyControls(..))
 import qualified Hide.Privacy as Privacy
 import Control.Applicative ((<|>))
 import Control.Monad (guard)
@@ -39,7 +39,7 @@ import Hide.Plugin.Command (CommandRef)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Maybe (listToMaybe, fromMaybe, isJust)
-import Data.List (find, findIndex, sortOn, mapAccumL, groupBy, nub)
+import Data.List (find, findIndex, sortOn, mapAccumL, nub)
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, splitDirectories, joinPath, normalise)
@@ -785,7 +785,7 @@ initialRowsInteraction prepared=case PluginWindow.preparedWindowRows prepared of
 -- | Shared fixed list/Details geometry. Both painting and pointer input use it.
 rowsWindowRects :: Desktop -> Window -> (Rect,Rect)
 rowsWindowRects d w=(Rect (x+1) (y+1) inner listHeight,Rect (x+1) (y+listHeight+2) inner (max 0 (bodyHeight-listHeight-1)))
-  where Rect x y ww hh=bounds w
+  where Rect x y ww _=bounds w
         inner=max 0 (ww-2)
         bodyHeight=pluginBodyRows d w
         listHeight=min 8 (max 1 (bodyHeight `div` 3))
@@ -992,7 +992,6 @@ ensureVisible d | activeMarkdown d,Just w<-activeWindow d = markdownMoveTo True 
 ensureVisible d = case (activeWindow d, activeDocument d) of
   (Just w, Just doc) -> modifyActive (const (rememberSourceWidth d doc w { scrollRow = max 0 row', scrollColumn = max 0 col' })) d
     where
-      b = documentBuffer doc
       (row,dc) = windowCaretCell d doc w
       rows = max 1 (windowContentRows d doc w); cols = max 1 (if bufferView w==SideBySideView then snd (reviewPaneWidths w) else width (bounds w)-2)
       paneOffset=if bufferView w==SideBySideView then fst (reviewPaneWidths w)+1 else 0
@@ -2162,9 +2161,10 @@ settleConversationCaret :: Maybe TextLayout.TextLayout -> Maybe BodyViewport -> 
 settleConversationCaret layout captured view=case (conversationCaretIntent view,captured) of
   (Just (EdgeCaret end extended),Just viewport) | not end || viewportAtEnd viewport->case points viewport of
     []->view {conversationCaretIntent=Nothing}
-    entries->let (point,finish)=if end then last entries else head entries
-                 chosen=if end then ending point finish else point
-             in selected extended chosen
+    entries@(first:_)->
+      let (point,finish)=if end then last entries else first
+          chosen=if end then ending point finish else point
+      in selected extended chosen
   (Just (RowCaret column extended),Just viewport)->case viewportPoint viewport offset <|> firstPoint viewport of
     Just chosen->selected extended chosen
     Nothing->view {conversationCaretIntent=Nothing}
@@ -3337,7 +3337,7 @@ scrollbarRect d vertical doc w
   where Rect x y ww hh=bounds w
 
 scrollbarLimit :: Desktop -> Bool -> Document -> Window -> Int
-scrollbarLimit d vertical doc w | bufferView w==MarkdownView=markdownScrollLimit d vertical w
+scrollbarLimit d vertical _ w | bufferView w==MarkdownView=markdownScrollLimit d vertical w
 scrollbarLimit d vertical doc w = max 0 (if vertical then (case windowPresentation d w of Just layout->Vec.length (TextLayout.layoutRows layout); Nothing->documentRows doc w)-max 1 (windowContentRows d doc w)
   else (case windowPresentation d w of Just layout->TextLayout.layoutWidth layout; Nothing->windowDocumentWidth doc w)-max 1 (if bufferView w==SideBySideView then min (fst (reviewPaneWidths w)) (snd (reviewPaneWidths w)) else width (bounds w)-2)+(if byteMode (documentBuffer doc) then 0 else 1))
 
@@ -3432,7 +3432,7 @@ scrollClick vertical x y d = case activeWindow d of
   _ -> d
 
 scrollTrack :: Bool -> Int -> Int -> Desktop -> Desktop
-scrollTrack True x y d | Just window<-activeWindow d,Just target<-conversationTargetFor d window,
+scrollTrack True _ y d | Just window<-activeWindow d,Just target<-conversationTargetFor d window,
   Just logical<-conversationLogicalBody target d,Just (area,_)<-windowScrollbar d True window=
     let slots=logicalBodyItems logical
         fraction=max 0 (min 1000 ((y-top area-1)*1000 `div` max 1 (height area-3)))
@@ -3480,7 +3480,7 @@ selectAt extend x y d = case activeWindow d of
     b = maybe (newBuffer "") documentBuffer (activeDocument d)
     row = max 0 (min (windowTextRows d w (bufferContent b)-1) (y-top (bounds w)-1+scrollRow w))
     col = max 0 (x-left (bounds w)-1+scrollColumn w)
-    pos = case activeWindow d of Just w->windowTextOffset d w (bufferContent b) row col; Nothing->0
+    pos = windowTextOffset d w (bufferContent b) row col
 
 -- | Read-only semantic text navigation; printable keys cannot edit a source behind it.
 pluginKey :: V.Key -> [V.Modifier] -> Desktop -> Desktop
@@ -3523,14 +3523,14 @@ pluginMoveTo extend requested d | Just view<-activePluginWindow d, Just w<-activ
   let text=PluginWindow.preparedWindowText view
       pos=max 0 (min (contentLength text) requested)
       (row,col)=windowTextPosition d w text pos
-      update w=w {selection=Selection (if extend then anchor (selection w) else pos) pos,
-      scrollRow=max 0 (min row (max (scrollRow w) (row-height (pluginTextRect d w)+1))),
-      scrollColumn=max 0 (min col (max (scrollColumn w) (col-width (bounds w)+3)))}
+      update window=window {selection=Selection (if extend then anchor (selection window) else pos) pos,
+      scrollRow=max 0 (min row (max (scrollRow window) (row-height (pluginTextRect d window)+1))),
+      scrollColumn=max 0 (min col (max (scrollColumn window) (col-width (bounds window)+3)))}
       movedWindow=update w
       moved=modifyActive update d
   in case conversationTargetFor d w of
     Just target | Just viewport<-bodyViewportFor d target,Just point<-viewportPoint viewport pos->
-      let original=do view<-M.lookup target (conversationViews d); BodySelection first _<-conversationReplySelection view; pure first
+      let original=do previous<-M.lookup target (conversationViews d); BodySelection first _<-conversationReplySelection previous; pure first
           chosen=BodySelection (if extend then fromMaybe point original else point) point
       in moved {conversationViews=M.adjust (\v->v {conversationReplySelection=Just chosen,conversationCaretIntent=Nothing,
         conversationScrollColumn=scrollColumn movedWindow,
@@ -3686,7 +3686,6 @@ bindingContext d
     "Debugger " `T.isPrefixOf` label || "Source " `T.isPrefixOf` label = Just Bindings.DebuggerKeys
   | Just _<-activeDocument d = Just (if wordStar d && not (activeHex d) then fromMaybe Bindings.WordStarKeys (wordStarPrefixContext d) else Bindings.SourceKeys)
   | Nothing<-activeDocument d = Just Bindings.SourceKeys
-  | otherwise = Nothing
 
 -- Only the current ordinary WordStar source owner admits finite prefix steps.
 wordStarPrefixOwner :: Desktop -> Bool
@@ -3907,8 +3906,8 @@ rowEdge end extend d
   | Just w<-activeWindow d, Just doc<-activeDocument d =
       let b=documentBuffer doc; p=caret (selection w); row=fst (bufferLineColumn b p)
           start=bufferLineOffset b row
-          target | byteMode b=let start=p-p `mod` windowHexBytes w
-                             in if end then min (bufferLength b) (start+windowHexBytes w-1) else start
+          target | byteMode b=let byteStart=p-p `mod` windowHexBytes w
+                             in if end then min (bufferLength b) (byteStart+windowHexBytes w-1) else byteStart
                  | Just layout<-windowPresentation d w =
                      TextLayout.layoutOffset layout (fst (TextLayout.layoutPosition layout p)) column
                  | end=start+sourceLineLength (contentSourceLineAt (bufferContent b) row)

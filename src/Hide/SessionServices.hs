@@ -501,7 +501,7 @@ retireBuildPreparation ref = mask_ $ do
     Nothing -> pure ()
     Just BuildRetiring{} -> pure ()
     Just slot -> do
-      let launch=case slot of BuildPreparing _ active _->active; BuildReady _ active _->active; _->False
+      let launch=case slot of BuildPreparing _ active _->active; BuildReady _ active _->active
       worker<-asyncWithUnmask (\unmask -> unmask (closeBuildPreparation slot))
       modifyIORef' ref (\s -> s {buildPreparation=Just (BuildRetiring launch worker)})
 

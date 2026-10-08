@@ -77,7 +77,7 @@ withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->
   configureCompletion<-command "hide.sidebar.completion.configure" "Apply completion setting"
     (\ctx (target,option,value)->human ctx (ConfigureCompletion target option value))
   let choiceSpec title options current=Form.ChoiceFormSpec title "Provider choices"
-        [(ident,T.take 256 (T.map (\c->if c<' ' || c=='\DEL' then ' ' else c) label)) | (ident,label)<-options]
+        [(optionId,T.take 256 (T.map (\c->if c<' ' || c=='\DEL' then ' ' else c) label)) | (optionId,label)<-options]
         (if current `elem` map fst options then current else maybe "" fst (listToMaybe options)) "Apply"
       configurationCommand category ctx who
         | Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Agent forms require the human."))

@@ -66,8 +66,8 @@ cancelRequestedPaste (RequestedPaste ref)=writeIORef ref Nothing
 -- An older or duplicate token cannot consume a newer request. The caller has
 -- already attributed this reply to the human transport, never to a guest batch.
 applyRequestedPaste :: RequestedPaste -> Text -> Text -> Desktop -> IO (Desktop,[Effect])
-applyRequestedPaste reads@(RequestedPaste ref) token text d=do
-  refreshRequestedPaste reads d
+applyRequestedPaste requested@(RequestedPaste ref) token text d=do
+  refreshRequestedPaste requested d
   pending<-readIORef ref
   case pending of
     Just (expected,_) | token==expected->do

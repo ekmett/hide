@@ -82,13 +82,13 @@ withDebuggerSidebar host runtime use=withRegistry $ \registry->do
   let watchAction command captured=P.treeAction registry command captured (\_ value->pure value)
       watchesRoot=P.NodeDef (P.NodeInfo watchesId "Watches" "" True Nothing) Nothing [P.ActionMenu "Add watch…" (watchAction add AddDebugWatch)]
       watchChildren ctx (P.ChildRequest parent cursor)=do
-        (_,selected,entries)<-debuggerWatches runtime
+        (_,chosenWatch,entries)<-debuggerWatches runtime
         case (parent,pageOffset cursor) of
-          (root,Just 0) | root==watchesId->do
-            let rows=map (watchNode (watchAction edit) (watchAction remove) (watchAction evaluate) (watchAction force) selected (sidebarPrivatePaths ctx)) (M.toList entries)
+          (parentId,Just 0) | parentId==watchesId->do
+            let rows=map (watchNode (watchAction edit) (watchAction remove) (watchAction evaluate) (watchAction force) chosenWatch (sidebarPrivatePaths ctx)) (M.toList entries)
                 emptyRow=P.NodeDef (P.NodeInfo (ident "watch-empty") "No watches; add an expression" "" False Nothing) Nothing []
             pure (Right (P.NodePage (if null rows then [emptyRow] else rows) Nothing))
-          (_,Just offset) | Just (key,revision,receipt,reference)<-watchTarget selected entries parent->do
+          (_,Just offset) | Just (key,revision,receipt,reference)<-watchTarget chosenWatch entries parent->do
             let epoch=case receipt of WatchFrame _ stop _ _ _->stop
             result<-debuggerSidebarRead runtime (DebugPageRequest epoch (DebugWatchVariables key revision receipt reference) offset)
             pure $ case result of
