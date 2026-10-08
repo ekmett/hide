@@ -86,6 +86,7 @@ data RemoteFrame = RemoteFrame
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
   , remoteCanvas :: Maybe RemoteCanvas
+  , remoteDialog :: Maybe BS.ByteString
   , remoteSidebar :: BS.ByteString, remoteExportView :: [Integer], remoteBindings :: [(T.Text,T.Text)]
   , remoteWindows :: [(Int,T.Text,Bool,Bool)]
   , remoteContributions :: [RemoteContribution], remoteMenus :: [Bool], remoteCells :: [RemoteCell]
@@ -114,6 +115,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   unless (maybe True (\value->case value of Object{}->True; _->False) sidebar) (fail "Invalid sidebar semantics")
   let sidebarBytes=maybe BS.empty (BL.toStrict . BL.take 2097153 . encode) (sidebar::Maybe Value)
   unless (BS.length sidebarBytes<=2097152) (fail "Oversized sidebar semantics")
+  modal <- o .:? "semanticDialog" >>= maybe (pure Nothing) (parseRemoteDialog size)
   bindings <- o .: "bindings"
   unless (length bindings<=8192 && all validBinding bindings) (fail "Invalid binding projection")
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
@@ -129,7 +131,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   unless (IS.size (IS.fromList [ident | (ident,_,_,_)<-windows])==length windows && length [() | (_,_,True,_)<-windows]<=1) (fail "Invalid editor window catalogue")
   canvas <- o .:? "canvas" >>= traverse (parseRemoteCanvas size)
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar canvas sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar canvas modal sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
   where
     validBinding (chord,name)=T.length name<=256 && case readChord chord of Right (key,mods)->chordName key mods==Just chord; _->False
     parseContribution=withObject "menu contribution" $ \o->do
@@ -174,6 +176,50 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
         start>=0 && start<w && shown>0 && shown<=w-start && shown<=cols-at &&
         (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
       foldRuns cols y paint (at+shown) (RemoteGlyph at y paint text w start shown:acc) rest
+
+-- | Validate a complete bounded read-only modal snapshot on the receiver worker.
+-- A hidden modal remains present with no nodes; absence/dismissal restores the
+-- ordinary surface projection. Structural IDs retain no input capability.
+parseRemoteDialog :: (Int,Int) -> Value -> Parser (Maybe BS.ByteString)
+parseRemoteDialog size@(cols,rows) value=withObject "dialog semantics" (\o->do
+  present<-o .: "present"
+  readOnly<-o .: "readOnly"
+  (_::Bool)<-o .: "truncated"
+  nodes<-o .: "nodes" :: Parser [Value]
+  unless (readOnly && length nodes<=256 && (present || null nodes)) (fail "Invalid dialog snapshot")
+  entries<-mapM node nodes
+  let records=M.fromList [(ident,parent) | (ident,parent,_)<-entries]
+      root=["dialog"]
+      parentReachesRoot remaining ident
+        | ident==root=True
+        | remaining==0=False
+        | otherwise=case M.lookup ident records of
+            Just (Just parent)->parentReachesRoot (remaining-1) parent
+            _->False
+  unless (M.size records==length nodes && sum [count | (_,_,count)<-entries]<=32768 &&
+    (null nodes || M.lookup root records==Just Nothing) &&
+    all (\(ident,parent,_)->if ident==root then parent==Nothing else maybe False (parentReachesRoot (5::Int)) parent) entries)
+    (fail "Invalid dialog identity, ancestry or text budget")
+  let bytes=BL.toStrict (BL.take 524289 (encode (object ["dialog" .= value,"size" .= size])))
+  unless (BS.length bytes<=524288) (fail "Oversized dialog semantics")
+  pure (if present then Just bytes else Nothing)) value
+  where
+    roles=["dialog","text","textbox","checkbox","radiogroup","radio","listbox","option","combobox","button"]::[T.Text]
+    validIdentity parts=not (null parts) && length parts<=5 && head parts=="dialog" && all validPart parts
+    validPart part=not (T.null part) && T.length part<=24 &&
+      (part `elem` ["dialog","field","body","button","option"] || T.all (\c->c>='0' && c<='9') part)
+    boundedText limit text=T.length text<=limit && not (T.any (=='\0') text)
+    node=withObject "dialog node" $ \o->do
+      ident<-o .: "id";parent<-o .: "parent";role<-o .: "role"
+      name<-o .: "name";valueText<-o .: "value"
+      (x,y,w,h)<-o .: "bounds" :: Parser (Int,Int,Int,Int)
+      (_::Bool)<-o .: "focused";(_::Bool)<-o .: "multiline"
+      (_::Maybe Bool)<-o .: "checked";(_::Maybe Bool)<-o .: "selected";(_::Maybe Bool)<-o .: "expanded"
+      unless (validIdentity ident && maybe True validIdentity parent && role `elem` roles &&
+        (if ident==["dialog"] then role=="dialog" && parent==Nothing else role/="dialog" && parent/=Nothing) &&
+        boundedText 256 name && maybe True (boundedText 2048) valueText &&
+        x>=0 && y>=0 && w>0 && h>0 && x<cols && y<rows && w<=cols-x && h<=rows-y) (fail "Invalid dialog node")
+      pure (ident,parent,T.length name+maybe 0 T.length valueText)
 
 -- | Complete, bounded image scene. Resource IDs identify retained pixels, never
 -- input capabilities; the host window ID remains a separate field.
@@ -445,7 +491,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
             (serial,changed)<-parseIO (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) value
             if changed then go rows metadata download serial canvasState
               else emit (Control value) >> go rows metadata download demand canvasState
-          "connection" -> emit (Control value) >> go rows (case metadata of Object fields->Object (KM.delete "canvas" fields); _->metadata) Nothing 0 emptyCanvasReceiveState
+          "connection" -> emit (Control value) >> go rows (case metadata of Object fields->Object (KM.delete "semanticDialog" (KM.delete "canvas" fields)); _->metadata) Nothing 0 emptyCanvasReceiveState
           _ | kind `elem` ["canvas-reset","canvas-resource","canvas-chunk","canvas-release"]->do
             unless (case download of Nothing->True; _->False) (ioError (userError "Canvas control interrupted a download pair"))
             (next,control)<-either (ioError . userError) pure (admitCanvasControl canvasState value)
@@ -550,13 +596,24 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
   presentationDemand <- newIORef Nothing
   titleTiming <- newIORef (0::Double,""::T.Text)
   exportGesture <- newIORef Nothing
+  installedDialog <- newIORef Nothing
   installedSidebar <- newIORef Nothing
   installedCanvas <- newIORef Nothing
   canvasEpochRef <- newIORef Nothing
   let clearSidebar=do
         check "Clear sidebar accessibility" (c_accessibility nullPtr 0)
+        writeIORef installedDialog Nothing
         writeIORef installedSidebar Nothing
         writeIORef installedCanvas Nothing
+      installDialog value=do
+        previous<-readIORef installedDialog
+        let current=remoteDialog value
+        when (previous/=Just current) $ do
+          let bytes=fromMaybe emptyDialogAccessibility current
+          BS.useAsCStringLen bytes $ \(ptr,len)->check "Update dialog accessibility" (c_accessibility ptr (fromIntegral len))
+          writeIORef installedDialog (Just current)
+          writeIORef installedSidebar Nothing
+          writeIORef installedCanvas Nothing
       installSidebar value=do
         previous<-readIORef installedSidebar
         let bytes=remoteSidebar value
@@ -707,8 +764,10 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           forM_ (zip [0..] (remoteMenus value)) $ \(i,enabled) ->
             c_menu_enabled (fromIntegral (i::Int)) (if enabled then 1 else 0)
 #endif
-          installSidebar value
-          installCanvas value
+          installDialog value
+          case remoteDialog value of
+            Just _->pure ()
+            Nothing->installSidebar value >> installCanvas value
           pure (Just value,atlas,connection,True,closed)
         Control value -> do
           kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text

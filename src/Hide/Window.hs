@@ -9,7 +9,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
   , c_accessibility, c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
-  , installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
+  , emptyDialogAccessibility, installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
   , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
@@ -52,6 +52,7 @@ import Hide.Unicode (Script(..), CellSpan(..), clusterWidth)
 import Hide.TextStyle
 import Hide.Font
 import Hide.Render
+import Hide.Accessibility (SemanticAudience(..),dialogSemantics)
 
 #endif
 
@@ -152,6 +153,10 @@ check context action = do
 utf8 :: T.Text -> (CString -> IO a) -> IO a
 utf8 text = BS.useAsCString (TE.encodeUtf8 text)
 
+-- | The complete dismissed modal snapshot; clearing it never changes SDL focus.
+emptyDialogAccessibility :: BS.ByteString
+emptyDialogAccessibility="{\"dialog\":{\"present\":false,\"readOnly\":true,\"truncated\":false,\"nodes\":[]},\"size\":[40,12]}"
+
 -- | Commit one validated small scene on the SDL thread. The packed mask is
 -- copied/widened by C; borrowed strings and bytes never survive these calls.
 -- Retained image resources are admitted separately and remain invisible until
@@ -229,8 +234,8 @@ newNativeCanvasOwner=do
   ref<-newIORef (M.empty,Canvas.CanvasScene [] BS.empty)
   pure (NativeCanvasOwner epoch ref)
 
-updateNativeCanvas :: NativeCanvasOwner -> (Int,Int) -> Canvas.CanvasScene -> IO ()
-updateNativeCanvas (NativeCanvasOwner epoch ref) size scene=do
+updateNativeCanvas :: NativeCanvasOwner -> Bool -> (Int,Int) -> Canvas.CanvasScene -> IO ()
+updateNativeCanvas (NativeCanvasOwner epoch ref) modal size scene=do
   (resident,_)<-readIORef ref
   let images=M.fromList [(Canvas.imageResourceId image,image) | surface<-Canvas.canvasSurfaces scene,let image=Canvas.canvasImage surface]
       retained=M.intersection resident images
@@ -239,16 +244,17 @@ updateNativeCanvas (NativeCanvasOwner epoch ref) size scene=do
   writeIORef ref (retained,scene)
   installNativeCanvas epoch size (Canvas.canvasMask scene)
     [(Canvas.imageResourceId (Canvas.canvasImage entry),Canvas.canvasSlot entry,Canvas.canvasRect entry,Canvas.canvasTarget entry) | entry<-Canvas.canvasSurfaces scene]
-  let (columns,rows)=size
-      scan !index !found
-        | index==columns*rows=found
-        | otherwise=let slot=Canvas.canvasOwnerAt scene index .&. 32767
-                    in scan (index+1) (if slot==0 then found else found Bits..|. Bits.bit (slot-1))
-      visible=if null (Canvas.canvasSurfaces scene) then 0 else scan 0 (0::Word64)
-      imagesAX=[object ["id" .= Canvas.canvasId entry,"name" .= Canvas.canvasName entry,"description" .= Canvas.canvasDescription entry,"bounds" .= Canvas.canvasRect entry]
-        | entry<-Canvas.canvasSurfaces scene,Bits.testBit visible (Canvas.canvasSlot entry-1)]
-      bytes=BL.toStrict (encode (object ["images" .= imagesAX,"size" .= size]))
-  BS.useAsCStringLen bytes $ \(ptr,len)->check "Update local image accessibility" (c_accessibility ptr (fromIntegral len))
+  unless modal $ do
+    let (columns,rows)=size
+        scan !index !found
+          | index==columns*rows=found
+          | otherwise=let slot=Canvas.canvasOwnerAt scene index .&. 32767
+                      in scan (index+1) (if slot==0 then found else found Bits..|. Bits.bit (slot-1))
+        visible=if null (Canvas.canvasSurfaces scene) then 0 else scan 0 (0::Word64)
+        imagesAX=[object ["id" .= Canvas.canvasId entry,"name" .= Canvas.canvasName entry,"description" .= Canvas.canvasDescription entry,"bounds" .= Canvas.canvasRect entry]
+          | entry<-Canvas.canvasSurfaces scene,Bits.testBit visible (Canvas.canvasSlot entry-1)]
+        bytes=BL.toStrict (encode (object ["images" .= imagesAX,"size" .= size]))
+    BS.useAsCStringLen bytes $ \(ptr,len)->check "Update local image accessibility" (c_accessibility ptr (fromIntegral len))
 
 pumpNativeCanvas :: NativeCanvasOwner -> IO Bool
 pumpNativeCanvas (NativeCanvasOwner epoch ref)=do
@@ -294,7 +300,10 @@ draw font canvasOwner d = allocaArray 16 $ \scratch -> do
   case renderCursor d of
     V.Cursor x y -> c_cursor (fromIntegral x) (fromIntegral y)
     _ -> pure ()
-  updateNativeCanvas canvasOwner (screenSize d) scene
+  let modal=dialog d/=Nothing
+      dialogBytes=BL.toStrict (encode (object ["dialog" .= dialogSemantics OwnerSemantics d,"size" .= screenSize d]))
+  BS.useAsCStringLen dialogBytes $ \(ptr,len)->check "Update local dialog accessibility" (c_accessibility ptr (fromIntegral len))
+  updateNativeCanvas canvasOwner modal (screenSize d) scene
   check "Present window frame" c_present
   where
     go :: Ptr Word16 -> Int -> Int -> [CellSpan] -> IO ()
