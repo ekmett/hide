@@ -353,7 +353,7 @@ int thc_accessibility(const char *json,size_t length) {
 #ifdef __APPLE__
     if (length && window) geometry();
     void *native=window?SDL_GetPointerProperty(SDL_GetWindowProperties(window),SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,NULL):NULL;
-    if (!thc_accessibility_update(native,json,length)) return SDL_SetError("Invalid or unavailable sidebar accessibility metadata");
+    if (!thc_accessibility_update(native,json,length)) return SDL_SetError("Invalid or unavailable accessibility metadata");
 #else
     (void)json; (void)length;
 #endif
