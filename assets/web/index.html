@@ -3,8 +3,10 @@
 <title>Haskell</title>
 <style>
 html,body{margin:0;height:100%;overflow:hidden;background:#000;color:#aaa;font:14px monospace}body{display:flex;flex-direction:column}header{height:30px;display:flex;align-items:center;gap:16px;padding:0 10px;background:#222}button{font:inherit;color:#eee;background:#333;border:1px solid #777;cursor:pointer}#download-file{color:#eee;white-space:nowrap;max-width:35%;overflow:hidden;text-overflow:ellipsis}#screen{flex:1;min-height:0;display:grid;place-items:center;overflow:hidden}canvas{cursor:none;outline:none;touch-action:none}#input{position:fixed;left:-100px;top:0;width:1px;height:1px;opacity:0}#status{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 </style>
 <header><button id="fullscreen">Fullscreen / capture keys</button><button id="clipboard-action" hidden>Clipboard</button><button id="open-resource" hidden>Open link</button><a id="download-file" hidden draggable="true" title="Download this snapshot, or drag a copy in Chromium where supported">Download snapshot</a><span id="status">Connecting…</span></header>
+<aside id="semantic-sidebar" class="visually-hidden" role="tree" aria-label="Sidebar" aria-description="Read-only visible sidebar. Arrow keys browse; opening and changing files use the editor controls." tabindex="0" hidden></aside>
 <main id="screen"><canvas id="display" tabindex="0" aria-label="Haskell editor"></canvas></main>
 <textarea id="input" aria-label="Editor text input" autocapitalize="off" autocomplete="off" spellcheck="false"></textarea>
 <script src="cell-shader.js"></script><script src="editor.js"></script></html>
