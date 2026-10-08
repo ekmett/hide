@@ -267,9 +267,10 @@ window shortcuts when the OS intercepts it.
 **F1** opens the bundled guide. Press **F10** to enter the menu bar, then use
 arrows or letter mnemonics.
 The status bar describes the highlighted action. Its key labels are clickable.
-On macOS, **Haskell > Settings…** (⌘,) opens **Options > Preferences**;
-**About Haskell** opens the About dialog. The native menu bar provides ⌘
-shortcuts. Other Control bindings remain Control; ⌘ is not a universal substitute. Function keys may need Fn/Globe.
+**Help > About hide** identifies the application as a Haskell IDE; **F1** opens
+**hide Help**. On macOS, **Haskell > Settings…** (⌘,) opens
+**Options > Preferences**, and **Haskell > About Haskell** opens the same About
+dialog. The native menu bar provides ⌘ shortcuts. Other Control bindings remain Control; ⌘ is not a universal substitute. Function keys may need Fn/Globe.
 
 Right-click the macOS Dock icon to use **Editor windows** above **Options**.
 The list includes open editor views and docked terminal tabs, checks the selected

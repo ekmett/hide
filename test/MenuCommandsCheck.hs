@@ -101,7 +101,7 @@ runChecks=withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands d
   let (fromF1,effects)=handleEvent (V.EvKey (V.KFun 1) []) initial
   check "F1 resolves live contributed Help lifetime" (effects==[InvokeMenu helpRef Plugin.HumanMenu Nothing])
   help<-run fromF1 effects
-  check "registered help prepares styled document with relative links" (maybe False (\doc->documentMarkdownPath doc/=Nothing && not (null (documentLinks doc)) && documentLabel doc==Just "Haskell Help") (activeDocument help))
+  check "registered help prepares styled document with relative links" (maybe False (\doc->documentMarkdownPath doc/=Nothing && not (null (documentLinks doc)) && documentLabel doc==Just "hide Help") (activeDocument help))
   let helpIndex=case findIndex (\(title,_,_)->title=="Help") menus of Just index->index; _->error "missing help slot"
       popup=initial {menu=Just (helpIndex,0)}
       (chosen,popupEffects)=handleEvent (V.EvKey V.KEnter []) popup

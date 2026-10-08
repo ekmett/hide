@@ -621,7 +621,7 @@ windowLayers _ d active original =
     titleColumn=titleStart+max 0 ((titleWidth-V.imageWidth titleImage) `div` 2)
     number=T.pack (show (windowNumber w))
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
-    helpWindow=documentLabel doc==Just "Haskell Help"
+    helpWindow=documentLabel doc==Just "hide Help"
     background=if helpWindow && not (darkAppearance d) then scrollCyan else blue
     base=if helpWindow then attr (if darkAppearance d then white else black) background else edit
     frame=attr (if moving then cyan else if active then white else gray) background
@@ -629,7 +629,7 @@ windowLayers _ d active original =
     -- Docs: docs/site/screenshots/debug-step.png (docs/running.md).
     useStyles=case documentLabel doc of
       Nothing -> True
-      Just title -> title=="Haskell Help" || any (`T.isPrefixOf` title) ["Terminal ","Source "]
+      Just title -> title=="hide Help" || any (`T.isPrefixOf` title) ["Terminal ","Source "]
     styledLines=splitStyled (documentHighlight doc)
     hexDividerLayers =
       [place (x+1+column) y (V.vertCat [V.char frame (if active && not moving then '╤' else '┬'),

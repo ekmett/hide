@@ -114,7 +114,7 @@ with tempfile.TemporaryDirectory(prefix='thc-remote-browser-') as directory:
             assert source.name in display.meta['title'],display.meta
             ws.send({'type':'menu','command':help_action['id'],'registry':help_action['registry'],'generation':help_action['generation'],'seq':4})
             display.until('ack',lambda m:m['seq']==4)
-            display.until('frame',lambda _:'Haskell Help' in display.meta['title'])
+            display.until('frame',lambda _:'hide Help' in display.meta['title'])
             assert source.read_text()=='remote λ\n'
             ws.send({'type':'menu','command':'hide.window.close','seq':5});display.until('ack',lambda m:m['seq']==5)
             showing_files=any(saved.name in row for row in display.text_rows())

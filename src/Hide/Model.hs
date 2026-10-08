@@ -366,7 +366,7 @@ menus =
   ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload keybindings" "" ReloadBindings,mi "Inspect keybindings" "" InspectBindings])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView),mi "Markdown" "" (SetBufferView MarkdownView)])
-  ,("Help",'h',[mi "Contents" "F1" Help,mi "About Haskell..." "" About])]
+  ,("Help",'h',[mi "Contents" "F1" Help,mi "About hide..." "" About])]
   where mi = MenuItem
 
 -- | The host-owned contribution slots shared by registration and frontend
@@ -534,7 +534,7 @@ commandDescription cmd = case cmd of
   SplitVertical -> "Create a side-by-side view of the same buffer."
   SplitHorizontal -> "Create a view of the same buffer above or below."
   OpenLink _ target -> "Open "<>target
-  About -> "Show information about Haskell."; Help -> "Open the read-only help document."
+  About -> "Show information about hide, the Haskell IDE."; Help -> "Open the read-only help document."
   EditorOptions -> "Change key bindings, cursor appearance, and graphical screen mode."; Gallery -> "Try the available dialog controls."
   InspectType -> "Ask HLS for type information at the cursor."
   Definition -> "Go to the symbol's definition using HLS."
@@ -1470,7 +1470,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     -- Docs: docs/site/screenshots/split.png (docs/editing.md) shows shared split views.
     go SplitVertical d = splitWindow True d
     go SplitHorizontal d = splitWindow False d
-    go About d = (message "About Haskell" ["Haskell  0.1", "Copyright (c) 2026 Edward Kmett", "", "Haskell source editor"] d,[])
+    go About d = (message "About hide" ["hide  0.1", "Haskell IDE", "", "Copyright (c) 2026 Edward Kmett"] d,[])
     go InspectType d = (d,[LanguageRequest TypeInfo])
     go CodeActions d = (d,[LanguageRequest RequestCodeActions])
     go RenameSymbol d = (prompt "Rename symbol" Renaming [Input "New name" "" 0] d,[])
@@ -3600,7 +3600,7 @@ windowPresentationTarget d w=case windowContent w of
     doc<-M.lookup bid (buffers d)
     if bufferView w==MarkdownView && markdownDocument doc then Just (MarkdownPresentation bid (revision (documentBuffer doc)))
     else if bufferView w/=CurrentView || byteMode (documentBuffer doc) || syntaxDocument doc || null (documentHighlight doc) ||
-       not (documentLabel doc `elem` [Just "Haskell Help"] || documentMarkdownPath doc/=Nothing) then Nothing
+       not (documentLabel doc `elem` [Just "hide Help"] || documentMarkdownPath doc/=Nothing) then Nothing
     else Just (DocumentPresentation bid (revision (documentBuffer doc)))
 
 -- | A layout is usable only for this exact payload, width and live preference.
@@ -4722,7 +4722,7 @@ addHelpStyled chars d = let opened=addHelp (styledContents chars) d
                          _ -> opened
 
 addHelp :: Text -> Desktop -> Desktop
-addHelp text d = addReadOnly "Haskell Help" text d
+addHelp text d = addReadOnly "hide Help" text d
 
 addReadOnly :: Text -> Text -> Desktop -> Desktop
 addReadOnly title text = addReadOnlyBuffer title (newBuffer text)
