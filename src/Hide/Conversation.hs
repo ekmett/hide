@@ -252,6 +252,57 @@ conversationEffects runtime@(ConversationState _ ref _ _) fallback original effe
           pure (quit,opened {status="Edit [editor.agent] context; save to apply with the next query or steer."})
     apply (_,d) (AgentAction action values) = do
       updated<-perform runtime action values d
+      syncConversationAgent runtime
+      pure (False,updated)
+    apply (_,d) effect = fallback d [effect]
+
+-- Sidebar requests are fixed human operations, adopted after host hit/lifetime
+-- validation. Dialog purposes carry the exact ID instead of a directory index.
+applyAgentSidebar :: ConversationState -> AgentSidebarRequest -> Desktop -> IO Desktop
+applyAgentSidebar runtime@(ConversationState _ ref _ agents) request d=case request of
+  ShowAgent ident | ident==AR.primaryAgent agents->perform runtime "show" [] d
+                  | otherwise->showAgentHistory runtime ident d
+  ConfigureAgent receipt option value->
+    startAgentControl runtime (AH.agentConfigAgent receipt) Nothing (AH.configureAgentAt hub receipt option value) d
+  RenameAgentTo ident name->do
+    result<-AH.renameAgent hub AH.Human ident name
+    pure d {status=either id (const "Agent renamed.") result}
+  CreateAgent workspace _ _ | workspace/=startingDirectory d->pure d {status="Agent workspace changed; reopen the form."}
+  CreateAgent workspace name task->do
+    state<-readIORef ref
+    case creatingAgent state of
+      Just _->pure d {status="An agent is already starting."}
+      Nothing->mask $ \restore->do
+        let spec=AH.SpawnSpec name task workspace AH.Shared AH.Fresh Nothing Nothing
+        worker<-async (restore (AH.spawnAgentWithTask hub AH.Human spec))
+        modifyIORef' ref (\current->current {creatingAgent=Just worker})
+        pure d {status="Starting agent…"}
+  _->pure d {status="Completion owner is unavailable."}
+  where hub=AR.agentHub agents
+
+pollAgentCreation :: ConversationState -> Desktop -> IO Desktop
+pollAgentCreation (ConversationState _ ref _ _) d=do
+  state<-readIORef ref
+  case creatingAgent state of
+    Nothing->pure d
+    Just worker->poll worker >>= \completed->case completed of
+      Nothing->pure d
+      Just outcome->do
+        modifyIORef' ref (\current->current {creatingAgent=Nothing})
+        pure d {status=either (const "Agent creation interrupted.") (either id (const "Agent created; task queued.")) outcome}
+
+perform :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
+perform (ConversationState _ ref _ _) "focus" [] d=do
+  modifyIORef' ref (\state -> state {deferredApproval=False})
+  pure d
+perform (ConversationState _ ref _ _) "toggle-tool-run" [ident] d=do
+  state<-readIORef ref
+  let target=conversationTarget d
+      next=toggleExpansion target (RunExpansion ident) state
+      records=if T.null target then transcript next else M.findWithDefault [] target (childRecords next)
+  writeIORef ref next
+  keepConversationPosition d <$> paintView target False next {transcript=records} d
+perform runtime action values d
   | action `elem` ["show","new"] = do
       prepared<-ensureConversationEditor runtime "" "Primary" d
       performPrimary runtime action values (selectConversationView "" "Primary" prepared)
