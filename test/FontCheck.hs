@@ -40,9 +40,9 @@ checks = do
       check "left corners meet vertical border" (Just (last (rows tl)) == listToMaybe (rows v) && Just (last (rows v)) == listToMaybe (rows bl))
       check "right corners meet vertical border" (Just (last (rows tr)) == listToMaybe (rows v) && Just (last (rows v)) == listToMaybe (rows br))
   check "bubble tails join the top edge without a notch"
-    (all (\c -> head (rows c)==0xff00 && last (rows c)==0) ['\xe006','\xe007'])
+    (all (\c -> listToMaybe (rows c)==Just 0xff00 && last (rows c)==0) ['\xe006','\xe007'])
   check "bubble corners join their interior edges"
-    (last (rows '\xe000')==0xff00 && head (rows '\xe002')==0xff00 && all id (right '\xe000') && all id (left '\xe001'))
+    (last (rows '\xe000')==0xff00 && listToMaybe (rows '\xe002')==Just 0xff00 && all id (right '\xe000') && all id (left '\xe001'))
   forM_ ['\xe000'..'\xe007'] $ \c -> check "bubble tile occupies one VGA cell"
     (glyphWidth (glyph font c)==8 && length (rows c)==16)
   check "Material folders are distinct bundled two-cell bitmaps"

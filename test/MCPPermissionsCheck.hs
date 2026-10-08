@@ -164,7 +164,9 @@ checks=do
 -- A live writer withholds data from the actual configuration read. The first
 -- owner tick must return while that read waits, then the same request completes.
 -- Exercise the real asynchronous owner until a reply or human approval appears.
+settledCall :: Hide.MCPPermissions.Permissions -> (Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 settledCall runtime callback=settledTool runtime (permissionCall runtime callback)
+settledTool :: Hide.MCPPermissions.Permissions -> (desktop -> name -> args -> IO (Desktop,IO result)) -> desktop -> name -> args -> IO (Desktop,IO result)
 settledTool runtime initiate desktop name args=do
   (initial,continuation)<-initiate desktop name args
   worker<-async continuation
@@ -183,14 +185,16 @@ settledTool runtime initiate desktop name args=do
                   | otherwise->threadDelay 1000 >> tickPermissions runtime current >>= loop
   timeout 3000000 (loop initial) >>= maybe (cancel worker >> error "policy dispatch did not settle") pure
 
+awaitPermissionUI :: Hide.MCPPermissions.Permissions -> Desktop -> IO Desktop
 awaitPermissionUI runtime desktop=do
   let loop current=case dialog current of
         Just dg | PermissionDialog action<-purpose dg,not ("loading:" `T.isPrefixOf` action)->pure current
         _->threadDelay 1000 >> tickPermissions runtime current >>= loop
   timeout 3000000 (loop desktop) >>= maybe (error "permission UI did not settle") pure
 
+settleDialog :: Hide.MCPPermissions.Permissions -> Dialog -> Desktop -> IO Desktop
 settleDialog runtime original desktop
-  | any (\field->case field of TextArea "diff" True _ _ _ _->True; _->False) (fields original)=pure desktop
+  | any (\widget->case widget of TextArea "diff" True _ _ _ _->True; _->False) (fields original)=pure desktop
   | otherwise=do
       let loop current=case dialog current of
             Just dg | purpose dg==purpose original || (case purpose dg of PermissionDialog action->"loading:" `T.isPrefixOf` action; _->False)->threadDelay 1000 >> tickPermissions runtime current >>= loop
@@ -250,7 +254,7 @@ policyWakeChecks=bracket temporary removePathForcibly $ \directory->do
       base=addDocument Nothing (newBuffer "source") (initialDesktop (80,25))
       ident=fromMaybe (error "Missing source") (sourceFixtureBuffer <$> activeWindow base)
       core d _=pure (False,d)
-      action owner token values d=snd <$> policyEffects owner core d [PermissionAction token values]
+      action owner actionToken values d=snd <$> policyEffects owner core d [PermissionAction actionToken values]
       advance owner d=do
         timeout 3000000 (STM.atomically (awaitPermissionWork owner)) >>= maybe (error ("Permission completion did not wake owner: "++T.unpack (status d))) pure
         tickPermissions owner d
@@ -268,8 +272,8 @@ policyWakeChecks=bracket temporary removePathForcibly $ \directory->do
       timeout 3000000 (STM.atomically (awaitPermissionWork owner)) >>= maybe (error "Accepted capture did not wake owner") pure
       noSpin<-timeout 10000 (STM.atomically (awaitPermissionWork owner))
       check "consumed permission wake does not spin" (noSpin==Nothing)
-      queued<-tickPermissions owner base
-      captured<-advance owner queued
+      capturing<-tickPermissions owner base
+      captured<-advance owner capturing
       image<-timeout 3000000 (wait capture)
       check "policy completion admits typed capture without periodic polling" (case image of Just (Right _)->True; _->False)
       check "typed capture preserves source selection" (fmap selection (activeWindow captured)==fmap selection (activeWindow base))
@@ -326,9 +330,9 @@ policyWakeChecks=bracket temporary removePathForcibly $ \directory->do
     saving<-action owner (token reopenedEdit) ["0","2"] oldPolicy
     whileSaving<-tickPermissions owner saving
     check "Save barrier blocks old enabled policy reply" . (==0) =<< readIORef seen
-    (revoked,result)<-withAsync oldReply $ \reply->do
+    (revoked,result)<-withAsync oldReply $ \worker->do
       let await current=do
-            completed<-Control.Concurrent.Async.race (wait reply) (STM.atomically (awaitPermissionWork owner))
+            completed<-Control.Concurrent.Async.race (wait worker) (STM.atomically (awaitPermissionWork owner))
             case completed of Left value->pure (current,value); Right ()->tickPermissions owner current >>= await
       timeout 3000000 (await whileSaving) >>= maybe (error "Saved policy did not resolve queued request") pure
     check "fresh Disable replaces pre-save policy result" (either (const True) (const False) result)

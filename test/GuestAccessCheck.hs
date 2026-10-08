@@ -16,7 +16,6 @@ import Hide.GuestAccess
 import Hide.Commands (platformBindings, configuredBindings)
 import Hide.Bindings (BindingPlatform(TerminalPlatform))
 import SidebarFixture
-import Hide.Sidebar
 import Hide.Model
 import qualified Hide.Protocol as P
 import qualified Hide.Plugin.Editor as E
@@ -250,9 +249,9 @@ checksWithBody conversation=do
     (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+12)) && readableAt browser (left fileRect+2) (top fileRect+3))
   forM_ [Opening "/authority" "*" [],ChangingDirectory "/authority" []] $ \browserPurpose ->
     forM_ [Input "Name" "/authority/secret.hs" 0,SelectedInput "Name" "/authority/secret.hs" (Selection 0 20)] $ \nameField -> do
-      let dg=Dialog "Browser" browserPurpose [nameField] 0 ["OK"] []
-          view=base {dialog=Just dg,guestPrivatePaths=["/authority"]}
-          r=firstRect view dg
+      let protectedNameDialog=Dialog "Browser" browserPurpose [nameField] 0 ["OK"] []
+          view=base {dialog=Just protectedNameDialog,guestPrivatePaths=["/authority"]}
+          r=firstRect view protectedNameDialog
       check "browser text widgets share protected pathname masks"
         (not (readableAt view (left r) (top r+1)) && not (streamerReadableAt view (left r) (top r+1)))
   putStrLn "guest access checks passed"

@@ -90,7 +90,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
     let selected=ghc {B.buildExecutable="compiler with spaces",B.buildTarget=target,B.buildArguments=["Run argument"],B.buildRuntime="Run runtime"}
     check "captured runner uses the selected GHC and literal target" .
       (==Right [("cabal",[verb,"--with-compiler=compiler with spaces"]++details++[T.unpack target])]) =<< B.buildPlan action selected root (Just file)
-    check "THC runner is explicitly refused" . (\result->case result of Left message->"THC" `T.isPrefixOf` message; _->False) =<< B.buildPlan action thc root Nothing
+    check "THC runner is explicitly refused" . (\result->case result of Left reason->"THC" `T.isPrefixOf` reason; _->False) =<< B.buildPlan action thc root Nothing
   removeFile (root </> "fixture.cabal")
   forM_ [B.Test,B.Benchmark] $ \action->
     check "runner requires a Cabal project" . (\result->case result of Left _->True; _->False) =<< B.buildPlan action ghc root (Just file)

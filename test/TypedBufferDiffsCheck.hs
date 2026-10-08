@@ -36,17 +36,17 @@ checks=bracket temporary removePathForcibly $ \directory->do
       check label ok=unless ok (error label)
   TIO.writeFile config "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
   withPermissionsAt config (builtinTools++fileTools) $ \owner->C.withRegistry $ \registry->do
-    let editor=bufferEditor owner (pure (Right ()))
-        reference=editorReference editor ident
+    let linkedEditor=bufferEditor owner (pure (Right ()))
+        linkedReference=editorReference linkedEditor ident
         codec=C.Codec Null (const (Left "typed only")) (const Null)
         reader=bufferReader owner (pure (Right ()))
-        commandDef=C.CommandDef "test.diff" "Linked diff" codec codec $ \(reader,ability,target) text->do
-          image<-P.captureBuffer reader target
+        commandDef=C.CommandDef "test.diff" "Linked diff" codec codec $ \(sourceReader,ability,target) text->do
+          image<-P.captureBuffer sourceReader target
           case image of
             Left err->pure (Left (C.CommandRejected err))
             Right source->fmap (either (Left . C.CommandRejected) Right) (P.applyBufferDiff ability target (P.capturedVersion source) text)
     command<-C.registerCommand registry commandDef >>= either (error . show) pure
-    withAsync (C.invoke registry command (reader,editor,reference) patch) $ \worker->do
+    withAsync (C.invoke registry command (reader,linkedEditor,linkedReference) patch) $ \worker->do
       let await current=do
             done<-poll worker
             case done of
@@ -90,11 +90,11 @@ checks=bracket temporary removePathForcibly $ \directory->do
               Nothing->threadDelay 1000 >> tickPermissions owner current >>= await
       (unchanged,result)<-timeout 5000000 (await base) >>= maybe (error "revoked diff reply timed out") pure
       check "typed diff rechecks queued actor before source admission" (activeText unchanged=="old\n" && case result of Left "actor revoked"->True; _->False)
-  (closed,reference,version)<-withPermissionsAt config fileTools $ \owner->do
+  (closed,closedReference,closedVersion)<-withPermissionsAt config fileTools $ \owner->do
     let editor=bufferEditor owner (pure (Right ()))
-    version<-captureVersion (documentBuffer (buffers base M.! ident))
-    pure (editor,editorReference editor ident,version)
-  stopped<-P.applyBufferDiff closed reference version patch
+    closedVersion<-captureVersion (documentBuffer (buffers base M.! ident))
+    pure (editor,editorReference editor ident,closedVersion)
+  stopped<-P.applyBufferDiff closed closedReference closedVersion patch
   check "retained editor refuses requests after session shutdown" (case stopped of Left _->True; _->False)
   pending<-withPermissionsAt config fileTools $ \owner->do
     let editor=bufferEditor owner (pure (Right ()))

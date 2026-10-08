@@ -38,7 +38,7 @@ checks=do
     check "accepted result consumes once" (consumed && not repeatedResult)
     pure ()
   withRegistry $ \registry->do
-    choices<-prepareForm registry (ChoiceFormSpec "Model" "Provider choices" [("small","Small"),("large","Large")] "small" "Apply") (\() value->pure (Right value)) >>= right
+    choices<-prepareForm registry (ChoiceFormSpec "Model" "Provider choices" [("small","Small"),("large","Large")] "small" "Apply") (\() submitted->pure (Right submitted)) >>= right
     _<-admitForm False choices
     let dg=Dialog "Private choices" (PluginChoiceForm (formReference choices) (formRevision choices)) [ListBox "Private values" ["Secret"] 0] 0 ["Apply","Cancel"] []
         desktop=(initialDesktop (80,25)) {dialog=Just dg}
@@ -72,8 +72,8 @@ checks=do
     extra<-invokeFormAction prepared () (InputValues (M.insert "other" "x" values))
     oversized<-invokeFormAction prepared () (InputValues (M.insert "task" (T.replicate 8193 "x") values))
     check "named values reject missing extra and overbound inputs" (all rejected [missing,extra,oversized])
-    scalarShape<-prepareForm registry spec (\() value->pure (Right value))
-    namedShape<-withRegistry $ \other->prepareInputsForm other (InputFormSpec "Single" "Name" "" "Apply") (\() values->pure (Right values))
+    scalarShape<-prepareForm registry spec (\() submitted->pure (Right submitted))
+    namedShape<-withRegistry $ \other->prepareInputsForm other (InputFormSpec "Single" "Name" "" "Apply") (\() submitted->pure (Right submitted))
     check "form preparation rejects spec action shape mismatches" (case (scalarShape,namedShape) of (Left InvalidArguments{},Left InvalidArguments{})->True; _->False)
     retireForm (formReference prepared)
   escaped<-withRegistry $ \registry->do

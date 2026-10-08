@@ -112,10 +112,10 @@ checks=bracket temporary removePathForcibly $ \root->do
       writeFile (root </> T.unpack requestId) "complete"
       waitRetired runtime requestId
       settled<-tickAutocomplete runtime wideRequest
-      shown<-save runtime True settled >>= awaitDesktop runtime "debug pane toggle on" hasTranscript
+      openingTranscript<-save runtime True settled >>= awaitDesktop runtime "debug pane toggle on" hasTranscript
       shown<-awaitDesktop runtime "prepared completion activity" (\d->case autocompleteWindow d >>= (`M.lookup` pluginWindows d) of
         Just body->let text=W.preparedWindowText body in "[reply]" `T.isInfixOf` contentSlice text 0 (contentLength text)
-        Nothing->False) shown
+        Nothing->False) openingTranscript
       check "debug pane preserves focused source" (activeText shown==large)
       check "completion transcript allocates no source document" (M.keys (buffers shown)==M.keys (buffers settled))
       let oldRef=maybe (error "Missing completion reference") id (autocompleteWindow shown)
@@ -158,14 +158,14 @@ checks=bracket temporary removePathForcibly $ \root->do
       hidden<-save runtime False sourceFocused >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
       check "debug toggle keeps the source" (activeText hidden==large)
       let shortSource=addDocument Nothing (newBuffer "x\n") hidden
-          configure target option value state=snd <$> autocompleteEffects runtime (\d _->pure (False,d)) state
-            [AgentSidebarAction (ConfigureCompletion target option value)]
+          configure settingTarget option value state=snd <$> autocompleteEffects runtime (\d _->pure (False,d)) state
+            [AgentSidebarAction (ConfigureCompletion settingTarget option value)]
       sixthRequest<-send runtime "propose" [] shortSource
       sixth<-awaitPrompt 6
       sixthId<-submit runtime sixth "first proposal\n"
       waitRetired runtime sixthId
       firstPreview<-awaitDesktop runtime "preview before settings change" (isJust.inlinePreview) sixthRequest
-      oldTarget<-awaitIO "connected completion target" $ fmap (\(CompletionSummary target _)->target) <$> completionSummary runtime
+      oldTarget<-awaitIO "connected completion target" $ fmap (\(CompletionSummary current _)->current) <$> completionSummary runtime
       changedSetting<-configure oldTarget "model-id" "model-b" firstPreview
       configuredPreview<-awaitDesktop runtime "accepted setting invalidates preview" (\d->status d=="Completion setting updated." && inlinePreview d==Nothing) changedSetting
       seventhRequest<-send runtime "propose" [] configuredPreview

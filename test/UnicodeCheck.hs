@@ -108,7 +108,7 @@ checks = do
     forM_ [1,2] $ \groupSize->forM_ [0,groupSize..length flat-1] $ \start->do
       let group=take groupSize (drop start captured)
           expected=take groupSize (drop start flat)
-          (byte,_,col,_,_,_,incoming)=head group
+          (byte,_,col,_,_,_,incoming)=case group of item:_->item; []->error "resumed storage group missing"
           (_,end,_,_,_,lastOverflow,_)=last group
           leaf=TU.takeWord8 (end-byte) (TU.dropWord8 byte text)
       check "resumed storage groups preserve exact original items at artificial EOF"
@@ -137,7 +137,7 @@ checks = do
   check "overflow presentation preserves source copy and undo bytes"
     (clipboard copied==oversized && activeText deleted==T.drop 32 oversized && activeText (fst (runCommand Undo deleted))==oversized)
   let emitted=cellRowsForPic (V.picForImage (textImage V.defAttr oversized)) (4,1)
-      shown=T.concat [case span of CellText _ t->t; CellGlyph _ t _ _ _->t; CellScript _ t _ _->t | span<-toList (emitted Vec.! 0)]
+      shown=T.concat [case cell of CellText _ t->t; CellGlyph _ t _ _ _->t; CellScript _ t _ _->t | cell<-toList (emitted Vec.! 0)]
   check "common visible grid sends bounded fallback glyphs instead of original overflow"
     (shown=="���Z")
   let longOverflow="a"<>T.replicate 100000 "\x301"
@@ -182,9 +182,9 @@ checks = do
     check "platform segments a complete grapheme" (graphemes g==[g])
     check "cursor crosses a complete grapheme" (nextCharacter (g<>"x") 0==T.length g && previousCharacter ("x"<>g) (1+T.length g)==1)
     let base=addDocument Nothing (newBuffer (g<>"x")) (initialDesktop (80,25))
-        deleted=fst (handleEvent (V.EvKey V.KDel []) base)
+        deletedCluster=fst (handleEvent (V.EvKey V.KDel []) base)
     check "paste preserves complete emoji sequences" (activeText (fst (handleEvent (V.EvPaste (TE.encodeUtf8 g)) (addDocument Nothing (newBuffer "") (initialDesktop (80,25)))))==g)
-    check "Delete removes one cluster, undo restores bytes" (activeText deleted=="x" && activeText (fst (runCommand Undo deleted))==g<>"x")
+    check "Delete removes one cluster, undo restores bytes" (activeText deletedCluster=="x" && activeText (fst (runCommand Undo deletedCluster))==g<>"x")
   forM_ wide $ \g -> check "emoji occupies two cells with no internal mouse offsets"
     (displayColumn (g<>"x") (T.length g+1)==3 && columnOffset (g<>"x") 1==0 && columnOffset (g<>"x") 2==T.length g)
   check "combining and tabs use grapheme columns" (displayColumn "e\x301\t🇯🇵" 6==10)
@@ -195,7 +195,7 @@ checks = do
   check "wide clusters are blanked at the left edge" (plain (V.picForImage (V.translateX (-2) image)) (2,1)==" B")
   check "a window covering half a glyph blanks the exposed half"
     (plain (V.picForLayers [V.translateX 2 (textImage V.defAttr "│"),image]) (4,1)=="A │B")
-  let semantic pic size=[(text,full,start,shown) | row<-toList (cellRowsForPic pic size),CellGlyph _ text full start shown<-toList row]
+  let semantic pic size=[(text,full,start,visible) | row<-toList (cellRowsForPic pic size),CellGlyph _ text full start visible<-toList row]
   check "shared GPU rows keep right-clipped semantic glyph and width"
     (semantic (V.picForImage (V.cropRight 2 image)) (2,1)==[("👩🏽\x200d\&💻",2,0,1)])
   check "shared GPU rows keep left-clipped original glyph origin"
@@ -205,7 +205,7 @@ checks = do
   let halo=cellRowsForLayers [CellHalo (V.defAttr `V.withBackColor` V.black) [(2,0,1,1)],CellImage image] (4,1)
       masked=cellRowsForLayers [CellMask V.defAttr [(2,0,1)],CellImage image] (4,1)
   check "style-only halo preserves semantic glyph identity and clipping"
-    ([(text,full,start,shown) | row<-toList halo,CellGlyph _ text full start shown<-toList row]==[("👩🏽\x200d\&💻",2,0,1),("👩🏽\x200d\&💻",2,1,1)])
+    ([(text,full,start,visible) | row<-toList halo,CellGlyph _ text full start visible<-toList row]==[("👩🏽\x200d\&💻",2,0,1),("👩🏽\x200d\&💻",2,1,1)])
   check "privacy masks both semantic glyph halves before export"
     (null [text | row<-toList masked,CellGlyph _ text _ _ _<-toList row] &&
      [text | row<-toList masked,CellText _ text<-toList row]==["A**B"])
@@ -237,7 +237,8 @@ checks = do
   let packed=cellRowsForPic (V.picForImage prepared) (180,55)
   occupied<-evaluate (Vec.foldl' (\n row->Vec.foldl' (\m cell->m+case cell of
     CellText _ text->T.length text
-    CellGlyph _ _ _ _ shown->shown) n row) 0 packed)
+    CellGlyph _ _ _ _ visible->visible
+    CellScript{}->error "unexpected script cell in border fixture") n row) 0 packed)
   after<-getAllocationCounter
   check "prepared border and padding grid stays within 1.5 MB allocation"
     (occupied==9900 && before-after<1500000)
@@ -262,18 +263,18 @@ checks = do
     check "Mac modifiers reserve two cells and reposition terminal text"
       (V.imageWidth (textImage V.defAttr (symbol<>"X"))==3 && next==6 &&
        writeToByteString drawn==TE.encodeUtf8 ("  <3>"<>symbol<>"<5>X"))
-  let terminal=(initialDesktop (100,25)) {macKeySymbols=True}
-      mac=terminal {nativeMac=True,videoMode=Just 3}
+  let macTerminal=(initialDesktop (100,25)) {macKeySymbols=True}
+      mac=macTerminal {nativeMac=True,videoMode=Just 3}
       save=MenuItem "Save" "Ctrl+S" Save
       (enabled,effects)=handleEvent (V.EvKey V.KEnter [])
         ((fst (runCommand EditorOptions (initialDesktop (80,25))))
           {dialog=fmap (\dg -> dg {fields=[CheckBox "Mac key symbols" True]}) (dialog (fst (runCommand EditorOptions (initialDesktop (80,25)))))})
   check "symbol labels distinguish native Command from terminal Control"
-    (menuShortcut terminal save=="⌃S" && menuShortcut mac save=="⌘S")
+    (menuShortcut macTerminal save=="⌃S" && menuShortcut mac save=="⌘S")
   check "text preferences change labels and request persistence"
     (macKeySymbols enabled && effects==[SaveMacKeySymbols True])
-  let hits=statusItemRects terminal
-      expected=scanl (+) 0 (map (keyLabelWidth . fst) (statusHints terminal))
+  let hits=statusItemRects macTerminal
+      expected=scanl (+) 0 (map (keyLabelWidth . fst) (statusHints macTerminal))
   check "status hit targets follow two-cell modifier labels"
-    (and [left rect==expected!!index | (rect,index,_)<-hits,index<length (statusHints terminal)])
+    (and [left rect==expected!!index | (rect,index,_)<-hits,index<length (statusHints macTerminal)])
   putStrLn "Unicode grapheme/layout checks passed"

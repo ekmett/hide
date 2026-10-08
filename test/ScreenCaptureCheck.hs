@@ -151,11 +151,11 @@ checksWithBody chatBase=do
               (Vec.fromList hidden) Vec.empty Vec.empty
         body<-W.prepareSemanticTextWindow "Conversation" styled semantics >>= either (error . T.unpack) pure
         withEditorBodyFixture "" body (initialDesktop (80,25)) $ \mounted->do
-          let view=fromMaybe (error "missing heading window") (activeWindow mounted)
+          let headingView=fromMaybe (error "missing heading window") (activeWindow mounted)
               rows=case W.preparedWindowRows body of W.StyledRows preparedRows->preparedRows; _->error "heading is not styled"
           layout<-prepareTextLayout wide 10 (W.preparedWindowText body) rows
           let receipt reference=InstalledBody reference (Just (BodyControlReceipt body 10 wide (Just layout) (HostBodyControls Nothing Nothing Nothing [])))
-              heading=mounted {wideSectionTitles=wide,windows=[view {bounds=Rect 2 2 12 12}],
+              heading=mounted {wideSectionTitles=wide,windows=[headingView {bounds=Rect 2 2 12 12}],
                 conversationViews=M.adjust (\value->case conversationBodyRef value of
                   Just reference->value {conversationBody=receipt reference}
                   Nothing->error "missing heading body reference") "" (conversationViews mounted)}

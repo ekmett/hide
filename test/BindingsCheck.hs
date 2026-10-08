@@ -439,7 +439,7 @@ edgePageChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chat
       inert d=all (\(_,command,_,_)->not (commandEnabled d command) && renderedRange (fst (runCommand command d))==renderedRange d && range (fst (runCommand command d))==range d) actions
   check "pending Markdown edges and pages remain unavailable" (inert pending)
   ready<-prepareTextPresentations pending
-  let Just (_,rendered,_)=activeWindow ready >>= windowMarkdown ready
+  let (_,rendered,_)=maybe (error "prepared Markdown window missing") id (activeWindow ready >>= windowMarkdown ready)
       mdPos=contentLineOffset rendered 20+2
       markdown=modifyActive (modifyDisplayedWindow (\w->w {selection=Selection (mdPos+4) mdPos})) ready
       markdownUnbound=markdown {keyBindings=keyBindings unbound}
@@ -770,17 +770,17 @@ prefixChecks=do
       defaults=base {wordStar=True,keyBindings=prepare TerminalPlatform M.empty}
       started=event (V.KChar 'k') [V.MCtrl] defaults
       selected d=selection <$> activeWindow d
-  check "remapped WordStar starter and continuation copy the selected source" (prefix pending==Just 'k' && clipboard copied=="hello" && prefix copied==Nothing && activeText copied=="hello")
-  check "removed starter and continuation cannot reach old grammar" (prefix (event (V.KChar 'k') [V.MCtrl] configured)==Nothing && clipboard (event (V.KChar 'c') [] pending)=="" && activeText (event (V.KChar 'c') [] pending)=="hello")
+  check "remapped WordStar starter and continuation copy the selected source" (prefix pending==Just 'k' && clipboard copied=="hello" && prefix copied==Nothing && sourceText copied=="hello")
+  check "removed starter and continuation cannot reach old grammar" (prefix (event (V.KChar 'k') [V.MCtrl] configured)==Nothing && clipboard (event (V.KChar 'c') [] pending)=="" && sourceText (event (V.KChar 'c') [] pending)=="hello")
   check "prefix labels are compound while frontend input stays a single stroke"
     (menuShortcut configured (MenuItem "Copy" "Ctrl+C" Copy)=="Ctrl+J Y" && commandBindingKeys pending Copy==["Ctrl+J Y"] &&
      lookup "Y" (focusedBindingChords pending)==Just "hide.edit.copy" && boundKeyCommand (V.KChar 'p') [] pending==Just Paste &&
      nativeMenuShortcut pending Copy==("",0) && any ((==" Ctrl+J … ").fst) (statusHints pending))
   let replaced=event (V.KChar '!') [] configured
       undoPending=event (V.KChar 'j') [V.MCtrl] replaced
-  check "a configured ordinary command is eligible as a second stroke" (activeText replaced=="!" && activeText (event (V.KChar 'z') [] undoPending)=="hello")
+  check "a configured ordinary command is eligible as a second stroke" (sourceText replaced=="!" && sourceText (event (V.KChar 'z') [] undoPending)=="hello")
   check "unknown removed noncharacter and cancelled steps consume prefix without editing"
-    (all (\d->prefix d==Nothing && activeText d=="hello" && selected d==selected pending && clipboard d=="")
+    (all (\d->prefix d==Nothing && sourceText d=="hello" && selected d==selected pending && clipboard d=="")
       [event (V.KChar 'c') [] pending,event V.KRight [] pending,event V.KEsc [] pending])
   forM_ [[],[V.MShift],[V.MCtrl],[V.MCtrl,V.MShift]] $ \mods->
     check "default bare Control and Shift block aliases resolve the same action" (clipboard (event (V.KChar 'C') mods started)=="hello")
@@ -788,14 +788,14 @@ prefixChecks=do
       refused=event (V.KChar 'l') [] unavailable
   check "an actually unavailable continuation still consumes one prefix"
     (not (commandEnabled unavailable CopyLocation) && prefix refused==Nothing && clipboard refused=="" &&
-     activeText (event (V.KChar '!') [] refused)=="!")
+     sourceText (event (V.KChar '!') [] refused)=="!")
   let marks=modifyActive (\w->w {selection=Selection 1 1}) defaults
       marked=event (V.KChar 'b') [] (event (V.KChar 'k') [V.MCtrl] marks)
       moved=modifyActive (\w->w {selection=Selection 4 4}) marked
       block=event (V.KChar 'k') [] (event (V.KChar 'k') [V.MCtrl] moved)
       removed=event (V.KChar 'y') [] (event (V.KChar 'k') [V.MCtrl] block)
   check "block markers and deletion retain source selection and one Undo"
-    (selected block==Just (Selection 1 4) && activeText removed=="ho" && activeText (fst (runCommand Undo removed))=="hello")
+    (selected block==Just (Selection 1 4) && sourceText removed=="ho" && sourceText (fst (runCommand Undo removed))=="hello")
   check "explicit global overrides apply inside the finite prefix table"
     (boundKeyCommand (V.KFun 13) [] started {keyBindings=prepare TerminalPlatform (M.singleton "global" (M.singleton "hide.edit.undo" ["F13"]))}==Just Undo)
   let reservedGlobal=prepare TerminalPlatform (M.singleton "global" (M.singleton "hide.app.quit" ["Ctrl+Alt+X"]))
@@ -815,7 +815,7 @@ prefixChecks=do
   let pasted=fst (handleEvent (V.EvPaste "replacement") pending)
       requested=runCommand Paste pending {browserFrontend=True}
   check "native browser paste and requested paste consume the active prefix"
-    (activeText pasted=="replacement" && prefix pasted==Nothing && prefix (fst requested)==Nothing && snd requested==[ReadBrowserClipboard])
+    (sourceText pasted=="replacement" && prefix pasted==Nothing && prefix (fst requested)==Nothing && snd requested==[ReadBrowserClipboard])
   check "prefix cannot steal the earlier Ctrl Alt Exit owner"
     (prefix (event (V.KChar 'x') [V.MCtrl,V.MAlt] started)==Nothing && snd (handleEvent (V.EvKey (V.KChar 'x') [V.MCtrl,V.MAlt]) started)==[Exit])
   let noQuick=defaults {keyBindings=prepare TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.wordstar.quick-prefix" []))}
@@ -846,4 +846,4 @@ prefixChecks=do
      boundKeyCommand (V.KChar 'c') [V.MMeta] retainedModal==Just Copy && any ((==Just (Left DialogAccept)).snd) (statusHints retainedModal))
   check "macOS prefix has no inherited Command clipboard default"
     (boundKeyCommand (V.KChar 'c') [V.MMeta] macPending==Nothing && menuShortcut mac (MenuItem "Copy" "Cmd+C" Copy)=="⌃J Y")
-  where activeText d=maybe "" (contents . documentBuffer) (activeDocument d)
+  where sourceText d=maybe "" (contents . documentBuffer) (activeDocument d)

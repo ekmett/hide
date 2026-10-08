@@ -3,7 +3,8 @@ module TypedBufferReadsCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay,newEmptyMVar,putMVar,takeMVar)
-import Control.Concurrent.Async
+import Control.Concurrent.Async hiding (wait)
+import qualified Control.Concurrent.Async
 import Control.Exception (bracket,try,evaluate,SomeException,IOException,catch,throwIO,finally)
 import Control.Monad (unless,forM)
 import Data.IORef
@@ -39,6 +40,7 @@ import qualified Hide.Plugin.Buffer as P
 import Hide.Plugin.BufferHost (readerReference)
 import Hide.EditorMCP (builtinTools,builtinTool,listBuffersTool,readBufferTool,readWindowTool,editorResponseOnly)
 
+ownerUntil :: Hide.MCPPermissions.Permissions -> Desktop -> Async a -> IO Desktop
 ownerUntil owner desktop worker=do
   let loop current=do
         result<-poll worker
@@ -178,8 +180,8 @@ checks=do
             JsonPacket value<-response
             content<-parseMaybe (withObject "rpc" (\o->o .: "result" >>= withObject "tool result" (.: "content"))) value :: Maybe [Value]
             row<-case content of first:_->Just first; _->Nothing
-            text<-parseMaybe (withObject "content" (.: "text")) row
-            decodeStrict' (TE.encodeUtf8 text)
+            encodedText<-parseMaybe (withObject "content" (.: "text")) row
+            decodeStrict' (TE.encodeUtf8 encodedText)
           succeeded response=case response of
             Just (JsonPacket (Object fields))->case KM.lookup "result" fields of
               Just result->parseMaybe (withObject "tool result" (.: "isError")) result==Just False
@@ -314,7 +316,7 @@ windowReadChecks path=W.withWindowScope $ \scope->do
   let check label ok=unless ok (error label)
       semantics=W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow
         (V.singleton (7,13)) V.empty V.empty
-      prepare text=W.prepareSemanticTextWindow "Transcript" [(text,Plain)] semantics >>= either (error . T.unpack) pure
+      prepare contentsText=W.prepareSemanticTextWindow "Transcript" [(contentsText,Plain)] semantics >>= either (error . T.unpack) pure
       rejected result=case result of Left _->True; _->False
       queued worker=do
         let observe=threadStatus (asyncThreadId worker) >>= \state->case state of

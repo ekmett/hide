@@ -13,7 +13,7 @@ import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 
-import Control.Concurrent.Async (Async, withAsync, cancel, poll, wait)
+import Control.Concurrent.Async (Async, withAsync, poll, wait)
 import Control.Exception (bracket, evaluate)
 import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson hiding (Number)
@@ -45,13 +45,13 @@ import qualified System.Posix.IO as Posix
 #endif
 import System.Info (os)
 import System.Timeout (timeout)
-import Hide.Render (snapshot, snapshotHtml, renderCursor)
+import Hide.Render (snapshot, renderCursor)
 import Hide.Font (loadFont)
 import qualified Hide.ScreenCapture as ScreenCapture
 import Hide.Buffer
 import qualified Hide.App as App
 import Hide.GuestAccess (guestCommandAllowed, protectedBuffer, readableAt)
-import Hide.Conversation
+import Hide.Conversation hiding (tickConversation)
 import Hide.SessionServices
 import qualified Hide.BuildJobs as Jobs
 import qualified Hide.Build as Build
@@ -110,8 +110,7 @@ composerCodeChecks=do
   questionInsertionChecks
   withEditorFixture "" (initialDesktop (100,35)) $ \primary->
     withEditorFixture "child" primary $ \fixtures->do
-      let check label ok=unless ok (error label)
-          press key mods=fst . handleEvent (V.EvKey key mods)
+      let press key mods=fst . handleEvent (V.EvKey key mods)
           typeText text desktop=foldl (\d c->press (V.KChar c) [] d) desktop (T.unpack text)
           paste text=fst . handleEvent (V.EvPaste (TE.encodeUtf8 text))
           chat=selectConversationView "" "Primary" fixtures
@@ -120,7 +119,7 @@ composerCodeChecks=do
           code=typeText "x = 1" block
           extended=paste "  y = 2\nz = 3" (press V.KEnter [] code)
           normal=typeText "Then explain it." (press V.KDown [] extended)
-          text d=contents (composerBuffer d)
+          draftText d=contents (composerBuffer d)
           isCodeChar (_,CodeStyle _ _)=True
           isCodeChar _=False
       check "greater-than-space creates code with a normal exit line" (composerInCode block && bufferLineCount (composerBuffer block)==2)
@@ -128,16 +127,16 @@ composerCodeChecks=do
           codeRect=composerRect code codeWindow
           clickedCode=fst (handleEvent (V.EvMouseDown (left codeRect+1) (top codeRect) V.BLeft []) code)
       check "clicking visible code edits its text rather than its hidden indentation"
-        (text (typeText "Z" clickedCode)=="    xZ = 1\n")
-      check "code creation is one undoable edit" (text (fst (runCommand Undo block))==">" && text (fst (runCommand Redo (fst (runCommand Undo block))))==text block)
+        (draftText (typeText "Z" clickedCode)=="    xZ = 1\n")
+      check "code creation is one undoable edit" (draftText (fst (runCommand Undo block))==">" && draftText (fst (runCommand Redo (fst (runCommand Undo block))))==draftText block)
       check "Enter extends code while Down leaves it for normal prose"
-        ("    x = 1\n      y = 2\n    z = 3\nThen explain it."==text normal &&
-         not (composerInCode normal) && any isCodeChar (renderMarkdown 80 (text normal)))
+        ("    x = 1\n      y = 2\n    z = 3\nThen explain it."==draftText normal &&
+         not (composerInCode normal) && any isCodeChar (renderMarkdown 80 (draftText normal)))
       let listCode=paste "line = 1" (typeText "> " (press V.KEnter [V.MShift] (typeText "- Inspect this:" chat)))
           fenceCode="    before\n    ```\n    after\n"
       check "submission preserves code after a list and embedded fence characters"
-        (any isCodeChar (renderMarkdown 80 (composerMarkdown (text listCode))) &&
-         "```" `T.isInfixOf` T.concat [text | pair@(text,_)<-renderMarkdown 80 (composerMarkdown fenceCode),isCodeChar pair] &&
+        (any isCodeChar (renderMarkdown 80 (composerMarkdown (draftText listCode))) &&
+         "```" `T.isInfixOf` T.concat [fragment | pair@(fragment,_)<-renderMarkdown 80 (composerMarkdown fenceCode),isCodeChar pair] &&
          composerMarkdown "```hs\n    original indentation\n```\n"=="```hs\n    original indentation\n```\n")
       check "Control Enter keeps the configured opposite submit action inside code"
         (snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) extended)==[editorEffect SteerSubmit extended] &&
@@ -159,7 +158,7 @@ composerCodeChecks=do
           unwrapped=press V.KBS [] (press V.KHome [] code)
           backIn=press V.KBS [] (press V.KDown [] code)
       check "composer copy removes only Markdown markers and keeps code indentation" (clipboard copied=="x = 1\n  y = 2\nz = 3\n")
-      check "backspace at code start unwraps and backspace from the exit line reenters" (text unwrapped=="x = 1\n" && composerInCode backIn && text backIn==text code)
+      check "backspace at code start unwraps and backspace from the exit line reenters" (draftText unwrapped=="x = 1\n" && composerInCode backIn && draftText backIn==draftText code)
       let sourceText="main = 1\n  helper = 2\n"
           source=fst (runCommand SelectAll (addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer sourceText) (initialDesktop (100,35))))
           sourceCopy=fst (runCommand Copy source)
@@ -170,24 +169,24 @@ composerCodeChecks=do
           external=paste "plain replacement" (toChat sourceCopy)
           prosePaste=paste sourceText (typeText "Please inspect:" (toChat sourceCopy))
       check "copied and cut source paste as code through internal or native clipboard"
-        (composerInCode pasted && text pasted==text nativePaste && activeText sourceCut=="" &&
+        (composerInCode pasted && draftText pasted==draftText nativePaste && activeText sourceCut=="" &&
          composerInCode (fst (runCommand Paste (toChat sourceCut))) &&
-         clipboard sourceCopy==sourceText && "      helper = 2" `T.isInfixOf` text pasted)
+         clipboard sourceCopy==sourceText && "      helper = 2" `T.isInfixOf` draftText pasted)
       check "source paste is one undo step and separates existing prose"
-        (T.null (text (fst (runCommand Undo pasted))) && "Please inspect:\n\n    main" `T.isPrefixOf` text prosePaste)
+        (T.null (draftText (fst (runCommand Undo pasted))) && "Please inspect:\n\n    main" `T.isPrefixOf` draftText prosePaste)
       check "browser paste still requests its clipboard and external text does not inherit code formatting"
-        (snd browserPaste==[ReadBrowserClipboard] && text external=="plain replacement" && not (composerInCode external))
+        (snd browserPaste==[ReadBrowserClipboard] && draftText external=="plain replacement" && not (composerInCode external))
       let location=fst (runCommand CopyLocation (modifyActive (\w->w {selection=Selection 11 11}) (copyClipboard True "/project/Main.hs:2:3" sourceCopy)))
           locationPaste=fst (runCommand Paste (toChat location))
       check "Copy Location is one-based plain text even after copying source code"
-        (clipboard location=="/project/Main.hs:2:3" && text locationPaste==clipboard location && not (composerInCode locationPaste) && lookup "Copy Location" (contextItems SourceContext)==Just CopyLocation)
+        (clipboard location=="/project/Main.hs:2:3" && draftText locationPaste==clipboard location && not (composerInCode locationPaste) && lookup "Copy Location" (contextItems SourceContext)==Just CopyLocation)
       let child=selectConversationView "child" "Child" chat
           childCode=typeText "child = 1" (typeText "> " child)
           returned=selectConversationView "child" "Child" (selectConversationView "" "Primary" childCode)
           question=(questionOwner 1 chat) {chatQuestion=Just (ChatQuestion 1 "Answer?" [] Nothing (newBuffer "") (Selection 0 0) True),clipboard=sourceText,clipboardCode=Just sourceText}
           answered=typeText "> " question
           questionPaste=fst (runCommand Paste question)
-      check "child code drafts survive switching conversations" (text returned==text childCode && composerInCode returned)
+      check "child code drafts survive switching conversations" (draftText returned==draftText childCode && composerInCode returned)
       check "inline question input stays plain text" (fmap (contents.questionBuffer) (chatQuestion answered)==Just "> " && fmap (contents.questionBuffer) (chatQuestion questionPaste)==Just (T.map (\c->if c=='\n' then ' ' else c) sourceText))
       let ignoredQuestion=fst (handleEvent (V.EvKey V.KEnter [V.MCtrl]) answered)
       check "inline question Control Enter preserves answer and separate draft"
@@ -401,7 +400,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
             current<-if replaced then fresh original else pure original
             hidden<-send runtime "show" [] (draftBuffer current submitted)
             putMVar release (); wait writer
-            let accepted d=do
+            let accepted _=do
                   value<-AH.statusAgent hub AH.Human ident >>= either (error.T.unpack) pure
                   pure (field "status" value==Just ("idle"::T.Text))
             settled<-await runtime "child acceptance" accepted hidden
@@ -495,8 +494,9 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         (W.TextSemantics (W.CopyMessages W.UserBotAttribution) Nothing Vec.empty Vec.empty W.ReadableWindow Vec.empty Vec.empty Vec.empty) >>= either (error.T.unpack) pure
       withEditorBodyFixture "" preparedCopy (initialDesktop (60,18)) $ \base->do
         let chat=draftAt (newBuffer "draft") (Selection 2 2) base
-            positions ident=[(a,z) | (a,z,BubbleText j _ _)<-styleRanges cells,j==ident]
-            a=fst (head (positions 0)); z=snd (last (positions 1))
+            positions ident=[(start,end) | (start,end,BubbleText j _ _)<-styleRanges cells,j==ident]
+            a=case positions 0 of (start,_):_->start; []->error "first bubble source range missing"
+            z=snd (last (positions 1))
             copiedReply x y=W.copyPreparedSelection preparedCopy (min x y) (max x y)
         check "single-bubble copies omit speaker names and decoration"
           (copiedReply a (a+3)=="one" && copiedReply (a+1) (a+3)=="ne")
@@ -511,9 +511,9 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         preservedDraft<-sameDraftRoot chat released
         check "dragging across bubbles preserves the draft caret and copies only message text"
           (composerFocused released && preservedDraft && composerSelection released==Selection 2 2 && W.copyPreparedSelection preparedCopy start end=="User: one\n\nBot: two")
-    let reply width outgoing=styledContents . renderReply False width outgoing
+    let renderedReply width outgoing=styledContents . renderReply False width outgoing
     check "short bubbles occupy one row with outward tails"
-      (reply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && reply 30 False "hello"=="◥▜hello▌")
+      (renderedReply 30 True "hello"==T.replicate 22 " "<>"▐hello▛◤" && renderedReply 30 False "hello"=="◥▜hello▌")
     check "outgoing bubble is black on VGA cyan"
       (hasStyledChar 'h' (BubbleText 0 True Plain) (renderReply False 30 True "hello"))
     check "agent prose and code retain their styles inside bubbles"
@@ -521,7 +521,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
     forM_ [False,True] $ \outgoing -> do
       let sourceText="```haskell\nx = 42\n```"
           cells=renderReply False 40 outgoing sourceText
-          firstRow=head (splitStyled cells)
+          firstRow=case splitStyled cells of row:_->row; []->error "leading code panel row missing"
           codeCell (_,BubbleText _ _ (CodeStyle _ _))=True
           codeCell _=False
           copied=T.concat [text | (text,BubbleText _ _ _)<-cells]
@@ -540,7 +540,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         check "code panel margins leave copied contents unchanged"
           (T.concat [text | (text,BubbleText _ _ _)<-cells]==styledContents (renderMarkdown (width-5) sourceText))
     forM_ [1,2,5,6,8,30,80] $ \width -> forM_ [False,True] $ \outgoing -> do
-      let rendered=reply width outgoing "Wide 界 words é and more words"
+      let rendered=renderedReply width outgoing "Wide 界 words é and more words"
       check "bubbles wrap within the window width"
         (all (\row -> displayColumn row (T.length row)<=width || width==1 && displayColumn row (T.length row)==2) (T.lines rendered))
       check "bubble wrapping retains combining marks" (not ("\ń" `T.isInfixOf` rendered))
@@ -548,10 +548,10 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         permissionMenu=[title | ("Options",_,items)<-menus,MenuItem title _ AgentPermissions<-items]
         chooser=Dialog "Agent Permissions" (PermissionDialog "settings") [ListBox "Tool" ["tool"<>T.pack (show n) | n<-[0..39::Int]] 0] 0 ["Edit","Close"] []
         chooseLast=foldl (\d _->fst (handleEvent (V.EvKey V.KDown []) d)) permissionBase {dialog=Just chooser} [1..39::Int]
-        approval=Dialog "Allow tool?" (PermissionDialog "approve:fixture") [] 0 ["Allow once","Deny"] ["Tool: editor_file"]
+        permissionApproval=Dialog "Allow tool?" (PermissionDialog "approve:fixture") [] 0 ["Allow once","Deny"] ["Tool: editor_file"]
     check "Options menu uses exact Agent Permissions label" (permissionMenu==["Agent Permissions"] && snd (runCommand AgentPermissions permissionBase)==[PermissionAction "show" []])
     check "permission tool chooser paginates all entries" ("tool39" `T.isInfixOf` snapshot chooseLast && snd (handleEvent (V.EvKey V.KEnter []) chooseLast)==[PermissionAction "settings" ["0","39"]])
-    check "Escape explicitly denies permission requests" (snd (handleEvent (V.EvKey V.KEsc []) permissionBase {dialog=Just approval})==[PermissionAction "approve:fixture" ["1"]])
+    check "Escape explicitly denies permission requests" (snd (handleEvent (V.EvKey V.KEsc []) permissionBase {dialog=Just permissionApproval})==[PermissionAction "approve:fixture" ["1"]])
     let modeDialog=Dialog "Agent Permissions" (PermissionDialog "set:editor_file") [Radio "Permission" ["Enable","Prompt","Disable"] 2] 0 ["Save","Back"] []
     check "permission mode submission includes selected radio" (snd (submitDialog 0 modeDialog permissionBase {dialog=Just modeDialog})==[PermissionAction "set:editor_file" ["0","2"]])
     let draftBase=initialDesktop (90,30)
@@ -649,7 +649,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
     forM_ [32,120,150] $ \columns -> do
       let outgoing=renderReply False columns True (T.unwords (replicate 90 "window-width"))
           incoming=renderReply False columns False (T.unwords (replicate 90 "window-width"))
-          firstRow=head . splitStyled
+          firstRow cells=case splitStyled cells of row:_->row; []->error "wide reply row missing"
       check "wide user bubbles anchor on the right and replies on the left"
         (styledLength (firstRow outgoing)==columns && maybe False (\(_,style)->case style of BubbleText _ False _->False; _->True) (listToMaybe incoming) &&
          maximum (map (styledLength . filter (\(_,style)->case style of BubbleText{}->True; _->False)) (splitStyled incoming))>columns-20)
@@ -815,7 +815,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         _<-clickAction runtime "question-cancel" fresh
         pure ()
       expired<-questionPoll runtime cleaned ident
-      check "old terminal results explicitly expire" (case expired of Left message->"expired" `T.isInfixOf` message; _->False)
+      check "old terminal results explicitly expire" (case expired of Left reason->"expired" `T.isInfixOf` reason; _->False)
       let narrow=initialDesktop (40,12)
       (manyChoices,_)<-questionTool runtime narrow (object ["question" .= ("Choose"::T.Text),"choices" .= (T.replicate 100 "z":["Option "<>T.pack (show n) | n<-[1..11::Int]])])
       let choiceVisible d=case activeWindow d of
@@ -883,10 +883,10 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         _<-send runtime "cancel" [] admitted
         pure ()
       writeFile (root </> "question-permissions.toml") ""
-      (review,creation)<-call savedDraft "ask_user" (object ["question" .= ("Revoked caller"::T.Text)])
+      (revokedReview,revokedCreation)<-call savedDraft "ask_user" (object ["question" .= ("Revoked caller"::T.Text)])
       _<-AH.endAgent (AR.agentHub (conversationAgents runtime)) AH.Human primary
-      withAsync creation $ \request->do
-        refused<-approve review
+      withAsync revokedCreation $ \request->do
+        refused<-approve revokedReview
         result<-wait request
         check "deferred approval cannot resurrect an ended question requester" (chatQuestion refused==Nothing && isLeft result)
     (closedRuntime,closedId)<-C.withConsoles $ \consoles -> withConversation consoles $ \runtime->do
@@ -996,7 +996,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       check "old queued admission cannot bind to a replacement provider" . isLeft =<< oldCreation
       stale<-questionPoll runtime replacement oldId
       check "same session label on a new connection cannot retrieve an old answer"
-        (case stale of Left message->"expired" `T.isInfixOf` message; _->False)
+        (case stale of Left reason->"expired" `T.isInfixOf` reason; _->False)
       settled<-foldM (\value _->threadDelay 1000 >> tickConversation runtime value) replacement [1..20::Int]
       entries<-logged
       check "retired queued answer never prompts the replacement provider"
@@ -1084,8 +1084,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
               if pending then threadDelay 10000 >> reader next else pure next
         held<-timeout 3000000 (reader responsive) >>= maybe (error "Settings reader did not acquire held FIFO") pure
         waitForReader opened
-        next<-timeout 1000000 (tickSessionServices runtime held)
-        check "repeated ticks do not join or duplicate blocked settings discovery" (maybe False (const True) next)
+        repeatedTick<-timeout 1000000 (tickSessionServices runtime held)
+        check "repeated ticks do not join or duplicate blocked settings discovery" (maybe False (const True) repeatedTick)
         putMVar release ()
         wait writer
         let loop current=do
@@ -1165,7 +1165,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
           selectedWindow=fromMaybe (error "missing live copy frame") (activeWindow selectedChat)
           selectedBody=targetBody "" selectedChat
           liveContent=W.preparedWindowText selectedBody
-          interval ident=case [(a,z) | (a,z,message,_)<-Vec.toList (W.preparedWindowMessages selectedBody),message==ident] of
+          interval ident=case [(a,z) | (a,z,messageId,_)<-Vec.toList (W.preparedWindowMessages selectedBody),messageId==ident] of
             first:_->first
             _->error "missing live copy bubble"
           (from,_)=interval 0
@@ -1272,8 +1272,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
       check "approved write uses ordinary Undo" (contents (undo (documentBuffer (sourceDocument written)))=="unsaved disk original\n")
       check "approved write marks buffer saved" (not (dirty (documentBuffer (sourceDocument written))))
       staleDialog<-prompt runtime "write" (focusSource written) >>= modal runtime
-      let changed=insertText "later " (focusSource staleDialog)
-      rejected<-actDialog runtime 0 changed
+      let editedSource=insertText "later " (focusSource staleDialog)
+      rejected<-actDialog runtime 0 editedSource
       stale<-done runtime rejected
       staleAnswer<-response "write-4"
       check "stale revision rejects agent write" (maybe False hasError staleAnswer && "later " `T.isInfixOf` contents (documentBuffer (sourceDocument stale)))
@@ -1300,10 +1300,10 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
           selected=press (V.KChar 'a') [V.MCtrl] multiline
           copiedDraft=press (V.KChar 'c') [V.MCtrl] selected
           window=fromMaybe (error "conversation window") (activeWindow multiline)
-          clickStatus needle desktop=case [r | (r,i,_)<-statusItemRects desktop,needle `T.isInfixOf` fst (statusItems desktop !! i)] of
-            r:_ -> handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) desktop
+          clickStatus needle current=case [r | (r,i,_)<-statusItemRects current,needle `T.isInfixOf` fst (statusItems current !! i)] of
+            r:_ -> handleEvent (V.EvMouseDown (left r) (top r) V.BLeft []) current
             [] -> error ("missing status action: "++T.unpack needle)
-          applyEvent event desktop=let (next,effects)=handleEvent event desktop in snd <$> conversationEffects runtime fallback next effects
+          applyEvent event current=let (next,effects)=handleEvent event current in snd <$> conversationEffects runtime fallback next effects
       check "composer is a compact thought bubble without buttons or divider"
         (height (composerRect cancelled window)==1 && height (composerRect multiline window)==2 && width (composerRect multiline window)==12 &&
          "•." `T.isInfixOf` snapshot multiline && not (" Query " `T.isInfixOf` T.intercalate "\n" (init (T.lines (snapshot multiline)))))
@@ -1431,8 +1431,8 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
         check "ACP terminal kill completes pending wait" ((killedExit >>= field "result" >>= field "exitCode")==Just (137::Int))
         rejectedTerminal<-prompt runtime "terminal-reject" killed >>= modal runtime
         _<-escape runtime rejectedTerminal >>= done runtime
-        refused<-response "terminal-create-3"
-        check "rejected terminal request gets error" (maybe False hasError refused)
+        rejectedReply<-response "terminal-create-3"
+        check "rejected terminal request gets error" (maybe False hasError rejectedReply)
         check "rejected terminal command never executes" . not =<< doesFileExist (root </> "should-not-exist")
       -- Reconfiguration stops the old provider; the next handshake lacks resume support.
       current<-tickConversation runtime resumed
@@ -1650,7 +1650,7 @@ checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ 
           check "inactive child and primary replies reflow at their own window width"
             (maximum (0:map columnsOf (filter received rows))>columns-18 && all ((<=columns-2).columnsOf) rows)
           check "each resized target retains its own exact executable shell body"
-            (map (\(_,_,_,source)->source) (bodyShellBlocks body)==[raw])
+            (map (\(_,_,_,bodySource)->bodySource) (bodyShellBlocks body)==[raw])
           pure lastView) shown [("",primaryColumns,"printf 'live λ'\n"),(AH.agentIdText child,childColumns,"printf 'child λ'\n")]
         let before=map (`conversationBodySnapshot` ended) ["",AH.agentIdText child]
         unchanged<-tickConversation runtime ended

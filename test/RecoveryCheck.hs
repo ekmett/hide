@@ -207,11 +207,11 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
      all (\w->maybe True (const False) (windowConversationControls restoredPrimary w)) (windows restoredPrimary))
   allCopied<-withTextPresentation $ \presentation->do
     let (copying,effects)=runCommand Copy restoredPrimary
-        awaitCopy desktop=do
-          (next,_)<-tickTextPresentation presentation [] desktop
+        awaitCopy current=do
+          (next,_)<-tickTextPresentation presentation [] current
           if fst (clipboardExport next)==fst (clipboardExport copying) && snd (clipboardExport next)/=Nothing
             then pure (clipboard next) else threadDelay 10000 >> awaitCopy next
-    (_,queued)<-textPresentationEffects presentation (\desktop _->pure (False,desktop)) copying effects
+    (_,queued)<-textPresentationEffects presentation (\current _->pure (False,current)) copying effects
     timeout 8000000 (awaitCopy queued) >>= maybe (error "Recovered conversation copy timed out") pure
   check "passive copy retains hard breaks and outgoing attribution"
     ("User: hi\nx" `T.isInfixOf` allCopied && "Bot: ok" `T.isInfixOf` allCopied)

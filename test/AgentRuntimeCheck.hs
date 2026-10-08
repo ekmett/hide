@@ -329,7 +329,7 @@ creationChecks root=do
       assert "host creation completion drains once" (null [() | AgentCreated _<-drained])
       _<-requestAgentCreation runtime spec {spawnName=""} >>= right
       rejected<-waitRequests runtime
-      assert "drained launch slot is reusable and retains Hub validation" (case [result | AgentCreated result<-rejected] of [Left _]->True; _->False)
+      assert "drained launch slot is reusable and retains Hub validation" (case [reply | AgentCreated reply<-rejected] of [Left _]->True; _->False)
       pure runtime
     refused<-requestAgentCreation closedRuntime spec
     assert "closed runtime refuses new provider acquisition" (failed refused)

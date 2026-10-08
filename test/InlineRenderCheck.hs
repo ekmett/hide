@@ -41,7 +41,7 @@ checks=W.withWindowScope $ \scope->do
              in map (\line->let content=T.drop (columnOffset line (x+1)) line in T.stripEnd (T.take (columnOffset content (width'-2)) content)) (take 8 (drop (y+1) (T.lines (snapshot d))))
   option<-either (error . T.unpack) pure (prepareOption b (Proposal 11 14 "new\nsecond" Nothing))
   let shown=preview option
-  let acceptRect=head [rect | (rect,_,Right (V.EvKey (V.KChar '\t') []))<-statusItemRects shown]
+  let acceptRect=case [rect | (rect,_,Right (V.EvKey (V.KChar '\t') []))<-statusItemRects shown] of rect:_->rect; []->error "inline Accept rectangle missing"
       (clicked,clickEffects)=handleEvent (V.EvMouseDown (left acceptRect+1) (top acceptRect) V.BLeft []) shown
   check "clicking inline Accept dispatches against the displayed proposal"
     (clickEffects==[AutocompleteAction "accept" []] && inlinePreview clicked/=Nothing)

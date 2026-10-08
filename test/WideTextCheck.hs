@@ -36,12 +36,13 @@ import Hide.RemoteTerminal (remoteTerminalDisplay)
 checks :: IO ()
 checks=do
  let check name ok=unless ok (fail name)
+     firstWindow desktop=case M.windows desktop of window:_->window; []->error "wide-text fixture has no window"
      ops image=Vec.toList (displayOpsForPic (V.picForImage image) (8,1) Vec.! 0)
-     glyphs image=[(TL.toStrict text,width) | TextSpan _ width _ text<-ops image]
+     imageGlyphs image=[(TL.toStrict text,width) | TextSpan _ width _ text<-ops image]
      original=wideTextImage V.defAttr "A"
- check ("compositor retains original narrow text and two-cell advance: "++show (glyphs original)) (take 1 (glyphs original)==[("A",2)])
+ check ("compositor retains original narrow text and two-cell advance: "++show (imageGlyphs original)) (take 1 (imageGlyphs original)==[("A",2)])
  check "flattening preserves explicit advances" (displayOpsForPic (flattenPicture (8,1) (V.picForImage original)) (8,1)==displayOpsForPic (V.picForImage original) (8,1))
- check "partial wide crop becomes blank" (all (not . T.isInfixOf "A" . fst) (glyphs (V.cropRight 1 original)))
+ check "partial wide crop becomes blank" (all (not . T.isInfixOf "A" . fst) (imageGlyphs (V.cropRight 1 original)))
  let covered=V.picForLayers [V.translateX 1 (textImage V.defAttr "X"),original]
  check "covering either wide half clears the full glyph" (all (not . T.isInfixOf "A") [TL.toStrict text | row<-Vec.toList (displayOpsForPic covered (8,1)),TextSpan _ _ _ text<-Vec.toList row])
  forM_ [("A","Ａ"),(" ","　"),("é","ｅ́"),("é","é "),("́"," ́ "),("界","界"),("👩🏽\x200d\&💻","👩🏽\x200d\&💻")] $ \(semantic,projected)->do
@@ -49,8 +50,8 @@ checks=do
    let (bytes,end)=terminalSpan (const mempty) 0 2 semantic
    check "terminal projection reserves two cells and keeps semantic text separate" (end==2 && TE.encodeUtf8 projected `BS.isInfixOf` writeToByteString bytes)
  let metadata=object ["size" .= ([40,12]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)])]
-     row=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,0::Int,2::Int)])]
- frame<-either fail pure (parseRemoteFrame metadata (row:replicate 11 (toJSON ([]::[Value]))))
+     metadataRow=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,0::Int,2::Int)])]
+ frame<-either fail pure (parseRemoteFrame metadata (metadataRow:replicate 11 (toJSON ([]::[Value]))))
  check "native receiver keeps stretched semantic glyph width" (case remoteCells frame of [RemoteGlyph 0 0 _ "A" 2 0 2]->True; _->False)
  check "remote TUI retains the same original glyph/advance before output projection" (case [ (TL.toStrict text,width) | rowOps<-Vec.toList (snd (remoteTerminalDisplay (40,12) (Just frame) "")),TextSpan _ width _ text<-Vec.toList rowOps,text=="A"] of [("A",2)]->True; _->False)
  let clipped start shown=toJSON [(0::Int,0xffffff::Int,0::Int,3::Int,[toJSON ("A"::T.Text,2::Int,True,start::Int,shown::Int)])]
@@ -64,19 +65,19 @@ checks=do
  check "invalid stretched wire glyphs refuse instead of changing geometry" (all (either (const True) (const False) . parseRemoteFrame metadata . (:replicate 11 (toJSON ([]::[Value])))) [bad True 1 "A",bad True 2 "界",bad True 2 "ab",bad False 2 "A"])
  let heading="ABé界é👩🏽\x200d\&💻"
      semantic=heading<>"\nplain"
-     source=bufferContent (newBuffer semantic)
+     headingSource=bufferContent (newBuffer semantic)
      styles=Vec.fromList (styledRows [(heading,SectionStyle 1 (BoldStyle (ItalicStyle (Heading 1)))),("\nplain",Plain)])
- layout<-prepareTextLayout True 5 source styles
- ordinary<-prepareTextLayout False 5 source styles
- check "wide layout wraps without changing semantic source" (Vec.length (layoutRows layout)==4 && contentSlice source 0 (contentLength source)==semantic && Vec.length (layoutRows ordinary)==2)
- forM_ (zip [0..] (Vec.toList (layoutRows layout))) $ \(rowNumber,visual)->
+ initialLayout<-prepareTextLayout True 5 headingSource styles
+ ordinary<-prepareTextLayout False 5 headingSource styles
+ check "wide layout wraps without changing semantic source" (Vec.length (layoutRows initialLayout)==4 && contentSlice headingSource 0 (contentLength headingSource)==semantic && Vec.length (layoutRows ordinary)==2)
+ forM_ (zip [0..] (Vec.toList (layoutRows initialLayout))) $ \(rowNumber,visual)->
    forM_ (Vec.toList (layoutGlyphs visual)) $ \glyph->do
-     check "prepared source ranges retain complete original graphemes" (contentSlice source (layoutStart glyph) (layoutEnd glyph-layoutStart glyph)==layoutText glyph)
-     check "render and navigation share the prepared position map" (layoutPosition layout (layoutStart glyph)==(rowNumber,layoutColumn glyph))
-     forM_ [0..layoutAdvance glyph-1] $ \cell->check "all glyph cells retain their original complete source item" (layoutOffset layout rowNumber (layoutColumn glyph+cell)==layoutStart glyph+if layoutRunStep glyph>0 then cell `div` layoutRunStep glyph else 0)
- check "widening removes bold while retaining italic and heading semantics" (all (\glyph->let (_,bold,italic)=fontTraits (layoutStyle glyph) in not bold && italic) [glyph | row<-Vec.toList (layoutRows layout),glyph<-Vec.toList (layoutGlyphs row),layoutStart glyph<T.length heading])
+     check "prepared source ranges retain complete original graphemes" (contentSlice headingSource (layoutStart glyph) (layoutEnd glyph-layoutStart glyph)==layoutText glyph)
+     check "render and navigation share the prepared position map" (layoutPosition initialLayout (layoutStart glyph)==(rowNumber,layoutColumn glyph))
+     forM_ [0..layoutAdvance glyph-1] $ \cell->check "all glyph cells retain their original complete source item" (layoutOffset initialLayout rowNumber (layoutColumn glyph+cell)==layoutStart glyph+if layoutRunStep glyph>0 then cell `div` layoutRunStep glyph else 0)
+ check "widening removes bold while retaining italic and heading semantics" (all (\glyph->let (_,bold,italic)=fontTraits (layoutStyle glyph) in not bold && italic) [glyph | row<-Vec.toList (layoutRows initialLayout),glyph<-Vec.toList (layoutGlyphs row),layoutStart glyph<T.length heading])
  check "ordinary heading styles retain bold and italic" (all (\glyph->let (_,bold,italic)=fontTraits (layoutStyle glyph) in bold && italic) (Vec.toList (layoutGlyphs (Vec.head (layoutRows ordinary)))))
- check "ordinary rows do not acquire title geometry" (layoutRowWidth (Vec.last (layoutRows layout))==5)
+ check "ordinary rows do not acquire title geometry" (layoutRowWidth (Vec.last (layoutRows initialLayout))==5)
  let controls="A\ESC#6B\r"
      controlSource=bufferContent (newBuffer controls)
      controlStyles=Vec.fromList (styledRows [(controls,SectionStyle 1 (Heading 1))])
@@ -100,7 +101,7 @@ checks=do
       [layoutText g | g<-glyphs,layoutText g `elem` ["🇦🇧","🇨"]]==["🇦🇧","🇨"])
    check "rendered Markdown copy retains original fragment characters"
      (T.filter (/='\n') (M.clipboard copied)==expected<>"🇦🇧🇨Z" && M.clipboard sourceCopied==source && contents (M.documentBuffer (fromJust (M.activeDocument ready)))==source)
- forM_ [1,2,9] $ \columns->forM_ ["```\n "<>T.replicate 70 "\x301"<>"Z\n```","| H |\n|---|\n| "<>head overflowing<>"Z |"] $ \source->do
+ forM_ [1,2,9] $ \columns->forM_ ["```\n "<>T.replicate 70 "\x301"<>"Z\n```","| H |\n|---|\n| "<>(case overflowing of cluster:_->cluster; []->error "overflowing cluster fixture missing")<>"Z |"] $ \source->do
    let chars=renderMarkdown columns source
        measured=bufferContent (newBuffer (styledContents chars))
    prepared<-prepareTextLayout False columns measured (M.indexedHighlightRows chars)
@@ -124,7 +125,7 @@ checks=do
       Just M.WindowPresentationUnneeded{}->M.windowPresentation negative negativeView==Nothing &&
         (M.selection negativeView,M.scrollRow negativeView,M.scrollColumn negativeView)==(Selection 2 2,2,1)
       _->False)
- let headingBlock=head (markdownBlocks (parseMarkdown "# ABCDE界q\x301\&FGHIJKLMNOP"))
+ let headingBlock=case markdownBlocks (parseMarkdown "# ABCDE界q\x301\&FGHIJKLMNOP") of block:_->block; []->error "wide heading block missing"
      headingRows=Vec.fromList (renderMarkdownBlock True 12 headingBlock)
      naturalRows=renderMarkdownBlock False 12 headingBlock
      rowWidth row=case mappedStyledRow row of StyledRow sigils _ _->sigilsColumn True 0 sigils
@@ -198,9 +199,9 @@ checks=do
        initial=opened {M.wideSectionTitles=False}
        settle desktop=do
          next<-fmap fst (tickTextPresentation owner [] desktop)
-         if M.windowPresentation next (head (M.windows next))/=Nothing then pure next else threadDelay 1000 >> settle next
+         if M.windowPresentation next (firstWindow next)/=Nothing then pure next else threadDelay 1000 >> settle next
    ready<-timeout 5000000 (settle initial) >>= maybe (fail "script-only plugin layout not adopted") pure
-   let view=head (M.windows ready)
+   let view=firstWindow ready
        rows=renderCellRows ready
        scripts=[(text,natural,mode) | row<-Vec.toList rows,CellScript _ text natural mode<-Vec.toList row]
        source=W.preparedWindowText payload
@@ -210,7 +211,7 @@ checks=do
    check "actual plugin body keeps script metadata in the one common grid"
      (scripts==[("A",1,Superscript),("界",2,Subscript),("e\x301",1,Superscript),("👩🏽\x200d\&💻",2,Subscript)])
    check "script hit and caret map to the original complete source position"
-     (caret (M.selection (head (M.windows clicked)))==1 && M.windowTextPosition ready view source 2==(0,2))
+     (caret (M.selection (firstWindow clicked))==1 && M.windowTextPosition ready view source 2==(0,2))
    check "script copy retains original graphemes without placeholders" (M.clipboard copied==scripted<>"X")
    check "text mode keeps scripts one cell and the following sentinel" ("A\xfffd\&e\x301\xfffdX" `T.isInfixOf` snapshot ready)
    check "HTML retains script source and explicit half-scale placement" (all (`T.isInfixOf` snapshotHtml ready) ["transform:scale(0.5)","top:0.5em","界","👩🏽\x200d\&💻"])
@@ -227,7 +228,7 @@ checks=do
          if maybe False (\w->M.windowPresentation next w/=Nothing) (M.activeWindow next) then pure next
          else threadDelay 1000 >> settle next
        prepare desktop=timeout 5000000 (settle desktop) >>= maybe (fail "wide heading owner did not adopt") pure
-   let browsing=initial {M.windows=[(head (M.windows initial)) {M.scrollRow=1}]}
+   let browsing=initial {M.windows=[(firstWindow initial) {M.scrollRow=1}]}
        originalText=bufferContent (M.documentBuffer (fromJust (M.activeDocument initial)))
        topOffset desktop=let current=fromJust (M.activeWindow desktop) in M.windowTextOffset desktop current originalText (M.scrollRow current) (M.scrollColumn current)
    preparedBrowsing<-prepareTextPresentations browsing
@@ -243,7 +244,7 @@ checks=do
    ready<-prepare initial
    let w=fromJust (M.activeWindow ready)
        doc=fromJust (M.activeDocument ready)
-       text=bufferContent (M.documentBuffer doc)
+       sourceText=bufferContent (M.documentBuffer doc)
        layout=fromJust (M.windowPresentation ready w)
        headingStart=layoutStart (Vec.head (layoutGlyphs (Vec.head (layoutRows layout))))
        click col=M.selectAt False (M.left (M.bounds w)+1+col) (M.top (M.bounds w)+1) ready
@@ -251,7 +252,7 @@ checks=do
        atStart=M.moveTo False headingStart ready
        down=M.editorKey V.KDown [] atStart
        lastColumn=M.editorKey V.KEnd [] atStart
-   check "live headings wrap in the shared prepared owner" (Vec.length (layoutRows layout)>M.windowTextRows (ready {M.wideSectionTitles=False}) w text)
+   check "live headings wrap in the shared prepared owner" (Vec.length (layoutRows layout)>M.windowTextRows (ready {M.wideSectionTitles=False}) w sourceText)
    check "both stretched cells select the same original character" (selected (click 0)==headingStart && selected (click 1)==headingStart)
    check "Down and End use visual row edges" (selected down==layoutOffset layout 1 0 && selected lastColumn==layoutOffset layout 0 maxBound)
    let allText=fst (M.runCommand M.SelectAll ready)
@@ -266,7 +267,7 @@ checks=do
    let originalRows=Protocol.frameRows (ready {M.wideSectionTitles=False})
    (_,rebuilt)<-Protocol.decodeFrame originalRows (BL.toStrict (Protocol.framePacket False originalRows (Protocol.frameRows ready) (Protocol.frameMetadata "." ready)))
    check "actual geometry change survives production compressed patch reconstruction" (rebuilt==Protocol.frameRows ready)
-   let (a,z,_) = head (M.documentLinks doc)
+   let (a,z,_) = case M.documentLinks doc of link:_->link; []->error "wide heading document link missing"
        (linkRow,linkColumn)=layoutPosition layout a
        lx=M.left (M.bounds w)+1+linkColumn
        ly=M.top (M.bounds w)+1+linkRow
@@ -274,8 +275,8 @@ checks=do
    let resized=ready {M.windows=[w {M.bounds=M.Rect 2 2 10 12}]}
        disabled=ready {M.wideSectionTitles=False}
    let review=ready {M.windows=[w {M.bufferView=M.SideBySideView}]}
-   check "review views retain their original coordinate owner" (M.windowPresentation review (head (M.windows review))==Nothing)
-   check "resize and disabling refuse stale layout immediately" (M.windowPresentation resized (head (M.windows resized))==Nothing && M.windowPresentation disabled w==Nothing)
+   check "review views retain their original coordinate owner" (M.windowPresentation review (firstWindow review)==Nothing)
+   check "resize and disabling refuse stale layout immediately" (M.windowPresentation resized (firstWindow resized)==Nothing && M.windowPresentation disabled w==Nothing)
    let preferences=fst (M.runCommand M.EditorOptions disabled)
        dg=fromJust (M.dialog preferences)
        changed=dg {M.fields=map (\field->case field of M.CheckBox "Wide section titles" _->M.CheckBox "Wide section titles" True; _->field) (M.fields dg)}
@@ -285,7 +286,7 @@ checks=do
    disabledKey<-renderKey disabled
    check "preference changes invalidate the shallow render key" (readyKey/=disabledKey)
    resizedReady<-prepare resized
-   check "resized layout adopts a fresh measured identity" (M.windowPresentation resizedReady (head (M.windows resizedReady))/=Just layout)
+   check "resized layout adopts a fresh measured identity" (M.windowPresentation resizedReady (firstWindow resizedReady)/=Just layout)
    result<-Links.prepareMarkdown 40 "/tmp/notes.md" "" "# New document"
    let linkReplaced=fst (Links.applyLink result ready)
    check "prepared Markdown replacement cannot reuse an old source-map version" (M.windowPresentation linkReplaced (fromJust (M.activeWindow linkReplaced))==Nothing)
@@ -307,9 +308,9 @@ checks=do
        initial=opened {M.wideSectionTitles=True,M.windows=[w {M.bounds=M.Rect 2 2 8 12}]}
        settle desktop=do
          next<-fmap fst (tickTextPresentation owner [] desktop)
-         if M.windowPresentation next (head (M.windows next))/=Nothing then pure next else threadDelay 1000 >> settle next
+         if M.windowPresentation next (firstWindow next)/=Nothing then pure next else threadDelay 1000 >> settle next
    ready<-timeout 5000000 (settle initial) >>= maybe (fail "plugin heading layout not adopted") pure
-   let view=head (M.windows ready)
+   let view=firstWindow ready
        x=M.left (M.bounds view)+1;y=M.top (M.bounds view)+1
        copied=fst (M.runCommand M.Copy (fst (M.runCommand M.SelectAll ready)))
    check "plugin Markdown uses same wide layout and original copy" ("ＡＢＣ" `T.isInfixOf` snapshot ready && M.clipboard copied==contentSlice (W.preparedWindowText prepared) 0 (contentLength (W.preparedWindowText prepared)))

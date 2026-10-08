@@ -80,16 +80,16 @@ storageChecks=do
   let poisoned=(newBuffer "raw\n") {saved=error "raw storage forced saved projection"}
   _<-recover poisoned
   let short=fmap snd (snapshotBufferStorage (newBuffer "borrowed\r\n"))
-      borrowed=case storageCurrent short of StoredLine _ [text]:_->text; _->error "missing raw physical line"
+      borrowed=case storageCurrent short of StoredLine _ [raw]:_->raw; _->error "missing raw physical line"
   shortRestored<-either (error . T.unpack) pure (restoreBufferStorage short)
   originalPayload<-evaluate borrowed
   restoredPayload<-evaluate (case storageCurrent (fmap snd (snapshotBufferStorage shortRestored)) of
-    StoredLine _ [text]:_->text; _->error "missing restored raw physical line")
+    StoredLine _ [raw]:_->raw; _->error "missing restored raw physical line")
   let sameSlice (TI.Text (TA.ByteArray first) start size) (TI.Text (TA.ByteArray second) offset count)=
         isTrue# (sameByteArray# first second) && start==offset && size==count
   check "short terminated lines retain the borrowed string-table payload" (sameSlice originalPayload restoredPayload)
   multiRestored<-recover multiByte
-  let rawPieces b=[text | StoredLine _ pieces<-storageCurrent (fmap snd (snapshotBufferStorage b)),text<-pieces]
+  let rawPieces b=[piece | StoredLine _ pieces<-storageCurrent (fmap snd (snapshotBufferStorage b)),piece<-pieces]
       originalPieces=rawPieces multiByte
       restoredPieces=rawPieces multiRestored
   check "a real ASCII mode toggle retains multiple borrowed raw pieces"
@@ -371,7 +371,7 @@ wordChecks=withEditorTextFixture "" "trace" (Model.initialDesktop (80,25)) $ \ch
       base=Model.addDocument Nothing (newBuffer source) (Model.initialDesktop (80,25))
       selected=Model.modifyActive (\w->w {Model.selection=Selection 6 10}) base
       erased=fst (Model.handleEvent (V.EvKey V.KBS [V.MCtrl]) selected)
-      Just result=Model.activeDocument erased
+      result=maybe (error "word deletion lost its source document") id (Model.activeDocument erased)
   check "selected word deletion remains one ordinary undo"
     (contents (Model.documentBuffer result)=="alpha  gamma" && length (undoStack (Model.documentBuffer result))==1 &&
       contents (undo (Model.documentBuffer result))==source)

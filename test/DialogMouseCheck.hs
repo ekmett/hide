@@ -47,7 +47,7 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       apart=separate {windows=[w {bounds=if windowId w==2 then Rect 45 5 25 14 else Rect 5 3 25 14} | w<-windows separate]}
       paintAt d x y=pick x (toList (toList (renderCellRows d) !! y))
         where
-          pick column (cell:rest)=let (paint,width)=case cell of CellText a text->(a,T.length text); CellGlyph a _ _ _ shown->(a,shown)
+          pick column (cell:rest)=let (paint,width)=case cell of CellText a text->(a,T.length text); CellGlyph a _ _ _ shown->(a,shown); CellScript{}->error "unexpected script cell in dialog paint"
                                  in if column<width then paint else pick (column-width) rest
           pick _ []=error "missing composed test cell"
       shadowed d x y=V.attrBackColor (paintAt d x y)==V.SetTo (V.RGBColor 0 0 0)
@@ -188,7 +188,7 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
   let editedTitle=insertText "new" (addDocument Nothing (newBuffer "") (initialDesktop (80,25)))
       cleanTitle=editedTitle {buffers=M.map (\doc -> doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers editedTitle)}
       narrowTitle=modifyActive (\w -> w {bounds=Rect 1 2 28 10}) editedTitle
-      header desktop=T.lines (snapshot desktop) !! maybe 1 (top . bounds) (activeWindow desktop)
+      header state=T.lines (snapshot state) !! maybe 1 (top . bounds) (activeWindow state)
   check "edited unnamed buffer shows line changes in top title" ("+1 -0" `T.isInfixOf` header editedTitle)
   check "line counts retain green and red colors" (all (`T.isInfixOf` snapshotHtml editedTitle)
     ["color:rgb(85,255,85);background:rgb(0,0,170)'>+1", "color:rgb(255,85,85);background:rgb(0,0,170)'>-0"])
@@ -356,24 +356,24 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       atSecond=addDocument (Just (FileState "/project/Other.hs" Nothing)) (newBuffer "other") nextMessageState
       (_,previousMessage)=handleEvent (V.EvKey (V.KFun 7) [V.MAlt]) atSecond
       (_,emptyNavigation)=runCommand NextMessage desktop
-  let messagePopup=openContext MessagesContext 10 5 messages {problemsVisible=True,problemsFocused=True}
+  let diagnosticPopup=openContext MessagesContext 10 5 messages {problemsVisible=True,problemsFocused=True}
       messageInvoke=snd . handleEvent (V.EvKey V.KEnter [])
-  let emptyMessages=openContext MessagesContext 10 5 (setDiagnostics [] messagePopup)
+  let emptyMessages=openContext MessagesContext 10 5 (setDiagnostics [] diagnosticPopup)
       hideIndex=fromMaybe (error "missing Hide Messages") (findIndex ((==Problems).snd) (contextItems MessagesContext))
       hideEmpty=fst (handleEvent (V.EvKey V.KEnter []) emptyMessages {contextMenu=fmap (\(rect,_)->(rect,hideIndex)) (contextMenu emptyMessages)})
   check "empty Messages popup can still hide its pane" (contextTargetCurrent emptyMessages && not (problemsVisible hideEmpty))
   check "Messages popup retains selected diagnostic owner"
-    (messageInvoke messagePopup==[JumpTo "/project/Main.hs" 1 2])
+    (messageInvoke diagnosticPopup==[JumpTo "/project/Main.hs" 1 2])
   check "Messages popup refuses changed selection instead of jumping elsewhere"
-    (null (messageInvoke messagePopup {problemsSelected=1}))
+    (null (messageInvoke diagnosticPopup {problemsSelected=1}))
   check "Messages popup refuses replaced/reordered diagnostics"
-    (null (messageInvoke (setDiagnostics [secondProblem,problem] messagePopup)))
+    (null (messageInvoke (setDiagnostics [secondProblem,problem] diagnosticPopup)))
   check "Messages popup refuses equal-looking fresh diagnostic projections"
-    (null (messageInvoke (setDiagnostics (diagnostics messagePopup) messagePopup)))
+    (null (messageInvoke (setDiagnostics (diagnostics diagnosticPopup) diagnosticPopup)))
   check "Messages currentness never inspects diagnostic message or list payload"
-    (contextTargetCurrent messagePopup {diagnostics=error "popup currentness forced diagnostics"})
+    (contextTargetCurrent diagnosticPopup {diagnostics=error "popup currentness forced diagnostics"})
   check "Messages popup refuses focus redirected to a source window"
-    (null (messageInvoke messagePopup {problemsFocused=False}))
+    (null (messageInvoke diagnosticPopup {problemsFocused=False}))
   check "first message navigation visits selected diagnostic" (firstMessage==[JumpTo "/project/Main.hs" 1 2])
   check "message navigation goes across files in both directions" (nextMessage==[JumpTo "/project/Other.hs" 0 0] && previousMessage==[JumpTo "/project/Main.hs" 1 2])
   check "empty message navigation is disabled and harmless" (not (commandEnabled desktop NextMessage) && not (commandEnabled desktop PreviousMessage) && null emptyNavigation)
@@ -401,14 +401,14 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       appearanceRect=at appearanceIndex preferenceRects
       darkChoice=fst (handleEvent (V.EvMouseDown (left appearanceRect+5) (top appearanceRect+2) V.BLeft []) graphicalPreferences)
       darkSaved=fst (handleEvent (V.EvKey V.KEnter []) darkChoice)
-      narrow=graphicalPreferences {screenSize=(40,25)}
+      narrowPreferences=graphicalPreferences {screenSize=(40,25)}
   check "Preferences uses compact columns with working right-column hit targets"
     (height (dialogRect graphicalPreferences graphicalDialog)<=15 &&
      left appearanceRect>left (at 0 preferenceRects) && top appearanceRect==top (at 0 preferenceRects) &&
      appearance darkSaved==DarkMode &&
      all (\i -> fieldRects graphicalPreferences graphicalDialog {focus=i}==preferenceRects) [0..length (fields graphicalDialog)-1])
   check "narrow Preferences falls back to one column"
-    (all ((==3+left (dialogRect narrow graphicalDialog)) . left) (fieldRects narrow graphicalDialog))
+    (all ((==3+left (dialogRect narrowPreferences graphicalDialog)) . left) (fieldRects narrowPreferences graphicalDialog))
   check "Pixelate Unicode can be clicked immediately at 80x25" (pixelateUnicode savedPixel)
   check "focused Messages hides source caret" (V.picCursor (renderDesktop desktop {problemsFocused=True})==V.NoCursor)
   check "cursor blinking defaults on" (blinkCursor desktop)

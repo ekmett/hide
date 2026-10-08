@@ -91,9 +91,9 @@ checks = do
   check "remote rejects duplicate editor window identities" (either (const True) (const False) (parseRemoteFrame duplicateWindows rows))
 #ifdef WITH_REMOTE
   let named=Model.addDocument Nothing (newBuffer "payload") (Model.initialDesktop (80,25))
-      odd=named {Model.buffers=Data.Map.Strict.map (\doc->doc {Model.documentLabel=Just "Odd\nlabel\t"}) (Model.buffers named)}
+      oddLabel=named {Model.buffers=Data.Map.Strict.map (\doc->doc {Model.documentLabel=Just "Odd\nlabel\t"}) (Model.buffers named)}
   check "sanitized host labels round trip through actual remote metadata"
-    (case parseRemoteFrame (object (P.frameMetadata "." odd)) (P.frameRows odd) of Right decoded->remoteWindows decoded==[(1,"Odd·label·",True,True)]; _->False)
+    (case parseRemoteFrame (object (P.frameMetadata "." oddLabel)) (P.frameRows oddLabel) of Right decoded->remoteWindows decoded==[(1,"Odd·label·",True,True)]; _->False)
 #endif
   check "drag and wheel updates wait for the new frame instead of repainting stale content"
     (not (nativeRepaint [3,10,4,0,0,1]) && not (nativeRepaint [9,10,4,-1,0]))
@@ -173,7 +173,7 @@ checks = do
   check "menu state requires advertised command capability" (not (or (states (menuMeta ["menuState" .= [("hide.file.new"::T.Text,True)]]))))
   let reordered=states (menuMeta ["menuCommands" .= (["hide.app.quit","hide.file.new"]::[T.Text]),"menuState" .= [("hide.app.quit"::T.Text,False),("hide.file.new",True)]])
   check "menu enable state maps by command name across reordered layouts" (take 1 (drop newToken reordered)==[True] && take 1 (drop quitToken reordered)==[False])
-  let remoteMenu metadata index= either (const Nothing) (\frame -> remoteMenuInput frame index) (parseRemoteFrame metadata rows)
+  let remoteMenu metadata index= either (const Nothing) (\decoded -> remoteMenuInput decoded index) (parseRemoteFrame metadata rows)
       enabledMenu=menuMeta ["menuCommands" .= (["hide.file.new"]::[T.Text]),"menuState" .= [("hide.file.new"::T.Text,True)]]
   check "menu invocation uses its public identity" (remoteMenu enabledMenu newToken==Just (object ["type" .= ("menu"::T.Text),"command" .= ("hide.file.new"::T.Text)]))
   check "invalid menu positions cannot alias the first command" (remoteMenu enabledMenu (-1)==Nothing && remoteMenu enabledMenu 10000==Nothing)

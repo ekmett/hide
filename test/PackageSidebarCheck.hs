@@ -177,19 +177,19 @@ checks=bracket temporary removePathForcibly $ \root->do
         unless (unchangedConfig==ghcBytes) (fail "Test/Benchmark must not replace the saved target")
         removeFile invocation
         let focused=focusOther afterRunners
-            dirty=editActive (\sel->replaceSelection sel "changed") Nothing focused
-        blocked<-request "test:check" "Test" dirty >>= admitted >>= wait "dirty target refusal" (maybe False (const True) . dialog)
+            edited=editActive (\sel->replaceSelection sel "changed") Nothing focused
+        blocked<-request "test:check" "Test" edited >>= admitted >>= wait "dirty target refusal" (maybe False (const True) . dialog)
         exists<-doesFileExist invocation
         unless (not exists) (fail "Dirty source cannot launch a captured package build")
         let reopened=blocked {dialog=Nothing}
         -- A component has no agent-readable resource: even an advertised tree is
         -- refused by the existing host boundary, before its Human-only handler.
-        row<-case [row | row<-rows reopened,P.infoLabel (rowInfo row)=="exe:demo"] of
-          row:_->pure row; _->fail "Executable row missing"
-        reference<-case [ref | ("Build",P.RegisteredAction ref)<-rowActions row] of
+        componentRow<-case [componentRow | componentRow<-rows reopened,P.infoLabel (rowInfo componentRow)=="exe:demo"] of
+          componentRow:_->pure componentRow; _->fail "Executable row missing"
+        reference<-case [ref | ("Build",P.RegisteredAction ref)<-rowActions componentRow] of
           ref:_->pure ref; _->fail "Build action missing"
-        let P.TreeHit owner _ _=rowHit row
-            trace=maybe [] (hitTrace (keyOf (rowHit row))) (sideTree reopened)
+        let P.TreeHit owner _ _=rowHit componentRow
+            trace=maybe [] (hitTrace (keyOf (rowHit componentRow))) (sideTree reopened)
             advertised=reopened {status="agent action pending",sideTree=fmap (\tree->tree {treeFocused=True,treeAgentRefs=[owner]}) (sideTree reopened)}
         writeIORef captured Nothing
         (_,agentQueued)<-sidebarEffects host core advertised [InvokeTree trace reference Menu.AgentMenu]

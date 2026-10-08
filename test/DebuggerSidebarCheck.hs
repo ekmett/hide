@@ -64,7 +64,7 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
   empty<-expand mounted >>= wait "empty Watches" (has "No watches")
   added<-add "counter + 1" empty >>= wait "added watch row" (has "counter + 1")
   (revision,_,entries)<-debuggerWatches runtime
-  let [(ident,entry)]=M.toList entries
+  let (ident,entry)=case M.toList entries of [watch]->watch; _->error "expected one sidebar debugger watch"
       selected=row "counter + 1" added
       stale=command "Remove watch" selected added
   check "watch has monotonic identity and bounded owner metadata" (ident>0 && revision>0 && watchExpression entry=="counter + 1" && watchRevision entry==0)
@@ -101,7 +101,7 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
   storedPrivate<-save "private-source-expression" sourceEditor
   protected<-wait "private watch row" (has "Private watch") storedPrivate {guestPrivatePaths=[]}
   (_,_,privateEntries)<-debuggerWatches runtime
-  check "captured source privacy remains decisive after origin becomes public" (all (not.T.isInfixOf "private-source-expression") (labels protected) && any (\entry->watchPrivate entry && watchOrigin entry==Just "/private/watch.hs") (M.elems privateEntries))
+  check "captured source privacy remains decisive after origin becomes public" (all (not.T.isInfixOf "private-source-expression") (labels protected) && any (\watch->watchPrivate watch && watchOrigin watch==Just "/private/watch.hs") (M.elems privateEntries))
   _<-foldM (\d _->tick d) protected [1..20::Int]
   check "management does not create a stopped session or evaluation handles" . (==Nothing) =<< debuggerSidebarEpoch runtime
 
@@ -122,7 +122,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
           i:_->let (next,outbox)=activateTree True i d {sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree d)} in snd <$> effects next outbox
           _->error ("missing row "<>T.unpack title)
         requests=do values<-T.lines <$> TIO.readFile logPath
-                    pure [request | value<-values,Just body<-[decodeStrictText value],Just request<-[field "request" body]] :: IO [Value]
+                    pure [request | value<-values,Just body<-[decodeReplyText value],Just request<-[field "request" body]] :: IO [Value]
         commands=map (maybe "" id . (field "command" :: Value -> Maybe T.Text)) <$> requests
         readPage d request=withAsync (debuggerSidebarRead runtime request) $ \worker->do
           next<-waitIO "sidebar page reply" (\_->maybe False (const True) <$> poll worker) d
@@ -130,7 +130,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
           pure (next,result)
         selected d=do (_,finish)<-debuggerTool runtime d "debug_status" (object []); value<-finish
                       pure (value >>= maybe (Left "no frame") Right . (field "frame" :: Value -> Maybe Value) >>= maybe (Left "no frame ID") Right . (field "id" :: Value -> Maybe Int))
-        decodeStrictText=decodeStrict' . Data.Text.Encoding.encodeUtf8
+        decodeReplyText=decodeStrict' . Data.Text.Encoding.encodeUtf8
     initial<-initializeSidebar host (initialDesktop (80,25)) {sideTree=Just (emptySidebar (takeDirectory logPath) 28 False)}
     mounted<-wait "Debug provider" (has "Debug") initial
     (_,prompted)<-core mounted [DebugSidebarAction AddDebugWatch]

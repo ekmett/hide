@@ -81,8 +81,8 @@ checks=bracket temporary removePathForcibly $ \root -> do
     bounded<-pollACPCompletionTranscript completion
     check "debug transcript queue and entries are bounded" (length bounded==64 && all ((<=2048).T.length) bounded)
     check "debug transcript polling drains without new requests" . null =<< pollACPCompletionTranscript completion
-    expired<-submitted completion "first" []
-    check "completed request cannot accept late tools" (isLeft expired)
+    lateSubmission<-submitted completion "first" []
+    check "completed request cannot accept late tools" (isLeft lateSubmission)
     forM_ [Shown,Accepted,Ignored,PartiallyAccepted 2] $ \action -> feedbackACP completion action (Proposal 9 14 "new😀\r\n" Nothing)
     beforeFeedback<-logs
     check "feedback never starts its own provider task" (length [() | entry<-beforeFeedback,field "method" entry==Just ("session/prompt"::T.Text)]==1)

@@ -119,16 +119,16 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
           _<-send runtime "launch-config" ["0","",p] base
           state<-timeout 1000000 (takeMVar preparationState) >>= maybe (error "preparation did not start") pure
           check "preparation body restores unmasked execution" (state==Unmasked)
-      stopped<-tryTakeMVar preparationStopped
-      check "runtime close joins pending preparation cleanup" (stopped==Just ())
+      preparationCleanup<-tryTakeMVar preparationStopped
+      check "runtime close joins pending preparation cleanup" (preparationCleanup==Just ())
       -- Replacing a still-running preparation retires its worker before the new
       -- request starts, without treating that old context as the new request.
       preparations<-newIORef (0::Int)
       entered<-newEmptyMVar
-      held<-newEmptyMVar
+      preparationRelease<-newEmptyMVar
       let prepare compiler=do
             number<-atomicModifyIORef' preparations (\n->(n+1,n))
-            if number==0 then putMVar entered () >> takeMVar held else pure ()
+            if number==0 then putMVar entered () >> takeMVar preparationRelease else pure ()
             pure (Right (plan compiler))
       withDebuggerHdb (pure 0) prepare (\_ _->pure (Left "unexpected acquisition")) $ \runtime->do
         p<-port
@@ -172,7 +172,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
                       Just w->(selection w,scrollRow w,scrollColumn w,rowsInteraction w)
                       _->error "missing Downloads window"
                     selected=modifyActive (\w->w {selection=Selection 0 5,scrollRow=1,scrollColumn=2,
-                      rowsInteraction=fmap (\(RowsInteraction ident _)->RowsInteraction ident True) (rowsInteraction w)}) progress
+                      rowsInteraction=fmap (\(RowsInteraction rowId _)->RowsInteraction rowId True) (rowsInteraction w)}) progress
                 captured<-captureCancel selected
                 before<-evaluate (details selected) >>= makeStableName
                 idle<-tickDebugger runtime captured
@@ -198,7 +198,7 @@ checks | os=="mingw32"=pure () -- Official hdb bindists are currently POSIX only
                       Just (rows,index,selected,_)->(rows,index,selected)
                       _->error "missing Downloads rows"
                     (_,_,firstId)=currentRows progress
-                    cancelled ident desktop=let (rows,index,_)=currentRows desktop in case M.lookup ident index >>= (rows Vec.!?) of
+                    cancelled rowId desktop=let (rows,index,_)=currentRows desktop in case M.lookup rowId index >>= (rows Vec.!?) of
                       Just (W.WindowRow _ caption _)->"Cancelled" `T.isInfixOf` caption
                       _->False
                 held<-captureCancel progress

@@ -170,16 +170,16 @@ checks = do
      null (snd (runCommand shellCommand expiredShell)))
   let terminal=modifyActive (\w->w {bounds=Rect 3 4 50 12,selection=Selection 1 4})
         (addReadOnly "Terminal 1" "terminal text" (addDocument Nothing (newBuffer "source") (initialDesktop (100,35))))
-      view=fromMaybe (error "terminal missing") (activeWindow terminal)
-      ident=windowId view
+      terminalView=fromMaybe (error "terminal missing") (activeWindow terminal)
+      ident=windowId terminalView
       pin=fst (runCommand ToggleTerminalPin terminal)
       unpinnedOriginal=fst (runCommand ToggleTerminalPin pin)
       get wid d=fromMaybe (error "window missing") (find ((==wid).windowId) (windows d))
       sameIdentity a b=windowId a==windowId b && sourceFixtureBuffer a==sourceFixtureBuffer b && windowNumber a==windowNumber b && selection a==selection b
   check "terminal pin retains window buffer number selection and restores floating bounds"
     (windowPinned pin (get ident pin) && bounds (get ident pin)==problemsRect pin &&
-     sameIdentity view (get ident pin) && sameIdentity view (get ident unpinnedOriginal) &&
-     bounds (get ident unpinnedOriginal)==bounds view && buffers unpinnedOriginal==buffers terminal && M.null (dockedTerminals unpinnedOriginal))
+     sameIdentity terminalView (get ident pin) && sameIdentity terminalView (get ident unpinnedOriginal) &&
+     bounds (get ident unpinnedOriginal)==bounds terminalView && buffers unpinnedOriginal==buffers terminal && M.null (dockedTerminals unpinnedOriginal))
   let border=T.lines (snapshot pin) !! top (problemsRect pin)
   check "bottom tab strip joins the panel sides with downward corners" (T.head border=='╔' && T.last border=='╗')
   let clicked=fst (handleEvent (V.EvMouseDown 9 4 V.BLeft []) terminal)
@@ -188,7 +188,7 @@ checks = do
       secondView=fromMaybe (error "second missing") (activeWindow second)
       twoPins=setTerminalPinned True (windowId secondView) second
       withPanelMessages=setProblemsVisible True twoPins
-      focused=activateWindowNumber (windowNumber view) withPanelMessages
+      focused=activateWindowNumber (windowNumber terminalView) withPanelMessages
       cycled=cycleEditorWindow False focused
   check "one shared panel reserves one height and selecting a tab reveals only its terminal"
     (problemsHeight withPanelMessages==problemsHeight pin && messagesDisplayed withPanelMessages &&
@@ -210,7 +210,7 @@ checks = do
       closed=closeActive (focusWindow ident twoPins)
   check "screen files panel tile and cascade keep pinned views in the same bottom rectangle"
     (all ((==problemsRect cascaded).bounds) resizedPins && all (\w->top (bounds w)+height (bounds w)<=top (problemsRect cascaded)) (floatingWindows cascaded) &&
-     bounds (get ident undocked)==fitWindow undocked (bounds view) && sameIdentity view (get ident undocked))
+     bounds (get ident undocked)==fitWindow undocked (bounds terminalView) && sameIdentity terminalView (get ident undocked))
   check "closing a pinned view removes only its tab and preserves the remaining terminal"
     (M.notMember ident (dockedTerminals closed) && M.member (windowId secondView) (dockedTerminals closed) &&
      bottomTerminal closed==Just (windowId secondView) && length (windows closed)==length (windows twoPins)-1)
@@ -249,7 +249,7 @@ checks = do
      chooseScale Nothing ["1.3"]==Right 1.25 &&
      all (either (const True) (const False)) [chooseScale Nothing ["NaN"],chooseScale Nothing ["Infinity"],chooseScale Nothing ["0.9"]])
   check "Control and Alt zoom reset use the same modifiers as zoom in and out"
-    (all (\mods -> map (\key -> zoomDirection (fromEnum key) mods) "0+=-"==map Just [0,1,1,-1]) [2,4,3,5] &&
+    (all (\mods -> map (\character -> zoomDirection (fromEnum character) mods) "0+=-"==map Just [0,1,1,-1]) [2,4,3,5] &&
      zoomDirection (fromEnum '0') 0==Nothing && zoomDirection (fromEnum 'a') 2==Nothing)
   check "remote targets retain the exact remote path"
     (parseRemoteTarget "user@eak-pc.local:some-path"==Just ("user@eak-pc.local","some-path") &&
@@ -371,10 +371,10 @@ checks = do
   forM_ [beginSelection,beginMove] $ \captured -> do
     let (crossed,actions)=handleEvent (mouseInput sx sy) captured
         ended=fst (handleEvent (V.EvMouseUp sx sy (Just V.BLeft)) crossed)
-        clicked=fst (handleEvent (mouseInput sx sy) ended)
+        clickedSelector=fst (handleEvent (mouseInput sx sy) ended)
     check "dragging across compiler selector retains capture without invoking it"
       (drag captured/=Nothing && drag crossed==drag captured && contextMenu crossed==Nothing && null actions)
-    check "compiler selector opens on a new click after release" (contextMenu clicked/=Nothing)
+    check "compiler selector opens on a new click after release" (contextMenu clickedSelector/=Nothing)
   let mouse x y=fst . handleEvent (V.EvMouseDown x y V.BLeft [])
       grabbed=mouse 10 1 desktop
       dragged=mouse 20 6 grabbed
@@ -393,9 +393,9 @@ checks = do
   check "title dragging preserves size when there is room" (rect floatingMove==Just (Rect 10 6 30 10))
   check "title dragging shrinks within dock boundaries" (rect dockMove==Just (Rect 33 6 47 10))
   check "keyboard movement uses the same edge shrink behavior" (rect keyboardMove==Just (Rect 1 1 79 23))
-  let arranged rs=let base=addDocument Nothing (newBuffer "geometry") (initialDesktop (100,40))
-                      original=fromMaybe (error "missing geometry window") (activeWindow base)
-                  in base {windows=zipWith (\i r -> original {windowId=i,windowNumber=i,bounds=r}) [1..] rs}
+  let arranged rs=let geometryBase=addDocument Nothing (newBuffer "geometry") (initialDesktop (100,40))
+                      geometryWindow=fromMaybe (error "missing geometry window") (activeWindow geometryBase)
+                  in geometryBase {windows=zipWith (\i r -> geometryWindow {windowId=i,windowNumber=i,bounds=r}) [1..] rs}
       rectangles=map bounds . windows
       corner dx dy state=let r=bounds (fromMaybe (error "missing geometry window") (activeWindow state)); x=left r+width r-2; y=top r+height r-1
                          in mouse (x+dx) (y+dy) (mouse x y state)
@@ -549,7 +549,7 @@ sourceCoordinateChecks=do
   forM_ [(source,original),(removed,changed),(B.undo removed,original)] $ \(buffer,flat)->do
     _<-evaluate (B.prepareBuffer buffer)
     let rows=map (T.dropWhileEnd (=='\r')) (T.splitOn "\n" flat)
-        starts=scanl (\offset row->offset+T.length row+1) 0 (T.splitOn "\n" flat)
+        starts=scanl (\start row->start+T.length row+1) 0 (T.splitOn "\n" flat)
         offset row=starts !! row
         reference p=let row=length (takeWhile (<=p) (take (length rows) starts))-1
                     in (row,B.displayColumn (rows !! row) (p-offset row))
@@ -562,7 +562,7 @@ sourceCoordinateChecks=do
           [n | n<-[0,1,size `div` 2,size]++[1200..1220]++[size-40,size-8],n>=0,n<=size]]
     forM_ cases $ \(row,column)->do
       let p=offset row+column
-          focused=modifyActive (\w->w {selection=Selection p p}) base
+          focused=modifyActive (\window->window {selection=Selection p p}) base
           w=win focused
           expected=reference p
           visible=ensureVisible focused
@@ -585,7 +585,7 @@ sourceCoordinateChecks=do
       forM_ ([0,1,7,8,max 0 (extent-1),extent,extent+1]++[1200..min 1220 extent]) $ \column->do
         let p=offset row+B.columnOffset line column
             pan=max 0 (column-3)
-            located=modifyActive (\w->w {scrollRow=row,scrollColumn=pan}) base
+            located=modifyActive (\window->window {scrollRow=row,scrollColumn=pan}) base
             w=win located; x=left (bounds w)+1+column-pan; y=top (bounds w)+1
             hovered=fst (hoverAt x y located)
             target=if column>=extent then Nothing else Just (sourceFixtureBuffer w,B.revision buffer,p)

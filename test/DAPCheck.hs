@@ -96,8 +96,8 @@ checks = do
     check "failed THC startup reports exit status" (any (\e -> case e of DAP.Disconnected reason -> "23" `T.isInfixOf` reason; _ -> False) events)
   bracket (DAP.startManaged "python3" ["-u","-c","import time; print('waiting',flush=True); time.sleep(60)"] "." "127.0.0.1" managedPort) DAP.stopClient $ \client -> do
     ident<-DAP.request client "initialize" Null
-    waiting<-await client (any notification)
-    check "managed build is not connected while waiting for its listener" (DAP.Connected `notElem` waiting)
+    startupEvents<-await client (any notification)
+    check "managed build is not connected while waiting for its listener" (DAP.Connected `notElem` startupEvents)
     stopped<-timeout processStopTimeout (DAP.stopClient client)
     check "managed startup cancellation stops process before joining output readers" (stopped==Just ())
     events<-DAP.pollEvents client

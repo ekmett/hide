@@ -43,7 +43,7 @@ checks = do
   let shell=renderMarkdown 20 "```sh\necho hello\n```"
       shellLines=T.lines (styledContents shell)
   check "shell panels use their own background style" (any (\(_,style)->case style of CodeStyle True _->True; _->False) shell)
-  check "code panel includes top bottom and side padding" (length shellLines==3 && all T.null (map T.strip [head shellLines,last shellLines]) && "   echo hello " `T.isInfixOf` styledContents shell)
+  check "code panel includes top bottom and side padding" ((case shellLines of [first,_,final]->all (T.null . T.strip) [first,final]; _->False) && "   echo hello " `T.isInfixOf` styledContents shell)
   check "list continuation hangs below content" (text 12 "- one two three four" == "• one two\n  three four")
   let help=addHelpStyled (renderMarkdown 40 "# Title\n\nText\n\n```sh\necho hi\n```") (initialDesktop (80,25))
       light=snapshotHtml help {appearance=LightMode}
@@ -82,7 +82,7 @@ checks = do
   rendered<-timeout 2000000 (evaluate (styledLength long))
   check "large streamed paragraph avoids quadratic inline concatenation" (maybe False (>90000) rendered)
   check "large paragraph retains text order and inline styles"
-    (T.take 8 (styledContents long)=="Ordinary" && sum [T.count "b" text | (text,BoldStyle Keyword)<-long]==2000 && sum [T.count "a" text | (text,Literal)<-long]==2000)
+    (T.take 8 (styledContents long)=="Ordinary" && sum [T.count "b" run | (run,BoldStyle Keyword)<-long]==2000 && sum [T.count "a" run | (run,Literal)<-long]==2000)
 
   putStrLn "Markdown checks passed"
   where check label ok = unless ok (error label)

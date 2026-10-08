@@ -260,7 +260,7 @@ runtimeLifecycleChecks docs=bracket temporary removePathForcibly $ \directory->w
 #endif
       (_,queued)<-menuEffects host (\_ _->error "bound replacement missed host") chosen actions
       let document current=do
-            next<-tickMenus host (\current _->pure (False,current)) current
+            next<-tickMenus host (\desktop _->pure (False,desktop)) current
             if activeDocument next/=Nothing then pure next else threadDelay 1000 >> document next
       opened<-timeout 5000000 (document queued) >>= maybe (error "bound replacement callback did not finish") pure
       check "replacement chord invokes actual typed callback" (maybe False (T.isInfixOf "Independent extension" . contents . documentBuffer) (activeDocument opened))

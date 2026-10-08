@@ -108,9 +108,9 @@ checks=bracket temporary removePathForcibly $ \directory -> do
       (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "read window admission failed") pure
       let conversation=addPluginWindow reference body base
       target<-either (error . T.unpack) pure (windowReadTarget conversation (maybe (error "missing conversation frame") windowId (activeWindow conversation)))
-      image<-captureWindow conversation target >>= either (error . T.unpack) pure
+      capturedBody<-captureWindow conversation target >>= either (error . T.unpack) pure
       check "window admission captures raw immutable body without applying masks"
-        (contentSlice (W.preparedWindowText (capturedWindowPrepared image)) 0 (T.length conversationText)==conversationText)
+        (contentSlice (W.preparedWindowText (capturedWindowPrepared capturedBody)) 0 (T.length conversationText)==conversationText)
       (_,masked)<-beginWindow conversation
       maskedResult<-masked
       check "admitted prepared window read applies semantic privacy masks"
@@ -118,9 +118,9 @@ checks=bracket temporary removePathForcibly $ \directory -> do
           Just output->not ("private-token" `T.isInfixOf` output) && not ("unsent-secret" `T.isInfixOf` output) && "public λ" `T.isInfixOf` output
           Nothing->False) maskedResult)
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'prompt'\n"
-    (prompt,pending)<-begin reader base
-    check "read policy Prompt uses owning approval queue" (dialog prompt/=Nothing)
-    let current=changed {dialog=dialog prompt}
+    (approvalPrompt,pending)<-begin reader base
+    check "read policy Prompt uses owning approval queue" (dialog approvalPrompt/=Nothing)
+    let current=changed {dialog=dialog approvalPrompt}
     _<-submit runtime current
     result<-pending
     check "queued read captures current buffer after approval" (either (const False) (\value->parseMaybe (withObject "read result" (.: "text")) value==Just ("new λ\n"::T.Text)) result)

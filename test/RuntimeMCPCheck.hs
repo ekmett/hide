@@ -30,12 +30,12 @@ checks=withSessionServices $ \runtime -> do
   check "terminal capability explicitly reported" (case listing of Right value -> field "available" value==Just terminalAvailable; _ -> False)
   (_,invalid)<-call d "terminal_output" (object ["terminalId" .= ("missing"::T.Text),"limit" .= (maxBound::Int)])
   check "terminal reads bounded" (either (const True) (const False) invalid)
-  let dirty=insertText "x" (addDocument Nothing (newBuffer "") d)
-  (unchanged,refused)<-call dirty "build_start" (object ["action" .= ("make"::T.Text)])
+  let edited=insertText "x" (addDocument Nothing (newBuffer "") d)
+  (unchanged,refused)<-call edited "build_start" (object ["action" .= ("make"::T.Text)])
   refusedFacts<-Jobs.buildJobStatus (sessionBuildJobs runtime) unchanged
   check "build refuses unsaved source without UI dialog"
-    (fmap windowId (activeWindow unchanged)==fmap windowId (activeWindow dirty) &&
-     fmap (revision.documentBuffer) (activeDocument unchanged)==fmap (revision.documentBuffer) (activeDocument dirty) &&
+    (fmap windowId (activeWindow unchanged)==fmap windowId (activeWindow edited) &&
+     fmap (revision.documentBuffer) (activeDocument unchanged)==fmap (revision.documentBuffer) (activeDocument edited) &&
      dialog unchanged==Nothing && field "active" refusedFacts==Just False && either (const True) (const False) refused)
   python<-findExecutable "python3"
   case python of
@@ -89,10 +89,10 @@ checks=withSessionServices $ \runtime -> do
       _<-awaitJob jobs replacement (100::Int)
       if not terminalAvailable then pure () else do
         (terminal,response)<-call d "terminal_start" (object ["command" .= executable,"args" .= (["-u","-c","print('ready',flush=True); print(input(),flush=True)"]::[String]),"cwd" .= root])
-        ident<-case response of Right value -> maybe (error "missing terminalId") pure (field "terminalId" value :: Maybe T.Text); Left err -> error (T.unpack err)
-        (_,written)<-call terminal "terminal_input" (object ["terminalId" .= ident,"text" .= ("mcp input\n"::T.Text)])
+        terminalId<-case response of Right value -> maybe (error "missing terminalId") pure (field "terminalId" value :: Maybe T.Text); Left err -> error (T.unpack err)
+        (_,written)<-call terminal "terminal_input" (object ["terminalId" .= terminalId,"text" .= ("mcp input\n"::T.Text)])
         check "terminal accepts input" (either (const False) (const True) written)
-        output<-awaitTerminal call terminal ident (100::Int)
+        output<-awaitTerminal call terminal terminalId (100::Int)
         check "shared terminal produces captured output and exit" (field "exitCode" output==Just (0::Int) && maybe False (T.isInfixOf "mcp input") (field "text" output))
   _<-tickSessionServices runtime d
   _<-sessionEffects runtime core d []

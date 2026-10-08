@@ -465,7 +465,7 @@ shellBlockChecks = when (terminalAvailable && os/="mingw32") $ bracket temporary
     queued<-execute desktop chosen
     opened<-await "visible interactive terminal" (\entries->case entries of (tid,_,_):_->outputHas tid "ready"; _->pure False) queued
     entries<-C.listConsoles consoles
-    let (tid,terminalBid,_)=head entries
+    let (tid,terminalBid,_)=case entries of entry:_->entry; []->error "interactive terminal entry missing"
     check "explicit Markdown execution opens and focuses terminal" (fmap sourceFixtureBuffer (activeWindow opened)==Just terminalBid)
     check "whole shell body preserves literal arguments" =<< outputHas tid "literal ; $(touch should-not-exist) λ"
     check "shell block runs in selected project cwd" =<< outputHas tid (T.pack expectedRoot)

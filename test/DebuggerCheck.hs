@@ -282,7 +282,7 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
             reject 21 gen' invalidated
             saved<-saveOnce "counter + λ" 0 invalidated
             (_,_,values)<-debuggerWatches runtime
-            let [(watchId,entry)]=M.toList values
+            let (watchId,entry)=case M.toList values of [watch]->watch; _->error "expected one saved debugger watch"
             editing<-watchAction (EditDebugWatch watchId (watchRevision entry)) saved
             let editDraft=fill "counter + 2" editing
             pendingThreads<-send "threads" [] editDraft

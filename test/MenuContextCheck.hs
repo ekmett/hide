@@ -236,7 +236,7 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
   resumed<-tickMenus host (\current _->pure (False,current)) retired
   released<-timeout 1000000 (wait blocked)
   check "bounded owner drain releases waiting producer" (released==Just (Right ()))
-  _<-foldM (\current _->tickMenus host (\current _->pure (False,current)) current) resumed [1..17::Int]
+  _<-foldM (\current _->tickMenus host (\desktop _->pure (False,desktop)) current) resumed [1..17::Int]
   -- Existing queued work also checks the source contribution lifetime at adoption.
   (_,late)<-menuEffects host (\_ _->error "missing context worker") chosen requests
   requestMenuRetirement host reference
@@ -327,9 +327,9 @@ sourceActionCheck host metadata path=withDebugger $ \runtime->do
   stale<-waitResult replaced
   check "equal-revision replacement refuses prepared source action" ("changed" `T.isInfixOf` status stale)
   watch<-run "Add watch…" base
-  prompt<-maybe (error "captured watch dialog missing") pure (dialog watch)
-  check "watch dialog has frozen full selection" (case fields prompt of SelectedInput _ text _:_ ->text=="alpha beta\ngamma"; _->False)
-  let (submitted,effects)=submitDialog 0 prompt watch
+  watchPrompt<-maybe (error "captured watch dialog missing") pure (dialog watch)
+  check "watch dialog has frozen full selection" (case fields watchPrompt of SelectedInput _ text _:_ ->text=="alpha beta\ngamma"; _->False)
+  let (submitted,effects)=submitDialog 0 watchPrompt watch
   (_,stored)<-core submitted effects
   storedInfo<-inspect stored
   check "watch confirmation stores one bounded expression" (parseEither (withObject "status" (.:"watchCount")) storedInfo==Right (1::Int))
@@ -343,8 +343,9 @@ sourceActionCheck host metadata path=withDebugger $ \runtime->do
   check "watch confirmation refuses changed source" (parseEither (withObject "status" (.:"watchCount")) staleInfo==Right (1::Int) && "changed" `T.isInfixOf` status staleWatch)
   withRegistry $ \registry->do
     version<-captureVersion (documentBuffer (maybe (error "missing source document") id (activeDocument base)))
-    let target=case contextTarget captured of Just value@SourceTarget{}->value; _->error "missing source capture"
-        request=DebugSourceRequest ToggleSourceBreakpoint (sourceTargetWindow target) (sourceTargetBuffer target) version (sourceTargetSelection target) (sourceTargetFile target) (Just path) 2 Nothing False
+    let request=case contextTarget captured of
+          Just SourceTarget {sourceTargetWindow=wid,sourceTargetBuffer=bid,sourceTargetSelection=capturedSelection,sourceTargetFile=file}->DebugSourceRequest ToggleSourceBreakpoint wid bid version capturedSelection file (Just path) 2 Nothing False
+          _->error "missing source capture"
         unit=Codec Null (const (Right ())) (const Null)
     command<-either (error . show) pure =<< registerCommand registry (CommandDef "example.debug-forged" "Forged" unit unit (\_ ()->pure (Right ())))
     reference<-either (error . show) pure =<< Plugin.contributeMenu (menuContributions host)

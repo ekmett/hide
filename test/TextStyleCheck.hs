@@ -58,7 +58,7 @@ checks=do
       terminalTraits=[(TL.toStrict text,textFlags (textStyleFromAttr attr)) | ops<-toList terminal, TextSpan {textSpanAttr=attr,textSpanText=text}<-toList ops]
   check "remote TUI restores all four font attributes" (all (\(char,flags)->any (\(text,actual)->char `T.isInfixOf` text && actual==flags) terminalTraits) [("B",1),("I",2),("X",3),("U",8),("S",16),("A",27)])
   check "remote TUI carries the actual Vty underline and strike bits"
-    (all (\(character,trait)->any (\ops->any (\span->case span of
+    (all (\(character,trait)->any (\ops->any (\op->case op of
       TextSpan attr _ _ text->character `T.isInfixOf` TL.toStrict text && VT.styleMask attr .&. trait/=0
       _->False) (toList ops)) (toList terminal)) [("U",VT.underline),("S",VT.strikethrough)])
   let allPaint=TextStyle (fromIntegral foreground) 0x654321 27
@@ -68,11 +68,12 @@ checks=do
       asciiBase=addDocument Nothing (newBuffer asciiText) (initialDesktop (80,25))
       asciiDesktop=modifyActive (\w->w {selection=Selection 1 5}) asciiBase
         {buffers=M.adjust (\doc->doc {documentSourceRows=Just (V.singleton (prepareSourceRow asciiText [(T.singleton c,TerminalStyle foreground 0x654321 3) | c<-T.unpack asciiText]))}) 1 (buffers asciiBase)}
-      Just asciiWindow=activeWindow asciiDesktop
+      asciiWindow=maybe (error "ASCII source window missing") id (activeWindow asciiDesktop)
       Rect ax ay _ _=bounds asciiWindow
-      cells=concatMap (\span->case span of
+      cells=concatMap (\op->case op of
         CellText paint text->[(c,paint) | c<-T.unpack text]
-        CellGlyph paint _ _ _ shown->replicate shown (' ',paint))
+        CellGlyph paint _ _ _ shown->replicate shown (' ',paint)
+        CellScript{}->error "unexpected script cell in ASCII style fixture")
         (toList (renderCellRows asciiDesktop V.! (ay+1)))
       displayed=take 12 (drop (ax+1) cells)
       normal=textStyleAttr (TextStyle (fromIntegral foreground) 0x654321 3)
@@ -86,5 +87,5 @@ checks=do
   check "selection keeps composed traits" (3 `elem` selectedFlags)
   check "styling keeps copied semantic text" (clipboard (fst (runCommand Copy selected))=="both")
   check "HTML snapshots carry both font traits" ("font-weight:bold;font-style:italic" `T.isInfixOf` snapshotHtml markdown)
-  check "direct terminal projection keeps dimensions" (V.length terminal==25 && V.all ((==80).sum.map textSpanOutputWidth.toList) terminal)
+  check "direct terminal projection keeps dimensions" (V.length terminal==25 && V.all ((==80).sum.map (\op->case op of TextSpan _ width _ _->width; _->error "expected text span in terminal projection").toList) terminal)
   putStrLn "text style checks passed"

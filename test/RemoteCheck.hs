@@ -594,13 +594,13 @@ requestedPasteReconnectCheck=do
   validNextId<-newIORef (nextId initial)
   let tick d=writeIORef observed d >> pure d
       core d _=pure (False,d)
-      inspect d _ (String "invalidate-checkpoint")=do
+      inspectCheckpoint d _ (String "invalidate-checkpoint")=do
         writeIORef validNextId (nextId d)
         pure (False,d {nextId=0},pure (Just (String "ready")))
-      inspect d _ (String "repair-checkpoint")=do
+      inspectCheckpoint d _ (String "repair-checkpoint")=do
         restored<-readIORef validNextId
         pure (False,d {nextId=restored},pure (Just (String "ready")))
-      inspect d _ _=pure (False,d,pure Nothing)
+      inspectCheckpoint d _ _=pure (False,d,pure Nothing)
       checkpointState request=bracket open hClose $ \h->do
         writePacket h (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= (request::T.Text)]))
         response<-timeout 3000000 (readPacket h)
@@ -609,7 +609,7 @@ requestedPasteReconnectCheck=do
       awaitText expected=do
         d<-readIORef observed
         if activeText d==expected then pure () else threadDelay 10000 >> awaitText expected
-  withAsync (runRemoteDaemon session 1 core tick inspect initial) $ \daemon->do
+  withAsync (runRemoteDaemon session 1 core tick inspectCheckpoint initial) $ \daemon->do
     link daemon
     first<-awaitOpen (300::Int)
     greeting<-attach first 0

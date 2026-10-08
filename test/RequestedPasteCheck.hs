@@ -16,7 +16,7 @@ import Hide.RequestedPaste
 
 checks :: IO ()
 checks=do
-  reads<-newRequestedPaste
+  requests<-newRequestedPaste
   let source=addDocument Nothing (newBuffer "source") (initialDesktop (80,25)) {browserFrontend=True}
       dg=Dialog "Rename" Information [SelectedInput "Name" "old" (Selection 0 3)] 0 ["OK","Cancel"] []
       opened=source {dialog=Just dg}
@@ -24,17 +24,17 @@ checks=do
       token d=do
         let (next,effects)=P.applyInput (P.BrowserCommand Paste) d
         check "Production named Paste requests a clipboard read" (ReadBrowserClipboard `elem` effects)
-        fromJust <$> requestPaste reads next
+        fromJust <$> requestPaste requests next
       unchanged d=check "Expired requested paste cannot mutate source or dialog" (activeText d=="source" && dialog d==Nothing)
       stale d lost restored=do
         receipt<-token d
-        refreshRequestedPaste reads lost
-        (arrived,_)<-applyRequestedPaste reads receipt "CLIPBOARD" restored
+        refreshRequestedPaste requests lost
+        (arrived,_)<-applyRequestedPaste requests receipt "CLIPBOARD" restored
         check "Input lifetime cannot revive after an intermediate transition" (activeText arrived==activeText restored && fmap fields (dialog arrived)==fmap fields (dialog restored))
   receipt<-token opened
   let closed=fst (handleEvent (V.EvKey V.KEsc []) opened)
-  refreshRequestedPaste reads closed
-  (arrived,_)<-applyRequestedPaste reads receipt "CLIPBOARD" closed
+  refreshRequestedPaste requests closed
+  (arrived,_)<-applyRequestedPaste requests receipt "CLIPBOARD" closed
   unchanged arrived -- Original production RED: this previously wrote CLIPBOARDsource.
   stale opened closed opened -- Reuse the SAME immutable dialog value after close.
   let edited=fst (handleEvent (V.EvKey (V.KChar 'x') []) opened)
@@ -42,7 +42,7 @@ checks=do
   stale opened edited opened
   stale opened selected opened
   let split=fst (runCommand SplitVertical source)
-      first=windowId (head (windows split)); last'=windowId (last (windows split))
+      first=windowId (case windows split of firstWindow:_->firstWindow; []->error "paste split window missing"); last'=windowId (last (windows split))
       focused=focusWindow first split
   stale focused (focusWindow last' split) focused
   let bid=fromJust (bufferId (fromJust (activeWindow source)))
@@ -51,19 +51,19 @@ checks=do
   accepted<-token opened
   -- The actual pointer-move path leaves the immutable dialog untouched.
   let hover=fst (P.applyInput (P.Mouse "move" (-1) (-1) 0 0 []) opened)
-  refreshRequestedPaste reads hover
-  (pasted,_)<-applyRequestedPaste reads accepted "accepted" hover
+  refreshRequestedPaste requests hover
+  (pasted,_)<-applyRequestedPaste requests accepted "accepted" hover
   check "Matching requested paste reaches the selected field without touching source" (activeText pasted=="source" && case fields <$> dialog pasted of Just [SelectedInput _ "accepted" _]->True; _->False)
-  (duplicate,_)<-applyRequestedPaste reads accepted "duplicate" pasted
+  (duplicate,_)<-applyRequestedPaste requests accepted "duplicate" pasted
   check "Accepted reply is consumed once" (fmap fields (dialog duplicate)==fmap fields (dialog pasted))
   old<-token source
   newer<-token source
-  (oldReply,_)<-applyRequestedPaste reads old "old" source
-  (newReply,_)<-applyRequestedPaste reads newer "new" oldReply
+  (oldReply,_)<-applyRequestedPaste requests old "old" source
+  (newReply,_)<-applyRequestedPaste requests newer "new" oldReply
   check "Old reply cannot consume a newer pending receipt" (activeText newReply=="newsource")
   cancelled<-token source
-  cancelRequestedPaste reads
-  (reconnected,_)<-applyRequestedPaste reads cancelled "stale" source
+  cancelRequestedPaste requests
+  (reconnected,_)<-applyRequestedPaste requests cancelled "stale" source
   check "Disconnected receipt cannot survive a new attachment" (activeText reconnected=="source")
   let wire=object ["type" .= ("paste-reply"::T.Text),"request" .= newer,"text" .= ("requested"::T.Text)]
   check "Requested reply parses distinctly and pure input fails closed" (parseEither P.parseInput wire==Right (P.PasteReply newer "requested") && activeText (fst (P.applyInput (P.PasteReply newer "requested") source))=="source")
@@ -74,42 +74,42 @@ checks=do
   check "Ordinary paste stays ordinary" (activeText (fst (P.applyInput (P.Paste "direct") source))=="directsource")
   let poisoned=source {buffers=M.adjust (\doc->doc {documentBuffer=(documentBuffer doc) {undoStack=error "Paste snapshot forced Undo"}}) bid (buffers source)}
   _<-token poisoned
-  refreshRequestedPaste reads poisoned
+  refreshRequestedPaste requests poisoned
   -- PTY output replacement does not replace its paste recipient.
   let terminal=addReadOnly "Terminal test" "old output" (initialDesktop (80,25)) {browserFrontend=True}
   terminalToken<-token terminal
   let output=terminal {buffers=M.map (\doc->doc {documentBuffer=newBuffer "new output"}) (buffers terminal)}
-  refreshRequestedPaste reads output
-  (_,effects)<-applyRequestedPaste reads terminalToken "terminal input" output
+  refreshRequestedPaste requests output
+  (_,effects)<-applyRequestedPaste requests terminalToken "terminal input" output
   check "PTY output does not expire requested input" (effects==[ServiceAction "terminal-input" ["test","terminal input"]])
   withEditorFixture "" source $ \mounted->do
     let chat=setComposerInput (newBuffer "draft") (Selection 5 5) True mounted
     matching<-token chat
-    refreshRequestedPaste reads chat
-    (inserted,_)<-applyRequestedPaste reads matching " accepted" chat
+    refreshRequestedPaste requests chat
+    (inserted,_)<-applyRequestedPaste requests matching " accepted" chat
     check "a matching requested reply edits only its actual host-owned draft"
       (contents (composerBuffer inserted)=="draft accepted" && activeText inserted==activeText chat)
     leaving<-token chat
-    refreshRequestedPaste reads source
-    (returned,_)<-applyRequestedPaste reads leaving "stale" chat
+    refreshRequestedPaste requests source
+    (returned,_)<-applyRequestedPaste requests leaving "stale" chat
     check "returning to the same draft cannot revive a clipboard receipt"
       (revision (composerBuffer returned)==revision (composerBuffer chat) && composerSelection returned==composerSelection chat)
     editedDraft<-token chat
-    refreshRequestedPaste reads (setComposerInput (replaceSelection (Selection 0 0) "x" (composerBuffer chat)) (Selection 5 5) True chat)
-    (restoredDraft,_)<-applyRequestedPaste reads editedDraft "stale" chat
+    refreshRequestedPaste requests (setComposerInput (replaceSelection (Selection 0 0) "x" (composerBuffer chat)) (Selection 5 5) True chat)
+    (restoredDraft,_)<-applyRequestedPaste requests editedDraft "stale" chat
     check "restoring an old immutable draft after an edit cannot revive requested input"
       (revision (composerBuffer restoredDraft)==revision (composerBuffer chat))
     replacedFrame<-token chat
     -- A newly prepared frame for the same named target receives distinct opaque
     -- editor ownership, even when its input tree and selection are transferred.
     withEditorFixture "" chat $ \newFrame->do
-      let replacement=setComposerInput (composerBuffer chat) (composerSelection chat) True newFrame
-      refreshRequestedPaste reads replacement
-      (obsolete,_)<-applyRequestedPaste reads replacedFrame "stale" chat
+      let replacementFrame=setComposerInput (composerBuffer chat) (composerSelection chat) True newFrame
+      refreshRequestedPaste requests replacementFrame
+      (obsolete,_)<-applyRequestedPaste requests replacedFrame "stale" chat
       check "a replacement editor attachment cannot preserve a prior clipboard receipt"
-        (activeEditorMount replacement/=activeEditorMount chat && revision (composerBuffer obsolete)==revision (composerBuffer chat))
+        (activeEditorMount replacementFrame/=activeEditorMount chat && revision (composerBuffer obsolete)==revision (composerBuffer chat))
     let poisonDraft=(composerBuffer chat) {undoStack=error "editor paste receipt forced Undo",saved=error "editor paste receipt forced saved contents"}
         retained=setComposerInput poisonDraft (composerSelection chat) True chat
     _<-token retained
-    refreshRequestedPaste reads retained
+    refreshRequestedPaste requests retained
   putStrLn "requested paste checks passed"

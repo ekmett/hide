@@ -33,7 +33,7 @@ checks :: IO ()
 checks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly $ \directory -> do
   let path=directory </> "config.toml"
       enable=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
-      prompt=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'prompt'\n"
+      promptPolicy=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'prompt'\n"
       base=addDocument Nothing (newBuffer "old\n") (initialDesktop (80,25))
       bid=maybe (error "missing diff target") sourceFixtureBuffer (activeWindow base)
       patch="@@ -1 +1 @@\n-old\n+agent\n"::T.Text
@@ -71,7 +71,7 @@ checks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly 
     check "cancel-first cannot edit on later tick" (unchanged cancelled)
     check "cancel-first reply stays an error" . isLeft =<< cancelResponse
     (policyStart,policyResponse)<-call runtime base "buffer_apply_diff" (args patch)
-    prompt
+    promptPolicy
     (policyResult,rejected)<-awaitReply runtime policyStart policyResponse
     check "Enable becoming Prompt before adoption requires approval" (unchanged policyResult && case rejected of Left err->"requires approval" `T.isInfixOf` err; _->False)
     enable
@@ -110,7 +110,7 @@ checks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly 
           again<-tickPermissions runtime adopted
           count<-readIORef called
           check "adoption-first adds exactly one Undo and cannot repeat" (revision (documentBuffer (buffers again M.! bid))==1 && length (undoStack (documentBuffer (buffers again M.! bid)))==1 && count==2)
-  prompt
+  promptPolicy
   withPermissionsAt path fileTools $ \runtime -> do
     (shown,pending)<-call runtime base "buffer_apply_diff" (args patch)
     started<-submit runtime 0 shown

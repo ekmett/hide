@@ -21,7 +21,9 @@ import qualified Data.Text.IO as TIO
 import Hide.Files (FileState(..),loadFile)
 #ifndef mingw32_HOST_OS
 import System.Posix.Files (createNamedPipe)
-import System.Posix.IO (openFd,closeFd,fdRead,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock)
+import qualified Data.ByteString as BS
+import qualified System.Posix.IO.ByteString as PosixBytes
+import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock)
 import System.IO.Error (tryIOError,isFullError)
 #endif
 import Hide.Buffer
@@ -143,11 +145,11 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
             (\gate->void (fdWrite gate "y") `finally` closeFd gate) $ \gate->do
             _<-fdWrite gate "x"
             let readStarted=do
-                  result<-tryIOError (fdRead gate 1)
+                  result<-tryIOError (PosixBytes.fdRead gate 1)
                   case result of
                     Left err | isFullError err->pure ()
                              | otherwise->ioError err
-                    Right (_,1)->fdWrite gate "x" >> threadDelay 1000 >> readStarted
+                    Right bytes | BS.length bytes==1->fdWrite gate "x" >> threadDelay 1000 >> readStarted
                     _->fail "Local source gate lost its writer"
             entered<-timeout 1000000 readStarted
             unless (maybe False (const True) entered) (fail "Local source worker did not enter its file read")
@@ -168,8 +170,8 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
             Nothing->fail "Debugger UI owner blocked on local source read"
             Just interrupted->do
               settled<-foldTicks 30 tick interrupted
-              let modalHeld=maybe False (\prompt->dialogTitle prompt=="Human draft" && focus prompt==0 &&
-                    case fields prompt of [Input "Query" "draft" 5]->True; _->False) (dialog settled) &&
+              let modalHeld=maybe False (\modal->dialogTitle modal=="Human draft" && focus modal==0 &&
+                    case fields modal of [Input "Query" "draft" 5]->True; _->False) (dialog settled) &&
                     activeText settled=="foreground" && length (windows settled)==1
               unless (action/="modal" && action/="modal-continue" || modalHeld)
                 (fail "Prepared source replaced a human modal")
@@ -263,8 +265,8 @@ generatedOriginCheck=bracket (Fixture.fixture "source-origin") Fixture.cleanup $
   version<-captureVersion (documentBuffer doc)
   let captured=DebugSourceRequest AddSourceWatch (windowId window) bid version (selection window) Nothing Nothing 1 (Just "unique private expression") False
   (_,prompted)<-debuggerEffects runtime core stopped [DebugSourceAction captured]
-  prompt<-maybe (fail "private source watch prompt missing") pure (dialog prompted)
-  let r=case fieldRects prompted prompt of value:_->value; _->error "missing watch field geometry"
+  watchPrompt<-maybe (fail "private source watch prompt missing") pure (dialog prompted)
+  let r=case fieldRects prompted watchPrompt of value:_->value; _->error "missing watch field geometry"
       x=left r+3; y=top r+1
   unless (not (streamerReadableAt prompted x y) && not (readableAt prompted x y) && guestModalBlocked prompted) (fail "Frozen private source expression must be masked and protected in watch prompt")
   unless (not (streamerReadableAt prompted {guestPrivatePaths=[]} x y)) (fail "Captured watch privacy must survive later policy removal")

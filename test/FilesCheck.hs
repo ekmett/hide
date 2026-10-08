@@ -129,8 +129,8 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
         , ("mode Undo", undo switched, expected)
         , ("recovered representation", restored, BS.pack [0,255,13,10])
         ]
-  _ <- foldM (\state (name, candidate, wanted) -> do
-    result <- saveFile state candidate >>= right ("save " ++ name)
+  _ <- foldM (\currentState (name, candidate, wanted) -> do
+    result <- saveFile currentState candidate >>= right ("save " ++ name)
     actual <- BS.readFile piecesPath
     check (name ++ " saves exact bytes and strict baseline")
       (actual == wanted && diskBytes result == Just wanted)

@@ -35,9 +35,9 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
       ends=scanl (\(chars,bytes) text->(chars+T.length text,bytes+TU.lengthWord8 text)) (0,0) pieces
   check "source ranges preserve original UTF8 and character boundaries"
     (sourceRowText row==exact && T.concat pieces==exact &&
-      [(sourceRangeCharEnd r,sourceRangeByteEnd r) | r<-V.toList (sourceRowRanges row)]==tail ends &&
+      [(sourceRangeCharEnd r,sourceRangeByteEnd r) | r<-V.toList (sourceRowRanges row)]==drop 1 ends &&
       take (T.length exact) (sourceStylesAt row 0)==take (T.length exact) (cycle [Keyword,Keyword,Plain]))
-  let sourceSigils row=let (_,_,sigils)=sourceSigilsWindow 0 maxBound row in sigils
+  let sourceSigils sourceRow=let (_,_,sigils)=sourceSigilsWindow 0 maxBound sourceRow in sigils
       fragments Nil=[]
       fragments (ConsChars text _ rest)=text:fragments rest
       fragments (ConsSigil glyph _ _ rest)=graphemeText glyph:fragments rest
@@ -98,7 +98,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
       viewportSource=addDocument Nothing (newBuffer viewportText) (initialDesktop (180,55))
       preparedViewport=viewportSource {sideTree=Nothing,blinkCursor=False,buffers=M.map (\d->d
         {documentSourceRows=Just (V.fromList [prepareSourceRow line [(T.singleton c,if c=='H' then Keyword else Plain) | c<-T.unpack line] | line<-T.lines viewportText])}) (buffers viewportSource)}
-      occupied=V.foldl' (V.foldl' (\n span->case span of
+      occupied=V.foldl' (V.foldl' (\n cell->case cell of
         CellText paint text->paint `seq` n+T.length text
         CellGlyph paint text full start shown->paint `seq` n+T.length text+full+start+shown
         CellScript paint text natural script->paint `seq` script `seq` n+T.length text+natural)) 0
@@ -321,7 +321,7 @@ sourceLineChecks=do
     let source=contents b
         line=contentSourceLineAt (bufferContent b) 0
         visible=lineAt source 0
-        raw=head (T.splitOn "\n" source)
+        raw=T.takeWhile (/='\n') source
         prepared=prepareSourceRow raw (zip (map T.singleton (T.unpack raw)) (cycle [Plain,Keyword,Comment]))
         live=attachSourceLine line prepared
     check "live source row keeps exact public text and ranges" (live==prepared)

@@ -35,7 +35,7 @@ checks=do
       original=replaceSelection (Selection 0 0) source (newBuffer "")
       named=addDocument (Just (FileState "/tmp/notes.md" Nothing)) original (initialDesktop (60,20))
       current=modifyActive (\w->w {selection=Selection 3 8,scrollRow=1,scrollColumn=2}) named
-        {buffers=M.map (\doc->doc {documentSuggestedName=Just "notes.md"}) (buffers named)}
+        {buffers=M.map (\document->document {documentSuggestedName=Just "notes.md"}) (buffers named)}
       win d=fromJust (activeWindow d)
       doc d=fromJust (activeDocument d)
       mode view d=fst (runCommand (SetBufferView view) d)
@@ -71,7 +71,7 @@ checks=do
   let messageOwned=selected {problemsVisible=True,problemsFocused=True,diagnostics=[Diagnostic "/tmp/public.hs" Nothing 1 1 1 "message owner"]}
   check "Focused Messages Copy does not take background preview selection" ("message owner" `T.isInfixOf` clipboard (fst (runCommand Copy messageOwned)) && clipboard (fst (runCommand Copy messageOwned))/=rendered)
   check "MCP selection identifies rendered coordinate space" (case builtinTool selected "read_selection" (object []) of Right (Object value)->KM.lookup "coordinateSpace" value==Just (String "rendered-markdown") && KM.lookup "text" value==Just (String rendered); _->False)
-  let (start,_,_)=head links
+  let (start,_,_)=case links of link:_->link; []->error "Markdown preview link missing"
       (row,col)=windowTextPosition ready (win ready) text start
       r=bounds (win ready)
       browsed=modifyActive (modifyDisplayedWindow (\w->w {scrollRow=row,scrollColumn=0})) ready
@@ -93,7 +93,7 @@ checks=do
   check "Reflow clears preview selection without changing Current" (selection (displayWindow (win resizedReady))==Selection 0 0 && sameSource resizedReady)
   let split=fst (runCommand SplitVertical ready)
       ids=map windowId (windows split)
-      separate=mode CurrentView (focusWindow (head ids) split)
+      separate=mode CurrentView (focusWindow (case ids of first:_->first; []->error "split preview window missing") split)
       other=focusWindow (last ids) separate
       changed=insertText "EDIT" separate
   check "Split windows choose source and Markdown independently" (length ids==2 && bufferView (win separate)==CurrentView && bufferView (win other)==MarkdownView)

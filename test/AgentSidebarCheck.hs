@@ -87,9 +87,9 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "completion model settings remain separate from Primary" (null (agentSettings configured))
         let staleSubmission=handleEvent (V.EvKey V.KEnter []) choose
         stale<-act (configured,snd staleSubmission) >>= await tick (T.isInfixOf "expired" . status)
-        renamed<-act (chooseMenu "Primary  idle" stale) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
-        sourceVersion<-captureVersion (maybe (error "Missing source") documentBuffer (activeDocument renamed))
-        let originalSelection=selection <$> activeWindow renamed
+        initialRename<-act (chooseMenu "Primary  idle" stale) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
+        sourceVersion<-captureVersion (maybe (error "Missing source") documentBuffer (activeDocument initialRename))
+        let originalSelection=selection <$> activeWindow initialRename
             formRef desktop=case dialog desktop of
               Just dg->case purpose dg of
                 PluginInputForm reference->reference
@@ -97,29 +97,29 @@ checks=bracket temporary removePathForcibly $ \root->
                 PluginChoiceForm reference _->reference
                 _->error "Missing typed form"
               _->error "Missing typed form"
-            captured=formRef renamed
-        ensure "typed form is private to guest input and capture" (not (guestKeyboardAllowed renamed) &&
-          not (readableAt renamed (left (dialogRect renamed (maybe (error "dialog") id (dialog renamed)))) (top (dialogRect renamed (maybe (error "dialog") id (dialog renamed))))) &&
-          not (streamerReadableAt renamed 2 34))
-        cancelled<-act (handleEvent (V.EvKey V.KEsc []) renamed)
+            captured=formRef initialRename
+        ensure "typed form is private to guest input and capture" (not (guestKeyboardAllowed initialRename) &&
+          not (readableAt initialRename (left (dialogRect initialRename (maybe (error "dialog") id (dialog initialRename)))) (top (dialogRect initialRename (maybe (error "dialog") id (dialog initialRename))))) &&
+          not (streamerReadableAt initialRename 2 34))
+        cancelled<-act (handleEvent (V.EvKey V.KEsc []) initialRename)
         reopened<-act (chooseMenu "Primary  idle" cancelled) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
         ensure "reopened form has a fresh lifetime" (captured/=formRef reopened)
-        refusedOld<-act (reopened,snd (handleEvent (V.EvKey V.KEnter []) renamed))
+        refusedOld<-act (reopened,snd (handleEvent (V.EvKey V.KEnter []) initialRename))
         ensure "old form submission leaves reopened draft intact" (inputValue refusedOld==Just ("Primary",Selection 0 7))
         deniedAgent<-act (refusedOld,[SubmitInputForm (formRef refusedOld) (Form.TextValue "Agent edit") Menu.AgentMenu])
         ensure "agent-origin form submission leaves human draft intact" (inputValue deniedAgent==Just ("Primary",Selection 0 7))
-        let renamed=deniedAgent
-        ensure "rename opens with current name selected" (inputValue renamed==Just ("Primary",Selection 0 7))
+        let deniedForm=deniedAgent
+        ensure "rename opens with current name selected" (inputValue deniedForm==Just ("Primary",Selection 0 7))
         let focusMaps=either (error . show) id (configuredBindings [] (M.singleton "terminal" (M.singleton "dialog" (M.fromList [("hide.dialog.focus-next",["F13"]),("hide.dialog.focus-previous",["F14"])]))))
-            navigable=renamed {keyBindings=focusMaps}
+            navigable=deniedForm {keyBindings=focusMaps}
         focusedForm<-act (handleEvent (V.EvKey (V.KFun 13) []) navigable)
-        ensure "remapped form focus retains exact form and draft" (formRef focusedForm==formRef renamed && inputValue focusedForm==Just ("Primary",Selection 0 7) && maybe False ((==1).focus) (dialog focusedForm))
+        ensure "remapped form focus retains exact form and draft" (formRef focusedForm==formRef deniedForm && inputValue focusedForm==Just ("Primary",Selection 0 7) && maybe False ((==1).focus) (dialog focusedForm))
         returnedForm<-act (handleEvent (V.EvKey (V.KFun 14) []) focusedForm)
-        ensure "form focus never claims submission" (formRef returnedForm==formRef renamed && maybe False ((==0).focus) (dialog returnedForm))
+        ensure "form focus never claims submission" (formRef returnedForm==formRef deniedForm && maybe False ((==0).focus) (dialog returnedForm))
         let renamed=returnedForm
-        let typed=fst (handleEvent (V.EvKey (V.KChar 'N') []) renamed)
-        ensure "typing replaces rename selection" (inputValue typed==Just ("N",Selection 1 1))
-        let pasted=fst (handleEvent (V.EvPaste (TE.encodeUtf8 "界x")) typed)
+        let typedName=fst (handleEvent (V.EvKey (V.KChar 'N') []) renamed)
+        ensure "typing replaces rename selection" (inputValue typedName==Just ("N",Selection 1 1))
+        let pasted=fst (handleEvent (V.EvPaste (TE.encodeUtf8 "界x")) typedName)
             backed=fst (handleEvent (V.EvKey V.KBS []) pasted)
             moved=fst (handleEvent (V.EvKey V.KLeft [V.MShift]) backed)
         ensure "rename paste backspace and selection use the real dialog owner" (inputValue moved==Just ("N界",Selection 2 1))
@@ -213,8 +213,8 @@ checks=bracket temporary removePathForcibly $ \root->
           Just dg->fields dg==[SelectedInput "Agent name" "Child" (Selection 1 3),SelectedInput "Initial task" "Count files" (Selection 2 5)] && focus dg==1
           _->False) fill
         let closedSubmission=snd (handleEvent (V.EvKey V.KEnter []) refreshedInputs)
-        cancelled<-act (handleEvent (V.EvKey V.KEsc []) refreshedInputs)
-        refusedCreation<-act (cancelled,closedSubmission)
+        closedForm<-act (handleEvent (V.EvKey V.KEsc []) refreshedInputs)
+        refusedCreation<-act (closedForm,closedSubmission)
         attempted<-readIORef createRequests
         ensure "closed New agent form cannot commit a spawn" (null attempted && dialog refusedCreation==Nothing)
         staleDialog<-act (chooseMenu "Agents" refusedCreation) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
@@ -241,19 +241,19 @@ checks=bracket temporary removePathForcibly $ \root->
                   history<-AH.historyAgent hub AH.Human who 0 100 >>= right
                   pure (has "Child" desktop && length [() | event<-AH.historyEvents history,AH.historyKind event=="message_queued"]==1)
                 _->pure False
-        started<-awaitIO tick createdAndQueued starting
-        replayed<-act (started,snd createSubmission)
+        createdDesktop<-awaitIO tick createdAndQueued starting
+        creationReplay<-act (createdDesktop,snd createSubmission)
         requests<-readIORef createRequests
         ensure "New agent form commits the captured values once" ([(workspace,task) | (workspace,"Child",task)<-requests]==[(root,"Count files")])
         directory<-AH.listAgents hub AH.Human >>= right
         let children=[entry | entry<-maybe [] id (field "agents" directory :: Maybe [Value]),field "name" entry==Just ("Child"::T.Text)]
-        ensure "New Agent enqueues its task without selecting its view" (length children==1 && all (\entry->field "cwd" entry==Just (T.pack root)) children && T.null (conversationTarget replayed))
-        ensure "background completion never steals focus" (fmap windowId (activeWindow started)==fmap windowId (activeWindow primaryView))
+        ensure "New Agent enqueues its task without selecting its view" (length children==1 && all (\entry->field "cwd" entry==Just (T.pack root)) children && T.null (conversationTarget creationReplay))
+        ensure "background completion never steals focus" (fmap windowId (activeWindow createdDesktop)==fmap windowId (activeWindow primaryView))
         childId<-case children of [entry] | Just who<-field "id" entry->pure (AH.AgentId who); _->error "Missing created child"
         let childReady desktop=do
               current<-AH.agentConfiguration hub childId
               pure (has "Child  idle" desktop && case current of Right (_,options)->any ((=="model").AH.configId) options; _->False)
-        idleChild<-awaitIO tick childReady started
+        idleChild<-awaitIO tick childReady createdDesktop
         childChoices<-act (chooseMenuAt 1 "Child  idle" idleChild) >>= await tick (maybe False agentChoicePurpose . dialog)
         let selectedChild=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) childChoices
             capturedChild=handleEvent (V.EvKey V.KEnter []) selectedChild

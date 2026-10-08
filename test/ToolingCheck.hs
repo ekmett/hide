@@ -745,7 +745,7 @@ diagnosticCacheChecks = bracket temporary removePathForcibly $ \root -> do
         case result of
           Just next->pure next
           Nothing->do lastView<-readIORef latest; error ("Diagnostic update timed out: "++label++"; "++show (status lastView,diagnostics lastView))
-      diagnostic message=object ["range" .= object ["start" .= object ["line" .= (0::Int),"character" .= (0::Int)]],"severity" .= (1::Int),"message" .= (message::T.Text)]
+      diagnostic description=object ["range" .= object ["start" .= object ["line" .= (0::Int),"character" .= (0::Int)]],"severity" .= (1::Int),"message" .= (description::T.Text)]
       batch path version messages=object ["uri" .= ("file://"<>T.pack path),"version" .= (version::Maybe Int),"diagnostics" .= map diagnostic messages]
       publish tooling d entries predicate=do
         BS.writeFile (root </> "diagnostics.next") (BL.toStrict (encode entries))

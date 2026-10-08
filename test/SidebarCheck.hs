@@ -183,7 +183,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
       any (\(_,row)->P.infoResource (rowInfo row)==Just (dir </> "archive/bytes.dat")) (visibleRows 0 32768 (treeOf refreshedMove)))
   lateForm<-open "Renamedλ.hs" refreshedMove
   late<-submit "Late.hs" lateForm
-  let newer=sourceCommand Find (focusWindow (windowId (head (windows mounted))) late)
+  let newer=sourceCommand Find (focusWindow (windowId (case windows mounted of window:_->window; []->error "rename source window missing")) late)
   check "The late rename fixture opens a newer source modal"
     (maybe False (\dg->case purpose dg of Searching{}->True; _->False) (dialog newer))
   retired<-tickSidebar host applyEffects newer
@@ -213,11 +213,11 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
     >>= await (tickSidebar host applyEffects) (\d->not (null (windows d)))
   check "Files primary action opens through a typed worker" (activeText opened=="main = 1\n")
   let changed=insertText "local " opened
-  dirty<-await (tickSidebar host applyEffects) (\d->maybe False (\(value,_,_)->value) (M.lookup (dir </> "Main.hs") (treeBadges (treeOf d)))) changed
-  check "Files cached badge preserves dirty counts" ("Main.hs +1 -1" `T.isInfixOf` snapshot dirty)
+  edited<-await (tickSidebar host applyEffects) (\d->maybe False (\(value,_,_)->value) (M.lookup (dir </> "Main.hs") (treeBadges (treeOf d)))) changed
+  check "Files cached badge preserves dirty counts" ("Main.hs +1 -1" `T.isInfixOf` snapshot edited)
   removeFile (dir </> "Main.hs")
   createDirectory (dir </> "Main.hs")
-  reopened<-act host (activateTree False (atLabel "Main.hs" dirty) dirty)
+  reopened<-act host (activateTree False (atLabel "Main.hs" edited) edited)
     >>= await (tickSidebar host applyEffects) (\d->not (treeFocused (treeOf d)) || "failed" `T.isInfixOf` status d)
   check "Opening an existing dirty file survives an unreadable disk replacement and preserves its live content" (activeText reopened=="local main = 1\n" && not (treeFocused (treeOf reopened)))
   removeDirectory (dir </> "Main.hs")
@@ -634,8 +634,9 @@ budgetChecks dir=withSidebarCommands $ \host->withRegistry $ \registry->do
       desktop=installSidebar full (initialDesktop (100,30))
   refused<-act host (desktop,[])
   check "Files root refuses a full provider budget without crashing" ("budget" `T.isInfixOf` status refused && S.length (treeRoots (treeOf refused))==32)
-  let available=refused {sideTree=Just (removeRoot (P.treeReference (head providers)) (treeOf refused))}
+  let provider=case providers of first:_->first; []->error "budget provider fixture missing"
+      available=refused {sideTree=Just (removeRoot (P.treeReference provider) (treeOf refused))}
   accepted<-act host (available,[]) >>= settle host
   check "Files root loads once a provider slot becomes available" (any ((=="Main.hs").P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (treeOf accepted)))
-  let unchanged=removeRoot (P.treeReference (head providers)) (treeOf accepted)
+  let unchanged=removeRoot (P.treeReference provider) (treeOf accepted)
   check "repeated withdrawal does not invalidate prepared projections" (treeRevision unchanged==treeRevision (treeOf accepted))

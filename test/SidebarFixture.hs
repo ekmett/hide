@@ -17,7 +17,8 @@ sidebarFixture root entries d=withRegistry $ \registry->do
   provider<-P.registerTree registry "test.tree.fixture" (P.NodeDef info Nothing []) (\() _->pure (Right (P.NodePage nodes Nothing))) >>= either (error.show) pure
   let tree=addRoot (P.treeReference provider) info Nothing [] (emptySidebar root 30 False)
       key=NodeKey (P.treeReference provider) (P.infoId info)
-      (loading,Just request)=requestChildren (nodeHit key (treeNodes tree M.! key)) Nothing tree
+      (loading,pending)=requestChildren (nodeHit key (treeNodes tree M.! key)) Nothing tree
+      request=maybe (error "sidebar fixture child request missing") id pending
   page<-P.loadChildren provider () (P.ChildRequest (P.infoId info) Nothing) >>= either (error.show) pure
   loaded<-either (error.T.unpack) pure (adoptPage request [(P.nodeInfo node,Nothing,[]) | node<-P.pageNodes page] Nothing loading)
   prepared<-prepareProjection loaded

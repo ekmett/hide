@@ -68,8 +68,8 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
                   pure [request | line<-logLines,Just body<-[decodeStrict' (TE.encodeUtf8 line)],Just request<-[field "request" body]] :: IO [Value]
       executing=filter ((==Just ("evaluate"::T.Text)).field "command") <$> requests
       rejectInspect target extra d=do
-        (_,current)<-debuggerTool runtime d "debug_status" (object [])
-        value<-current >>= either (fail.T.unpack) pure
+        (_,statusReply)<-debuggerTool runtime d "debug_status" (object [])
+        value<-statusReply >>= either (fail.T.unpack) pure
         let gen=maybe (error "missing generation") id (field "generation" value :: Maybe Int)
         (_,finish)<-debuggerTool runtime d "debug_inspect" (object (["generation" .= gen,"request" .= (target::T.Text)]++extra))
         outcome<-finish
@@ -77,8 +77,8 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
       entries=do (_,selected,values)<-debuggerWatches runtime; pure (selected,values)
       release d=writeFile (path<>".release") "release" >> barrier d
       barrier d=do
-        (_,current)<-debuggerTool runtime d "debug_status" (object [])
-        value<-current >>= either (fail.T.unpack) pure
+        (_,statusReply)<-debuggerTool runtime d "debug_status" (object [])
+        value<-statusReply >>= either (fail.T.unpack) pure
         (_,finish)<-debuggerTool runtime d "debug_inspect" (object ["generation" .= maybe (0::Int) id (field "generation" value),"request" .= ("threads"::T.Text)])
         withAsync finish $ \reply->do
           let loop current=do
@@ -126,7 +126,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
             _->fail "missing Watch More row"
       check "first watch page contains exactly128 children" (length (childRows first)==128 && not (has "item128 =" first))
       (firstSelected,firstValues)<-entries
-      let [(firstKey,firstEntry)]=M.toList firstValues
+      let (firstKey,firstEntry)=case M.toList firstValues of [watch]->watch; _->error "expected one paged debugger watch"
           firstReceipt=maybe (error "missing first page frame") id firstSelected
       (_,unpublished)<-core first [DebugSidebarAction (ForceDebugWatchChild firstKey (watchRevision firstEntry) firstReceipt 980 128 1 971)]
       check "retained snapshot tail does not grant unpublished child authority" ("expired" `T.isInfixOf` status unpublished)
@@ -140,7 +140,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
       let parentReads=[r | r<-sent,field "command" r==Just ("variables"::T.Text),(field "arguments" r >>= field "variablesReference")==Just (980::Int)]
       check "More pages do not resend DAP variables" (length parentReads==1)
       (selected,values)<-entries
-      let [(key,entry)]=M.toList values
+      let (key,entry)=case M.toList values of [watch]->watch; _->error "expected one debugger watch"
           receipt@(WatchFrame _ epoch _ _ _)=maybe (error "missing page frame") id selected
           request=DebugPageRequest epoch (DebugWatchVariables key (watchRevision entry) receipt 980) 256
           force=ForceDebugWatchChild key (watchRevision entry) receipt 980 128 1 971
@@ -156,9 +156,9 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
         "pages-resume"->snd <$> core lastPage [DebugAction "continue" []]
         "pages-retire"->retireTreeFromHost host (case receipt of WatchFrame owner _ _ _ _->owner) lastPage
         _->snd <$> core lastPage [DebugAction "stack" []] >>= await "page frame chooser" ((/=Nothing).dialog) >>= \d->case dialog d of
-          Just dg->let chosen=dg {fields=map (\field->case field of ListBox title values _->ListBox title values 1; _->field) (fields dg)}
-                       (next,outbox)=submitDialog 0 chosen d
-                   in snd <$> core next outbox
+          Just dg->let chosen=dg {fields=map (\widget->case widget of ListBox title choices _->ListBox title choices 1; _->widget) (fields dg)}
+                       (next,choiceEffects)=submitDialog 0 chosen d
+                   in snd <$> core next choiceEffects
           _->fail "missing page frame chooser"
       (_,oldForce)<-core changed [DebugSidebarAction force]
       _<-effects oldForce oldMore
@@ -186,7 +186,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
     afterAgent<-requests
     check "agent cannot force a lazy child" (length before==length afterAgent && "stale, protected or busy" `T.isInfixOf` status refused)
     (selected,values)<-entries
-    let [(key,entry)]=M.toList values
+    let (key,entry)=case M.toList values of [watch]->watch; _->error "expected one debugger watch"
         receipt=maybe (error "missing child frame") id selected
         command=ForceDebugWatchChild key (watchRevision entry) receipt 980 0 1 971
     forM_ [ForceDebugWatchChild key (watchRevision entry) receipt 980 0 (-1) 971,
@@ -203,7 +203,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
           "remove"->snd <$> core pending [DebugSidebarAction (RemoveDebugWatch key (watchRevision entry))]
           "resume"->snd <$> core pending [DebugAction "continue" []]
           "frame"->snd <$> core pending [DebugAction "stack" []] >>= await "child frame chooser" ((/=Nothing).dialog) >>= \d->case dialog d of
-            Just dg->let chosen=dg {fields=map (\field->case field of ListBox title values _->ListBox title values 1; _->field) (fields dg)}
+            Just dg->let chosen=dg {fields=map (\widget->case widget of ListBox title choices _->ListBox title choices 1; _->widget) (fields dg)}
                          (next,outbox)=submitDialog 0 chosen d
                      in snd <$> core next outbox
             _->fail "missing child frame chooser"
@@ -249,7 +249,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
     check "lazy watch has no passive branch" (not (P.infoBranch (rowInfo lazyRow)) && any ((=="Force lazy watch").fst) (rowActions lazyRow))
     rejectInspect "variables" ["variablesReference" .= (970::Int)] lazyResult
     (selected,values)<-entries
-    let [(key,entry)]=[(key,value) | (key,value)<-M.toList values,watchExpression value=="lazy"]
+    let (key,entry)=case [(watchKey,value) | (watchKey,value)<-M.toList values,watchExpression value=="lazy"] of [watch]->watch; _->error "expected one lazy debugger watch"
         receipt=maybe (error "missing stopped watch frame") id selected
     (_,guessed)<-core lazyResult [DebugSidebarAction (ForceDebugWatch key (watchRevision entry) receipt 971)]
     check "guessed lazy references are refused" ("expired" `T.isInfixOf` status guessed)
@@ -274,7 +274,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
     -- A deterministic peer holds the executing reply until another request.
     pending<-await "pending watch receipt" (has "[evaluating") evaluated
     (selected,values)<-entries
-    let [(key,entry)]=M.toList values
+    let (key,entry)=case M.toList values of [watch]->watch; _->error "expected one debugger watch"
         receipt=maybe (error "missing pending receipt") id selected
     (_,busy)<-core pending [DebugSidebarAction (EvaluateDebugWatch key (watchRevision entry) receipt)]
     check "one executing request owns the slot" ("busy" `T.isInfixOf` status busy)
@@ -283,7 +283,7 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
       "remove"->snd <$> core pending [DebugSidebarAction (RemoveDebugWatch key (watchRevision entry))]
       "resume"->snd <$> core pending [DebugAction "continue" []]
       "frame"->snd <$> core pending [DebugAction "stack" []] >>= await "frame chooser" ((/=Nothing).dialog) >>= \d->case dialog d of
-        Just dg->let chosen=dg {fields=map (\field->case field of ListBox title values _->ListBox title values 1; _->field) (fields dg)}
+        Just dg->let chosen=dg {fields=map (\widget->case widget of ListBox title choices _->ListBox title choices 1; _->widget) (fields dg)}
                      (next,outbox)=submitDialog 0 chosen d
                  in snd <$> core next outbox
         _->fail "missing frame chooser"
@@ -293,10 +293,10 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
     settled<-if scenario=="resume" then foldM (\d _->threadDelay 1000 >> tick d) changed [1..80::Int] else release changed
     (_,after)<-entries
     if scenario=="policy" then do
-      check "canonical frame origin is rechecked before publication" (any (\entry->watchPrivate entry && case watchValue entry of WatchResult _ _ _ _ resultOrigin->resultOrigin==Just origin; _->False) (M.elems after) && has "Private watch" settled && not (has "STALE" settled))
+      check "canonical frame origin is rechecked before publication" (any (\watch->watchPrivate watch && case watchValue watch of WatchResult _ _ _ _ resultOrigin->resultOrigin==Just origin; _->False) (M.elems after) && has "Private watch" settled && not (has "STALE" settled))
       publicAgain<-foldM (\d _->tick d) settled {guestPrivatePaths=[]} [1..20::Int]
       check "captured result privacy remains sticky" (has "Private watch" publicAgain && not (has "delay" publicAgain))
-    else check ("late watch reply refused after "<>scenario) (not (has "STALE" settled) && all (\entry->case watchValue entry of WatchResult{}->False; _->True) (M.elems after))
+    else check ("late watch reply refused after "<>scenario) (not (has "STALE" settled) && all (\watch->case watchValue watch of WatchResult{}->False; _->True) (M.elems after))
     if scenario=="retire" then do
       before<-length <$> executing
       (_,refused)<-core settled [DebugSidebarAction (EvaluateDebugWatch key (watchRevision entry) receipt)]
