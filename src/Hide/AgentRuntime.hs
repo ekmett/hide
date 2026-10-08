@@ -58,7 +58,12 @@ data AgentRequest = DeliverPrimary HubMessage (MVar (Either Text Value))
 data PrimaryControl
   = ConfigurePrimary !(StableName ACP.Client) !Text ![(Text,Text)] !(MVar (Either Text Capabilities))
   | SteerPrimary !(StableName ACP.Client) !Text !HubMessage !(MVar (Either Text Value))
-  deriving Eq
+
+-- Reply identity is the control lifetime; never compare prompt/config payloads.
+instance Eq PrimaryControl where
+  ConfigurePrimary _ _ _ a == ConfigurePrimary _ _ _ b=a==b
+  SteerPrimary _ _ _ a == SteerPrimary _ _ _ b=a==b
+  _ == _=False
 
 data AgentRuntime = AgentRuntime
   { agentHub :: AgentHub, agentAccess :: AgentAccess, primaryAgent :: AgentId
