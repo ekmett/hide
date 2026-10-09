@@ -26,6 +26,10 @@ import System.IO (hClose, openTempFile, withBinaryFile, IOMode(..), Handle, hFlu
 import System.Posix.IO (openFd, closeFd, OpenMode(ReadWrite), OpenFileFlags(nonBlock), defaultFileFlags)
 #endif
 import System.Process (callProcess)
+#ifdef mingw32_HOST_OS
+import System.Exit (ExitCode(..))
+import System.Process (readProcessWithExitCode)
+#endif
 import System.Timeout (timeout)
 import System.Info (os)
 import qualified Hide.Consoles as C
@@ -382,6 +386,15 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
   createDirectoryIfMissing True settings
   writeFile selected ""
   BS.writeFile path (BL.toStrict (encode saved))
+#ifdef mingw32_HOST_OS
+  compiler<-findExecutable "ghc" >>= maybe (fail "ghc required for compiler menu fixture") pure
+  let executable=bin </> "ghcup.exe"
+      buildDir=root </> "fixture-build"
+  createDirectory buildDir
+  (built,_,buildError)<-readProcessWithExitCode compiler
+    ["-v0","-O0","-fno-hpc","-package-env","-","-i","-outputdir",buildDir,"-o",executable,"test/compiler-discovery-fixture.hs"] ""
+  unless (built==ExitSuccess) (fail ("compiler menu fixture build failed: "++buildError))
+#else
   python<-findExecutable "python3" >>= maybe (error "python3 required") pure
   let executable=bin </> "ghcup"
   writeFile executable $ unlines
@@ -391,7 +404,8 @@ compilerMenuChecks=bracket temporary removePathForcibly $ \root -> do
      " print('ghc 9.8.2 installed')", "else:", " open(os.environ['MENU_DONE'],'w').close()", " print(os.environ['MENU_COMPILER'])"]
   perms<-getPermissions executable
   setPermissions executable perms {executable=True}
-  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withEnv "PATH" (Just bin) $
+#endif
+  withEnv "HIDE_COMPILER_FIXTURE_GHCUP" (Just "menu") $ withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withEnv "PATH" (Just bin) $
     withEnv "MENU_STARTED" (Just started) $ withEnv "MENU_RELEASE" (Just release) $
     withEnv "MENU_DONE" (Just done) $ withEnv "MENU_COMPILER" (Just selected) $ do
       withSessionServices $ \runtime -> do

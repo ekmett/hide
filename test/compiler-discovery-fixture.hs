@@ -5,7 +5,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (unless)
 import Data.List (isPrefixOf)
 import Numeric (showHex)
-import System.Directory (findExecutable)
+import System.Directory (doesFileExist, findExecutable)
 import System.Environment (getArgs, getEnv, getExecutablePath, lookupEnv)
 import System.Exit (exitFailure)
 import System.FilePath (searchPathSeparator, takeBaseName, takeDirectory)
@@ -24,6 +24,17 @@ main=do
       blocked<-lookupEnv "HIDE_COMPILER_FIXTURE_GHCUP"
       if blocked==Just "blocked"
         then getEnv "TEST_READY" >>= (`writeFile` "") >> threadDelay 60000000
+        else if blocked==Just "menu" then case args of
+          "--offline":"list":_ -> do
+            getEnv "MENU_STARTED" >>= (`writeFile` "")
+            release<-getEnv "MENU_RELEASE"
+            let await=doesFileExist release >>= \ready->unless ready (threadDelay 1000 >> await)
+            await
+            putStrLn "ghc 9.8.2 installed"
+          ["--offline","whereis","ghc",_] -> do
+            getEnv "MENU_DONE" >>= (`writeFile` "")
+            getEnv "MENU_COMPILER" >>= putStrLn
+          _ -> exitFailure
         else case args of
           "--offline":"list":_ -> putStrLn "ghc 9.14.1 latest\nghc 9.8.2 old\nghc wasm32-wasi-9.12.2 cross"
           ["--offline","whereis","ghc",_] -> getEnv "TEST_COMPILER" >>= putStrLn

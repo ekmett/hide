@@ -58,8 +58,10 @@ checks profile = do
     check "deep UTF16 offset seeks directly to measured line" (bufferOffsetPosition large offset==(row,3))
   allocationAfter<-getAllocationCounter
   check "UTF16 endpoints do not traverse or split preceding document text" (withinBudget profile (allocationBefore-allocationAfter) (1024*1024))
+  temporaryRoot<-getTemporaryDirectory
   let sample = "a😀b\r\nxλ"
-      path = "/tmp/λ space/#%?.hs"
+      path = temporaryRoot </> "λ space" </> "#%?.hs"
+  check "native absolute URI has an empty authority" ("file:///" `T.isPrefixOf` fileUri path)
   check "URI Unicode and reserved characters round trip" (uriFilePath (fileUri path) == Just path)
   check "reject nonlocal and malformed URI" (all ((== Nothing) . uriFilePath) ["https://host/x", "file://host/x", "file:///tmp/%xz", "file:///tmp/%ff", "file:///tmp/#x"])
   check "localhost URI" (uriFilePath "file://localhost/tmp/a" == Just "/tmp/a")

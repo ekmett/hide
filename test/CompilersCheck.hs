@@ -72,7 +72,7 @@ checks=do
       resolved<-compilerInfo root False ghc
       check "explicit versioned GHC is resolved literally" (resolved==Right (Compiler "9.14.1" ghc))
       pinned<-debuggerCompiler root False ghc
-      check "versioned hdb receives a private compiler environment" (case pinned of
+      check ("versioned hdb receives a private compiler environment: "++show pinned) (case pinned of
         Right (adapter,environment) -> adapter==toolPath "hdb-9.14.1" && lookup "GHC_BIN" environment==Just ghc &&
           lookup "GHC_LIBDIR" environment==Just libdir && lookup "PATH" environment==Just (bin++[searchPathSeparator]++bin)
         Left _ -> False)

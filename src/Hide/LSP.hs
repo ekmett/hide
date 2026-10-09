@@ -22,7 +22,7 @@ import qualified Data.Aeson.Key
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BL
-import Data.Char ( isHexDigit, ord, toLower)
+import Data.Char (isAsciiLower, isAsciiUpper, isHexDigit, ord, toLower)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Sequence as Seq
@@ -34,6 +34,8 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Numeric (readHex, showHex)
 import System.Directory (canonicalizePath)
 import System.IO.Error (tryIOError)
+import System.FilePath (normalise)
+import System.Info (os)
 import System.Environment (lookupEnv)
 import System.IO
 import System.Process
@@ -296,8 +298,11 @@ readFrame handle = do
       bytes (remaining-BS.length chunk) (chunk:chunks)
 
 fileUri :: FilePath -> Text
-fileUri path = "file://" <> T.concatMap escape (TE.decodeLatin1 (TE.encodeUtf8 (T.pack path)))
+fileUri path = "file://" <> T.concatMap escape (TE.decodeLatin1 (TE.encodeUtf8 (T.pack absolute)))
   where
+    separated=if os=="mingw32" then map (\c -> if c=='\\' then '/' else c) path else path
+    -- A drive belongs in the URI path, not its authority (RFC 8089, D.2).
+    absolute=if os=="mingw32" && drivePath separated then '/':separated else separated
     escape c | c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c `elem` ("/-._~:" :: String) = T.singleton c
              | otherwise = let hex = showHex (ord c) "" in T.pack ('%' : (if length hex == 1 then '0':hex else hex))
 
@@ -306,7 +311,11 @@ uriFilePath uri = do
   path <- T.stripPrefix "file://" uri
   local <- if T.isPrefixOf "/" path then Just path else ("/" <>) <$> T.stripPrefix "localhost/" path
   raw <- decode (T.unpack local)
-  either (const Nothing) (Just . T.unpack) (TE.decodeUtf8' (BS.pack raw))
+  decoded<-either (const Nothing) (Just . T.unpack) (TE.decodeUtf8' (BS.pack raw))
+  pure $ case decoded of
+    '/':drive | os=="mingw32" && drivePath drive -> normalise drive
+    '/':'/':_ | os=="mingw32" -> normalise decoded
+    _ -> decoded
   where
     decode [] = Just []
     decode ('%':a:b:rest) | isHexDigit a && isHexDigit b = case readHex [a,b] of
@@ -315,6 +324,12 @@ uriFilePath uri = do
     decode ('%':_) = Nothing
     decode (c:rest) | c == '?' || c == '#' = Nothing
                     | otherwise = (BS.unpack (TE.encodeUtf8 (T.singleton c)) ++) <$> decode rest
+
+-- Drive recognition is deliberately restricted to an absolute DOS path. A
+-- POSIX filename containing a colon must retain its ordinary filename semantics.
+drivePath :: FilePath -> Bool
+drivePath (letter:':':'/':_) = isAsciiLower letter || isAsciiUpper letter
+drivePath _ = False
 
 -- Editor offsets count Unicode characters; LSP defaults to UTF-16 code units.
 offsetPosition :: Text -> Int -> (Int,Int)
