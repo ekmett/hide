@@ -1954,7 +1954,7 @@ hdbContext d=do
   pure (Build.buildSource d,defaultDirectory d,treeRoot <$> sideTree d,fromMaybe GHC (toolchain d),identities)
   where identity (bid,doc)=do
           buffer<-evaluate (documentBuffer doc)
-          stable<-makeStableName buffer
+          stable<-makeStableName $! buffer
           pure (bid,filePath <$> documentFile doc,revision buffer,stable,dirty buffer)
 hdbCurrent :: GhcLaunch -> HdbContext -> Bool
 hdbCurrent PackageLaunch{} _=False

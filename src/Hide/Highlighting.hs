@@ -109,7 +109,7 @@ tickHighlighting (Highlighting state) desktop = do
       | otherwise = (seen,docs)
     request (ident,doc)=do
       buffer<-evaluate (documentBuffer doc)
-      identity<-makeStableName buffer
+      identity<-makeStableName $! buffer
       pure (Request (Key ident (revision buffer) (documentSyntaxPath doc) identity) buffer)
     install ready docs (Request key@(Key ident _ _ _) _) = case M.lookup ident ready of
       Just (completed,Just rows)
