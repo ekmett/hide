@@ -133,17 +133,6 @@ runRemoteRelay args = handle report $ do
       throwIO err
     relay source destination = readPacket source >>= maybe (pure ()) (\packet -> writePacket destination packet >> relay source destination)
 
--- GHC's Windows Handle readiness wait can remain inside a foreign call after
--- socket shutdown. Bound that wait so cancellation can run between polls.
-awaitInspectionEOF :: Handle -> IO ()
-#ifdef mingw32_HOST_OS
-awaitInspectionEOF connection = do
-  ready <- hWaitForInput connection 100
-  if ready then void (BS.hGetSome connection 1) else awaitInspectionEOF connection
-#else
-awaitInspectionEOF connection = void (BS.hGetSome connection 1)
-#endif
-
 -- Run the wakeup before withAsync joins a blocked socket reader on Windows.
 raceWithShutdown :: IO () -> IO a -> IO b -> IO ()
 raceWithShutdown shutdown left right = mask $ \restore ->
@@ -312,7 +301,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
             d <- tick (desktop s)
             refreshRequestedPaste pasteReads d
             pure s {desktop=d}
-        serve shutdown connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
+        serve shutdown awaitInspectionEnd connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
           first <- readFirstPacket connection
           case first of
             JsonPacket _ | packetType first==Just "session-status" -> do
@@ -346,7 +335,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                     pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
                   -- Start deferred work masked before accepting cancellation. Its
                   -- interruptible waits install their cleanup before EOF can stop it.
-                  withAsync finish $ \response -> withAsync (restore (awaitInspectionEOF connection)) $ \eof ->
+                  withAsync finish $ \response -> withAsync (restore awaitInspectionEnd) $ \eof ->
                     flip finally (do
                       shutdown
                       when exited $ do
@@ -576,9 +565,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
       rememberSession record {sessionId=session,sessionHost=Nothing}
       let acceptLoop = forever $ do
             (sock,_) <- N.accept socket
-            (connection,shutdown) <- socketToEndpoint sock
+            (connection,shutdown,awaitInspectionEnd) <- socketToEndpoint sock
             void (forkIO (finally
-              ((authenticate connection >> serve shutdown connection) `catch` \(_::IOException) -> pure ())
+              ((authenticate connection >> serve shutdown awaitInspectionEnd connection) `catch` \(_::IOException) -> pure ())
               (quietClose connection)))
           drainInspections=do
             let empty=atomically (readTVar inspections >>= check . M.null)

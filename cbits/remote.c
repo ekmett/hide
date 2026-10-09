@@ -240,3 +240,17 @@ done:
 void thc_remote_shutdown(uint32_t socket) {
     shutdown((SOCKET)socket, SD_BOTH);
 }
+
+/* Winsock fd_set stores SOCKET values, not Unix descriptor indices. Bound the
+   wait so Haskell can accept cancellation even when shutdown does not wake it. */
+uint32_t thc_remote_wait_input(uint32_t socket) {
+    fd_set readable;
+    struct timeval delay;
+    FD_ZERO(&readable);
+    FD_SET((SOCKET)socket, &readable);
+    delay.tv_sec = 0;
+    delay.tv_usec = 100000;
+    int result = select(0, &readable, NULL, NULL, &delay);
+    if (result == SOCKET_ERROR) return (uint32_t)WSAGetLastError();
+    return result == 0 ? WAIT_TIMEOUT : 0;
+}

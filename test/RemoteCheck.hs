@@ -374,8 +374,8 @@ withBridgeHandles action=bracket (N.socket N.AF_INET N.Stream N.defaultProtocol)
   bracketOnError (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \client -> do
     N.connect client address
     (server,_)<-N.accept listener
-    (clientHandle,_)<-socketToEndpoint client
-    (serverHandle,shutdown)<-socketToEndpoint server
+    (clientHandle,_,_)<-socketToEndpoint client
+    (serverHandle,shutdown,_)<-socketToEndpoint server
     action serverHandle shutdown clientHandle `finally` do
       shutdown
       hClose serverHandle

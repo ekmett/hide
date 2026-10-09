@@ -8,7 +8,7 @@
 module Hide.RemoteEndpoint
   (sessionEndpoint, connectEndpoint, connectEndpointWithShutdown, socketToEndpoint, endpointExists, withEndpointListener, randomIdentity, spawnDetached, privateDirectory, withSessionLock) where
 import Control.Exception
-import Control.Monad (unless)
+import Control.Monad (unless, void)
 import qualified Data.ByteString as BS
 import Data.Char (isHexDigit, isDigit, isLower)
 import qualified Network.Socket as N
@@ -100,9 +100,12 @@ withSessionLock path action=bracket acquire PI.closeFd (const action)
 connectEndpoint :: FilePath -> IO Handle
 connectEndpoint path = fst <$> connectEndpointWithShutdown path
 
--- The Socket transfers ownership to the Handle. Keep the wakeup only until
--- that Handle closes; calling it afterwards could target a reused descriptor.
-socketToEndpoint :: N.Socket -> IO (Handle, IO ())
+-- | Transfer socket ownership to the Handle and return borrowed shutdown and
+-- inspection-end actions. Join the inspection waiter before closing the Handle;
+-- neither action may outlive it, since the descriptor could then be reused.
+-- On Windows, shutdown precedes cancellation; shutdown alone need not wake a
+-- local Handle reader. Inspection consumes at most one byte before returning.
+socketToEndpoint :: N.Socket -> IO (Handle, IO (), IO ())
 socketToEndpoint sock = mask_ $ do
 #ifdef mingw32_HOST_OS
   descriptorNumber <- N.withFdSocket sock pure
@@ -114,9 +117,21 @@ socketToEndpoint sock = mask_ $ do
   flip onException (hClose h) $ do
     hSetBinaryMode h True
     hSetBuffering h NoBuffering
-    pure (h,shutdown)
+#ifdef mingw32_HOST_OS
+    let awaitEnd=do
+          code<-c_waitInput (fromIntegral descriptorNumber)
+          if code==258 then awaitEnd else do
+            checkWindows "Wait for remote inspection input" code
+            void (BS.hGetSome h 1)
+#else
+    let awaitEnd=void (BS.hGetSome h 1)
+#endif
+    pure (h,shutdown,awaitEnd)
 
 #ifdef mingw32_HOST_OS
+-- Bounded Winsock wait: GHC fdReady treats a SOCKET as a Unix fd index and
+-- aborts for values >= FD_SETSIZE. A safe call leaves other Haskell threads free.
+foreign import ccall safe "thc_remote_wait_input" c_waitInput :: Word32 -> IO Word32
 foreign import ccall unsafe "thc_remote_shutdown" c_shutdown :: Word32 -> IO ()
 foreign import ccall unsafe "thc_remote_spawn" c_spawn :: CWString -> CWString -> CWString -> CWString -> Ptr (Ptr ()) -> IO Word32
 foreign import ccall unsafe "thc_remote_private_directory" c_privateDirectory :: CWString -> IO Word32
@@ -183,7 +198,7 @@ connectEndpointWithShutdown path = do
     _ -> failure "Invalid private remote endpoint descriptor"
   bracketOnError (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \sock -> do
     N.connect sock (N.SockAddrInet (fromIntegral port) (N.tupleToHostAddress (127,0,0,1)))
-    (h,shutdown) <- socketToEndpoint sock
+    (h,shutdown,_) <- socketToEndpoint sock
     flip onException (hClose h) $ do
       let authenticate=do
             challenge <- randomBytes 24
@@ -235,7 +250,8 @@ endpointExists path = do
 connectEndpointWithShutdown :: FilePath -> IO (Handle, IO ())
 connectEndpointWithShutdown path = bracketOnError (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
   N.connect sock (N.SockAddrUnix path)
-  socketToEndpoint sock
+  (h,shutdown,_) <- socketToEndpoint sock
+  pure (h,shutdown)
 withEndpointListener :: FilePath -> (N.Socket -> (Handle -> IO ()) -> IO a) -> IO a
 withEndpointListener path action = bracket (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
   N.bind sock (N.SockAddrUnix path)
