@@ -290,7 +290,17 @@ session scenario=bracket (Fixture.fixture (if take 5 scenario=="child" || take 5
       "policy"->pure pending {guestPrivatePaths=[origin]}
       "retire"->retireTreeFromHost host (case receipt of WatchFrame owner _ _ _ _->owner) pending
       _->pure pending {dialog=Just (Dialog "modal" (DebuggerWatchDialog 999 Nothing False) [Input "Expression" "" 0] 0 ["Cancel"] [])}
-    settled<-if scenario=="resume" then foldM (\d _->threadDelay 1000 >> tick d) changed [1..80::Int] else release changed
+    released<-if scenario=="resume" then foldM (\d _->threadDelay 1000 >> tick d) changed [1..80::Int] else release changed
+    -- An ordered DAP reply only starts source preparation. Observe this watch's
+    -- adopted result and sidebar projection before checking its provenance.
+    settled<-if scenario=="policy" then awaitIO "watch result adoption" (\d->do
+      (_,current)<-entries
+      pure (not (has "[evaluating" d) && case M.lookup key current of
+        Just watch | watchRevision watch==watchRevision entry -> case watchValue watch of
+          WatchResult{}->True
+          WatchError{}->True
+          _->False
+        _->False)) released else pure released
     (_,after)<-entries
     if scenario=="policy" then do
       check "canonical frame origin is rechecked before publication" (any (\watch->watchPrivate watch && case watchValue watch of WatchResult _ _ _ _ resultOrigin->resultOrigin==Just origin; _->False) (M.elems after) && has "Private watch" settled && not (has "STALE" settled))

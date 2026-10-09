@@ -43,7 +43,7 @@ checks=withSessionServices $ \runtime -> do
     Just executable -> do
       root<-getTemporaryDirectory
       let jobs=sessionBuildJobs runtime
-      started<-Jobs.startBuildJob jobs "Test job" root [(executable,["-c","import sys; print('mcp λ界'); print('compiler stderr',file=sys.stderr); raise SystemExit(7)"])] d
+      started<-Jobs.startBuildJob jobs "Test job" root [(executable,["-X","utf8","-c","import sys; sys.stdout.reconfigure(newline='\\n'); print('mcp λ界'); print('compiler stderr',file=sys.stderr); raise SystemExit(7)"])] d
       done<-awaitJob jobs started (100::Int)
       status<-Jobs.buildJobStatus jobs done
       check "job retains exact nonzero exit status" (field "active" status==Just False && field "exitCode" status==Just (7::Int))

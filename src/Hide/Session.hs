@@ -13,7 +13,7 @@ import Control.Monad (filterM, unless)
 import Data.Aeson (FromJSON, ToJSON, Value, object, (.=), eitherDecodeStrict', encode)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.List (sortOn, nub, find, isPrefixOf)
+import Data.List (sortOn, find, isPrefixOf)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (Down(..))
 import Data.Time (UTCTime, getCurrentTime)
@@ -99,9 +99,8 @@ forgetSession :: String -> IO ()
 forgetSession ident = do
   path <- recordPath ident
   checkpoint <- checkpointPath ident
-  legacy <- (++".json") <$> sessionEndpoint ident
   mapM_ (\target -> removeFile target `catch` \(err::IOException) ->
-    unless (isDoesNotExistError err) (ioError err)) [path,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json",legacy]
+    unless (isDoesNotExistError err) (ioError err)) [path,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json"]
 
 -- | Delete a captured, stopped local session from its owning sidebar worker.
 -- The current daemon identity must be supplied: POSIX lifetime locks are
@@ -135,9 +134,7 @@ deleteStoppedSession current captured=do
 loadSession :: String -> IO (Maybe SessionRecord)
 loadSession ident = do
   path <- recordPath ident
-  legacy <- (++".json") <$> sessionEndpoint ident
-  current <- readRecord path
-  maybe (readRecord legacy) (pure . Just) current
+  readRecord path
   where
     readRecord path=(withBinaryFile path ReadMode $ \handle -> do
       size <- hFileSize handle
@@ -150,9 +147,8 @@ loadSession ident = do
 listSessions :: IO [SessionRecord]
 listSessions = do
   directory <- sessionStoreDirectory
-  legacy <- takeDirectory <$> sessionEndpoint (replicate 48 '0')
-  names <- concat <$> mapM listDirectory [directory,legacy]
-  records <- mapM loadSession (nub [ident | name<-names, takeExtension name==".json", let ident=dropExtension name, length ident==48, all (`elem` ("0123456789abcdef"::String)) ident])
+  names <- listDirectory directory
+  records <- mapM loadSession [ident | name<-names, takeExtension name==".json", let ident=dropExtension name, length ident==48, all (`elem` ("0123456789abcdef"::String)) ident]
   sortOn (Down . sessionCreated) <$> filterM (fmap (/="ended") . sessionState) (catMaybes records)
 
 -- | Choose an unambiguous display prefix within the supplied session inventory.

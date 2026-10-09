@@ -51,7 +51,9 @@ captureRead = bufferContent
 captureVersion :: Buffer -> IO ContentVersion
 captureVersion b=do
   evaluated<-evaluate b
-  identity<-makeStableName evaluated
+  -- Strict application also removes an HPC tick thunk at this call site.
+  -- Name the evaluated buffer constructor, never an instrumentation wrapper.
+  identity<-makeStableName $! evaluated
   pure (ContentVersion (revision evaluated) identity)
 
 -- | Check current immutable identity and revision without payload traversal.

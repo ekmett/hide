@@ -7,7 +7,7 @@
 -- applyEdit requests at receipt time, until its terminal response. Cancellation
 -- does not release ownership prematurely; only a broken transport is retired.
 module Hide.LSP
-  ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
+  ( Client, Event(..), startClient, startClientWith, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
   , executeCommand, replyEdit, cancelRequest, retireClient
   , fileUri, uriFilePath, offsetPosition, positionOffset, positionValue
   , bufferOffsetPosition, bufferPositionOffset, bufferPositionValue
@@ -22,7 +22,7 @@ import qualified Data.Aeson.Key
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BL
-import Data.Char ( isHexDigit, ord, toLower)
+import Data.Char (isAsciiLower, isAsciiUpper, isHexDigit, ord, toLower)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Sequence as Seq
@@ -34,11 +34,14 @@ import Data.Text.Encoding.Error (lenientDecode)
 import Numeric (readHex, showHex)
 import System.Directory (canonicalizePath)
 import System.IO.Error (tryIOError)
+import System.FilePath (normalise)
+import System.Info (os)
 import System.Environment (lookupEnv)
 import System.IO
 import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
+import Hide.Process (waitProcessExit)
 import Hide.Buffer (Buffer, bufferLineColumn, bufferLineOffset, bufferSlice, bufferContent, contentSourceLineAt, sourceLineSlice)
 
 data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
@@ -53,19 +56,26 @@ data Client = Client
   , commandOwner :: MVar (Maybe Int), replyEdit :: Value -> Bool -> Maybe Text -> IO (), retireClient :: IO (MVar ())
   }
 
--- Initialization and all subsequent writes happen off the UI thread.
+-- | Start the configured HLS executable in a project root. Initialization and
+-- subsequent writes belong to the protocol workers.
 startClient :: FilePath -> IO Client
-startClient root = mask $ \restore -> do
+startClient root = do
   executable <- fromMaybe "haskell-language-server-wrapper" <$> lookupEnv "THC_EDIT_HLS"
+  startClientWith executable ["--lsp"] root
+
+-- | Start a language server with literal arguments and a working directory.
+-- The caller supplies the complete argument list; no shell or shebang is needed.
+startClientWith :: FilePath -> [String] -> FilePath -> IO Client
+startClientWith executable arguments root = mask $ \restore -> do
   (Just input, Just output, Just errors, process) <- createProcess
-    (proc executable ["--lsp"]) { cwd = Just root, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe }
+    (proc executable arguments) { cwd = Just root, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe }
   let ignore action = void action `catch` (\(_ :: IOException) -> pure ())
       cleanup = do
         ignore (terminateProcess process)
         ignore (hClose input)
         ignore (hClose output)
         ignore (hClose errors)
-        void (timeout 1000000 (waitForProcess process))
+        void (timeout 1000000 (waitProcessExit process))
   restore (do
     mapM_ (`hSetBinaryMode` True) [input, output, errors]
     queue <- newChan
@@ -173,10 +183,13 @@ startClient root = mask $ \restore -> do
                 call (-1 :: Int) ("shutdown" :: Text) Null
                 takeMVar shutdown
               void $ timeout 250000 (notify ("exit" :: Text) Null)
+            void (timeout 250000 (waitProcessExit process))
+            -- Windows pipe reads cannot receive ThreadKilled until the peer
+            -- closes its handle. Stop that peer before joining the readers.
+            ignore (terminateProcess process)
             killThread reader
             killThread responder
             killThread drainer
-            void (timeout 250000 (waitForProcess process))
             cleanup) `finally` putMVar stopDone ()
         reply ident applied reason = writeChan queue (Reply (object
           ["jsonrpc" .= ("2.0" :: Text),"id" .= ident,"result" .= object
@@ -289,8 +302,11 @@ readFrame handle = do
       bytes (remaining-BS.length chunk) (chunk:chunks)
 
 fileUri :: FilePath -> Text
-fileUri path = "file://" <> T.concatMap escape (TE.decodeLatin1 (TE.encodeUtf8 (T.pack path)))
+fileUri path = "file://" <> T.concatMap escape (TE.decodeLatin1 (TE.encodeUtf8 (T.pack absolute)))
   where
+    separated=if os=="mingw32" then map (\c -> if c=='\\' then '/' else c) path else path
+    -- A drive belongs in the URI path, not its authority (RFC 8089, D.2).
+    absolute=if os=="mingw32" && drivePath separated then '/':separated else separated
     escape c | c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c `elem` ("/-._~:" :: String) = T.singleton c
              | otherwise = let hex = showHex (ord c) "" in T.pack ('%' : (if length hex == 1 then '0':hex else hex))
 
@@ -299,7 +315,11 @@ uriFilePath uri = do
   path <- T.stripPrefix "file://" uri
   local <- if T.isPrefixOf "/" path then Just path else ("/" <>) <$> T.stripPrefix "localhost/" path
   raw <- decode (T.unpack local)
-  either (const Nothing) (Just . T.unpack) (TE.decodeUtf8' (BS.pack raw))
+  decoded<-either (const Nothing) (Just . T.unpack) (TE.decodeUtf8' (BS.pack raw))
+  pure $ case decoded of
+    '/':drive | os=="mingw32" && drivePath drive -> normalise drive
+    '/':'/':_ | os=="mingw32" -> normalise decoded
+    _ -> decoded
   where
     decode [] = Just []
     decode ('%':a:b:rest) | isHexDigit a && isHexDigit b = case readHex [a,b] of
@@ -308,6 +328,12 @@ uriFilePath uri = do
     decode ('%':_) = Nothing
     decode (c:rest) | c == '?' || c == '#' = Nothing
                     | otherwise = (BS.unpack (TE.encodeUtf8 (T.singleton c)) ++) <$> decode rest
+
+-- Drive recognition is deliberately restricted to an absolute DOS path. A
+-- POSIX filename containing a colon must retain its ordinary filename semantics.
+drivePath :: FilePath -> Bool
+drivePath (letter:':':'/':_) = isAsciiLower letter || isAsciiUpper letter
+drivePath _ = False
 
 -- Editor offsets count Unicode characters; LSP defaults to UTF-16 code units.
 offsetPosition :: Text -> Int -> (Int,Int)

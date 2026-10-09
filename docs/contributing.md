@@ -35,6 +35,68 @@ disk baselines or Undo. Equal numeric revisions do not authorize replacement.
 Human input remains a pure model transition; screen permission hints run on the
 capture worker and do not replace admission checks.
 
+
+## Coverage and test results
+
+The separate [Coverage workflow](https://github.com/ekmett/hide/actions/workflows/coverage.yml)
+runs the editor checks with GHC HPC on Linux x64, macOS ARM64 and native Windows
+x64. Each host uploads source coverage and JUnit test results to
+[Codecov](https://app.codecov.io/github/ekmett/hide) under its own platform flag.
+Coverage statuses are informational while we establish a baseline. Missing reports
+and upload errors fail the workflow; a failed test run still uploads the reports
+it produced. Canceled jobs do not invent results.
+
+These runs use GHC 9.14.1 with the browser and shared editor services enabled.
+SDL windows and Ghostty terminals are omitted from this common configuration;
+HPC measures Haskell execution, not C code or shaders. Native frontend and terminal
+checks remain part of their ordinary feature builds. Windows does not run the
+POSIX-only hdb binary acquisition fixture. Filesystem checks retain portable
+behavior and isolate assertions that require POSIX permissions or filenames.
+
+The workflow pairs two required runs. The normal optimized build enforces the
+existing allocation limits. The full HPC run uses `--instrumented`: it still
+measures allocations and checks values, identities and behavior, but does not
+compare instrumented allocation costs against optimized limits. HPC counters can
+change optimization and allocation; increasing those limits would hide regressions
+in the normal build. The two profiles have distinct names in JUnit.
+
+To generate the same reports locally from the repository root:
+
+```sh
+cabal install hpc-codecov-0.6.4.1
+reports=$(mktemp -d "${TMPDIR:-/tmp}/hide-coverage.XXXXXX")
+export MSYS2_ARG_CONV_EXCL=--test-option=--pattern=
+cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-option='--pattern=/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --test-option="--xml=$reports/allocation-tests.xml"
+cabal build editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal
+test_exe=$(cabal list-bin editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal)
+test_exe=${test_exe%$'\r'}
+HPCTIXFILE="$reports/editor-tests.tix" cabal exec --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal -- "$test_exe" --instrumented --xml="$reports/tests.xml" +RTS --read-tix-file=no -RTS
+python3 tools/coverage.py --output "$reports"
+```
+
+The test runner names each existing check group and excludes overlapping execution
+because some fixtures temporarily own the process environment or working directory.
+No group depends on the results or side effects of a previous group.
+Use `--test-options="--pattern=BufferTree"` to select a group. Full coverage reports
+come from the whole suite; a focused run measures only the selected work.
+
+The builds use separate directories and caches. CI saves completed builds before
+running tests, so a test failure does not discard them. Each invocation owns its
+reports directory; `HPCTIXFILE` keeps counts outside the reusable build and
+`--read-tix-file=no` prevents accumulation on repeated execution. No files need
+to be deleted before repeating a run or converting its reports.
+Each platform converts its own matching instrumentation before uploading; Codecov
+combines the reports for the commit without carrying old platform coverage forward.
+
+Download the workflow's `coverage-<platform>` artifact and open
+`hpc-html/hpc_index.html` inside its report directory for expression-level coverage, including
+columns and Boolean outcomes. This is GHC's native rendering of the HPC spans.
+The artifact retains the matching `.mix` files, raw `.tix` counts, HTML, LCOV,
+both JUnit reports and host/toolchain metadata for seven days. HPC spans retain
+one-based character columns and inclusive ends, with tabs expanded to stops of
+eight columns. Codecov receives the coarser LCOV line/branch report; its upload
+does not preserve those column spans.
+
 ## Source documentation
 
 Each `Hide.*` module starts with an overview of its role, ownership and notable
@@ -50,8 +112,8 @@ Generate the initial API reference and linked source with:
 cabal haddock lib:hide --haddock-html --haddock-hyperlink-source
 ```
 
-Coverage is preliminary, especially the model's internal helpers and native FFI
-exports. A documentation build checks parsing and links, not the truth of the
+API documentation is preliminary, especially the model's internal helpers and
+native FFI exports. A documentation build checks parsing and links, not the truth of the
 contracts: review those against implementation and the relevant behavioral tests.
 
 ## Plugin command implementation

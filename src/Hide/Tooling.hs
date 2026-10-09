@@ -97,8 +97,9 @@ data Tooling = Tooling
   }
 
 -- | Scope language sessions, preparation workers and pending retirement joins.
-withTooling :: (Tooling -> IO a) -> IO a
-withTooling = withToolingUsing projectRoot L.startClient editSnapshot loadFile
+-- The launcher receives each discovered project root and owns its server startup.
+withTooling :: (FilePath -> IO L.Client) -> (Tooling -> IO a) -> IO a
+withTooling launch = withToolingUsing projectRoot launch editSnapshot loadFile
 
 -- | Override the filesystem/process operations, keeping their normal ownership.
 withToolingUsing :: (FilePath -> IO FilePath) -> (FilePath -> IO L.Client) -> (Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))) -> (FilePath -> IO (Either String (FileState,Buffer))) -> (Tooling -> IO a) -> IO a

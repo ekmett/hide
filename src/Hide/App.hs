@@ -34,9 +34,11 @@ import Hide.ClipboardMCP
 import Hide.Links (followLink)
 import Hide.Environment
 import Hide.ControlMCP
-import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
-import Control.Concurrent (myThreadId, throwTo, threadDelay)
+import Control.Exception (finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
+import Control.Concurrent (threadDelay)
 #ifndef mingw32_HOST_OS
+import Control.Concurrent (myThreadId,throwTo)
+import Control.Exception (bracket)
 import System.Posix.Signals (installHandler, Handler(Catch), sigTERM, sigHUP)
 #endif
 import Data.Aeson (Value(..), object, (.=), withObject, (.:), (.:?), (.!=))
@@ -69,6 +71,7 @@ import Hide.Debugger
 import Hide.DebuggerSidebar
 import Hide.Conversation
 import Hide.SessionServices hiding (sessionDirectory)
+import qualified Hide.LSP as L
 import Hide.Tooling
 import Hide.GitOperations
 import qualified Data.Map.Strict as M
@@ -280,7 +283,7 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> withAgentSidebar (sidebarCapabilities sidebarHost) SidebarAgent (conversationAgents conversation) autocomplete $ \agentSidebar -> do
+          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> withAgentSidebar (sidebarCapabilities sidebarHost) SidebarAgent (conversationAgents conversation) autocomplete $ \agentSidebar -> do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)

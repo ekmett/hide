@@ -41,8 +41,8 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
   environment "XDG_DATA_HOME" (Just (root </> "data")) $ do
     firstRecord<-newSessionRecord Nothing ["--private-startup-secret"]
     otherRecord<-newSessionRecord (Just "remote.example") ["--other-private-secret"]
-    let current=firstRecord {sessionId=replicate 48 'a',sessionDirectory=root}
-        other=otherRecord {sessionId=replicate 48 'b',sessionDirectory=root}
+    let current=firstRecord {sessionDirectory=root}
+        other=otherRecord {sessionDirectory=root}
     rememberSession current
     rememberSession other
     checkpointPath (sessionId current) >>= \path->writeFile path "recoverable fixture"
@@ -184,7 +184,7 @@ deletionChecks=do
   checkpoint<-checkpointPath ident
   directory<-sessionStoreDirectory
   let metadata=directory </> ident++".json"
-      artifacts=[metadata,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json",endpoint++".json"]
+      artifacts=[metadata,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json"]
       check label ok=unless ok (fail label)
       refused label current record=do
         before<-mapM BS.readFile artifacts
@@ -205,8 +205,8 @@ deletionChecks=do
     withEndpointListener endpoint $ \listener authenticate->
       withAsync (do
         (socket,_)<-N.accept listener
-        bracket (socketToEndpoint socket) (\(handle,shutdown)->shutdown `finally` hClose handle)
-          (authenticate . fst)) $ \worker->do
+        bracket (socketToEndpoint socket) (\(handle,shutdown,_)->shutdown `finally` hClose handle)
+          (\(handle,_,_)->authenticate handle)) $ \worker->do
         refused "Live endpoint deletion is refused even without its daemon lock" Nothing captured
         completed<-timeout 3000000 (Async.wait worker)
         check "Live endpoint probe reached the real listener" (completed==Just ())

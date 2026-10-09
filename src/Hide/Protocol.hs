@@ -363,7 +363,14 @@ writePacket h packet = do
 -- | Read one framed packet. Clean boundary EOF is Nothing; truncation or an
 -- invalid packet kind fails.
 readPacket :: Handle -> IO (Maybe WirePacket)
-readPacket h = do
+readPacket h = readPacketWith (BS.hGet h)
+
+-- | Read one packet with the transport owner's chunk reader. For each positive
+-- requested count, the reader returns at most that many bytes; an empty chunk
+-- means EOF. Arbitrary short chunks preserve the same framing and size limits
+-- as 'readPacket'. The caller serializes reads for the entire packet.
+readPacketWith :: (Int -> IO BS.ByteString) -> IO (Maybe WirePacket)
+readPacketWith receive = do
   header<-exact 4
   if BS.null header then pure Nothing else do
     unless (BS.length header==4) (bad "Truncated remote packet header")
@@ -380,7 +387,7 @@ readPacket h = do
     exact count = go count []
     go 0 chunks = pure (BS.concat (reverse chunks))
     go n chunks = do
-      chunk<-BS.hGet h n
+      chunk<-receive n
       if BS.null chunk then pure (BS.concat (reverse chunks)) else go (n-BS.length chunk) (chunk:chunks)
 
 -- | Reconstruct a bounded frame and validate row indices/completeness.

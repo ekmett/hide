@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module RemoteTerminalCheck (checks,packetChecks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 import Control.Monad (unless)
 import Control.Exception (evaluate)
 import Control.DeepSeq (force)
@@ -39,8 +40,8 @@ import System.Timeout (timeout)
 import qualified Data.ByteString.Lazy as BL
 #endif
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   packetChecks
   let check name good=unless good (error name)
       parsed event=terminalEventInput event >>= either (const Nothing) Just . parseEither P.parseInput
@@ -81,7 +82,7 @@ checks = do
     RemoteScript x y paint text natural _->x+y+textFlags paint+T.length text+natural | cell<-remoteCells dense])
   after<-getAllocationCounter
   check "dense receiver retains 55 runs within a 1.5 MB allocation budget"
-    (length (remoteCells dense)==55 && occupied==21285 && before-after<1500000)
+    (length (remoteCells dense)==55 && occupied==21285 && withinBudget profile (before-after) (1500000))
   let (cursor,ops)=remoteTerminalDisplay (40,12) (Just frame) ""
       rowWidth values=sum [n | TextSpan _ n _ _<-Vec.toList values]
       rowText values=T.concat [TL.toStrict text | TextSpan _ _ _ text<-Vec.toList values]

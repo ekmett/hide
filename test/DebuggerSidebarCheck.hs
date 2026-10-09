@@ -29,7 +29,7 @@ import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 
 checks :: IO ()
-checks=watchManagement >> mapM_ session ["sidebar","sidebar-exit"] >> putStrLn "Debugger sidebar checks passed"
+checks=watchManagement >> session "sidebar" 11 >> session "sidebar" 12 >> session "sidebar-exit" 11 >> putStrLn "Debugger sidebar checks passed"
 
 -- The persistent provider uses the same captured command route as stopped frames.
 -- A watch catalogue can be managed without a live adapter, and never evaluates.
@@ -73,7 +73,8 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
   updated<-save "counter + 2" editing >>= wait "updated watch row" (has "counter + 2")
   (_,_,edited)<-debuggerWatches runtime
   check "edit retains watch identity and increments its revision" (M.keys edited==[ident] && maybe False ((==1).watchRevision) (M.lookup ident edited))
-  staleAction<-invoke stale updated >>= wait "stale captured action refusal" ((/="Running sidebar action…").status)
+  check "previous watch row receipt is expired" (case stale of TreeCommand trace _->maybe False (not . hitCurrent trace) (sideTree updated); _->False)
+  staleAction<-invoke stale updated
   (_,_,afterStale)<-debuggerWatches runtime
   check "previous watch row cannot remove edited expression" (M.member ident afterStale)
   removed<-action "Remove watch" (row "counter + 2" staleAction) staleAction >>= wait "removed watch row" (has "No watches")
@@ -105,8 +106,8 @@ watchManagement=withSidebarCommands $ \host->withDebugger $ \runtime->withDebugg
   _<-foldM (\d _->tick d) protected [1..20::Int]
   check "management does not create a stopped session or evaluation handles" . (==Nothing) =<< debuggerSidebarEpoch runtime
 
-session :: String -> IO ()
-session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)->
+session :: String -> Int -> IO ()
+session mode firstFrame=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)->
   withSidebarCommands $ \host->withDebugger $ \runtime->withDebuggerSidebar host runtime $ \provider->do
     let fallback d _=pure (False,d)
         core=debuggerEffects runtime fallback
@@ -121,14 +122,37 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
         expand title d=case [i | (i,row)<-zip [0..] (rows d),title==P.infoLabel (rowInfo row)] of
           i:_->let (next,outbox)=activateTree True i d {sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree d)} in snd <$> effects next outbox
           _->error ("missing row "<>T.unpack title)
-        requests=do values<-T.lines <$> TIO.readFile logPath
-                    pure [request | value<-values,Just body<-[decodeReplyText value],Just request<-[field "request" body]] :: IO [Value]
+        records=do values<-T.lines <$> TIO.readFile logPath
+                   pure [body | value<-values,Just body<-[decodeReplyText value]] :: IO [Value]
+        requests=do values<-records; pure [request | body<-values,Just request<-[field "request" body]]
+        reversedReplies command argument targets=do
+          values<-records
+          let sent=[request | body<-values,Just request<-[field "request" body],field "command" request==Just command,
+                    (field "arguments" request >>= field argument) `elem` map Just targets]
+              received=[field "arguments" request >>= field argument | request<-sent]
+              releases=[release | body<-values,Just release<-[field "sidebarRelease" body]]
+          pure $ case traverse (field "seq") sent :: Maybe [Int] of
+            Just sequences | received==map Just targets->any (\release->field "command" release==Just command &&
+              field "targets" release==Just (reverse targets) && field "requestSeqs" release==Just (reverse sequences)) releases
+            _->False
+        requested command argument target=any (\request->field "command" request==Just command &&
+          (field "arguments" request >>= field argument)==Just target) <$> requests
         commands=map (maybe "" id . (field "command" :: Value -> Maybe T.Text)) <$> requests
+        secondFrame=if firstFrame==11 then 12 else 11
+        frameTitle :: Int -> T.Text
+        frameTitle fid=if fid==11 then "entry λ  :2" else "sibling frame  :1"
+        localsTitle fid="Locals "<>T.pack (show fid)
+        below fid title d=case (sideTree d,[row | row<-rows d,P.infoLabel (rowInfo row)==title]) of
+          (Just tree,[row])->let parent=one "owning frame" [value | value<-rows d,P.infoLabel (rowInfo value)==frameTitle fid]
+                            in keyOf (rowHit parent) `elem` map keyOf (hitTrace (keyOf (rowHit row)) tree)
+          _->False
         readPage d request=withAsync (debuggerSidebarRead runtime request) $ \worker->do
           next<-waitIO "sidebar page reply" (\_->maybe False (const True) <$> poll worker) d
           result<-Async.wait worker
           pure (next,result)
-        selected d=do (_,finish)<-debuggerTool runtime d "debug_status" (object []); value<-finish
+        debuggerState d=do (_,finish)<-debuggerTool runtime d "debug_status" (object []); finish
+        disconnected d=either (const False) ((==Just False) . (field "active" :: Value -> Maybe Bool)) <$> debuggerState d
+        selected d=do value<-debuggerState d
                       pure (value >>= maybe (Left "no frame") Right . (field "frame" :: Value -> Maybe Value) >>= maybe (Left "no frame ID") Right . (field "id" :: Value -> Maybe Int))
         decodeReplyText=decodeStrict' . Data.Text.Encoding.encodeUtf8
     initial<-initializeSidebar host (initialDesktop (80,25)) {sideTree=Just (emptySidebar (takeDirectory logPath) 28 False)}
@@ -139,7 +163,9 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
         (accepted,watchEffects)=submitDialog 0 filled prompted {dialog=Just filled}
     (_,withWatch)<-core accepted watchEffects
     (_,connected)<-core withWatch [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
-    stopped<-wait "stopped debugger" (T.isInfixOf "Stopped in " . status) connected
+    stopped<-waitIO "initial stopped source publication" (\d->do
+      epoch<-debuggerSidebarEpoch runtime
+      pure (epoch/=Nothing && (activeDocument d >>= documentLabel)==Just "Source Generated.hs [9]")) connected
     (_,_,retainedWatches)<-debuggerWatches runtime
     check "expressions survive session initialization without evaluation" (map watchExpression (M.elems retainedWatches)==["persistent"])
     root<-expand "Debug" stopped >>= wait "threads" (has "main λ")
@@ -149,25 +175,36 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
       expired<-wait "exited thread expires tree" (\d->not (has "worker" d) && not (has "STALE" d)) requesting
       check "exit preserves stopped state" . (/=Nothing) =<< debuggerSidebarEpoch runtime
       (_,closing)<-core expired [DebugAction "disconnect" []]
-      _<-wait "disconnect" (T.isPrefixOf "Debugger disconnected" . status) closing
+      _<-waitIO "disconnected debugger owner" disconnected closing
       pure ()
     else do
       stack<-expand "main λ" root >>= wait "stack" (has "sibling frame")
-      first<-expand "entry λ  :2" stack
-      second<-expand "sibling frame  :1" first
-      prepared<-wait "interleaved frame scopes" (\d->has "Locals 11" d && has "Locals 12" d && maybe False (\tree->treeProjectionRevision tree==treeRevision tree) (sideTree d)) second
-      let frameRow=one "frame row" [row | row<-rows prepared,"sibling frame" `T.isPrefixOf` P.infoLabel (rowInfo row)]
+      first<-expand (frameTitle firstFrame) stack
+      -- Choose both arrival orders explicitly. The fixture holds either first
+      -- request until its pair arrives, then releases replies in reverse order.
+      firstPending<-waitIO "first frame scopes request" (\_->requested ("scopes"::T.Text) "frameId" firstFrame) first
+      second<-expand (frameTitle secondFrame) firstPending
+      prepared<-waitIO "interleaved frame scopes" (\d->do
+        reordered<-reversedReplies ("scopes"::T.Text) "frameId" [firstFrame,secondFrame]
+        pure (reordered && has "Locals 11" d && has "Locals 12" d &&
+          maybe False (\tree->treeProjectionRevision tree==treeRevision tree) (sideTree d))) second
+      check "reordered scopes retain their owning frame" (below 11 "Locals 11" prepared && below 12 "Locals 12" prepared)
+      let frameRow=one "frame row" [row | row<-rows prepared,frameTitle secondFrame==P.infoLabel (rowInfo row)]
           trace=maybe [] (hitTrace (keyOf (rowHit frameRow))) (sideTree prepared)
           reference=one "frame action" [ref | (_,P.RegisteredAction ref)<-rowActions frameRow]
           captured=TreeCommand (rowHit frameRow:drop 1 trace) reference
           (_,activation)=runCommand captured prepared
-      firstLocals<-expand "Locals 11" prepared
-      pendingFirst<-waitIO "first frame locals request" (\_->any (\request->(field "arguments" request >>= field "variablesReference")==Just (211::Int)) <$> requests) firstLocals
+      firstLocals<-expand (localsTitle firstFrame) prepared
+      pendingFirst<-waitIO "first frame locals request" (\_->requested ("variables"::T.Text) "variablesReference" (200+firstFrame)) firstLocals
       (_,queued)<-effects pendingFirst activation
-      navigated<-waitIO "captured frame activation" (fmap (==Right 12) . selected) queued
-      scopes<-wait "interleaved frame scopes" (\d->has "Locals 11" d && has "Locals 12" d) navigated
-      two<-expand "Locals 12" scopes
-      locals<-wait "both frame locals" (\d->has "counter211" d && has "counter212" d) two
+      navigated<-waitIO "captured frame activation" (fmap (==Right secondFrame) . selected) queued
+      scopes<-wait "retained sibling scopes" (\d->has "Locals 11" d && has "Locals 12" d) navigated
+      two<-expand (localsTitle secondFrame) scopes
+      locals<-waitIO "both frame locals" (\d->do
+        reordered<-reversedReplies ("variables"::T.Text) "variablesReference" [200+firstFrame,200+secondFrame]
+        pure (reordered && has "counter211" d && has "counter212" d &&
+          maybe False (\tree->treeProjectionRevision tree==treeRevision tree) (sideTree d))) two
+      check "reordered locals retain their owning frame" (below 11 "counter211 = 211" locals && below 12 "counter212 = 212" locals)
       let moreRows title d=[i | (i,row)<-zip [0::Int ..] (rows d),LoadNext{}<-[rowAction row],
                     rowHit row==rowHit (one "locals root" [r | r<-rows d,P.infoLabel (rowInfo r)==title])]
           more title d=case moreRows title d of
@@ -186,7 +223,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
       inspected<-expand "local211_129 = expand" lastPage >>= wait "published later local expands" (has "child211 = later page")
       sent<-requests
       check "locals continuation reuses one unpaged response per frame" (all (\ref->[field "arguments" r :: Maybe Value | r<-sent,field "command" r==Just ("variables"::T.Text),(field "arguments" r >>= field "variablesReference")==Just ref]==[Just (object ["variablesReference" .= ref])]) [211::Int,212])
-      check "delayed locals and paging do not change selected frame" . (==Right 12) =<< selected inspected
+      check "delayed locals and paging do not change selected frame" . (==Right secondFrame) =<< selected inspected
       before<-commands
       _<-foldM (\d _->snapshot d `seq` tick d) inspected [1..20::Int]
       after<-commands
@@ -199,9 +236,15 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
       check "cached scope replay cannot weaken lazy reference policy" (case lazyReply of Left _->True; Right _->False)
       waiting<-expand "waiting = expand to wait" checked
       pending<-waitIO "pending variable read" (\_->any (\request->(field "arguments" request >>= field "variablesReference")==Just (910::Int)) <$> requests) waiting
+      beforeResume<-length . filter (=="threads") <$> commands
       (_,resuming)<-core pending [DebugAction "continue" []]
-      resumed<-wait "resume expires handles" (T.isPrefixOf "Running" . status) resuming
-      drained<-foldM (\d _->threadDelay 1000 >> tick d) resumed [1..30::Int]
+      drained<-waitIO "resume consumes late locals and expires handles" (\d->do
+        resumedEpoch<-debuggerSidebarEpoch runtime
+        threads<-length . filter (=="threads") <$> commands
+        -- The adapter sends thread-started after the delayed locals reply.
+        -- Its resulting threads request proves those events reached the owner.
+        pure (threads>beforeResume && resumedEpoch==Nothing && not (has "counter211" d) &&
+          maybe False (\tree->treeProjectionRevision tree==treeRevision tree) (sideTree d))) resuming
       (_,oldPage)<-effects drained (snd retainedMore)
       check "retained continuation cannot restore resumed locals" (not (has "local211_" oldPage))
       let (late,oldAction)=runCommand captured oldPage
@@ -210,7 +253,7 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
       check "late previous-stop locals cannot revive" (not (has "STALE" drained) && not (has "counter211" drained))
       check "inspection never evaluates lazy targets" . not . any (`elem` ["evaluate","setVariable"]) =<< commands
       (_,closing)<-core drained [DebugAction "disconnect" []]
-      _<-wait "disconnect" (T.isPrefixOf "Debugger disconnected" . status) closing
+      _<-waitIO "disconnected debugger owner" disconnected closing
       pure ()
 
 field :: FromJSON a => Key -> Value -> Maybe a

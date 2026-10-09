@@ -22,6 +22,10 @@ import Control.Concurrent.Async (withAsync, wait)
 import Data.Bits ((.|.), xor)
 import qualified Data.ByteString.Char8 as B8
 import Data.Word (Word8, Word32)
+import Data.IORef (readIORef)
+import GHC.IO.Buffer (isEmptyBuffer)
+import GHC.IO.Handle.Internals (wantReadableHandle_)
+import GHC.IO.Handle.Types (Handle__(haByteBuffer))
 import Foreign (Ptr, alloca, allocaBytes, castPtr, peek, nullPtr)
 import Foreign.C.String (CWString, withCWString)
 import System.Directory (getHomeDirectory)
@@ -100,9 +104,17 @@ withSessionLock path action=bracket acquire PI.closeFd (const action)
 connectEndpoint :: FilePath -> IO Handle
 connectEndpoint path = fst <$> connectEndpointWithShutdown path
 
--- The Socket transfers ownership to the Handle. Keep the wakeup only until
--- that Handle closes; calling it afterwards could target a reused descriptor.
-socketToEndpoint :: N.Socket -> IO (Handle, IO ())
+-- | Transfer socket ownership to the Handle and return borrowed shutdown and
+-- chunk-read actions. Join every reader before closing the Handle; neither
+-- action may outlive it, since the descriptor could then be reused. The chunk
+-- reader accepts a positive byte count and returns up to that many bytes, or
+-- an empty chunk at EOF. One owner must serialize all reads, including any
+-- earlier authentication reads through the Handle, use byte operations only,
+-- and retain binary mode.
+-- On Windows it drains Handle read-ahead before polling the socket. Bounded
+-- waits admit cancellation even with an incomplete packet and an open peer;
+-- shutdown alone need not wake a local Handle reader.
+socketToEndpoint :: N.Socket -> IO (Handle, IO (), Int -> IO BS.ByteString)
 socketToEndpoint sock = mask_ $ do
 #ifdef mingw32_HOST_OS
   descriptorNumber <- N.withFdSocket sock pure
@@ -114,9 +126,25 @@ socketToEndpoint sock = mask_ $ do
   flip onException (hClose h) $ do
     hSetBinaryMode h True
     hSetBuffering h NoBuffering
-    pure (h,shutdown)
+#ifdef mingw32_HOST_OS
+    let receive count=do
+          -- NoBuffering still permits binary Handle read-ahead. Polling only
+          -- Winsock would strand bytes already held by an earlier Handle read.
+          buffered<-wantReadableHandle_ "remote chunk read" h $ \handleState->
+            not . isEmptyBuffer <$> readIORef (haByteBuffer handleState)
+          code<-if buffered then pure 0 else c_waitInput (fromIntegral descriptorNumber)
+          if code==258 then receive count else do
+            checkWindows "Wait for remote input" code
+            BS.hGetSome h count
+#else
+    let receive=BS.hGetSome h
+#endif
+    pure (h,shutdown,receive)
 
 #ifdef mingw32_HOST_OS
+-- Bounded Winsock wait: GHC fdReady treats a SOCKET as a Unix fd index and
+-- aborts for values >= FD_SETSIZE. A safe call leaves other Haskell threads free.
+foreign import ccall safe "thc_remote_wait_input" c_waitInput :: Word32 -> IO Word32
 foreign import ccall unsafe "thc_remote_shutdown" c_shutdown :: Word32 -> IO ()
 foreign import ccall unsafe "thc_remote_spawn" c_spawn :: CWString -> CWString -> CWString -> CWString -> Ptr (Ptr ()) -> IO Word32
 foreign import ccall unsafe "thc_remote_private_directory" c_privateDirectory :: CWString -> IO Word32
@@ -183,7 +211,7 @@ connectEndpointWithShutdown path = do
     _ -> failure "Invalid private remote endpoint descriptor"
   bracketOnError (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \sock -> do
     N.connect sock (N.SockAddrInet (fromIntegral port) (N.tupleToHostAddress (127,0,0,1)))
-    (h,shutdown) <- socketToEndpoint sock
+    (h,shutdown,_) <- socketToEndpoint sock
     flip onException (hClose h) $ do
       let authenticate=do
             challenge <- randomBytes 24
@@ -235,7 +263,8 @@ endpointExists path = do
 connectEndpointWithShutdown :: FilePath -> IO (Handle, IO ())
 connectEndpointWithShutdown path = bracketOnError (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
   N.connect sock (N.SockAddrUnix path)
-  socketToEndpoint sock
+  (h,shutdown,_) <- socketToEndpoint sock
+  pure (h,shutdown)
 withEndpointListener :: FilePath -> (N.Socket -> (Handle -> IO ()) -> IO a) -> IO a
 withEndpointListener path action = bracket (N.socket N.AF_UNIX N.Stream N.defaultProtocol) N.close $ \sock -> do
   N.bind sock (N.SockAddrUnix path)

@@ -9,7 +9,7 @@ module Hide.BrowserServer (serveBrowser, allowedOrigin) where
 import Control.Concurrent.Async (withAsync, wait, race_)
 import Control.Concurrent.MVar
 import Control.Exception (bracket, finally, catch, IOException)
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
@@ -19,11 +19,11 @@ import qualified Network.Wai as W
 import qualified Network.Wai.Handler.Warp as Warp
 import Network.Wai.Handler.WebSockets (websocketsOr)
 import qualified Network.WebSockets as WS
-import Numeric (showHex)
+import Hide.RemoteEndpoint (randomIdentity)
 import Paths_hide (getDataFileName)
 import System.Environment (lookupEnv)
 import System.Info (os)
-import System.IO (withBinaryFile, IOMode(ReadMode), hPutStrLn, stderr)
+import System.IO (hPutStrLn, stderr)
 import System.Process (callProcess)
 
 -- | Require exact expected Host and HTTP Origin; missing Origin is rejected.
@@ -39,10 +39,7 @@ serveBrowser done session = do
   cellShader<-getDataFileName "assets/web/cell-shader.js" >>= BL.readFile
   canvasShader<-getDataFileName "assets/web/canvas-shader.js" >>= BL.readFile
   canvasImages<-getDataFileName "assets/web/canvas-images.js" >>= BL.readFile
-  token<-withBinaryFile "/dev/urandom" ReadMode $ \h->do
-    bytes<-BS.hGet h 24
-    unless (BS.length bytes==24) (ioError (userError "Cannot create browser session token"))
-    pure (B8.pack (concatMap (\n->let s=showHex n "" in replicate (2-length s) '0'++s) (BS.unpack bytes)))
+  token<-B8.pack <$> randomIdentity
   slot<-newMVar ()
   bracket (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \socket->do
     N.bind socket (N.SockAddrInet 0 (N.tupleToHostAddress (127,0,0,1)))

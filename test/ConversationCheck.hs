@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import EditorFixture (withEditorFixture,withEditorBodyFixture,sameBufferVersions)
 import qualified Hide.Plugin.Window as W
@@ -13,7 +14,7 @@ import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 
-import Control.Concurrent.Async (Async, withAsync, poll, wait)
+import Control.Concurrent.Async (withAsync,wait)
 import Control.Exception (bracket, evaluate)
 import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson hiding (Number)
@@ -27,7 +28,6 @@ import qualified Data.Set as S
 import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (find,findIndex,mapAccumL)
-import Data.IORef (newIORef,writeIORef,readIORef)
 import GHC.Conc (getAllocationCounter)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -35,8 +35,11 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
-import System.IO (hClose, hFlush, openTempFile)
+import System.IO (hClose,openTempFile)
 #ifndef mingw32_HOST_OS
+import Control.Concurrent.Async (Async,poll)
+import Data.IORef (newIORef,writeIORef,readIORef)
+import System.IO (hFlush)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, isEmptyMVar)
 import System.Process (withCreateProcess, proc, CreateProcess(..), StdStream(..), waitForProcess)
 import System.Exit (ExitCode(..))
@@ -105,9 +108,9 @@ openChild runtime ident d=snd <$> conversationEffects runtime (\value _->pure (F
 
 -- Draft code is ordinary Markdown carried by the existing Buffer. Exercise
 -- user edits and submitted/copy payloads, without depending on bubble artwork.
-composerCodeChecks :: IO ()
-composerCodeChecks=do
-  questionInsertionChecks
+composerCodeChecks :: AllocationProfile -> IO ()
+composerCodeChecks profile=do
+  questionInsertionChecks profile
   withEditorFixture "" (initialDesktop (100,35)) $ \primary->
     withEditorFixture "child" primary $ \fixtures->do
       let press key mods=fst . handleEvent (V.EvKey key mods)
@@ -198,8 +201,8 @@ composerCodeChecks=do
 
 
 -- Normalization and the cap belong to the inserted fragment, with one Undo.
-questionInsertionChecks :: IO ()
-questionInsertionChecks=do
+questionInsertionChecks :: AllocationProfile -> IO ()
+questionInsertionChecks profile=do
   withEditorFixture "" (initialDesktop (100,35)) $ \prepared->do
     let ordinary=newBuffer "independent draft"
         chat=questionOwner 1 (draftBuffer ordinary prepared)
@@ -238,7 +241,7 @@ questionInsertionChecks=do
     beforeAllocation<-getAllocationCounter
     selected<-evaluate (maybe (-1) (caret.questionSelection) (chatQuestion (fst (runCommand SelectAll focused))))
     afterAllocation<-getAllocationCounter
-    check "inline selection does not normalize the existing answer" (selected==4096 && beforeAllocation-afterAllocation<8000)
+    check "inline selection does not normalize the existing answer" (selected==4096 && withinBudget profile (beforeAllocation-afterAllocation) (8000))
     let first=pasted inserted initial
         second=pasted "more" first
     check "successive inline edits retain earlier Undo" (textOf (fst (runCommand Undo second))==textOf first && textOf (fst (runCommand Undo (fst (runCommand Undo second))))==before)
@@ -420,8 +423,8 @@ draftReceiptChecks=withTextPresentation $ \presentation->
   where restoreDraftEnvironment name=maybe (unsetEnv name) (setEnv name)
 #endif
 
-checks :: IO ()
-checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ \presentation->
+checks :: AllocationProfile -> IO ()
+checks profile = (draftReceiptChecks >> composerCodeChecks profile >>) $ withTextPresentation $ \presentation->
   let tickConversation=tickPresented presentation
   in bracket temporary removePathForcibly $ \root ->
   bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) restore $ \_ ->
@@ -1769,6 +1772,7 @@ waitForReader ready = do
 providerScript :: String
 providerScript=unlines
   [ "import json,os,sys"
+  , "sys.stdin.reconfigure(encoding='utf-8'); sys.stdout.reconfigure(encoding='utf-8',newline='\\n')"
   , "if len(sys.argv)==4 and sys.argv[1]=='held-pipe-writer':"
   , "  with open(sys.argv[2],'wb',buffering=0) as output:"
   , "    print('reader-ready',flush=True)"

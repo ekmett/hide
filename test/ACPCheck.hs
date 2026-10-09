@@ -38,7 +38,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
         events<-waitEvents client (any (\event->case event of Notification "environment" _->True; _->False))
         check "explicit environment is exact while ordinary launch inherits" (Notification "environment" (Bool absent) `elem` events)
   let server = root </> "fake.py"
-      launch = Launch python [server] [("THC_ACP_CHECK", "λ")]
+      launch = Launch python ["-X", "utf8", server] [("THC_ACP_CHECK", "λ")]
       start = startClient launch root
   BS.writeFile server (TE.encodeUtf8 (T.pack fakeServer))
   bracket start stopClient $ \client -> do

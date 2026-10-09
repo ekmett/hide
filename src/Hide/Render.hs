@@ -150,7 +150,7 @@ renderKey original = do
   identities<-newIORef []
   let payload value = do
         evaluated<-evaluate value
-        identity<-makeStableName evaluated
+        identity<-makeStableName $! evaluated
         modifyIORef' identities (RenderIdentity identity:)
       present=maybe False (const True)
       file value=do

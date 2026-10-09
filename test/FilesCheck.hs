@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 module FilesCheck (checks) where
 
@@ -28,16 +29,21 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   let path = dir </> "source.hs"
       original = "x = \206\187\r\nlast" :: BS.ByteString
   BS.writeFile path original
+#ifndef mingw32_HOST_OS
+  -- Windows infers executability from the filename rather than a mode bit.
   permissions <- getPermissions path
   setPermissions path (permissions { executable = True })
+#endif
   (state, buffer) <- loadFile path >>= right "load UTF-8"
   check "load preserves CRLF and absent final newline" (contents buffer == "x = λ\r\nlast")
   check "load keeps byte baseline" (diskBytes state == Just original)
   savedState <- saveFile state buffer >>= right "roundtrip save"
   bytes <- BS.readFile path
   check "save preserves exact bytes" (bytes == original && diskBytes savedState == Just original)
+#ifndef mingw32_HOST_OS
   savedPermissions <- getPermissions path
   check "save preserves executable permission" (executable savedPermissions)
+#endif
   BS.writeFile path "changed outside editor"
   conflict <- saveFile savedState (newBuffer "overwrite")
   bytesAfterConflict <- BS.readFile path
@@ -71,15 +77,20 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   check "NUL input opens in hex mode" (byteMode binary && bufferBytes binary==BS.pack [97,0,98])
   folder <- loadFile dir
   check "directory read is rejected" (isLeft folder)
+#ifndef mingw32_HOST_OS
+  -- The portable directory-read failure above remains checked on Windows.
   invalidPermissions <- getPermissions invalid
   bracket (setPermissions invalid (invalidPermissions { readable = False }))
           (const (setPermissions invalid invalidPermissions)) $ \_ -> do
     unreadable <- loadFile invalid
     check "unreadable input is rejected" (isLeft unreadable)
+#endif
 
   (failureState, _) <- loadFile path >>= right "load before failure"
   before <- BS.readFile path
   beforeEntries <- sort <$> listDirectory dir
+#ifndef mingw32_HOST_OS
+  -- System.Directory cannot deny directory writes through Permissions on Windows.
   dirPermissions <- getPermissions dir
   bracket (setPermissions dir (dirPermissions { writable = False }))
           (const (setPermissions dir dirPermissions)) $ \_ -> do
@@ -89,6 +100,7 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   afterEntries <- sort <$> listDirectory dir
   check "failed save keeps original bytes and cleans temporary files"
     (before == after && beforeEntries == afterEntries)
+#endif
   binarySave <- saveFile failureState (newBuffer "a\NULb")
   binarySaveBytes <- BS.readFile path
   binarySaveEntries <- sort <$> listDirectory dir

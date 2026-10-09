@@ -64,12 +64,15 @@ checks = bracket temporary removePathForcibly $ \dir -> withWatcher $ \watcher -
     FileObserved _ token _ -> token == 2
     FileUnavailable _ token _ -> token == 2
     _ -> True) pending)
-  permissions <- getPermissions path
-  bracket (setPermissions path (permissions { readable = False }))
-          (const (setPermissions path permissions)) $ \_ -> do
-    forceCheck watcher
-    denied <- timeout 3000000 (awaitUnavailable watcher path)
-    check "read errors are not mistaken for deletion" (denied == Just ())
+  -- A directory at a watched file path is a portable read error; unlike POSIX
+  -- mode bits it also exercises FileUnavailable on native Windows.
+  removeFile path
+  createDirectory path
+  forceCheck watcher
+  denied <- timeout 3000000 (awaitUnavailable watcher path)
+  check "read errors are not mistaken for deletion" (denied == Just ())
+  removeDirectory path
+  BS.writeFile path "queued before save"
   expect "readable file recovers from error" (FileObserved path 2 (Just "queued before save"))
   let subdirectory = dir </> "nested"
   createDirectory subdirectory

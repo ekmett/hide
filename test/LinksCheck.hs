@@ -27,7 +27,7 @@ checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do
   createDirectory (root </> "docs")
   writeFile (root </> "README.md") "# Project\n\nRead [Installation](docs/install.md).\n"
-  writeFile (root </> "docs/install.md") "# Installation\n\n[Home](../README.md)\n\n## Linux fonts\n\nInstall fonts.\n"
+  writeFile (root </> "docs" </> "install.md") "# Installation\n\n[Home](../README.md)\n\n## Linux fonts\n\nInstall fonts.\n"
   let d=(initialDesktop (80,25)) {defaultDirectory=Just root}
       check label ok=unless ok (error label)
       field key=parseMaybe (withObject "packet" (.: key))
@@ -37,7 +37,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "Markdown opens inside editor" (packet==Nothing && "Installation" `T.isInfixOf` text help && not ("docs/install.md" `T.isInfixOf` text help))
   check "help retains clickable target and source base" (documentMarkdownPath (doc help)==Just (root </> "README.md") && map (\(_,_,u)->u) (documentLinks (doc help))==["docs/install.md"])
   (installation,_)<-followLink True help (documentMarkdownPath (doc help)) "docs/install.md#linux-fonts"
-  check "relative doc and anchor navigation" (documentMarkdownPath (doc installation)==Just (root </> "docs/install.md") && maybe False ((>0).scrollRow) (activeWindow installation))
+  check "relative doc and anchor navigation" (documentMarkdownPath (doc installation)==Just (root </> "docs" </> "install.md") && maybe False ((>0).scrollRow) (activeWindow installation))
   (home,_)<-followLink True installation (documentMarkdownPath (doc installation)) "../README.md"
   check "nested link resolves against current document" (documentMarkdownPath (doc home)==Just (root </> "README.md"))
   let a=case documentLinks (doc help) of (start,_,_):_->start; []->error "missing link"

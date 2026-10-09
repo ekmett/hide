@@ -6,6 +6,8 @@ import Control.Exception (evaluate)
 import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as M
 import Data.List (find)
+import System.Directory (getTemporaryDirectory)
+import System.FilePath (normalise, (</>))
 import Hide.Frontend
 import Hide.Sidebar
 import Hide.Model
@@ -18,7 +20,7 @@ import qualified Hide.Buffer as B
 import Hide.BufferView
 import Hide.Files (FileState(..))
 import Hide.Syntax (Style(..),prepareSourceRow)
-import qualified Data.Vector as Vec
+import qualified Data.Sequence as Seq
 import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
@@ -43,7 +45,7 @@ checks = do
   forM_ [changeDoc (\doc->doc {documentBuffer=newBuffer "replacement with same revision"}) base,
          changeDoc (\doc->doc {documentHighlight=[("x",Keyword)]}) base,
          changeDoc (\doc->doc {documentLinks=[(0,1,"new target")]}) base,
-         changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton (prepareSourceRow "x" [("x",Comment)]))}) base,
+         changeDoc (\doc->doc {documentSourceRows=Just (Seq.singleton (prepareSourceRow "x" [("x",Comment)]))}) base,
          changeDoc (\doc->doc {documentBuffer=B.markSaved original}) base,
          base {editorDrafts=M.singleton ref (EditorDraft (newBuffer "new draft") (Selection 0 0) True Nothing)},
          setDiagnostics (diagnostics base) base,
@@ -521,17 +523,19 @@ checks = do
      rectangles (resizeProblems 7 messageChain)==[Rect 20 6 60 10,Rect 30 1 30 5])
   putStrLn "window input checks passed"
 
-  let named=addDocument (Just (FileState "/project/src/Main.hs" Nothing)) (newBuffer "") desktop
-      other=addDocument (Just (FileState "/project/test/Spec.hs" Nothing)) (newBuffer "") named
+  temporary<-getTemporaryDirectory
+  let project=temporary </> "project"
+      named=addDocument (Just (FileState (project </> "src" </> "Main.hs") Nothing)) (newBuffer "") desktop
+      other=addDocument (Just (FileState (project </> "test" </> "Spec.hs") Nothing)) (newBuffer "") named
   check "outer title includes the relative file path"
-    (applicationTitle "/project" named=="th src/Main.hs")
+    (applicationTitle project named==("th "<>T.pack (normalise "src/Main.hs")))
   check "outer title follows the active file and project directory"
-    (applicationTitle "/project" other=="th test/Spec.hs" &&
-     applicationTitle "/elsewhere" (installSidebar (emptySidebar "/project" 24 True) named)=="th src/Main.hs" &&
-     applicationTitle "/project" named {defaultDirectory=Just "/project/test"}=="th ../src/Main.hs")
+    (applicationTitle project other==("th "<>T.pack (normalise "test/Spec.hs")) &&
+     applicationTitle (temporary </> "elsewhere") (installSidebar (emptySidebar project 24 True) named)==("th "<>T.pack (normalise "src/Main.hs")) &&
+     applicationTitle project named {defaultDirectory=Just (project </> "test")}==("th "<>T.pack (normalise "../src/Main.hs")))
   check "outer title handles empty desktops and unnamed files"
-    (applicationTitle "/project" (initialDesktop (80,25))=="th" &&
-     applicationTitle "/project" desktop=="th NONAME1.HS")
+    (applicationTitle project (initialDesktop (80,25))=="th" &&
+     applicationTitle project desktop=="th NONAME1.HS")
 
 -- Coordinate references intentionally project the small fixture's original
 -- rows; production source windows must query measured rows instead.

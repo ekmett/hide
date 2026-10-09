@@ -58,11 +58,22 @@ checks=bracket temporary removePathForcibly $ \root->
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation->
       withAutocomplete root $ \autocomplete->withAgentSidebar (sidebarCapabilities host) SidebarAgent (conversationAgents conversation) autocomplete $ \agents->do
         createRequests<-newIORef []
+        agentRequests<-newIORef []
         let core desktop effects=do
+              modifyIORef' agentRequests (++[request | AgentSidebarAction request<-effects])
               modifyIORef' createRequests (++[(workspace,name,task) | AgentSidebarAction (CreateAgent workspace name task)<-effects])
               autocompleteEffects autocomplete (conversationEffects conversation applyEffects) desktop effects
             tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= \current->tickAgentSidebar agents >> tickSidebar host core current
             act (d,effects)=snd <$> sidebarEffects host core d effects
+            -- Refusal is synchronous at the form owner. A later settings reply
+            -- may update the HUD; it cannot change whether this action dispatched.
+            refuseReplay d effects=do
+              before<-readIORef agentRequests
+              refused<-act (d,effects)
+              after<-readIORef agentRequests
+              ensure "consumed settings form is refused on submission" ("expired" `T.isInfixOf` status refused)
+              ensure "consumed settings form dispatches no agent action" (before==after)
+              pure refused
             hub=AR.agentHub (conversationAgents conversation)
             primary=AR.primaryAgent (conversationAgents conversation)
         initial<-initializeSidebar host (installSidebar (emptySidebar root 26 True) (modifyActive (\w->w {selection=Selection 2 4}) ((addDocument Nothing (newBuffer "source payload") (initialDesktop (100,35))) {defaultDirectory=Just root})))
@@ -86,7 +97,7 @@ checks=bracket temporary removePathForcibly $ \root->
         configured<-awaitIO tick modelSaved acceptedChoice
         ensure "completion model settings remain separate from Primary" (null (agentSettings configured))
         let staleSubmission=handleEvent (V.EvKey V.KEnter []) choose
-        stale<-act (configured,snd staleSubmission) >>= await tick (T.isInfixOf "expired" . status)
+        stale<-refuseReplay configured (snd staleSubmission)
         initialRename<-act (chooseMenu "Primary  idle" stale) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
         sourceVersion<-captureVersion (maybe (error "Missing source") documentBuffer (activeDocument initialRename))
         let originalSelection=selection <$> activeWindow initialRename
@@ -134,7 +145,10 @@ checks=bracket temporary removePathForcibly $ \root->
         let caps=AH.Capabilities False False False []
             driver=AH.AgentDriver root "private-peer-key" caps (const (pure (Right caps))) (const (pure (Right Null))) (pure ()) (pure ()) (const (pure (Left "unsupported")))
         peer<-AH.registerAgent hub "A peer" root driver >>= right
-        submitted<-act (handleEvent (V.EvKey V.KEnter []) typed) >>= await tick (T.isInfixOf "Agent renamed" . status)
+        let primaryNamed name _=do
+              current<-AH.statusAgent hub AH.Human primary >>= right
+              pure (field "name" current==Just (name::T.Text))
+        submitted<-act (handleEvent (V.EvKey V.KEnter []) typed) >>= awaitIO tick (primaryNamed "N")
         unchanged<-versionCurrent sourceVersion (maybe (error "Missing source") documentBuffer (activeDocument submitted))
         ensure "rename preserves source content and selection" (unchanged && (selection <$> activeWindow submitted)==originalSelection)
         primaryStatus<-AH.statusAgent hub AH.Human primary >>= right
@@ -194,7 +208,7 @@ checks=bracket temporary removePathForcibly $ \root->
           (formRef staleIndex==formRef selectedLarge && any (\option->settingId option=="model" && settingCurrent option=="small") (agentSettings staleIndex))
         let capturedPrimary=handleEvent (V.EvKey V.KEnter []) staleIndex
         primaryUpdated<-act capturedPrimary >>= await tick (any (\option->settingId option=="model" && settingCurrent option=="large") . agentSettings)
-        stalePrimary<-act (primaryUpdated,snd capturedPrimary) >>= await tick (T.isInfixOf "expired" . status)
+        stalePrimary<-refuseReplay primaryUpdated (snd capturedPrimary)
         ensure "Primary model change retains its exact conversation" (T.null (conversationTarget stalePrimary))
         -- Real named form remains private, preserves drafts and captures workspace.
         newDialog<-act (chooseMenu "Agents" stalePrimary) >>= await tick (maybe False ((=="New agent").dialogTitle) . dialog)
@@ -250,17 +264,15 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "New Agent enqueues its task without selecting its view" (length children==1 && all (\entry->field "cwd" entry==Just (T.pack root)) children && T.null (conversationTarget creationReplay))
         ensure "background completion never steals focus" (fmap windowId (activeWindow createdDesktop)==fmap windowId (activeWindow primaryView))
         childId<-case children of [entry] | Just who<-field "id" entry->pure (AH.AgentId who); _->error "Missing created child"
-        let childReady desktop=do
-              current<-AH.agentConfiguration hub childId
-              pure (has "Child  idle" desktop && case current of Right (_,options)->any ((=="model").AH.configId) options; _->False)
-        idleChild<-awaitIO tick childReady createdDesktop
+        let childReady desktop=has "Child  idle" desktop &&
+              "Model" `elem` map fst (contextItemsFor (popupFor "Child  idle" desktop))
+        idleChild<-await tick childReady createdDesktop
         childChoices<-act (chooseMenuAt 1 "Child  idle" idleChild) >>= await tick (maybe False agentChoicePurpose . dialog)
         let selectedChild=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) childChoices
             capturedChild=handleEvent (V.EvKey V.KEnter []) selectedChild
             childLarge _=fmap (\current->case current of Right (_,options)->any (\option->AH.configId option=="model" && AH.configCurrent option=="large") options; _->False) (AH.agentConfiguration hub childId)
         childUpdated<-act capturedChild >>= awaitIO tick childLarge
-        retiredControl<-await tick ((=="Child settings updated.").status) childUpdated
-        refusedChild<-act (retiredControl,snd capturedChild) >>= await tick (T.isInfixOf "expired" . status)
+        refusedChild<-refuseReplay childUpdated (snd capturedChild)
         ensure "sidebar child setting never selects that conversation" (T.null (conversationTarget refusedChild))
         ensure "child setting does not change Primary settings" (any (\option->settingId option=="model" && settingCurrent option=="large") (agentSettings refusedChild))
         (subagent,_)<-AH.spawnAgentWithTask hub (AH.Agent primary) (AH.SpawnSpec "Nested" "Count files" root AH.Shared AH.Fresh Nothing Nothing) >>= right
