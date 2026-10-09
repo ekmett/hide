@@ -9,5 +9,5 @@ library
   default-language: Haskell2010
   ghc-options: -Wall
   hs-source-dirs: src
-  exposed-modules: Hide.Plugin.Agent, Hide.Plugin.AgentDirectory
+  exposed-modules: Hide.Plugin.Agent, Hide.Plugin.AgentDirectory, Hide.Plugin.AgentServices
   build-depends: base >=4.18 && <4.23, text >=2.0, aeson

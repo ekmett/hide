@@ -4,11 +4,12 @@ Build the editor, run the checks and exercise the frontend affected by a change.
 The source stays separate from THC's compiler and runtime.
 
 The root Cabal project builds five linked packages. `hide` owns the editor;
-`packages/hide-agent-api` contains the provider contract and typed directory API;
-`packages/hide-plugin-api` owns scoped commands, forms, menus and tree contracts;
+`packages/hide-agent-api` contains provider contracts, typed directory reads and
+bound orchestration services; `packages/hide-plugin-api` owns scoped commands,
+tool exposure, forms, menus and tree contracts;
 `plugins/hide-acp` implements ACP transport and the provider adapter;
-`plugins/hide-agents` contributes the Agents tree through public plugin APIs.
-The executable selects linked UI plugins in `app/Main.hs`. The ACP package
+`plugins/hide-agents` contributes the Agents tree and orchestration tools through
+public plugin APIs. The executable selects linked UI plugins in `app/Main.hs`. The ACP package
 depends on the contract, not the editor or its frontend libraries.
 Ordinary `cabal build` and `cabal test` use the linked packages from this checkout.
 To build only ACP, without resolving the editor's native dependencies, use its
@@ -18,7 +19,8 @@ smaller project:
 cabal build --project-dir=plugins/hide-acp all
 ```
 
-The Agents tree also builds without the editor or native frontend dependencies:
+The agent UI and tools also build without the editor or native frontend
+dependencies:
 
 ```sh
 cabal build --project-dir=plugins/hide-agents all
@@ -162,6 +164,35 @@ resolves a documentation corpus root; it neither imports nor receives `Desktop`.
 `Hide.DocsMCP` owns the session registration and adapts the explicit `docs_read`
 tool to it, retaining permission checks and deferred filesystem work. Listing and
 search are not yet registered commands.
+
+## Plugin tool exposure
+
+`Hide.Plugin.Tool` exposes selected typed commands as MCP tools. A `Tool` declares
+its wire name, read-only policy hint and `CommandDef`; registration alone grants
+no authority. `withTools` scopes an immutable set around the session. It rejects
+collisions with host tools, duplicate wire or command names, and malformed metadata
+before discovery. Input schemas declare strict object fields; output schemas
+describe objects. Codecs enforce their field types and bounds.
+
+`callTool` invokes the exact registration on the tool worker after host policy
+admission. Arguments are limited to 1 MiB and results to 4 MiB, matching the MCP
+transport. Oversized results fail explicitly rather than returning a truncated
+success. Object results appear as both structured content and JSON text. Closing
+the scope rejects retained calls; a missing tool has no fallback interpreter.
+
+The linked `hide-agents` package declares the nine directory, spawn, rename,
+message, wait, cancel, end, history and search tools in `Hide.AgentTools`.
+`Hide.Plugin.AgentServices` supplies their host-bound actor and workspace.
+Arguments cannot replace either: the adapter rejects a different spawn directory
+before reservation, and the Hub rechecks caller liveness on each operation.
+Ancestry, limits, provider lifetime, worktree isolation and task tickets remain
+Hub-owned. These tools receive no human approval or settings capability.
+
+The executable's plugin list determines discovery and permission registration.
+The primary route exposes editor tools plus these declarations; a child's
+coordination route exposes only these declarations. Autocomplete keeps its
+separate restricted route. Conversation presentation and the broader editor-tool
+surface remain in the editor.
 
 ## Immutable plugin buffer reads
 
@@ -813,9 +844,9 @@ changes the selected conversation to dispatch. The primary's redacted provider
 output, bounded tool/plan updates and context usage also enter the shared Hub
 history/status APIs. Exact connection replacement retires its event sink, while
 capability refresh preserves the provider lifetime and outstanding controls.
-Conversation consumes the Hub's typed `HistoryPage`/`HistoryEvent` values directly;
-AgentMCP owns the public JSON response. Both use the same retention, byte/count
-limits and exclusive event cursors. Checkpoints preserve those event identities.
+Conversation consumes the typed `HistoryPage`/`HistoryEvent` values from
+`Hide.Plugin.AgentServices` directly; `Hide.AgentTools` owns the tool response.
+Both use the same retention, byte/count limits and exclusive event cursors. Checkpoints preserve those event identities.
 New Agent startup uses the existing runtime's single pending launch slot. Its
 mailbox completion retains the Hub ID and initial task ticket; Conversation keeps
 human form/workspace admission and status display. Shutdown joins acquisition

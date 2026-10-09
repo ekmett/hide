@@ -715,6 +715,25 @@ offering force-close.
 Tools explicitly expose selected operations. Registering a menu command does not
 make it callable by an agent.
 
+The implemented boundary is `Hide.Plugin.Tool`: an immutable `Tools c` set scopes
+explicit `Tool c` declarations over the existing typed command registry.
+`withTools` rejects host-name collisions, duplicate wire/command names and invalid
+metadata before exposing the set. Strict object codecs validate input on the
+worker; object results are published as structured content and JSON text. The
+wire limits match MCP: 1 MiB of arguments and 4 MiB of result. Scope closure
+refuses retained calls, and unknown names never reach a fallback interpreter.
+Read-only hints configure default policy; they do not authorize execution.
+
+`Hide.AgentTools` in the linked `hide-agents` package registers the existing nine
+orchestration tools. Its only execution context is `AgentServices`, supplied by
+the host for the authenticated actor and workspace after permission admission.
+The workspace guard rejects substitution before provider reservation. Every
+operation still checks live Hub authority; retaining the record cannot keep an
+ended agent alive. Hub ancestry, limits, tickets, worktree isolation and rollback
+are unchanged. The plugin receives no human approval or settings capability.
+
+The broader registration shape below remains proposed:
+
 ```haskell
 exposeTool :: ToolDef a b -> Command a b -> PluginM Registration
 
@@ -789,13 +808,13 @@ prompts nor replays transcript state during synchronization. Conversation retain
 the primary transcript, ACP request dispatch and provider recovery.
 
 `AgentHub.historyAgent` and `searchAgentHistory` return public `HistoryPage` and
-`HistoryEvent` values. Conversation reads typed event indices and host-attributed
-actors directly; AgentMCP encodes the same pages for tools. The Hub retains the
-single history: at most 1,024 events/4 MiB per agent, with 1–100 events and 1 MiB of
+`HistoryEvent` values from `Hide.Plugin.AgentServices`. Conversation reads typed
+event indices and host-attributed actors directly; `Hide.AgentTools` encodes the
+same pages for tools. The Hub retains the single history: at most 1,024 events/4 MiB per agent, with 1–100 events and 1 MiB of
 encoded events per page. Exclusive cursors preserve original indices, including
 through search and checkpoint recovery; reads do not consume events or message
 tickets. Provider details remain extensible JSON whose publisher owns redaction.
-The MCP envelope and private checkpoint format are unchanged.
+Event fields and the private checkpoint format are unchanged.
 
 New Agent acquisition also belongs to `AgentRuntime`: its host-only
 `requestAgentCreation` admits one pending launch and returns the Hub's original
@@ -926,8 +945,10 @@ executable selects it with `Hide.App.main [Hide.AgentUI.plugin]`; the editor
 library does not import the plugin implementation. The metadata worker publishes
 invalidations to the same bounded, close-aware queue as trees and forms. No
 plugin callback runs on the UI tick. The host drains bounded deltas and owns
-input, geometry, forms and action admission. Conversation presentation and tool
-registration remain to be separated.
+input, geometry, forms and action admission. The same plugin declares its
+orchestration tools, which the host registers with existing per-tool policy.
+Conversation presentation and the broader editor-tool surface remain to be
+separated.
 
 `SessionServices` owns builds, compiler discovery, build settings and shared
 consoles for the editor session. Conversation receives a console handle and owns

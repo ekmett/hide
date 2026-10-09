@@ -34,6 +34,7 @@ import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import Hide.Plugin.Agent
 import Hide.Plugin.AgentDirectory (AgentSummary(..))
+import Hide.Plugin.AgentServices (HistoryEvent(..),HistoryPage(..))
 import qualified Data.Text.Encoding as TE
 
 data HubLimits = HubLimits { totalActiveAgents :: Int, directSubagents :: Int } deriving (Eq,Show)
@@ -45,27 +46,6 @@ agentConfigAgent :: AgentConfigRef -> AgentId
 agentConfigAgent (AgentConfigRef ident _ _ _)=ident
 
 data Phase = Starting | Idle | Running | Cancelling | Ended | Failed | Recovered deriving (Eq,Show)
--- | One retained public event. The index increases within its agent and remains
--- unchanged across pagination and recovery. The author is host-attributed; detail
--- is bounded provider/service data whose publisher owns redaction. Private resume
--- state is kept separately from these public events.
--- Event kinds remain extensible for provider activity.
-data HistoryEvent = HistoryEvent
-  { historyIndex :: !Int, historyKind :: !Text, historyAuthor :: !Actor
-  , historyDetail :: !Value } deriving (Eq,Show)
-
--- | An immutable page from the Hub's retained history, shared by presentation and
--- the MCP adapter. Events are in increasing index order and all exceed the
--- requested offset. The next offset is the last event index, or the requested
--- offset for an empty page. 'historyDropped' counts evicted events, independently
--- of filtering; 'historyHasMore' means matching retained events remain.
---
--- Pages contain at most the requested 1–100 events and 1 MiB of encoded events.
--- Resume with 'historyNextAfter'; reading neither consumes events nor changes
--- message tickets. The JSON instances preserve the MCP/checkpoint representation.
-data HistoryPage = HistoryPage
-  { historyEvents :: ![HistoryEvent], historyDropped :: !Int
-  , historyHasMore :: !Bool, historyNextAfter :: !Int } deriving (Eq,Show)
 data Entry = Entry
   { entryId :: AgentId, entryParent :: Maybe AgentId, entrySpec :: SpawnSpec, entryPhase :: Phase
   , entryDriver :: Maybe AgentDriver, entryKey :: Maybe Text, entryCaps :: Capabilities
@@ -674,15 +654,6 @@ capabilitiesParser=withObject "capabilities" $ \o->do
       unless (not (null options) && length options<=512) (fail "Invalid configuration choices")
       ConfigChoice ident category current <$> mapM option options
     option=withObject "configuration value" $ \o->(,) <$> (o .: "value" >>= small) <*> (o .: "name" >>= small)
-
-actorValue :: Actor -> Value
-actorValue Human=object ["kind" .= ("human"::Text)]
-actorValue (Agent ident)=object ["kind" .= ("agent"::Text),"id" .= agentIdText ident]
-instance ToJSON HistoryEvent where
-  toJSON (HistoryEvent index kind author value)=object ["index" .= index,"kind" .= kind,"author" .= actorValue author,"detail" .= value]
-instance ToJSON HistoryPage where
-  toJSON page=object ["events" .= historyEvents page,"dropped" .= historyDropped page,
-    "hasMore" .= historyHasMore page,"nextAfter" .= historyNextAfter page]
 
 -- Lifecycle is a typed host event, never inferred from provider display text.
 recordDriverEvent :: AgentHub -> AgentId -> Int -> DriverEvent -> IO ()

@@ -1,12 +1,16 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
 module PluginCommandCheck (checks) where
 
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar
 import Control.Exception (AsyncException(UserInterrupt), evaluate, throwIO, try)
-import Control.Monad (unless)
+import Control.Monad (unless,forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
+import qualified Data.Aeson.KeyMap as KM
+import Data.Either (isLeft)
+import System.IO.Error (tryIOError)
+import qualified Hide.Plugin.Tool as Tool
 import Data.IORef
 import qualified Data.Text as T
 import System.Timeout (timeout)
@@ -77,4 +81,55 @@ checks=do
     writeIORef escaped (invoke registry command () Null)
   closed<-readIORef escaped >>= id
   unless (closed==Left RegistryClosed) (error "closing registry rejects escaped handles")
+  toolChecks
   putStrLn "plugin command checks passed"
+
+-- The MCP adapter must retain the registry's lifetime and the host's context.
+-- All state belongs to this invocation; no files, processes or cleanup setup.
+toolChecks :: IO ()
+toolChecks=do
+  calls<-newIORef (0::Int)
+  let check label ok=unless ok (error label)
+      toolSchema=object ["type" .= ("object"::T.Text),"additionalProperties" .= False,
+        "required" .= (["n"]::[T.Text]),"properties" .= object ["n" .= object ["type" .= ("integer"::T.Text),"minimum" .= (0::Int),"maximum" .= (10::Int)]]]
+      decodeInput=withObject "integer request" $ \fields->do
+        unless (KM.keys fields==["n"]) (fail "Unexpected field")
+        n<-fields .: "n"
+        unless (n>=0 && n<=10) (fail "Out of range")
+        pure (n::Int)
+      input=Codec toolSchema (either (Left . T.pack) Right . parseEither decodeInput) (\n->object ["n" .= n])
+      output=Codec (object ["type" .= ("object"::T.Text)]) Right id
+      definition name action=CommandDef name "Add the authenticated context" input output action
+      run (context::Int) n=modifyIORef' calls (+1) >> pure (Right (object ["answer" .= (context+n)]))
+      increment=Tool.Tool "increment" True (definition "example.tool.increment" run)
+      second=Tool.Tool "second" True (definition "example.tool.second" run)
+      arguments=object ["n" .= (4::Int)]
+  escaped<-Tool.withTools [] [increment,second] $ \tools->do
+    check "tool discovery contains exactly the composed set" (length (Tool.toolDefinitions tools)==2 && Tool.hasTool tools "increment" && Tool.hasTool tools "second" && not (Tool.hasTool tools "missing"))
+    actual<-Tool.callTool tools 10 "increment" arguments
+    other<-Tool.callTool tools 20 "second" arguments
+    check "tool codecs use the host context" (actual==Right (object ["answer" .= (14::Int)]) && other==Right (object ["answer" .= (24::Int)]))
+    before<-readIORef calls
+    missing<-Tool.callTool tools 10 "missing" arguments
+    spoof<-Tool.callTool tools 10 "increment" (object ["n" .= (4::Int),"context" .= (100::Int)])
+    bounds<-Tool.callTool tools 10 "increment" (object ["n" .= (11::Int)])
+    oversized<-Tool.callTool tools 10 "increment" (String (T.replicate (1024*1024+1) "x"))
+    after<-readIORef calls
+    check "unknown, spoofed, out-of-range and oversized calls cannot reach a handler" (all isLeft [missing,spoof,bounds,oversized] && before==after)
+    pure tools
+  beforeClose<-readIORef calls
+  closed<-Tool.callTool escaped 10 "increment" arguments
+  afterClose<-readIORef calls
+  check "leaving tool scope revokes retained calls" (isLeft closed && beforeClose==afterClose)
+  forM_ [(["increment"],[increment]),([],[increment,increment]),([],[increment,Tool.Tool "another" True (definition "example.tool.increment" run)])] $ \(reserved,declarations)->do
+    reached<-newIORef False
+    rejected<-tryIOError (Tool.withTools reserved declarations (\_->writeIORef reached True))
+    used<-readIORef reached
+    check "reserved names, overlapping names and command IDs fail before exposure" (isLeft rejected && not used)
+  let malformed=Tool.Tool "malformed" True ((definition "example.tool.malformed" run)
+        {commandInput=input {codecSchema=object ["type" .= ("object"::T.Text)]}})
+  invalid<-tryIOError (Tool.withTools [] [malformed] (\_->error "invalid schema exposed"))
+  check "an input schema must declare its strict fields" (isLeft invalid)
+  let huge=Tool.Tool "large" False (definition "example.tool.large" (\(_::Int) _->pure (Right (object ["text" .= T.replicate (4*1024*1024+1) "x"]))))
+  large<-Tool.withTools [] [huge] $ \tools->Tool.callTool tools 0 "large" arguments
+  check "oversized result fails without a truncated success" (isLeft large)

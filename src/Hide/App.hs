@@ -56,7 +56,8 @@ import Hide.ProjectBrowser
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
 import Hide.AgentAccess (resolveAgentAccess,resolveActiveAgentAccess)
-import Hide.AgentMCP (agentTools, agentToolNames, agentTool)
+import Hide.AgentServicesHost (agentServices)
+import qualified Hide.Plugin.Tool as PluginTool
 import Hide.BufferReadCommand (withBufferReadCommands)
 import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
 import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool)
@@ -285,9 +286,10 @@ runEditor plugins args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
+          PluginTool.withTools [name | spec<-specs,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]] (concatMap Plugin.pluginAgentTools plugins) $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
-            let liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
+            let agentTools=PluginTool.toolDefinitions agentToolset
+                liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
             let liveDesktop=liveBase {keyBindings=keymap}
             withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> withTextPresentation $ \textPresentation -> do
@@ -361,7 +363,7 @@ runEditor plugins args = do
                               Right root -> do
                                 questionCaller<-captureQuestionCaller conversation ident
                                 let dispatch current name parameters
-                                      | name `elem` agentToolNames = pure (current,agentTool hub (AH.Agent ident) root name parameters)
+                                      | PluginTool.hasTool agentToolset name = pure (current,PluginTool.callTool agentToolset (agentServices hub (AH.Agent ident) root) name parameters)
                                       | name `elem` chatToolNames = case questionCaller of
                                           Left err->pure (current,pure (Left err))
                                           Right caller->chatToolAs conversation (Just caller) current name parameters

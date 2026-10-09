@@ -18,6 +18,8 @@ module Hide.Plugin.Session
 
 import Hide.Plugin.AgentDirectory (AgentDirectory,DirectoryRequest)
 import Hide.Plugin.Sidebar (Sidebar)
+import Hide.Plugin.AgentServices (AgentServices)
+import Hide.Plugin.Tool (Tool)
 
 -- | Capabilities for the concrete first-party directory workflow. Providers and
 -- resource owners outlive activation. Captured requests are admitted by the host;
@@ -33,9 +35,13 @@ data Session c r settings completion = Session
 -- Teardown must cancel/join owned workers and retire registrations, on success
 -- or exception; it must not stop session-owned agents or other shared services.
 -- Plugins publish prepared results through host queues instead of UI callbacks.
-newtype Plugin = Plugin
+-- Agent tools are declared explicitly; the host registers their policies and
+-- supplies actor-bound services only after caller and permission admission.
+data Plugin = Plugin
   { withPlugin :: forall c r settings completion a. Eq completion =>
-      Session c r settings completion -> IO a -> IO a }
+      Session c r settings completion -> IO a -> IO a
+  , pluginAgentTools :: [Tool AgentServices]
+  }
 
 -- | Nest resource scopes in declaration order and release them in reverse order.
 -- Failure while activating a later plugin unwinds earlier scopes normally.
