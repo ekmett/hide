@@ -8,6 +8,8 @@ import Control.Monad (unless, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy.Char8 as BL
+import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
@@ -42,12 +44,13 @@ checks = bracket temporary removePathForcibly $ \base -> do
       select desktop=case [windowId w | w<-windows desktop,Just d<-[M.lookup (sourceFixtureBuffer w) (buffers desktop)],fmap filePath (documentFile d)==Just source] of i:_ -> focusWindow i desktop; [] -> error "missing source window"
   createDirectory upstream
   void (git upstream ["init","-b","main"])
-  T.writeFile upstreamSource "original\n"
+  void (git upstream ["config","core.autocrlf","false"])
+  writeUtf8 upstreamSource "original\n"
   commit upstream "initial"
-  void (git base ["clone",upstream,work])
+  void (git base ["clone","-c","core.autocrlf=false","-c","core.symlinks=true",upstream,work])
   -- Background editor operations use repository identity, not this fixture's -c flags.
   mapM_ (void . git work . ("config":))
-    [["user.name","Git Test"],["user.email","test@example.invalid"],["commit.gpgsign","false"]]
+    [["user.name","Git Test"],["user.email","test@example.invalid"],["commit.gpgsign","false"],["core.autocrlf","false"],["core.symlinks","true"]]
   initial<-open (initialDesktop (100,30))
   (_,configured)<-core initial [RefreshGit work]
   withGitOperations (pure False) $ \runtime -> do
@@ -88,7 +91,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     (_,retainedStatus)<-call failed "git_operation_status" (object ["jobId" .= firstId])
     check "earlier completion remains queryable" (either (const False) ((==Just "succeeded") . stateOf) retainedStatus)
     void (git work ["config","remote.origin.url",upstream])
-    T.writeFile upstreamSource "pulled\n"
+    writeUtf8 upstreamSource "pulled\n"
     commit upstream "upstream change"
     let dirtyDesktop=insertText "unsaved " (select fetched)
     refused<-run PullRemote dirtyDesktop
@@ -102,11 +105,11 @@ checks = bracket temporary removePathForcibly $ \base -> do
     let upload=base </> "upload-pack"
         marker=base </> "fetch-started"
         gate=base </> "fetch-continue"
-    writeFile upload (unlines ["#!/bin/sh","touch '"++marker++"'","n=0","while [ ! -e '"++gate++"' ] && [ $n -lt 200 ]; do sleep 0.01; n=$((n+1)); done","exec git-upload-pack \"$@\""])
+    writeUtf8 upload (T.pack (unlines ["#!/bin/sh","touch '"++shellPath marker++"'","while [ ! -e '"++shellPath gate++"' ]; do sleep 0.01; done","exec git-upload-pack \"$@\""]))
     permissions<-getPermissions upload
     setPermissions upload (permissions {executable=True})
-    void (git work ["config","remote.origin.uploadpack",upload])
-    T.writeFile upstreamSource "changed during operation\n"
+    void (git work ["config","remote.origin.uploadpack",shellPath upload])
+    writeUtf8 upstreamSource "changed during operation\n"
     commit upstream "another change"
     (_,running)<-effects (select cleanPull) [RunGit PullRemote]
     started<-timeout 5000000 (waitFile marker)
@@ -126,7 +129,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     (_,duplicate)<-effects waiting [RunGit FetchRemote]
     check "concurrent Git operation refused" (status duplicate=="A Git operation is already running.")
     let edited=insertText "keep " (select duplicate)
-    writeFile gate "continue"
+    writeUtf8 gate "continue"
     preserved<-await tick (T.isInfixOf "completed." . status) edited
     let retained=doc preserved
     diskAfter<-T.readFile source
@@ -142,7 +145,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     (_,approvedDuringFetch)<-effects fetching [AgentAction "approval:2" ["0"]]
     check "read-only fetch permits agent approvals" (status approvedDuringFetch=="agent action delegated")
     let savePath=work </> "save-then-quit.txt"
-    T.writeFile savePath "before\n"
+    writeUtf8 savePath "before\n"
     (saveFileState,saveBuffer)<-loadFile savePath >>= either error pure
     let saveDesktop=addDocument (Just saveFileState) (replaceSelection (Selection 0 (bufferLength saveBuffer)) "saved\n" saveBuffer) (initialDesktop (100,30))
         saveBid=maybe (error "missing save window") sourceFixtureBuffer (activeWindow saveDesktop)
@@ -152,7 +155,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     (otherFile,otherBuffer)<-loadFile upstreamSource >>= either error pure
     switched<-tick (addDocument (Just otherFile) otherBuffer (initialDesktop (100,30)))
     check "focused repository changes during fetch" (branchRoot switched==Just upstream)
-    writeFile gate "continue"
+    writeUtf8 gate "continue"
     logged<-await tick (T.isInfixOf "completed." . status) switched
     check "operation log identifies completed repository" (branchRoot logged==Just work)
     returned<-tick (closeActive logged)
@@ -164,14 +167,14 @@ checks = bracket temporary removePathForcibly $ \base -> do
     check "agent fetch uses configured transport" (agentStarted==Just ())
     (_,busyHuman)<-effects agentRunning [RunGit FetchRemote]
     check "human action shares agent operation serialization" (status busyHuman=="A Git operation is already running.")
-    writeFile gate "continue"
+    writeUtf8 gate "continue"
     _<-await tick (T.isInfixOf "completed." . status) busyHuman
     void (git work ["config","--unset","remote.origin.uploadpack"])
     void (git work ["checkout","-b","topic"])
-    T.writeFile source "topic change\n"
+    writeUtf8 source "topic change\n"
     commit work "topic change"
     void (git work ["checkout","main"])
-    T.writeFile source "main change\n"
+    writeUtf8 source "main change\n"
     commit work "main change"
     conflictBase<-open (initialDesktop (100,30))
     (_,conflictRoot)<-core conflictBase [RefreshGit work]
@@ -186,7 +189,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     merging<-doesFileExist (work </> ".git" </> "MERGE_HEAD")
     check "conflicting merge remains available for resolution" merging
     void (git work ["reset","--hard","HEAD"])
-    writeFile (upstream </> "remote.txt") "remote commit\n"
+    writeUtf8 (upstream </> "remote.txt") "remote commit\n"
     commit upstream "remote diverged"
     diverged<-run PullRemote (select conflict)
     check "pull refuses divergence instead of creating a merge" ("failed" `T.isInfixOf` status diverged)
@@ -202,7 +205,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
     missing<-not <$> doesFileExist source
     check "deleted source stays deleted on disk" missing
     let target=base </> "symlink-target.hs"
-    T.writeFile target "outside symlink target\n"
+    writeUtf8 target "outside symlink target\n"
     createFileLink target upstreamSource
     commit upstream "replace source with symbolic link"
     linked<-run PullRemote (select deleted)
@@ -254,7 +257,7 @@ cancellationCheck base work=do
       marker=base </> "cancelled-git.pid"
       quote value="'"++concatMap (\c -> if c=='\'' then "'\\''" else [c]) value++"'"
   createDirectory directory
-  writeFile wrapper (unlines ["#!/bin/sh","for arg do", "if [ \"$arg\" = fetch ]; then", "echo $$ > "++quote marker,"exec /bin/sleep 60","fi","done","exec "++quote realGit++" \"$@\""])
+  writeUtf8 wrapper (T.pack (unlines ["#!/bin/sh","for arg do", "if [ \"$arg\" = fetch ]; then", "echo $$ > "++quote marker,"exec /bin/sleep 60","fi","done","exec "++quote realGit++" \"$@\""]))
   permissions<-getPermissions wrapper
   setPermissions wrapper (permissions {executable=True})
   bracket (lookupEnv "PATH") (maybe (unsetEnv "PATH") (setEnv "PATH")) $ \oldPath -> do
@@ -286,7 +289,7 @@ reviewCommitChecks base=do
       left (Left _)=True
       left _=False
       script body=do
-        writeFile hook ("#!/bin/sh\n"++body)
+        writeUtf8 hook (T.pack ("#!/bin/sh\n"++body))
         permissions<-getPermissions hook
         setPermissions hook (permissions {executable=True})
   createDirectory root
@@ -294,9 +297,10 @@ reviewCommitChecks base=do
   _<-git ["config","user.name","Git Test"]
   _<-git ["config","user.email","test@example.invalid"]
   _<-git ["config","commit.gpgsign","false"]
+  _<-git ["config","core.autocrlf","false"]
   _<-git ["config","core.hooksPath",root </> ".git" </> "hooks"]
-  T.writeFile source "before\n"
-  T.writeFile private "authority-secret-marker\n"
+  writeUtf8 source "before\n"
+  writeUtf8 private "authority-secret-marker\n"
   _<-git ["add","-A"]
   _<-git ["commit","-m","initial"]
   withGitOperations (pure False) $ \runtime -> do
@@ -331,7 +335,7 @@ reviewCommitChecks base=do
           check "refused review never returns partial diff text" ((field "diff" result :: Maybe Value)==Nothing)
           check "private review failure does not expose contents" (not ("authority-secret-marker" `T.isInfixOf` T.pack (BL.unpack (encode result))))
           pure next
-    T.writeFile source "working edit\n"
+    writeUtf8 source "working edit\n"
     (reviewed,token,description)<-review initial
     check "unchanged private configuration permits full public review"
       (maybe False (T.isInfixOf "+working edit") (textField "diff" description) && not ("authority-secret-marker" `T.isInfixOf` T.pack (BL.unpack (encode description))))
@@ -340,7 +344,7 @@ reviewCommitChecks base=do
     check "commit refuses unsaved buffers" (left dirtyRefused)
     (_,dirtyReview)<-call dirtyDesktop "git_review" (object [])
     check "review refuses unsaved buffers" (left dirtyReview)
-    T.writeFile source "later edit\n"
+    writeUtf8 source "later edit\n"
     (stale,result)<-commit reviewed token
     check "changed file invalidates reviewed commit" (textField "state" result==Just "failed")
     (_,reused)<-call stale "git_commit" (object ["reviewId" .= token,"message" .= ("must refuse"::T.Text)])
@@ -356,8 +360,8 @@ reviewCommitChecks base=do
     _<-git ["commit","--allow-empty","-m","external commit"]
     (headChanged,staleHead)<-commit headReview headToken
     check "changed HEAD invalidates reviewed commit" (textField "state" staleHead==Just "failed")
-    T.writeFile source "approved edit\n"
-    T.writeFile (root </> "new.txt") "untracked addition\n"
+    writeUtf8 source "approved edit\n"
+    writeUtf8 (root </> "new.txt") "untracked addition\n"
     (ready,commitToken,_)<-review headChanged
     (committed,success)<-commit ready commitToken
     actualHead<-T.strip <$> git ["rev-parse","HEAD"]
@@ -365,17 +369,17 @@ reviewCommitChecks base=do
     check "whole working-tree review commits tracked and untracked changes"
       (textField "state" success==Just "succeeded" && field "exitCode" success==Just (0::Int) && field "reviewedTreeMatched" success==Just True && textField "head" success==Just actualHead && T.null clean)
     createDirectory (root </> "nested")
-    T.writeFile (root </> "nested" </> "thc.toml") "untracked authority-secret-marker\n"
+    writeUtf8 (root </> "nested" </> "thc.toml") "untracked authority-secret-marker\n"
     privateUntracked<-failedReview committed
     removeFile (root </> "nested" </> "thc.toml")
     removeDirectory (root </> "nested")
-    T.writeFile (root </> "authority-parent") "authority-secret-marker\n"
+    writeUtf8 (root </> "authority-parent") "authority-secret-marker\n"
     ancestor<-failedReview privateUntracked {guestPrivatePaths=[root </> "authority-parent" </> "session.key"]}
     removeFile (root </> "authority-parent")
-    T.writeFile private "changed authority-secret-marker\n"
+    writeUtf8 private "changed authority-secret-marker\n"
     privateChanged<-failedReview ancestor {guestPrivatePaths=[]}
     _<-git ["add","thc.toml"]
-    T.writeFile private "authority-secret-marker\n"
+    writeUtf8 private "authority-secret-marker\n"
     privateStaged<-failedReview privateChanged
     _<-git ["reset","--","thc.toml"]
     _<-git ["mv","thc.toml","apparently-public.txt"]
@@ -389,9 +393,9 @@ reviewCommitChecks base=do
     createFileLink private (root </> "private-alias")
     linked<-failedReview copied
     removeFile (root </> "private-alias")
-    T.writeFile source (T.replicate 131073 "x")
+    writeUtf8 source (T.replicate 131073 "x")
     oversized<-failedReview linked
-    T.writeFile source "hook change\n"
+    writeUtf8 source "hook change\n"
     (beforeHook,hookToken,_)<-review oversized
     script "echo authority-secret-marker >&2\nexit 7\n"
     (hookFailed,hookFailure)<-commit beforeHook hookToken
@@ -427,13 +431,15 @@ integrationChecks base=do
   _<-git upstream ["config","user.name","Git Test"]
   _<-git upstream ["config","user.email","test@example.invalid"]
   _<-git upstream ["config","commit.gpgsign","false"]
-  T.writeFile (upstream </> "safe.txt") "base\n"
-  T.writeFile (upstream </> "thc.toml") "private-authority-marker\n"
+  _<-git upstream ["config","core.autocrlf","false"]
+  writeUtf8 (upstream </> "safe.txt") "base\n"
+  writeUtf8 (upstream </> "thc.toml") "private-authority-marker\n"
   commit upstream "initial"
-  _<-git base ["clone",upstream,work]
+  _<-git base ["clone","-c","core.autocrlf=false","-c","core.symlinks=true",upstream,work]
   _<-git work ["config","user.name","Git Test"]
   _<-git work ["config","user.email","test@example.invalid"]
   _<-git work ["config","commit.gpgsign","false"]
+  _<-git work ["config","core.autocrlf","false"]
   withGitOperations (pure False) $ \runtime->do
     let initial=(initialDesktop (80,25)) {defaultDirectory=Just work,branchRoot=Just work}
         call d name args=do (next,answer)<-gitTool runtime d name args; (next,) <$> answer
@@ -451,13 +457,13 @@ integrationChecks base=do
             _ -> threadDelay 10000 >> poll next
         merge d ref=run d "git_merge" (object ["ref" .= (ref::T.Text)])
         failed value=textField "state" value==Just "failed"
-    T.writeFile (upstream </> "safe.txt") "upstream\n"
+    writeUtf8 (upstream </> "safe.txt") "upstream\n"
     commit upstream "safe upstream"
     upstreamHead<-git upstream ["rev-parse","HEAD"]
     (pulled,pullResult)<-run initial "git_pull" (object [])
     check "agent pull fast forwards configured upstream" (textField "state" pullResult==Just "succeeded" && textField "head" pullResult==Just upstreamHead && field "fetchExitCode" pullResult==Just (0::Int) && field "exitCode" pullResult==Just (0::Int))
     check "unchanged private authority file permits safe pull" . (=="private-authority-marker\n") =<< T.readFile (work </> "thc.toml")
-    T.writeFile (upstream </> "after-fetch.txt") "incoming checked file\n"
+    writeUtf8 (upstream </> "after-fetch.txt") "incoming checked file\n"
     commit upstream "after fetch guard"
     let delayed variant=do
           (started,receipt)<-call pulled "git_pull" (object [])
@@ -483,13 +489,13 @@ integrationChecks base=do
     (_,badPull)<-call pulled "git_pull" (object ["remote" .= ("private://credential"::T.Text)])
     check "pull accepts no remote override" (left badPull)
     _<-git work ["checkout","-b","feature"]
-    T.writeFile (work </> "feature.txt") "feature\n"
+    writeUtf8 (work </> "feature.txt") "feature\n"
     commit work "feature"
     _<-git work ["checkout","main"]
     (merged,mergeResult)<-merge pulled "feature"
     check "agent merges named local branch" (textField "state" mergeResult==Just "succeeded" && field "conflicts" mergeResult==Just (0::Int))
     check "merge installs safe feature file" =<< doesFileExist (work </> "feature.txt")
-    T.writeFile (work </> "safe.txt") "saved local change\n"
+    writeUtf8 (work </> "safe.txt") "saved local change\n"
     (_,dirtyResult)<-merge merged "origin/main"
     check "saved dirty working tree is refused without mutation" (failed dirtyResult)
     check "saved dirty bytes preserved" . (=="saved local change\n") =<< T.readFile (work </> "safe.txt")
@@ -498,7 +504,7 @@ integrationChecks base=do
     (_,dirtyReply)<-call dirtyDesktop "git_pull" (object [])
     check "integration refuses dirty editor buffers immediately" (left dirtyReply)
     _<-git work ["checkout","-b","private-change"]
-    T.writeFile (work </> "thc.toml") "incoming-private-marker\n"
+    writeUtf8 (work </> "thc.toml") "incoming-private-marker\n"
     commit work "private change"
     _<-git work ["checkout","main"]
     before<-git work ["rev-parse","HEAD"]
@@ -508,7 +514,7 @@ integrationChecks base=do
     check "private refusal contains no paths or output" (all (not . (`T.isInfixOf` T.pack (BL.unpack (encode privateResult)))) ["thc.toml","incoming-private-marker"])
     check "private refusal preserves authority bytes" . (=="private-authority-marker\n") =<< T.readFile (work </> "thc.toml")
     _<-git work ["checkout","-b","head-rename-target"]
-    T.writeFile (work </> "safe.txt") "target edits public predecessor\n"
+    writeUtf8 (work </> "safe.txt") "target edits public predecessor\n"
     commit work "target edits old path"
     _<-git work ["checkout","-b","head-rename-current","main"]
     _<-git work ["mv","safe.txt","private.key"]
@@ -519,13 +525,13 @@ integrationChecks base=do
     check "HEAD-side protected divergence is conservatively refused" (failed headRenameResult)
     _<-git work ["checkout","main"]
     createDirectory (work </> "old")
-    T.writeFile (work </> "old" </> "safe.txt") "ordinary source\n"
+    writeUtf8 (work </> "old" </> "safe.txt") "ordinary source\n"
     commit work "directory base"
     _<-git work ["checkout","-b","incoming-directory"]
     _<-git work ["mv","old","new"]
     commit work "directory move"
     _<-git work ["checkout","main"]
-    T.writeFile (work </> "old" </> "secret.key") "protected branch-only bytes\n"
+    writeUtf8 (work </> "old" </> "secret.key") "protected branch-only bytes\n"
     commit work "private current-branch addition"
     (_,directoryResult)<-merge refused {guestPrivatePaths=[work </> "old" </> "secret.key"]} "incoming-directory"
     check "directory rename cannot relocate protected current-branch file" =<< doesFileExist (work </> "old" </> "secret.key")
@@ -551,43 +557,49 @@ integrationChecks base=do
     check "incoming symlink cannot expose authority file" (failed linkResult)
     check "incoming link was not installed" . not =<< doesPathExist (work </> "public-alias")
     _<-git work ["checkout","-b","incoming-parent"]
-    T.writeFile (work </> "authority-parent") "ordinary content\n"
+    writeUtf8 (work </> "authority-parent") "ordinary content\n"
     commit work "authority ancestor"
     _<-git work ["checkout","main"]
     (_,parentResult)<-merge refused {guestPrivatePaths=[work </> "authority-parent" </> "key"]} "incoming-parent"
     check "incoming ancestor replacement is protected" (failed parentResult)
     _<-git work ["update-index","--skip-worktree","safe.txt"]
-    T.writeFile (work </> "safe.txt") "hidden local changes\n"
+    writeUtf8 (work </> "safe.txt") "hidden local changes\n"
     (_,hiddenResult)<-merge refused "origin/main"
     check "hidden index files cannot bypass saved-state guard" (failed hiddenResult)
     check "hidden bytes preserved" . (=="hidden local changes\n") =<< T.readFile (work </> "safe.txt")
     _<-git work ["update-index","--no-skip-worktree","safe.txt"]
     _<-git work ["restore","safe.txt"]
-    T.writeFile (work </> ".gitignore") "ignored.txt\n"
+    writeUtf8 (work </> ".gitignore") "ignored.txt\n"
     commit work "ignore local output"
     _<-git work ["checkout","-b","incoming-ignored"]
-    T.writeFile (work </> "ignored.txt") "incoming output\n"
+    writeUtf8 (work </> "ignored.txt") "incoming output\n"
     _<-git work ["add","-f","ignored.txt"]
     commit work "tracked output"
     _<-git work ["checkout","main"]
-    T.writeFile (work </> "ignored.txt") "precious ignored file\n"
+    writeUtf8 (work </> "ignored.txt") "precious ignored file\n"
     (_,ignoredResult)<-merge refused "incoming-ignored"
     check "merge does not overwrite ignored user files" (failed ignoredResult && maybe False (/=0) (field "exitCode" ignoredResult::Maybe Int))
     check "ignored bytes preserved" . (=="precious ignored file\n") =<< T.readFile (work </> "ignored.txt")
-    T.writeFile (upstream </> "diverged.txt") "remote divergence\n"
+    writeUtf8 (upstream </> "diverged.txt") "remote divergence\n"
     commit upstream "diverged upstream"
     divergentHead<-git work ["rev-parse","HEAD"]
     (_,divergentResult)<-run refused "git_pull" (object [])
     check "pull refuses divergence with real nonzero merge exit" (failed divergentResult && field "fetchExitCode" divergentResult==Just (0::Int) && maybe False (/=0) (field "exitCode" divergentResult::Maybe Int) && textField "head" divergentResult==Just divergentHead)
     check "failed ff-only pull leaves no merge state" . not =<< doesFileExist (work </> ".git" </> "MERGE_HEAD")
     _<-git work ["checkout","-b","conflict"]
-    T.writeFile (work </> "safe.txt") "theirs\n"
+    writeUtf8 (work </> "safe.txt") "theirs\n"
     commit work "theirs"
     _<-git work ["checkout","main"]
-    T.writeFile (work </> "safe.txt") "ours\n"
+    writeUtf8 (work </> "safe.txt") "ours\n"
     commit work "ours"
     (conflicted,conflictResult)<-merge refused "conflict"
     check "merge reports actual conflict without aborting" (failed conflictResult && field "conflicts" conflictResult==Just (1::Int) && maybe False (/=0) (field "exitCode" conflictResult::Maybe Int))
     check "conflict state remains for human resolution" =<< doesFileExist (work </> ".git" </> "MERGE_HEAD")
     (_,blocked)<-run conflicted "git_pull" (object [])
     check "existing conflict blocks another integration" (failed blocked)
+
+writeUtf8 :: FilePath -> T.Text -> IO ()
+writeUtf8 path = BS.writeFile path . TE.encodeUtf8
+
+shellPath :: FilePath -> FilePath
+shellPath = map (\c -> if c=='\\' then '/' else c)
