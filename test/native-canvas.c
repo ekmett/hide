@@ -21,7 +21,6 @@ static const char *red="000000000000000000000000000000000000000000000002";
 static const char *green="000000000000000000000000000000000000000000000003";
 static const char *partial="000000000000000000000000000000000000000000000004";
 static const char *colorful="000000000000000000000000000000000000000000000005";
-static const char *capture="/private/tmp/hide-native-canvas.bmp";
 static uint16_t mask[80*25];
 static void cells(void) {
     uint16_t blank[16]={0},wide[16]; for (int y=0;y<16;++y) wide[y]=65535;
@@ -42,7 +41,8 @@ static void pixel(SDL_Surface *image,int x,int y,int r,int g,int b) {
     }
 }
 int main(int argc,char **argv) {
-    assert(argc==2);
+    assert(argc==3);
+    const char *capture=argv[2];
 #ifdef __APPLE__
     SDL_SetHint(SDL_HINT_MAC_BACKGROUND_APP,"1");
 #endif
