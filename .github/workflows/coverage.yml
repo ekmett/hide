@@ -104,9 +104,9 @@ jobs:
             ${{ steps.haskell.outputs.cabal-store }}
             build/coverage
             build/allocation
-          key: hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'cabal.project') }}-${{ github.sha }}
+          key: hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'packages/**/*.cabal', 'plugins/**/*.cabal', 'cabal.project') }}-${{ github.sha }}
           restore-keys: |
-            hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'cabal.project') }}-
+            hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'packages/**/*.cabal', 'plugins/**/*.cabal', 'cabal.project') }}-
             hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-
             hpc-v1-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-
       - name: Install report converter

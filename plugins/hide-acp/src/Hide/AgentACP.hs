@@ -6,7 +6,7 @@
 -- ACP file/terminal requests are disabled here in favor of the supplied MCP
 -- services. Uncertain steering or cancellation outcomes retire the connection
 -- rather than risk replaying input the provider may already have consumed.
-module Hide.AgentACP (ACPPermission(..), startACPDriver, publicACPUpdate) where
+module Hide.AgentACP (ACPPermission(..), startACPDriver, publicACPUpdate, parseCapabilities, filterPrivateCapabilities) where
 
 import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
@@ -28,7 +28,37 @@ import qualified Data.Vector as V
 import System.Directory (canonicalizePath)
 import System.Timeout (timeout)
 import qualified Hide.ACP as A
-import Hide.AgentHub
+import Hide.Plugin.Agent
+
+-- | Decode advertised ACP v1 capabilities. IDs and values remain provider-owned. No hard-coded model or
+-- reasoning menu is offered. fork={} is the experimental session/fork marker.
+parseCapabilities :: Value -> Value -> Capabilities
+parseCapabilities initialized session=Capabilities (marker "fork") (marker "resume" || field "loadSession" caps==Just True) ((field "_meta" initialized >>= field "steering" >>= field "supported")==Just True) choices
+  where
+    caps=fromMaybe Null (field "agentCapabilities" initialized)
+    marker name=case field "sessionCapabilities" caps >>= field name of Just (Object _)->True; _->False
+    choices=take 128 (mapMaybe choice (fromMaybe [] (field "configOptions" session)))
+    choice value=do
+      ident<-field "id" value; category<-field "category" value
+      current<-field "currentValue" value
+      unless (field "type" value==Just ("select"::Text) && category `elem` ["model","thought_level"] && validSmall ident && validSmall current) Nothing
+      let options=take 512 (concatMap option (fromMaybe [] (field "options" value)))
+      unless (not (null options)) Nothing
+      pure (ConfigChoice ident category current options)
+    option value=case (field "value" value,field "name" value) of
+      (Just ident,Just label) | validSmall ident && validSmall label -> [(ident,label)]
+      _->concatMap (\group->case (field "value" group,field "name" group) of
+           (Just ident,Just label) | validSmall ident && validSmall label -> [(ident,label)]; _->[]) (fromMaybe [] (field "options" value))
+    validSmall t=not (T.null t) && T.length t<=4096
+
+-- | A private identifier cannot be replaced with a different public choice. Omit
+-- the setting entirely if its IDs, current value or labels contain a binding.
+filterPrivateCapabilities :: [Text] -> Capabilities -> Capabilities
+filterPrivateCapabilities private caps=caps {configChoices=filter public (configChoices caps)}
+  where
+    keys=filter (not . T.null) private
+    public choice=not (any (\text->any (`T.isInfixOf` text) keys)
+      ([configId choice,configCategory choice,configCurrent choice]++concatMap (\(ident,label)->[ident,label]) (configValues choice)))
 
 -- | A scrubbed permission display and bounded provider choices.
 -- The callback returns an offered option ID or cancellation.

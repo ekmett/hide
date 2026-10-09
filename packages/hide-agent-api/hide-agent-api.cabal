@@ -1,0 +1,13 @@
+cabal-version: 3.0
+name: hide-agent-api
+version: 0.1.0.0
+synopsis: Provider-neutral agent driver contract for hide
+license: BSD-3-Clause
+build-type: Simple
+
+library
+  default-language: Haskell2010
+  ghc-options: -Wall
+  hs-source-dirs: src
+  exposed-modules: Hide.Plugin.Agent
+  build-depends: base >=4.18 && <4.23, text >=2.0, aeson

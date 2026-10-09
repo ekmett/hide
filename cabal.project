@@ -1,4 +1,4 @@
-packages: .
+packages: . packages/hide-agent-api plugins/hide-acp
 
 -- The POSIX wrapper discovers .deps/ghostty before dependency solving.
 -- Native Windows skips the extensionless script and uses its normal pkg-config.
