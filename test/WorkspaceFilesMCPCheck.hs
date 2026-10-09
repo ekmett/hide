@@ -72,7 +72,7 @@ checks=withBufferDiffCommands $ \commands->do
         rejected "workspace_files" (operation "create_file" "escape/escaped.txt") initial
         createFileLink (root </> "missing") (root </> "dangling")
         rejected "workspace_files" (operation "rename" "new/empty.hs"++["to" .= ("dangling"::T.Text)]) initial
-      TIO.writeFile (root </> "source.hs") "disk needle\n"
+      BS.writeFile (root </> "source.hs") "disk needle\n"
       loaded<-loadFile (root </> "source.hs") >>= either error pure
       let clean=uncurry (\state buffer->addDocument (Just state) buffer initial) loaded
           bid=maybe (error "missing buffer") sourceFixtureBuffer (activeWindow clean)
@@ -89,7 +89,7 @@ checks=withBufferDiffCommands $ \commands->do
       rejected "workspace_files" (operation "rename" "source.hs"++["to" .= ("renamed.hs"::T.Text)]) dirtyDesktop
       (renamedDesktop,renamedResult)<-success "workspace_files" (operation "rename" "source.hs"++["to" .= ("renamed.hs"::T.Text)]) clean
       check "rename reports success and updates open buffer paths" (field "operation" renamedResult==Just ("rename"::T.Text) && fmap filePath (activeDocument renamedDesktop >>= documentFile)==Just (root </> "renamed.hs"))
-      TIO.writeFile (root </> "notes.md") "# Heading\n"
+      BS.writeFile (root </> "notes.md") "# Heading\n"
       markdown<-loadFile (root </> "notes.md") >>= either error pure
       preview<-prepareTextPresentations (fst (runCommand SplitVertical (fst (runCommand (SetBufferView MarkdownView) (uncurry (\state buffer->addDocument (Just state) buffer initial) markdown)))))
       (renamedPreview,_)<-success "workspace_files" (operation "rename" "notes.md"++["to" .= ("notes.txt"::T.Text)]) preview
@@ -112,7 +112,7 @@ checks=withBufferDiffCommands $ \commands->do
       (movedTree,_)<-success "workspace_files" (operation "rename" "tree"++["to" .= ("moved"::T.Text)]) treeDesktop
       check "renaming a directory updates current directory and files tree root"
         (defaultDirectory movedTree==Just (root </> "moved") && fmap treeRoot (sideTree movedTree)==Just (root </> "moved") &&
-          fmap filePath (activeDocument movedTree >>= documentFile)==Just (root </> "moved/missing.hs") &&
+          fmap filePath (activeDocument movedTree >>= documentFile)==Just (root </> "moved" </> "missing.hs") &&
           maybe False ((==Nothing).diskBytes) (activeDocument movedTree >>= documentFile) &&
           map windowId (windows movedTree)==map windowId (windows treeDesktop))
       removedTree<-file "delete" "moved" movedTree

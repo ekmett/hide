@@ -9,7 +9,7 @@ module Hide.BrowserServer (serveBrowser, allowedOrigin) where
 import Control.Concurrent.Async (withAsync, wait, race_)
 import Control.Concurrent.MVar
 import Control.Exception (bracket, finally, catch, IOException)
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL

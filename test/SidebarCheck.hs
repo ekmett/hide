@@ -141,7 +141,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
       sourceCommand command d=fst (runCommand command d {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)})
       ids d=map (\w->(windowId w,bufferId w,selection w,scrollRow w,scrollColumn w)) (windows d)
   createDirectory (dir </> "archive")
-  TIO.writeFile original "main = 1\n"
+  BS.writeFile original "main = 1\n"
   BS.writeFile (dir </> "bytes.bin") (BS.pack [0,255,13,10])
   (file,buffer)<-loadFile original >>= either error pure
   -- A clean buffer with retained redo proves path adoption does not replace Undo.

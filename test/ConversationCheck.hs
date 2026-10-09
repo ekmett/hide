@@ -1770,6 +1770,7 @@ waitForReader ready = do
 providerScript :: String
 providerScript=unlines
   [ "import json,os,sys"
+  , "sys.stdin.reconfigure(encoding='utf-8'); sys.stdout.reconfigure(encoding='utf-8',newline='\\n')"
   , "if len(sys.argv)==4 and sys.argv[1]=='held-pipe-writer':"
   , "  with open(sys.argv[2],'wb',buffering=0) as output:"
   , "    print('reader-ready',flush=True)"

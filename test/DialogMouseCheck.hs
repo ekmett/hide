@@ -7,6 +7,7 @@ import Control.Monad (unless, forM_)
 import Control.Exception (evaluate)
 import GHC.Conc (getAllocationCounter)
 import System.Timeout (timeout)
+import System.FilePath ((</>))
 import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
 import Hide.Commands (configuredBindings)
@@ -104,8 +105,8 @@ checks profile = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase
       (_,directoryEffects)=handleDoubleClick (fx+2) (fy+2) browser
       (_,blankEffects)=handleDoubleClick (fx+2) (fy+7) browser
   check "single click selects without opening" (null singleEffects && dialog selected/=Nothing)
-  check "double click opens file" (fileEffects==[OpenFile PluginMenu.HumanMenu "/project/Main.hs"] && dialog opened==Nothing)
-  check "double click enters directory" (directoryEffects==[BrowsePath "/project/folder" "*"])
+  check "double click opens file" (fileEffects==[OpenFile PluginMenu.HumanMenu ("/project" </> "Main.hs")] && dialog opened==Nothing)
+  check "double click enters directory" (directoryEffects==[BrowsePath ("/project" </> "folder") "*"])
   check "double click blank row does not open" (null blankEffects)
   let (popup,_) = handleEvent (V.EvMouseDown 3 2 V.BRight []) desktop
       renameIndex=fromMaybe (error "missing Rename context action") (findIndex ((==RenameSymbol).snd) (contextItems (contextKind popup)))

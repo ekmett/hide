@@ -491,7 +491,7 @@ projectConfigChecks=bracket temporary removePathForcibly $ \directory -> do
       projectPath=root </> "thc.toml"
       localPath=nested </> "thc.toml"
       globalDirectory=directory </> "global"
-      globalPath=globalDirectory </> "thc/config.toml"
+      globalPath=globalDirectory </> "thc" </> "config.toml"
       absentPath=directory </> "absent.toml"
       isLeft (Left _)=True
       isLeft _=False
@@ -598,7 +598,7 @@ agentLimitChecks :: IO ()
 agentLimitChecks=bracket temporary removePathForcibly $ \directory -> do
   let root=directory </> "project"
       globalDirectory=directory </> "global"
-      globalPath=globalDirectory </> "thc/config.toml"
+      globalPath=globalDirectory </> "thc" </> "config.toml"
       projectPath=root </> "thc.toml"
       expect label expected=readAgentLimitsFor root >>= check label . (==Right expected)
       rejected label=readAgentLimitsFor root >>= check label . either (const True) (const False)

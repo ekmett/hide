@@ -18,10 +18,11 @@ import qualified Data.Map.Strict as M
 import System.Directory (getTemporaryDirectory,removeFile,canonicalizePath)
 import System.IO (openTempFile,hClose)
 import qualified Data.Text.IO as TIO
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
 import Hide.Files (FileState(..),loadFile)
 #ifndef mingw32_HOST_OS
 import System.Posix.Files (createNamedPipe)
-import qualified Data.ByteString as BS
 import qualified System.Posix.IO.ByteString as PosixBytes
 import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock)
 import System.IO.Error (tryIOError,isFullError)
@@ -39,7 +40,7 @@ localSourceCheck :: IO ()
 localSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(port,path,_)->do
   canonical<-canonicalizePath (path<>".hs")
   let text="disk\nα界🐈Z\n"
-  TIO.writeFile canonical text
+  BS.writeFile canonical (TE.encodeUtf8 text)
   Right (file,_)<-loadFile canonical
   withDebugger $ \runtime->do
     let core d [ReadPath target]=do
@@ -88,7 +89,7 @@ localSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(po
       humanShown<-await "human private source did not navigate" ((=="Stopped in private debugger source.").status) humanQueued
       unless (fmap (caret.selection) (activeWindow humanShown)==Just 10 && maybe False (privateDocument humanShown) (activeDocument humanShown))
         (fail "Human local source must retain ordinary document privacy"))
-      `finally` TIO.writeFile canonical text
+      `finally` BS.writeFile canonical (TE.encodeUtf8 text)
   putStrLn "local debugger source owner checks passed"
 
 -- Missing local paths are unavailable, unlike the normal new-file owner. A

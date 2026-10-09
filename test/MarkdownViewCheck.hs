@@ -30,10 +30,12 @@ import Hide.TextPresentation
 
 checks :: IO ()
 checks=do
-  let check name ok=unless ok (fail name)
+  directory<-getTemporaryDirectory
+  let sourcePath=directory </> "hide-preview-notes.md"
+      check name ok=unless ok (fail name)
       source="# Heading\n\nA **bold** [link](next.md).\n\n```haskell\nmain = putStrLn \"hi\"\n```\n\n"<>T.replicate 30 "later paragraph\n\n"
       original=replaceSelection (Selection 0 0) source (newBuffer "")
-      named=addDocument (Just (FileState "/tmp/notes.md" Nothing)) original (initialDesktop (60,20))
+      named=addDocument (Just (FileState sourcePath Nothing)) original (initialDesktop (60,20))
       current=modifyActive (\w->w {selection=Selection 3 8,scrollRow=1,scrollColumn=2}) named
         {buffers=M.map (\document->document {documentSuggestedName=Just "notes.md"}) (buffers named)}
       win d=fromJust (activeWindow d)
@@ -75,7 +77,7 @@ checks=do
       (row,col)=windowTextPosition ready (win ready) text start
       r=bounds (win ready)
       browsed=modifyActive (modifyDisplayedWindow (\w->w {scrollRow=row,scrollColumn=0})) ready
-  check "Preview link hit uses rendered offset" (linkAt (left r+1+col) (top r+1) browsed==Just (OpenLink (SourceLink (Just "/tmp/notes.md")) "next.md"))
+  check "Preview link hit uses rendered offset" (linkAt (left r+1+col) (top r+1) browsed==Just (OpenLink (SourceLink (Just sourcePath)) "next.md"))
   check "Preview shell hit cannot authorize execution" (isNothing (shellBlockAt (left r+2) (top r+2) ready))
   let navigated=fst (handleEvent (V.EvKey V.KRight []) ready)
       scrolled=changeScroll True 5 navigated
@@ -102,7 +104,7 @@ checks=do
   changedReady<-prepareTextPresentations staleRevision
   check "Sibling source edit retires old preview" (isNothing (windowMarkdown (focusWindow (last ids) changed) (win (focusWindow (last ids) changed))) && maybe False (\(_,content,_)->"EDIT" `T.isInfixOf` contentSlice content 0 (contentLength content)) (windowMarkdown changedReady (win changedReady)))
   _<-renderKey ready {buffers=M.map (\d->d {documentBuffer=(documentBuffer d) {undoStack=error "render forced source Undo"}}) (buffers ready)}
-  let private=ready {guestPrivatePaths=["/tmp/notes.md"]}
+  let private=ready {guestPrivatePaths=[sourcePath]}
   check "Rendered preview retains source privacy" (not (readableAt private (left r+1) (top r+1)))
   let plain=addDocument Nothing (newBuffer "ordinary") (initialDesktop (60,20)) {defaultBufferView=MarkdownView}
   check "Markdown default does not preview arbitrary source" (bufferView (win plain)==CurrentView && not (commandEnabled plain (SetBufferView MarkdownView)))
