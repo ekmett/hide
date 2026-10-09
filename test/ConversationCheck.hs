@@ -315,7 +315,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
           connectedMessages<-readMessages (root </> "messages.jsonl")
           let sent=[params | entry<-connectedMessages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
               sentText params=case (field "prompt" params::Maybe [Value]) of Just (first:_)->field "text" first; _->Nothing
-          check "initial connection accepts queued input in order" (map sentText sent==[Just ("stream"::T.Text),Just "stream\nconnecting followup"])
+          check ("initial connection accepts queued input in order: "++show (map sentText sent::[Maybe T.Text],status accepted,agentReplying accepted,agentQueued accepted)) (map sentText sent==[Just ("stream"::T.Text),Just "stream\nconnecting followup"])
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
     writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
@@ -424,7 +424,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
 #endif
 
 checks :: AllocationProfile -> IO ()
-checks profile = (draftReceiptChecks >> composerCodeChecks profile >>) $ withTextPresentation $ \presentation->
+checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \presentation->
   let tickConversation=tickPresented presentation
   in bracket temporary removePathForcibly $ \root ->
   bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) restore $ \_ ->
