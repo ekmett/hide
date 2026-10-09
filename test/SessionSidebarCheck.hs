@@ -19,11 +19,12 @@ import System.Environment (lookupEnv,setEnv,unsetEnv)
 import System.FilePath ((</>),takeFileName)
 import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
-import Hide.Buffer (newBuffer)
+import Hide.Buffer (newBuffer,contents)
 import Hide.GuestAccess (guestEffectsAllowed,guestKeyboardAllowed)
 import Hide.Model
 import Hide.Files (loadFile)
 import Hide.Session
+import qualified Hide.Recovery as Recovery
 import Hide.RemoteEndpoint (sessionEndpoint,withEndpointListener,socketToEndpoint)
 import qualified Network.Socket as N
 import qualified Graphics.Vty as V
@@ -123,21 +124,52 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
         cheap<-timeout 1000000 (foldM (\d _->tickSessionSidebar service host d) poison [1..32::Int] >>= evaluate . length . windows)
         unless (cheap==Just (length (windows views))) (fail "Session metadata blocks the UI owner")
         -- Use the real sidebar context menu and host confirmation lifecycle.
-        saved<-newSessionRecord Nothing []
+        savedRecord<-newSessionRecord Nothing []
+        let saved=savedRecord {sessionDirectory=root}
         rememberSession saved
         savedPath<-checkpointPath (sessionId saved)
-        writeFile savedPath "saved unsaved work"
+        Recovery.writeCheckpoint savedPath (addDocument Nothing (newBuffer "saved unsaved work") (initialDesktop (80,25))) >>= either (fail . T.unpack) pure
+        savedBytes<-BS.readFile savedPath
+        elsewhereRecord<-newSessionRecord Nothing []
+        let elsewhere=elsewhereRecord {sessionDirectory=root </> "another-project"}
+            elsewhereNode="session:"<>T.pack (sessionId elsewhere)
+        createDirectory (sessionDirectory elsewhere)
+        rememberSession elsewhere
+        checkpointPath (sessionId elsewhere) >>= \path->writeFile path "another project's checkpoint"
         let savedNode="session:"<>T.pack (sessionId saved)
             confirmation d=maybe False (T.isPrefixOf "Delete session ".dialogTitle) (dialog d)
             openDelete d=choose savedNode "Delete..." d >>= wait "delete confirmation" confirmation
-        catalogued<-wait "saved session" (\d->hasId savedNode d && ready d) selected
+        createDirectory (root </> "src")
+        writeFile (root </> "src" </> "Nested.hs") "module Nested where\n"
+        (nestedFile,nestedBuffer)<-loadFile (root </> "src" </> "Nested.hs") >>= either fail pure
+        let nested=addDocument (Just nestedFile) nestedBuffer selected
+        catalogued<-wait "saved session" (\d->hasId savedNode d && hasId elsewhereNode d && ready d) nested
         unless ("Delete..." `elem` menuLabels (popup savedNode catalogued) &&
+                "Recover buffers here" `elem` menuLabels (popup savedNode catalogued) &&
+                "Recover buffers here" `notElem` menuLabels (popup elsewhereNode catalogued) &&
                 null (menuLabels (popup currentNode catalogued)) &&
                 null (menuLabels (popup ("session:"<>T.pack (sessionId other)) catalogued)))
           (fail "Session deletion menu does not distinguish stopped local/current/remote targets")
-        switching<-choose savedNode "Recover" catalogued >>= wait "captured session recovery"
+        -- Replies belong to the clicked display/project. Dispatch first;
+        -- then change the owner before
+        -- any tick can consume its worker result.
+        let expireRecovery changed d=do
+              requested<-choose savedNode "Recover buffers here" d
+              refused<-wait "expired buffer recovery" (T.isInfixOf "expired" . status) (changed requested)
+              unless (M.keys (buffers refused)==M.keys (buffers d) && nextId refused==nextId d)
+                (fail "Expired buffer recovery added windows")
+              pure refused {sessionAttachment=sessionAttachment d,sideTree=fmap (\tree->tree {treeRoot=maybe root treeRoot (sideTree d)}) (sideTree refused),dialog=Nothing,status="Ready"}
+        epochRefused<-expireRecovery (\d->d {sessionAttachment=sessionAttachment d+1}) catalogued
+        directoryRefused<-expireRecovery (\d->d {sideTree=fmap (\tree->tree {treeRoot=sessionDirectory elsewhere}) (sideTree d)}) epochRefused
+        imported<-choose savedNode "Recover buffers here" directoryRefused >>= wait "buffer recovery menu action"
+          (\d->M.size (buffers d)==M.size (buffers directoryRefused)+1)
+        unchanged<-BS.readFile savedPath
+        unless (maybe False ((=="saved unsaved work").contents.documentBuffer) (activeDocument imported) &&
+                maybe True (not.treeFocused) (sideTree imported) && pendingSessionSwitch imported==Nothing && unchanged==savedBytes)
+          (fail "Buffer recovery failed to focus its copy or changed the saved session")
+        switching<-choose savedNode "Recover" imported >>= wait "captured session recovery"
           ((==Just (T.pack (sessionId saved))).pendingSessionSwitch)
-        unless ((windowId <$> activeWindow switching)==(windowId <$> activeWindow catalogued))
+        unless ((windowId <$> activeWindow switching)==(windowId <$> activeWindow imported))
           (fail "Session request changed the old desktop before attachment")
         let request=SessionSidebarAction (SwitchSession (T.pack (sessionId saved)) (sessionAttachment catalogued))
         (_,expiredSwitch)<-core catalogued {sessionAttachment=sessionAttachment catalogued+1} [request]

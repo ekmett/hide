@@ -6,9 +6,9 @@
 -- text is redacted where required; terminals recover as ended documents.
 -- Metadata and stable immutable-payload identities decide whether to checkpoint.
 -- Publishing uses flush and rename, without an explicit fsync durability promise.
-module Hide.Recovery (writeCheckpoint, readCheckpoint, CheckpointKey, checkpointKey) where
+module Hide.Recovery (writeCheckpoint, readCheckpoint, RecoveredSources, readSourceCheckpoint, adoptRecoveredSources, CheckpointKey, checkpointKey) where
 
-import Data.List (findIndex)
+import Data.List (findIndex, mapAccumL)
 import Data.Maybe (fromMaybe)
 import Hide.Sidebar
 import qualified Hide.Plugin.Tree as P
@@ -37,7 +37,7 @@ import Data.Unique (Unique)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import System.Directory (pathIsSymbolicLink, removeFile, renameFile)
+import System.Directory (canonicalizePath, pathIsSymbolicLink, removeFile, renameFile)
 import System.FilePath (isAbsolute, takeDirectory, takeFileName)
 import System.IO (IOMode(ReadMode), hClose, hFlush, openBinaryTempFile, withBinaryFile)
 import System.IO.Error (catchIOError)
@@ -127,11 +127,8 @@ validateConversationPoints desktop=mapM_ validate (M.elems (conversationViews de
 -- Reject symlink input and invalid references/ranges; clear transient interactions.
 readCheckpoint :: FilePath -> Desktop -> IO (Either Text Desktop)
 readCheckpoint path baseline=do
-  loaded<-safeIO $ do
-    symbolic<-pathIsSymbolicLink path
-    when symbolic (ioError (userError "Recovery checkpoint must not be a symlink"))
-    withBinaryFile path ReadMode (\handle->BS.hGet handle (checkpointLimit+1))
-  case loaded >>= decodeCheckpoint of
+  loaded<-readCheckpointValue path
+  case loaded of
     Left err->pure (Left err)
     Right value->case parseEither (desktopParser baseline) value of
       Left _->pure (Left "Invalid or unsupported recovery checkpoint.")
@@ -154,9 +151,6 @@ readCheckpoint path baseline=do
               editorDrafts=M.fromList [(ref,draft) | (_,_,(ref,draft),_,_)<-restored]}
         pure (layoutBottomWindows (normalizeBottom desktop))
   where
-    decodeCheckpoint bytes=do
-      unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")
-      either (const (Left "Invalid recovery checkpoint JSON.")) Right (eitherDecodeStrict' bytes)
     install scope prepared=do
       update<-W.openWindow scope prepared >>= maybe (ioError (userError "Recovery scope ended")) pure
       accepted<-W.admitWindowUpdate False update >>= maybe (ioError (userError "Recovery publication expired")) pure
@@ -186,6 +180,98 @@ readCheckpoint path baseline=do
       ref<-E.newDraftRef
       pure (target,ConversationView body name ref Nothing Nothing anchored 0 column reply (Just logical) Nothing Nothing,
         (ref,EditorDraft buffer selected focused Nothing),prepared,body)
+
+-- | Validated source documents and their views, without process, plugin or draft
+-- ownership. Split views share one document. The constructor is private so only
+-- checkpoint validation can produce an import; no payload equality is provided.
+data RecoveredSources = RecoveredSources !(M.Map Int Document) ![Window]
+
+-- | Read a bounded checkpoint on the sidebar worker, using the same schema
+-- validation as 'readCheckpoint'. Prepare only source documents and views;
+-- conversation/plugin snapshots are validated but never rendered or installed.
+-- Saved paths must still resolve to themselves; changed symlink targets are
+-- refused instead of granting new file authority. Ended terminals stay read-only.
+readSourceCheckpoint :: FilePath -> IO (Either Text RecoveredSources)
+readSourceCheckpoint path=do
+  loaded<-readCheckpointValue path
+  case loaded >>= either (const (Left "Invalid or unsupported recovery checkpoint.")) Right . parseEither (desktopParser (initialDesktop (80,25))) of
+    Left err->pure (Left err)
+    Right (recovered,frames,_,_)->do
+      result<-safeIO $ do
+        let views=[floating (make (SourceContent bid)) | WindowSeed _ (StoredSource bid) _ make<-frames]
+            referenced=S.fromList [bid | window<-views,Just bid<-[bufferId window]]
+            floating window=case M.lookup (windowId window) (dockedTerminals recovered) of
+              Just (rectangle,restored)->window {bounds=rectangle,restoredBounds=restored}
+              Nothing->window
+        documents<-traverse prepare (M.restrictKeys (buffers recovered) referenced)
+        mapM_ evaluate views
+        pure (RecoveredSources <$> sequence documents <*> pure views)
+      pure (result >>= id)
+  where
+    prepare doc=do
+      let paths=maybe [] (pure . filePath) (documentFile doc)++maybe [] pure (documentOrigin doc)
+      resolved<-mapM canonicalizePath paths
+      evaluate (prepareBuffer (documentBuffer doc))
+      pure $ if resolved==paths then Right doc
+        else Left "A saved source path now resolves elsewhere; Recover that session instead."
+
+-- | Add source windows with fresh document/frame identities, preserving buffer
+-- bytes, history, saved baselines and shared split views. Existing documents and
+-- runtime owners are untouched. Imported terminals float in their saved undocked
+-- bounds; all imported bounds fit the current workspace.
+--
+-- A path already owned here becomes an unnamed copy with a suggested filename
+-- and canonical privacy origin. Save therefore asks for a new path, while a
+-- previously clean buffer remains clean. If two distinct privacy origins cannot
+-- be retained, or checkpoint count/identity limits would be exceeded, refuse the
+-- whole import by setting status without adopting any documents or windows.
+adoptRecoveredSources :: RecoveredSources -> Desktop -> Desktop
+adoptRecoveredSources (RecoveredSources incoming views) desktop
+  | M.null incoming=desktop {status="The saved session has no source buffer windows to recover."}
+  | M.size incoming+M.size (buffers desktop)>2048 || length views+length (windows desktop)>4096 ||
+      toInteger (nextId desktop)+toInteger (M.size incoming)+toInteger (length views)>1073741823=
+      desktop {status="Recovered windows exceed this session's checkpoint limits."}
+  | any ambiguous prepared=desktop {status="A generated file has two privacy origins; Recover that saved session instead."}
+  | otherwise=desktop {buffers=combined,windows=map fitted imported++windows desktop,nextId=after,
+      problemsFocused=False,sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree desktop),
+      status="Recovered "<>T.pack (show (length views))<>" source windows ("<>T.pack (show (M.size incoming))<>" buffers)."}
+  where
+    existing=S.fromList [filePath file | doc<-M.elems (buffers desktop),Just file<-[documentFile doc]]
+    (_,prepared)=mapAccumL copy existing (M.toAscList incoming)
+    copy paths (old,doc)=case documentFile doc of
+      Nothing->(paths,(old,doc,False))
+      Just file->let path=filePath file in
+        if path `S.member` paths
+          then (paths,(old,doc {documentFile=Nothing,documentSuggestedName=Just (takeFileName path),documentOrigin=Just path},
+            maybe False (/=path) (documentOrigin doc)))
+          else (S.insert path paths,(old,doc,False))
+    ambiguous (_,_,value)=value
+    assigned=zip prepared [nextId desktop..]
+    identities=M.fromList [(old,fresh) | ((old,_,_),fresh)<-assigned]
+    combined=M.union (buffers desktop) (M.fromList [(fresh,doc) | ((_,doc,_),fresh)<-assigned])
+    firstFrame=nextId desktop+M.size incoming
+    after=firstFrame+length views
+    usedNumbers=S.fromList (map windowNumber (windows desktop)++maybe [] pure (messagesNumber desktop))
+    numbers=filter (`S.notMember` usedNumbers) [1..]
+    imported=zipWith3 remap [firstFrame..] numbers views
+    remap fresh number window=window {windowId=fresh,windowNumber=number,
+      windowContent=SourceContent (identities M.! fromMaybe (error "Validated source frame has no buffer") (bufferId window))}
+    fitted window=case windows (clampHexScroll before placed) of
+      [result]->result
+      _->error "Source window clamping changed its frame count"
+      where
+        before=desktop {buffers=combined,windows=[window]}
+        placed=before {windows=[window {bounds=fitWindow desktop (bounds window),restoredBounds=fmap (fitWindow desktop) (restoredBounds window)}]}
+
+readCheckpointValue :: FilePath -> IO (Either Text Value)
+readCheckpointValue path=do
+  loaded<-safeIO $ do
+    symbolic<-pathIsSymbolicLink path
+    when symbolic (ioError (userError "Recovery checkpoint must not be a symlink"))
+    withBinaryFile path ReadMode (\handle->BS.hGet handle (checkpointLimit+1))
+  pure $ loaded >>= \bytes->do
+    unless (BS.length bytes<=checkpointLimit) (Left "Recovery checkpoint exceeds 256 MiB.")
+    either (const (Left "Invalid recovery checkpoint JSON.")) Right (eitherDecodeStrict' bytes)
 
 -- Validation is pure and never calls a plugin. All rendering preparation belongs
 -- to readCheckpoint's calling recovery worker before layout adoption.

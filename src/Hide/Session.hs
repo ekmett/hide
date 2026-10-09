@@ -6,7 +6,7 @@
 -- remote records remain discoverable while offline. Display prefixes can be short,
 -- but endpoint operations require the complete session identity.
 module Hide.Session
-  (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, deleteStoppedSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity, shortSessionId) where
+  (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, deleteStoppedSession, withStoppedSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity, shortSessionId) where
 
 import Control.Exception (IOException, bracket, bracketOnError, catch, finally)
 import Control.Monad (filterM, unless)
@@ -104,33 +104,37 @@ forgetSession ident = do
     unless (isDoesNotExistError err) (ioError err)) [path,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json",legacy]
 
 -- | Delete a captured, stopped local session from its owning sidebar worker.
--- The current daemon identity must be supplied: POSIX lifetime locks are
--- process-scoped, so its own lock must never be reopened here. Calls from that
--- worker are serialized; concurrent deletion in one process is not supported.
---
--- Refuse current/remote records, a live or unresponsive endpoint, an occupied
--- lifetime lock, or a changed catalog record before removing any saved data.
--- Recheck liveness and exact record identity under the lifetime lock, then use
--- 'forgetSession'. The endpoint and lock file are never removed or a daemon
--- started/stopped. Filesystem failures are reported as 'IOException'.
+-- 'withStoppedSession' checks ownership before 'forgetSession' removes saved data;
+-- the endpoint and lifetime lock file remain in place.
 deleteStoppedSession :: Maybe String -> SessionRecord -> IO ()
-deleteStoppedSession current captured=do
-  unless (current/=Just ident) (ioError (userError "Cannot delete the current editor session."))
-  unless (sessionHost captured==Nothing) (ioError (userError "Cannot delete a remote session from this host."))
+deleteStoppedSession current captured=withStoppedSession current captured (const (forgetSession (sessionId captured)))
+
+-- | Hold the lifetime lock of the exact captured, stopped local session while
+-- using its checkpoint path. Refuse current/remote records, a live or unresponsive
+-- endpoint, an occupied lock, or changed metadata before invoking the callback.
+-- No daemon is started/stopped and the lock file is never removed.
+--
+-- The owning sidebar worker serializes these operations. POSIX locks are
+-- process-scoped: the current identity must be supplied and concurrent calls
+-- for one session within a process are not supported. Failures are 'IOException'.
+withStoppedSession :: Maybe String -> SessionRecord -> (FilePath -> IO a) -> IO a
+withStoppedSession current captured use=do
+  unless (current/=Just ident) (ioError (userError "Cannot use the current editor session as a stopped session."))
+  unless (sessionHost captured==Nothing) (ioError (userError "Cannot use a remote saved session from this host."))
   endpoint<-sessionEndpoint ident
   stopped endpoint
   checkpoint<-checkpointPath ident
   withSessionLock (checkpoint++".lock") $ do
     stopped endpoint
     latest<-loadSession ident
-    unless (latest==Just captured) (ioError (userError "The saved session changed or disappeared; refresh Sessions before deleting."))
-    forgetSession ident
+    unless (latest==Just captured) (ioError (userError "The saved session changed or disappeared; refresh Sessions before continuing."))
+    use checkpoint
   where
     ident=sessionId captured
     stopped endpoint=do
       result<-timeout 1000000 $ (bracket (connectEndpoint endpoint) hClose (const (pure True)))
         `catch` \(_::IOException)->pure False
-      unless (result==Just False) (ioError (userError "The session is running or its endpoint did not respond; stop it before deleting."))
+      unless (result==Just False) (ioError (userError "The session is running or its endpoint did not respond; stop it before continuing."))
 
 loadSession :: String -> IO (Maybe SessionRecord)
 loadSession ident = do
