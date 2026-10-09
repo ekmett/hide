@@ -10,7 +10,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Base64 as B64
 import Hide.RemoteWindow
-import Hide.Accessibility (SemanticAudience(..),dialogSemantics)
+import Hide.Accessibility (SemanticAudience(..),dialogSemantics,sourceSemantics)
 import Hide.FrameTiming
 import Hide.Window (nativeMenuEvent,nativeCommands)
 import Hide.Buffer (newBuffer,Selection(..))
@@ -156,6 +156,29 @@ checks = do
   check "native semantic transport rejects oversized and nonobject snapshots"
     (all (either (const True) (const False) . (\value->parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"semanticSidebar" .= value]) rows))
       [String "bad",object ["name" .= T.replicate 2097153 "a"]])
+
+  let sourceDesktop=addDocument Nothing (newBuffer "visible source\nnext") (initialDesktop (80,25))
+      sourceValue=sourceSemantics OwnerSemantics sourceDesktop
+      sourceFrame value=parseRemoteFrame (object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"semanticSource" .= value]) rows
+      replace key value (Object fields)=Object (KM.insert key value fields)
+      replace _ _ value=value
+  check "native receiver carries the exact bounded source excerpt"
+    (case sourceFrame sourceValue of
+      Right decoded->case remoteSource decoded of
+        Just bytes->eitherDecodeStrict' bytes==Right (object ["source" .= sourceValue,"size" .= ([80,25]::[Int])])
+        _->False
+      _->False)
+  check "missing or absent source clears the native excerpt"
+    (all (either (const False) ((==Nothing).remoteSource))
+      [parseRemoteFrame meta rows,sourceFrame (object ["present" .= False,"readOnly" .= True])])
+  check "native source rejects malformed geometry, authority and excessive text"
+    (all (either (const True) (const False) . sourceFrame)
+      [replace "bounds" (toJSON ([0,0,81,1]::[Int])) sourceValue,
+       replace "readOnly" (Bool False) sourceValue,
+       replace "lineCount" (toJSON (257::Int)) sourceValue,
+       replace "value" (String (T.replicate 32769 "x")) sourceValue,
+       replace "value" (String "unsafe\0") sourceValue,
+       replace "id" (toJSON (["source","oops","1"]::[T.Text])) sourceValue])
 
   let dialogId=["dialog"]::[T.Text]
       modalNode :: [T.Text] -> Maybe [T.Text] -> T.Text -> T.Text -> Maybe T.Text -> Value
