@@ -2,8 +2,11 @@
 
 ![Haskell 9.14.1](https://img.shields.io/badge/Haskell-9.14.1-5e5086?style=flat&logo=haskell&logoColor=white)
 [![Zig 0.16.0](https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=flat&logo=zig&logoColor=white)](docs/install.md#embedded-terminal)
-[![Docs build](https://github.com/ekmett/hide/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/ekmett/hide/actions/workflows/docs.yml)
+[![Build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/nixos.yml?branch=main&style=flat&label=build)](https://github.com/ekmett/hide/actions/workflows/nixos.yml)
+[![Docs build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/docs.yml?branch=main&style=flat&label=docs%20build)](https://github.com/ekmett/hide/actions/workflows/docs.yml)
 [![docs: pandoc](https://img.shields.io/badge/docs-pandoc-blue?style=flat)](https://ekmett.github.io/hide/)
+[![GitHub issues](https://img.shields.io/github/issues/ekmett/hide?style=flat)](https://github.com/ekmett/hide/issues)
+[![GitHub commit activity](https://img.shields.io/github/commit-activity/w/ekmett/hide?style=flat)](https://github.com/ekmett/hide/activity)
 
 hide is a Haskell IDE written in Haskell. Edit source, inspect types and
 diagnostics, build and debug programs, and work with agents. It runs in a
