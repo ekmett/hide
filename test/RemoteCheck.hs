@@ -5,7 +5,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.Async (withAsync, wait, link)
 import Control.Exception hiding (assert)
-import Control.Monad (unless, void, replicateM, replicateM_, forM_)
+import Control.Monad (unless, void, replicateM, forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.KeyMap as KM
@@ -15,10 +15,11 @@ import qualified Network.Socket as N
 import Data.IORef
 import qualified Data.Text as T
 import System.IO
-#ifndef mingw32_HOST_OS
 import System.Directory (getTemporaryDirectory, createDirectory, removeFile, removePathForcibly)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+#ifndef mingw32_HOST_OS
 import System.FilePath ((</>))
+import Control.Monad (replicateM_)
 import System.Posix.Files (setFileMode)
 import Data.List (isInfixOf)
 #endif
@@ -34,16 +35,12 @@ import Hide.RemoteEndpoint
 import qualified Hide.Session as S
 import Hide.Recovery (readCheckpoint)
 isolatedStore :: IO a -> IO a
-#ifndef mingw32_HOST_OS
 isolatedStore action=do
   temp<-getTemporaryDirectory
   old<-lookupEnv "XDG_DATA_HOME"
   bracket (do (path,h)<-openTempFile temp "thc-session-tests"; hClose h; removeFile path; createDirectory path; pure path)
     removePathForcibly $ \path -> bracket_ (setEnv "XDG_DATA_HOME" path)
       (maybe (unsetEnv "XDG_DATA_HOME") (setEnv "XDG_DATA_HOME") old) action
-#else
-isolatedStore action=action
-#endif
 
 checks :: IO ()
 checks = isolatedStore $ do

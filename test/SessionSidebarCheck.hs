@@ -36,8 +36,8 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
   environment "XDG_DATA_HOME" (Just (root </> "data")) $ do
     firstRecord<-newSessionRecord Nothing ["--private-startup-secret"]
     otherRecord<-newSessionRecord (Just "remote.example") ["--other-private-secret"]
-    let current=firstRecord {sessionId=replicate 48 'a',sessionDirectory=root}
-        other=otherRecord {sessionId=replicate 48 'b',sessionDirectory=root}
+    let current=firstRecord {sessionDirectory=root}
+        other=otherRecord {sessionDirectory=root}
     rememberSession current
     rememberSession other
     checkpointPath (sessionId current) >>= \path->writeFile path "recoverable fixture"
