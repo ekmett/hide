@@ -2,6 +2,7 @@
 
 ![Haskell](https://img.shields.io/badge/Haskell-%235e5086.svg?style=for-the-badge&logo=haskell&logoColor=white)
 [![Docs build](https://github.com/ekmett/hide/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/ekmett/hide/actions/workflows/docs.yml)
+[![docs: pandoc](https://img.shields.io/badge/docs-pandoc-blue?style=flat)](https://ekmett.github.io/hide/)
 
 hide is a Haskell IDE written in Haskell. Edit source, inspect types and
 diagnostics, build and debug programs, and work with agents. It runs in a
