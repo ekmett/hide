@@ -9,7 +9,7 @@ import Hide.TextPresentation (withTextPresentation,textPresentationEffects,tickT
 import qualified Hide.Conversation as Conversation
 import qualified Hide.Plugin.Menu as HideMenu
 import qualified Hide.Plugin.Editor as Editor
-import Hide.AgentSidebarTypes (AgentSidebarRequest(..))
+import Hide.AgentSidebarTypes (DirectoryRequest(..))
 import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)

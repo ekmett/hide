@@ -25,7 +25,7 @@ import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffe
 import qualified Data.Map.Strict as M
 import Data.IORef
 import Hide.Buffer (contents,newBuffer,contentSlice,contentLength,Selection(..))
-import Hide.AgentSidebarTypes (AgentSidebarRequest(ShowAgent))
+import Hide.AgentSidebarTypes (DirectoryRequest(ShowAgent))
 import Hide.Recovery (writeCheckpoint,readCheckpoint,checkpointKey)
 import Hide.BufferReadCommand (withBufferReadCommands,readPage,readWindowCommand)
 import Hide.BufferReads (windowReadTarget,captureWindow)

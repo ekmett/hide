@@ -52,6 +52,12 @@ checks=do
     ensure "child cannot end parent" (isLeft deniedParent)
     renamed<-renameAgent hub (Agent second) first "Parse source"
     ensure "agents can ascribe names to others" (renamed==Right ())
+    selected<-agentSummary hub first >>= right
+    summaries<-agentSummaries hub
+    unknownSummary<-agentSummary hub (AgentId "missing")
+    ensure "typed directory reads preserve exact identity, renamed label and ancestry"
+      (summaryId selected==first && summaryName selected=="Parse source" && summaryParent selected==Just root &&
+        any (\entry->summaryId entry==first && summaryName entry==summaryName selected) summaries && isLeft unknownSummary)
     duplicate<-renameAgent hub Human first " renderer "
     ensure "names are unique ignoring case and outer spaces" (isLeft duplicate)
     badName<-renameAgent hub Human first "bad\nname"

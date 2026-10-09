@@ -21,6 +21,7 @@ import System.Timeout (timeout)
 import Hide.Autocomplete (withAutocomplete,autocompleteEffects,tickAutocomplete)
 import Hide.MCPPermissions (readAutocompleteFor)
 import Hide.AgentSidebar
+import qualified Hide.AgentDirectoryHost as AgentDirectory
 import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
@@ -56,7 +57,7 @@ checks=bracket temporary removePathForcibly $ \root->
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation->
-      withAutocomplete root $ \autocomplete->withAgentSidebar (sidebarCapabilities host) SidebarAgent (conversationAgents conversation) autocomplete $ \agents->do
+      withAutocomplete root $ \autocomplete->withAgentSidebar (sidebarCapabilities host) SidebarAgent (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) $ \agents->do
         createRequests<-newIORef []
         agentRequests<-newIORef []
         let core desktop effects=do

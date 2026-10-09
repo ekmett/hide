@@ -901,6 +901,24 @@ An optional service can be unavailable in a build. Plugin-specific collaboration
 can use a normal Haskell dependency and scoped handles; add a dynamic service bus
 only if a concrete need appears.
 
+`Hide.Plugin.AgentDirectory` supplies the Agents tree with typed names,
+ancestry, state and advertised settings. It lives in `hide-agent-api` alongside
+the provider contract. The tree imports public plugin interfaces only; the host
+binds reads to the Hub and autocomplete owner. Rename reads one small directory
+entry instead of serializing a conversation's status.
+
+Directory listing and lookup do not start providers, submit prompts or change
+settings. Explicit completion-choice discovery may connect the configured provider
+and refresh its metadata, on its existing worker after human input admission.
+Settings and completion requests retain opaque receipts supplied by the host;
+the tree cannot reconstruct or reinterpret them. A metadata refresh cannot
+retarget an action, and the
+existing host command/receipt checks still admit its application. These are
+trusted linked-plugin capabilities, not an MCP endpoint or a grant of human
+input authority. Retiring the tree releases its registration and metadata worker
+without stopping providers. Conversation presentation and package-level UI
+registration remain to be separated.
+
 `SessionServices` owns builds, compiler discovery, build settings and shared
 consoles for the editor session. Conversation receives a console handle and owns
 its provider's terminal IDs; retiring that provider releases those terminals,
