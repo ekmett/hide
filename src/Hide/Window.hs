@@ -436,7 +436,7 @@ runWindow backend scale effects tick initial = do
       bytes <- c_text >>= BS.packCString
       case TE.decodeUtf8' bytes of
         Left _ -> pure (d,[])
-        Right text -> c_power_mode_burst >> foldText text d
+        Right text -> foldText text d
     dispatch (17:_) d = check "Present typing animation" c_present >> pure (d,[])
     dispatch (3:x:y:clicks:mods:button:_) d
       | clicks == 0 = pure (mouseMotion x y (keyMods mods) d)

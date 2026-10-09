@@ -682,7 +682,6 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of
             Right text -> do
-              c_power_mode_burst
               forM_ (T.unpack text) $ \c -> sendEvent [1,fromEnum c,0]
             Left _ -> pure ()
         17:_ -> check "Present typing animation" c_present

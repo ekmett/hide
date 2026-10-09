@@ -26,6 +26,7 @@ import Data.Text (Text)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Map.Strict as M
 import qualified Data.Vector as Vec
+import qualified Data.Sequence as Seq
 import Data.Foldable (toList)
 import Data.Char (isSpace, toLower)
 import Data.Maybe (fromMaybe)
@@ -625,7 +626,10 @@ windowLayers _ d active original =
     moving=case drag d of Just (Moving wid _ _) -> wid==windowId w; Just (Resizing wid _ _) -> wid==windowId w; _ -> False
     helpWindow=documentLabel doc==Just "hide Help"
     background=if helpWindow && not (darkAppearance d) then scrollCyan else blue
-    base=if helpWindow then attr (if darkAppearance d then white else black) background else edit
+    terminalPaint=maybe False (\title->any (`T.isPrefixOf` title) ["Terminal ","Ended Terminal "]) (documentLabel doc)
+    base | terminalPaint = attr (if darkAppearance d then white else black) (if darkAppearance d then black else gray)
+         | helpWindow = attr (if darkAppearance d then white else black) background
+         | otherwise = edit
     frame=attr (if moving then cyan else if active then white else gray) background
     -- Embedded DAP sources retain language tokens despite their read-only label.
     -- Docs: docs/site/screenshots/debug-step.png (docs/running.md).
@@ -682,7 +686,7 @@ windowLayers _ d active original =
         offset | rowIndex==0 && chunkIndex==0 = bufferLineOffset b (optionFirstRow option)
                | otherwise = proposalEnd (optionProposal option)
         (sourceRowIndex,sourceColumn)=bufferLineColumn b offset
-        ranges=case documentSourceRows doc >>= (Vec.!? sourceRowIndex) of
+        ranges=case documentSourceRows doc >>= (Seq.lookup sourceRowIndex) of
           Just tokens->[(sourceRangeCharEnd range-max sourceColumn (sourceRangeCharStart range),sourceRangeStyle range)
             | range<-Vec.toList (sourceRowRanges tokens),sourceRangeCharEnd range>sourceColumn]
           Nothing->[]
@@ -729,7 +733,7 @@ windowLayers _ d active original =
       (kind,liveRow,_):_ ->
         let plain=plainSourceRow (changeLineAt b fullRow)
             tokens=case liveRow of
-              Just n | syntaxDocument doc -> maybe plain (\rows->fromMaybe plain (rows Vec.!? n)) (documentSourceRows doc)
+              Just n | syntaxDocument doc -> maybe plain (\rows->fromMaybe plain (Seq.lookup n rows)) (documentSourceRows doc)
               _ -> plain
             color=case kind of
               OriginalLine -> Nothing
@@ -766,8 +770,9 @@ windowLayers _ d active original =
     sourceRow n=let line=if n>=max 0 (scrollRow w)
                           then fromMaybe (contentSourceLineAt (bufferContent b) n) (atMay sourceLines (n-max 0 (scrollRow w)))
                           else contentSourceLineAt (bufferContent b) n
-                in maybe (plainSourceLine line) (attachSourceLine line) (documentSourceRows doc >>= (Vec.!? n))
+                in maybe (plainSourceLine line) (attachSourceLine line) (documentSourceRows doc >>= (Seq.lookup n))
 
+    lineColor _ | terminalPaint, null (documentHighlight doc) = Just base
     lineColor n = case documentLabel doc of
       Just "Git diff" -> Just (diffLineAttr (bufferLineAt b n))
       Just _ | useStyles -> Nothing
@@ -984,13 +989,17 @@ treeLayers d tree =
         chosen=treeFocused tree && i==treeSelected tree
         changes=if Tree.infoBranch info then Nothing else Tree.infoResource info >>= (\path->case M.lookup path (treeBadges tree) of Just (True,added,deleted)->Just (added,deleted); _->Nothing)
         bg=if chosen then green else blue
-        a=if changes/=Nothing then attr (V.RGBColor 255 85 85) bg else if chosen then selected else edit
+        inactive=rowAction node==ActivateNode && not (Tree.infoBranch info) && rowCommand node==Nothing && null (rowActions node)
+        a | inactive = attr gray bg
+          | changes/=Nothing = attr (V.RGBColor 255 85 85) bg
+          | chosen = selected
+          | otherwise = edit
         leading=label (if chosen then selected else frame) (rowPrefix node) V.<|> label iconColor marker
         available=max 0 (listWidth-V.imageWidth leading-1)
         badge=case changes of
           Just (added,deleted) | added/=0 || deleted/=0 ->
-            label a " " V.<|> label (attr (V.RGBColor 85 255 85) bg) ("+"<>T.pack (show added))
-            V.<|> label a " " V.<|> label (attr (V.RGBColor 255 85 85) bg) ("-"<>T.pack (show deleted))
+            label a " " V.<|> (if added>0 then label (attr (V.RGBColor 85 255 85) bg) "+" else V.emptyImage)
+            V.<|> (if deleted>0 then label (attr (V.RGBColor 255 85 85) bg) "-" else V.emptyImage)
           _ -> V.emptyImage
         counts=if V.imageWidth badge<available then badge else V.emptyImage
         shownName=T.take (columnOffset (Tree.infoLabel info) (available-V.imageWidth counts)) (Tree.infoLabel info)

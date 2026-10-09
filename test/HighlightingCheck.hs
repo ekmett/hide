@@ -6,11 +6,13 @@ import Control.Concurrent
 import Control.Exception (evaluate,finally)
 import Control.Monad (unless,foldM,forM_)
 import Data.IORef
+import Data.Foldable (toList)
 import GHC.Conc (getAllocationCounter)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust,isJust)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
+import qualified Data.Sequence as Seq
 import qualified Data.Vector as V
 import qualified Graphics.Vty as VT
 import System.Timeout (timeout)
@@ -78,11 +80,11 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
       replace text d=d {buffers=M.adjust (\old->restyle old {documentBuffer=newBuffer text}) 1 (buffers d)}
       ready=isJust . documentSourceRows . doc
   check "new source has no lazy tokenizer to force on the display thread" (null (documentHighlight (doc initial)) && not (ready initial))
-  let decorated=initial {buffers=M.map (\d->d {documentSourceRows=Just (V.singleton (prepareSourceRow "decorated" [(T.singleton c,TerminalStyle 0x123456 0x654321 15) | c<-"decorated"]))}) (buffers initial)}
+  let decorated=initial {buffers=M.map (\d->d {documentSourceRows=Just (Seq.singleton (prepareSourceRow "decorated" [(T.singleton c,TerminalStyle 0x123456 0x654321 15) | c<-"decorated"]))}) (buffers initial)}
   check "HTML source capture keeps underline and strikethrough together" ("text-decoration:underline line-through" `T.isInfixOf` snapshotHtml decorated)
   let longText=T.replicate 100000 "界"
       longBase=addDocument Nothing (newBuffer longText) (initialDesktop (180,55))
-      longView=longBase {buffers=M.map (\d->d {documentSourceRows=Just (V.singleton (plainSourceRow longText)),documentWidth=200000}) (buffers longBase)}
+      longView=longBase {buffers=M.map (\d->d {documentSourceRows=Just (Seq.singleton (plainSourceRow longText)),documentWidth=200000}) (buffers longBase)}
   _<-evaluate (T.length (snapshot longView))
   viewBefore<-getAllocationCounter
   viewCount<-evaluate (T.length (snapshot (modifyActive (\w->w {scrollColumn=1}) longView)))
@@ -97,7 +99,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   let viewportText=T.replicate 200 (T.replicate 20 "Haskell λ ⌘ "<>"\n")
       viewportSource=addDocument Nothing (newBuffer viewportText) (initialDesktop (180,55))
       preparedViewport=viewportSource {sideTree=Nothing,blinkCursor=False,buffers=M.map (\d->d
-        {documentSourceRows=Just (V.fromList [prepareSourceRow line [(T.singleton c,if c=='H' then Keyword else Plain) | c<-T.unpack line] | line<-T.lines viewportText])}) (buffers viewportSource)}
+        {documentSourceRows=Just (Seq.fromList [prepareSourceRow line [(T.singleton c,if c=='H' then Keyword else Plain) | c<-T.unpack line] | line<-T.lines viewportText])}) (buffers viewportSource)}
       occupied=V.foldl' (V.foldl' (\n cell->case cell of
         CellText paint text->paint `seq` n+T.length text
         CellGlyph paint text full start shown->paint `seq` n+T.length text+full+start+shown
@@ -123,7 +125,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   let mixedText="a界e\x301\t👩🏽\x200d\&💻z"
       mixedSource=addDocument (Just (FileState "Mixed.hs" Nothing)) (newBuffer mixedText) (initialDesktop (30,12))
       styledMixed=mixedSource {sideTree=Nothing,buffers=M.map (\d->d {documentLabel=Just "Source Mixed",documentSourceRows=Just
-        (V.singleton (prepareSourceRow mixedText [(T.singleton c,TerminalStyle 0x123456 0x654321 15) | c<-T.unpack mixedText]))}) (buffers mixedSource)}
+        (Seq.singleton (prepareSourceRow mixedText [(T.singleton c,TerminalStyle 0x123456 0x654321 15) | c<-T.unpack mixedText]))}) (buffers mixedSource)}
       clipped=modifyActive (\w->w {bounds=Rect 1 1 14 7,scrollColumn=2,selection=Selection 1 2}) styledMixed
       glyphs=[(paint,text,full,start,shown) | CellGlyph paint text full start shown<-V.toList (renderCellRows clipped V.! 2)]
   check "source clipping keeps selected whole glyph and font traits"
@@ -159,13 +161,46 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
     requested<-readIORef calls
     check "rapid edits coalesce to first and newest requests" (length requested==2 && last requested==contents (documentBuffer (doc edited)))
     let rows=fromJust (documentSourceRows (doc colored))
-    check "accepted rows contain current source and injected styles" (sourceRowText (rows V.! 0)=="def newest20():" && take 3 (sourceStylesAt (rows V.! 0) 0)==replicate 3 Keyword)
+    check "accepted rows contain current source and injected styles" (sourceRowText (Seq.index rows 0)=="def newest20():" && take 3 (sourceStylesAt (Seq.index rows 0) 0)==replicate 3 Keyword)
     before<-evaluate (buffers colored) >>= makeStableName
     unchanged<-tickHighlighting worker colored
     after<-evaluate (buffers unchanged) >>= makeStableName
     check "completed highlighting preserves unchanged document sharing" (before==after)
     let typed=insertText "x" colored
-    check "editing invalidates accepted source rows immediately" (not (ready typed) && null (documentHighlight (doc typed)))
+    check "typing keeps previous colors aligned while rendering the edited source"
+      (ready typed && sourceRowText (Seq.index (fromJust (documentSourceRows (doc typed))) 0)=="xdef newest20():" &&
+       take 4 (sourceStylesAt (Seq.index (fromJust (documentSourceRows (doc typed))) 0) 0)==Plain:replicate 3 Keyword)
+  let before=newBuffer "red café\nblue tail\nunchanged"
+      original=sourceHighlightRows (contents before) [("red ",Keyword),("café\n",Literal),("blue tail\n",Comment),("unchanged",Constructor)]
+      edited=replaceSelection (Selection 6 12) "界\nnew" before
+      rows=rebaseSourceRows before edited original
+      undoRows=rebaseSourceRows edited (undo edited) rows
+  check "paint splices follow Unicode replacements and line joins/splits"
+    (map sourceRowText (toList rows)==T.splitOn "\n" (contents edited) &&
+     map sourceRangeStyle (V.toList (sourceRowRanges (Seq.index rows 0)))==[Keyword,Literal] &&
+     take 3 (sourceStylesAt (Seq.index rows 1) 0)==replicate 3 Literal &&
+     sourceRowText (Seq.index rows 2)=="unchanged" &&
+     sourceStylesAt (Seq.index rows 2) 0==replicate 9 Constructor &&
+     map sourceRowText (toList undoRows)==T.splitOn "\n" (contents before))
+  forM_ ["\r\n","\r\nmid\r\n","\r","\n"] $ \text->do
+    let input=newBuffer "xy"
+        edited=replaceSelection (Selection 1 1) text input
+        rows=rebaseSourceRows input edited (sourceHighlightRows "xy" [("xy",Keyword)])
+    check "rebased ranges preserve exact CRLF source coverage and byte endpoints"
+      (all (\row->let ranges=V.toList (sourceRowRanges row)
+                  in T.concat (map (sourceRangeText row) ranges)==sourceRowText row &&
+                     (null ranges || sourceRangeByteEnd (last ranges)==TU.lengthWord8 (sourceRowText row))) rows)
+  let long=newBuffer (T.replicate (1024*1024) "x")
+      longRows=sourceHighlightRows (contents long) [(contents long,Comment)]
+      changed=replaceSelection (Selection 10 10) "é" long
+  _<-evaluate (sourceRangeCharEnd (V.last (sourceRowRanges (Seq.index longRows 0))))
+  _<-evaluate (bufferLineCount changed)
+  allocationBefore<-getAllocationCounter
+  let (_,_,paint)=sourceSigilsWindow 0 80 (Seq.index (rebaseSourceRows long changed longRows) 0)
+  shown<-evaluate (T.length (sigilsText paint))
+  allocationAfter<-getAllocationCounter
+  check "typing in a long highlighted line does not scan or copy the line to repaint"
+    (shown==80 && allocationBefore-allocationAfter<256*1024)
   initializing<-newEmptyMVar
   releaseInitialization<-newEmptyMVar
   initializedCalls<-newIORef ([]::[T.Text])
@@ -180,7 +215,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
       colored<-await "newest request after catalog initialization" worker ready queued
       requested<-readIORef initializedCalls
       check "initialization coalesces all queued replacements to the newest source"
-        (requested==["newest 20"] && sourceRowText (fromJust (documentSourceRows (doc colored)) V.! 0)=="newest 20")
+        (requested==["newest 20"] && sourceRowText (Seq.index (fromJust (documentSourceRows (doc colored))) 0)=="newest 20")
   initializingStopped<-newEmptyMVar
   initializingEntered<-newEmptyMVar
   neverInitialized<-newEmptyMVar
@@ -193,10 +228,10 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
     colored<-await "cold real Python grammar result" worker ready initial
     let pythonRows=fromJust (documentSourceRows (doc colored))
     check "production worker applies real Python grammar on its cold first request"
-      (sourceRowText (pythonRows V.! 0)=="def old():" && take 3 (sourceStylesAt (pythonRows V.! 0) 0)==replicate 3 Keyword)
+      (sourceRowText (Seq.index pythonRows 0)=="def old():" && take 3 (sourceStylesAt (Seq.index pythonRows 0) 0)==replicate 3 Keyword)
     let renamed=colored {buffers=M.map (\d->restyle d {documentFile=Just (FileState "example.unknown" Nothing)}) (buffers colored)}
     plain<-await "unknown filename result" worker ready renamed
-    check "filename changes invalidate syntax selection" (all ((==Plain).sourceRangeStyle) (V.concatMap sourceRowRanges (fromJust (documentSourceRows (doc plain)))))
+    check "filename changes invalidate syntax selection" (all ((==Plain).sourceRangeStyle) (concatMap (V.toList . sourceRowRanges) (fromJust (documentSourceRows (doc plain)))))
   attempts<-newIORef (0::Int)
   timedOut<-newEmptyMVar
   withHighlightingUsing (pure ()) (\path text->do
@@ -223,7 +258,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
       text=T.replicate lineCount "prefix\n"<>"TAIL"
       deep=addDocument Nothing (newBuffer text) (initialDesktop (80,25))
       indexed=deep {buffers=M.map (\d->d {documentHighlight=error "flat syntax traversed",documentWidth=8,
-        documentSourceRows=Just (V.generate (lineCount+1) (\n->if n==lineCount then prepareSourceRow "TAIL" [("T",Keyword),("A",Keyword),("I",Keyword),("L",Keyword)] else error "offscreen syntax forced"))}) (buffers deep),
+        documentSourceRows=Just (Seq.fromFunction (lineCount+1) (\n->if n==lineCount then prepareSourceRow "TAIL" [("T",Keyword),("A",Keyword),("I",Keyword),("L",Keyword)] else error "offscreen syntax forced"))}) (buffers deep),
         windows=map (\w->w {scrollRow=lineCount}) (windows deep)}
   check "deep source scroll indexes only the visible highlighted row" ("TAIL" `T.isInfixOf` snapshot indexed)
   let pending=indexed {buffers=M.map (\d->d {documentSourceRows=Nothing}) (buffers indexed)}

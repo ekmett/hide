@@ -10,7 +10,7 @@ import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
-import qualified Data.Vector as Vec
+import qualified Data.Sequence as Seq
 import qualified Graphics.Vty as V
 import Graphics.Vty.Span (SpanOp(..))
 import Hide.Buffer
@@ -34,7 +34,7 @@ checks=W.withWindowScope $ \scope->do
       raw=addDocument (Just (FileState "Preview.hs" Nothing)) b (initialDesktop (80,25))
       base=modifyActive (\win->win {selection=Selection 11 11,bounds=Rect 0 1 70 18}) raw
       w=fromJust (activeWindow base)
-      colored=base {buffers=M.adjust (\doc->doc {documentSourceRows=Just (Vec.fromList
+      colored=base {buffers=M.adjust (\doc->doc {documentSourceRows=Just (Seq.fromList
         [prepareSourceRow row [(T.singleton c,if c=='l' then Keyword else Literal) | c<-T.unpack row] | row<-T.lines source])}) (sourceFixtureBuffer w) (buffers base)}
       preview option=colored {inlinePreview=Just (InlineView (windowId w) (sourceFixtureBuffer w) (revision b) (selection w) (inlineEpoch colored) [option] 0)}
       rows d=let win=fromJust (activeWindow d); Rect x y width' _=bounds win
@@ -124,6 +124,15 @@ checks=W.withWindowScope $ \scope->do
   let sourceTree=sourceFocused {sideTree=Just (emptySidebar "/project" 20 True)}
   check "tree focus leaves selected docked tab with single borders"
     (borders (focusWindow acpId sourceFocused) {sideTree=sideTree sourceTree}=="┌│└")
+  forM_ [DarkMode,LightMode] $ \mode->do
+    let terminalBase=(addDocument Nothing (newBuffer "retained terminal output") (initialDesktop (80,25)))
+          {appearance=mode}
+        recovered=terminalBase {buffers=M.map (\doc->doc {documentLabel=Just "Ended Terminal 1"}) (buffers terminalBase)}
+        terminalRows=toList (displayOpsForPic (renderDesktop recovered) (screenSize recovered))
+        colors=[V.attrBackColor a | row<-terminalRows,TextSpan {textSpanAttr=a,textSpanText=text}<-toList row,
+          "retained terminal output" `T.isInfixOf` TL.toStrict text]
+    check "recovered terminal text retains the terminal background without a live PTY"
+      (colors==[V.SetTo (if mode==DarkMode then V.RGBColor 0 0 0 else V.RGBColor 170 170 170)])
   putStrLn "Inline render checks passed"
 
 check :: String -> Bool -> IO ()

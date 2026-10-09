@@ -113,9 +113,12 @@ static void power_mode_pixels(const char *capture) {
         SDL_Surface *baseline=SDL_LoadBMP(capture); assert(baseline);
         uint64_t atlas_before,bytes,batches,grid_before;
         thc_atlas_stats(&atlas_before,&bytes,&batches); thc_grid_stats(&grid_before,&bytes);
-        thc_power_mode_burst();
         SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
-        int32_t event[6]; assert(thc_wait(event) && event[0]==17);
+        SDL_Event deletion; SDL_zero(deletion); deletion.type=SDL_EVENT_KEY_DOWN;
+        deletion.key.key=light?SDLK_DELETE:SDLK_BACKSPACE;
+        assert(SDL_PushEvent(&deletion));
+        int32_t event[6]; assert(thc_wait(event) && event[0]==1 && event[1]==(light?-13:-12));
+        assert(thc_wait(event) && event[0]==17);
         SDL_Delay(65); assert(thc_present());
         SDL_Surface *early=SDL_LoadBMP(capture); assert(early);
         SDL_Delay(120); assert(thc_wait(event) && event[0]==17);
