@@ -876,6 +876,16 @@ attachment epoch: a late sidebar reply cannot move a replacement display. Delete
 uses the existing confirmation form and rechecks the saved record under the
 session lifetime lock before removing a stopped checkpoint.
 
+Recover buffers here reads a stopped same-project checkpoint on that action
+worker under the same lifetime lock. `RecoveredSources` contains validated source
+documents and views only; decoding never installs plugin or conversation owners.
+Adoption checks the captured display attachment and project, then assigns fresh
+IDs and clamps windows to the current workspace. Duplicate paths become unnamed
+copies with their saved baseline, history and privacy origin intact. If retaining
+two different origins would require discarding provenance, the whole import is
+refused. Count and identity limits are checked before adoption; neither existing
+buffer contents nor histories are compared.
+
 `withSessionPeer` owns handoff within the existing frontend callback. It prepares
 a candidate with a fresh input journal while continuing to receive the old
 session's committed replies. Candidate admission waits for a complete reset frame

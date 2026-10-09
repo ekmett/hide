@@ -44,6 +44,12 @@ new one. A busy or unavailable target leaves you in the current session. These
 controls apply to sessions on the same host; while editing over SSH, that means
 the remote host. Use `hide --resume ID` to choose a different host or frontend.
 
+Choose **Recover buffers here** on a stopped session in the same project to bring
+its text, hex and ended terminal windows into the current desktop. Split views
+keep their shared buffer and undo history. A file already open here arrives as a
+separate copy; Save asks for a new path. The saved session remains available.
+Conversations, running tools and preferences stay with their own session.
+
 Right-click a stopped local session marked **recoverable** and choose **Delete...**
 to remove its saved windows, unsaved edits and conversation checkpoints. The
 confirmation offers **Delete** and **Cancel**. Files saved in the project are
