@@ -3,7 +3,9 @@
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 const source=fs.readFileSync('assets/web/editor.js','utf8');
-const decode=new Function(source.slice(source.indexOf('async function decodeFrame('),source.indexOf('const systemTheme='))+';return decodeFrame;')();
+const decoder=source.match(/^async function decodeFrame\([\s\S]*?^}/m)?.[0];
+assert.ok(decoder,'Production decodeFrame function is present');
+const decode=new Function(decoder+';return decodeFrame;')();
 const states=new Map(), totals=new Map();
 let frames=0;
 for(const line of fs.readFileSync(process.argv[2],'utf8').trim().split('\n')){
