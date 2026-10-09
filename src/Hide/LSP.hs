@@ -41,6 +41,7 @@ import System.IO
 import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
+import Hide.Process (waitProcessExit)
 import Hide.Buffer (Buffer, bufferLineColumn, bufferLineOffset, bufferSlice, bufferContent, contentSourceLineAt, sourceLineSlice)
 
 data Event = Response Int Value | ApplyEdit Int Value Value | Diagnostics FilePath (Maybe Int) Value | ServerError Text
@@ -74,7 +75,7 @@ startClientWith executable arguments root = mask $ \restore -> do
         ignore (hClose input)
         ignore (hClose output)
         ignore (hClose errors)
-        void (timeout 1000000 (waitForProcess process))
+        void (timeout 1000000 (waitProcessExit process))
   restore (do
     mapM_ (`hSetBinaryMode` True) [input, output, errors]
     queue <- newChan
@@ -182,10 +183,13 @@ startClientWith executable arguments root = mask $ \restore -> do
                 call (-1 :: Int) ("shutdown" :: Text) Null
                 takeMVar shutdown
               void $ timeout 250000 (notify ("exit" :: Text) Null)
+            void (timeout 250000 (waitProcessExit process))
+            -- Windows pipe reads cannot receive ThreadKilled until the peer
+            -- closes its handle. Stop that peer before joining the readers.
+            ignore (terminateProcess process)
             killThread reader
             killThread responder
             killThread drainer
-            void (timeout 250000 (waitForProcess process))
             cleanup) `finally` putMVar stopDone ()
         reply ident applied reason = writeChan queue (Reply (object
           ["jsonrpc" .= ("2.0" :: Text),"id" .= ident,"result" .= object
