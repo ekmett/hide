@@ -67,8 +67,9 @@ some fixtures temporarily change the process environment or working directory.
 Use `--test-options="--pattern=BufferTree"` to select a group. Full coverage reports
 come from the whole suite; a focused run measures only the selected work.
 
-Instrumented builds use their own directory and cache. CI discards old `.tix`
-counts before running, and retains the matching `.mix` files, raw HPC counts,
+Instrumented builds use their own directory and cache. CI saves the completed
+build before running tests, so a test failure does not discard it. Delete old
+`.tix` files before repeating a local run; CI does this automatically. It retains the matching `.mix` files, raw HPC counts,
 converted LCOV report, JUnit and host/toolchain metadata for seven days. Each platform
 converts its own instrumentation before uploading; Codecov combines the reports
 for the commit, without carrying old platform coverage forward.
@@ -88,8 +89,8 @@ Generate the initial API reference and linked source with:
 cabal haddock lib:hide --haddock-html --haddock-hyperlink-source
 ```
 
-Coverage is preliminary, especially the model's internal helpers and native FFI
-exports. A documentation build checks parsing and links, not the truth of the
+API documentation is preliminary, especially the model's internal helpers and
+native FFI exports. A documentation build checks parsing and links, not the truth of the
 contracts: review those against implementation and the relevant behavioral tests.
 
 ## Plugin command implementation

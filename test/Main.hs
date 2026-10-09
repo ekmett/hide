@@ -130,7 +130,7 @@ import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import qualified Graphics.Vty as V
 import qualified Data.Map.Strict as M
-import qualified Data.Vector as Vec
+import Data.Foldable (toList)
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error name)
@@ -287,7 +287,7 @@ modelChecks = do
     ["", "\n", "\n\n", "module Main where\r\n\tmain = print \"λ界\"\r\n", "x = '\\x03bb'", "x = [1..10] -- unfinished", "{- open comment\n"]
   let python=highlightDocument $ newDocument (newBuffer "def f():\n    return 42\n") (Just (FileState "test.py" Nothing))
       renamed=highlightDocument $ restyle python {documentFile=Just (FileState "notes.unknown" Nothing)}
-  let sourceStyles doc=maybe [] (concatMap (\row->sourceStylesAt row 0) . Vec.toList) (documentSourceRows doc)
+  let sourceStyles doc=maybe [] (concatMap (\row->sourceStylesAt row 0) . toList) (documentSourceRows doc)
   check "document filename chooses syntax" (take 3 (sourceStyles python) == replicate 3 Keyword)
   check "renaming refreshes syntax" (sourceStyles renamed == replicate (T.length "def f():    return 42") Plain)
   check "CRLF input is highlighted, not just preserved" (take 6 (scalarStyles (highlight "module Main where\r\n")) == replicate 6 Keyword)

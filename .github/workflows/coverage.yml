@@ -95,7 +95,8 @@ jobs:
           pc.write_text(pc.read_text().replace('-DUTF8PROC_EXPORTS', '-DUTF8PROC_STATIC'))
           with open(os.environ['GITHUB_ENV'], 'a') as env:
               env.write('PKG_CONFIG_PATH=' + str(pc.parent) + '\n')
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: cache
         with:
           path: |
             ${{ steps.haskell.outputs.cabal-store }}
@@ -116,6 +117,15 @@ jobs:
               path.unlink()
       - name: Build instrumented Haskell
         run: cabal build editor-tests --builddir=build/coverage --enable-coverage -O1 -j2 -f-window -f-terminal
+      # Preserve a completed build even if tests fail; execution counts stay fresh.
+      - name: Cache instrumented build
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ steps.haskell.outputs.cabal-store }}
+            build/coverage
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Run editor checks once
         id: tests
         run: cabal test editor-tests --builddir=build/coverage --enable-coverage -O1 -j2 -f-window -f-terminal --test-show-details=direct --test-options="--xml=build/coverage-results/tests.xml"
