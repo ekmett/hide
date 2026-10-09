@@ -18,7 +18,7 @@ import qualified Hide.Buffer as B
 import Hide.BufferView
 import Hide.Files (FileState(..))
 import Hide.Syntax (Style(..),prepareSourceRow)
-import qualified Data.Vector as Vec
+import qualified Data.Sequence as Seq
 import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
@@ -43,7 +43,7 @@ checks = do
   forM_ [changeDoc (\doc->doc {documentBuffer=newBuffer "replacement with same revision"}) base,
          changeDoc (\doc->doc {documentHighlight=[("x",Keyword)]}) base,
          changeDoc (\doc->doc {documentLinks=[(0,1,"new target")]}) base,
-         changeDoc (\doc->doc {documentSourceRows=Just (Vec.singleton (prepareSourceRow "x" [("x",Comment)]))}) base,
+         changeDoc (\doc->doc {documentSourceRows=Just (Seq.singleton (prepareSourceRow "x" [("x",Comment)]))}) base,
          changeDoc (\doc->doc {documentBuffer=B.markSaved original}) base,
          base {editorDrafts=M.singleton ref (EditorDraft (newBuffer "new draft") (Selection 0 0) True Nothing)},
          setDiagnostics (diagnostics base) base,

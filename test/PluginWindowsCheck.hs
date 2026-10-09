@@ -466,6 +466,7 @@ jpegChecks=do
       pixel n=case Picture.pixelAt reference (n `mod` 3) (n `div` 3) of Picture.PixelRGBA8 r g b a->BS.pack [r,g,b,a]
       check label condition=unless condition (fail label)
       prepare source=Canvas.prepareImage source >>= either (fail . T.unpack) pure
+      number :: Bool -> Int -> Integer -> BS.ByteString
       number little count value=BS.pack [fromIntegral (value `div` (256^index) `mod` 256) | index<-if little then [0..count-1] else reverse [0..count-1]]
       exif little orientation extra=let
         word=number little 2
@@ -476,6 +477,7 @@ jpegChecks=do
           if extra then long 0 else BS.empty
         payload="Exif\0\0"<>tiff
         in BS.pack [255,225]<>wordLength (BS.length payload+2)<>payload
+      wordLength :: Int -> BS.ByteString
       wordLength value=BS.pack [fromIntegral (value `div` 256),fromIntegral (value `mod` 256)]
       tagged tag=BS.take 2 jpeg<>tag<>BS.drop 2 jpeg
       cases=[(1,[0,1,2,3,4,5]),(2,[2,1,0,5,4,3]),(3,[5,4,3,2,1,0]),(4,[3,4,5,0,1,2]),
