@@ -309,7 +309,9 @@ Other context slots and full first-party routing through the typed registry rema
 open in #2. This is not a frozen extension SDK.
 
 `sh tools/check-native.sh` checks the SDL event queue and software glyph rendering
-without opening a visible window. Set `HIDE_TEST_GPU=metal` or
+without opening a visible window. Each run owns a temporary directory for its
+binaries and captures, removed when the run exits; concurrent runs do not share
+outputs or need preparatory cleanup. Set `HIDE_TEST_GPU=metal` or
 `HIDE_TEST_GPU=vulkan` to also check the actual GPU backend: atlas growth,
 clipping, decorations and reuse of uploaded glyphs. Vulkan needs a display server
 that supports GPU presentation; a headless Wayland compositor works, while Xvfb
@@ -318,7 +320,9 @@ headless machine so a software Vulkan driver cannot stand in for the GPU.
 
 On macOS the script also checks an unshown application menu for duplicate
 enablement and retained old menu-item stamps. These checks do not start an editor
-session.
+session. To also verify restoring a minimized window, set
+`HIDE_TEST_DOCK_RESTORE=1`; that additional macOS check opens and restores a real
+window, then closes it.
 
 ## Native Windows terminals
 

@@ -1,8 +1,9 @@
 /* Run tools/check-native.sh on macOS. This owns its application, menus and
- * temporary window; no existing editor session or configuration is touched. */
+ * optional restore window; no existing editor session or configuration is touched. */
 #import <Cocoa/Cocoa.h>
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 #import <objc/runtime.h>
 
 void thc_menu_clear(int, int, int);
@@ -39,7 +40,9 @@ void thc_post_command(int command, int generation) {
 - (int)preservedBehavior { return 42; }
 @end
 
-int main(void) {
+int main(int argc,char **argv) {
+    BOOL restore = argc==2 && strcmp(argv[1],"--dock-restore")==0;
+    assert(argc==1 || restore);
     @autoreleasepool {
         [NSApplication sharedApplication];
         id<NSDraggingSource> fileSource=[NSClassFromString(@"HideFileDragSource") new];
@@ -127,32 +130,36 @@ int main(void) {
         [(id<MenuAction>)reconnected.target invoke:reconnected];
         assert(postedWindow == 93 && postedDockGeneration == thc_dock_generation());
         assert(thc_menu_generation() == replacement); /* Dock updates leave main tokens intact. */
-        NSWindow *native = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,200,100) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-        [NSApp finishLaunching];
-        [native makeKeyAndOrderFront:nil]; [native miniaturize:nil];
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
-        while (!native.miniaturized && deadline.timeIntervalSinceNow > 0)
-            {
-                NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.01] inMode:NSDefaultRunLoopMode dequeue:YES];
-                if (event) [NSApp sendEvent:event];
-            }
-        assert(native.miniaturized);
-        thc_dock_raise((__bridge void *)native);
-        deadline = [NSDate dateWithTimeIntervalSinceNow:3];
-        while ((native.miniaturized || !native.visible) && deadline.timeIntervalSinceNow > 0)
-            {
-                NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.01] inMode:NSDefaultRunLoopMode dequeue:YES];
-                if (event) [NSApp sendEvent:event];
-            }
-        /* macOS cooperative activation may refuse a background CLI test.
-         * Foreground/key focus requires an actual Dock user-gesture smoke. */
-        assert(!native.miniaturized && native.visible);
-        [native orderOut:nil];
+        /* Restoring a minimized window is a visible desktop interaction. */
+        if (restore) {
+            NSWindow *native = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,200,100) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskMiniaturizable backing:NSBackingStoreBuffered defer:NO];
+            [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+            [NSApp finishLaunching];
+            [native makeKeyAndOrderFront:nil]; [native miniaturize:nil];
+            NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:3];
+            while (!native.miniaturized && deadline.timeIntervalSinceNow > 0)
+                {
+                    NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.01] inMode:NSDefaultRunLoopMode dequeue:YES];
+                    if (event) [NSApp sendEvent:event];
+                }
+            assert(native.miniaturized);
+            thc_dock_raise((__bridge void *)native);
+            deadline = [NSDate dateWithTimeIntervalSinceNow:3];
+            while ((native.miniaturized || !native.visible) && deadline.timeIntervalSinceNow > 0)
+                {
+                    NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny untilDate:[NSDate dateWithTimeIntervalSinceNow:0.01] inMode:NSDefaultRunLoopMode dequeue:YES];
+                    if (event) [NSApp sendEvent:event];
+                }
+            /* macOS cooperative activation may refuse a background CLI test.
+             * Foreground/key focus requires an actual Dock user-gesture smoke. */
+            assert(!native.miniaturized && native.visible);
+            [native orderOut:nil];
+            puts("native Dock visible restore check passed");
+        }
         thc_dock_close();
         assert(object_getClass(delegate) == [DockDelegate class] && NSApp.delegate == delegate);
         assert([delegate applicationDockMenu:NSApp] == delegate.original);
-        puts("native Dock delegate, identity, title, modal, restore and teardown checks passed");
+        puts("native Dock delegate, identity, title, modal and teardown checks passed");
         puts("native menu duplicate occurrence and incarnation checks passed");
     }
 }
