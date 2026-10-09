@@ -336,7 +336,8 @@ static void pixel_is(SDL_Surface *image,int x,int y,Uint8 r,Uint8 g,Uint8 b) {
     assert(actual_r==r && actual_g==g && actual_b==b);
 }
 int main(int argc,char **argv) {
-    const char *backend=argc>1?argv[1]:"software";
+    assert(argc==3);
+    const char *backend=argv[1],*capture=argv[2];
     bool measure=getenv("HIDE_TEST_ALLOCATIONS")!=NULL;
     if (measure) {
         SDL_GetOriginalMemoryFunctions(&allocation_malloc,&allocation_calloc,&allocation_realloc,&allocation_free);
@@ -365,18 +366,17 @@ int main(int argc,char **argv) {
     assert(!thc_unicode(0,0,0,"A",0xffffff,0,0,1,1));
     assert(!thc_unicode(0,0,0,"A",0xffffff,0,0,99,1));
     SDL_ClearError();
-    char capture[256]; SDL_snprintf(capture,sizeof(capture),"/tmp/hide-native-atlas-%llu.bmp",(unsigned long long)SDL_GetTicksNS());
-    SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",argc>2?argv[2]:capture,true);
+    SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE",capture,true);
     scene();
     if (!thc_present()) { fprintf(stderr,"present: %s\n",thc_error()); return 1; }
 
-    SDL_Surface *first=SDL_LoadBMP(argc>2?argv[2]:capture); assert(first);
+    SDL_Surface *first=SDL_LoadBMP(capture); assert(first);
     Uint8 red,green,blue,alpha;
     assert(SDL_ReadSurfacePixel(first,0,0,&red,&green,&blue,&alpha)); assert(red==255 && green==255 && blue==255);
     assert(SDL_ReadSurfacePixel(first,2,0,&red,&green,&blue,&alpha)); assert(red==0 && green==0 && blue==170);
     SDL_DestroySurface(first);
     if (measure) {
-        allocation_frames(argc>2?argv[2]:capture);
+        allocation_frames(capture);
         thc_close(); remove(capture); return 0;
     }
 #ifndef HIDE_BASELINE

@@ -61,6 +61,24 @@ select them explicitly. Linux window builds also need Pango/Cairo development
 headers (`libpango1.0-dev` on Debian/Ubuntu). `fonts-noto-color-emoji` supplies
 color emoji where a fallback font is needed. macOS uses CoreText.
 
+Windows uses SDL3 and Pango/Cairo from MSYS2's UCRT64 packages. In its UCRT64 shell:
+
+```sh
+pacman -S mingw-w64-ucrt-x86_64-sdl3 mingw-w64-ucrt-x86_64-pango mingw-w64-ucrt-x86_64-libutf8proc mingw-w64-ucrt-x86_64-pkgconf
+```
+
+For native GHC/Cabal in PowerShell, put that installation on the process's path
+and retain the include/library flags: GHC's bundled Clang does not search MSYS2's
+compiler directories by default. Adjust the prefix to your installation.
+
+```powershell
+$prefix = 'C:\msys64\ucrt64'
+$env:PATH = "$prefix\bin;$env:PATH"
+$env:PKG_CONFIG_PATH = "$prefix\lib\pkgconfig;$prefix\share\pkgconfig"
+$env:PKG_CONFIG_ALLOW_SYSTEM_CFLAGS = '1'
+$env:PKG_CONFIG_ALLOW_SYSTEM_LIBS = '1'
+```
+
 An installed build includes this frontend too:
 
 ```sh

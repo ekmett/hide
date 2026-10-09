@@ -576,7 +576,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
         Just (name,receipt) -> do
           (case receipt of
             Nothing->saveDownload name bytes
-            Just (row,view) | os=="darwin"->do
+            Just (row,view) | os `elem` ["darwin","mingw32"]->do
               staged<-stageFileExport exports name bytes
               either (hPutStrLn stderr . T.unpack) (\path->emit (ExportCopy path row view)) staged
             Just _->do

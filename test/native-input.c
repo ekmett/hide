@@ -201,6 +201,38 @@ static void check_font_traits(SDL_Renderer *renderer) {
     SDL_DestroySurface(wide);
 }
 
+#ifdef _WIN32
+static void check_file_drag_cancel(SDL_Window *window) {
+    SDL_Event press={0},release={0},key={0},sentinel={0};
+    press.type=SDL_EVENT_MOUSE_BUTTON_DOWN; press.button.button=SDL_BUTTON_LEFT;
+    press.button.windowID=SDL_GetWindowID(window); press.button.x=20; press.button.y=40;
+    release=press; release.type=SDL_EVENT_MOUSE_BUTTON_UP;
+    key.type=SDL_EVENT_KEY_DOWN; key.key.key=SDLK_ESCAPE;
+    sentinel.type=SDL_EVENT_WINDOW_EXPOSED;
+    int32_t out[6];
+    SDL_FlushEvents(SDL_EVENT_FIRST,SDL_EVENT_LAST);
+    /* An armed row consumes a click and retires without editing underneath. */
+    assert(thc_arm_file_drag("unused-until-drag",1,1,8,1));
+    assert(SDL_PushEvent(&press) && SDL_PushEvent(&release) && SDL_PushEvent(&sentinel));
+    assert(thc_wait(out) && out[0]==8);
+    assert(SDL_PushEvent(&press) && SDL_PushEvent(&release));
+    assert(thc_wait(out) && out[0]==3);
+    assert(thc_wait(out) && out[0]==4);
+    /* Escape cancels before another mouse press can start the stale offer. */
+    assert(thc_arm_file_drag("unused-until-drag",1,1,8,1));
+    assert(SDL_PushEvent(&press) && SDL_PushEvent(&key));
+    assert(thc_wait(out) && out[0]==1);
+    assert(SDL_PushEvent(&release)); assert(thc_wait(out) && out[0]==4);
+    assert(SDL_PushEvent(&press) && SDL_PushEvent(&release));
+    assert(thc_wait(out) && out[0]==3); assert(thc_wait(out) && out[0]==4);
+    /* A press outside the armed row is an ordinary editor action. */
+    assert(thc_arm_file_drag("unused-until-drag",1,1,8,1));
+    press.button.x=300;
+    assert(SDL_PushEvent(&press) && SDL_PushEvent(&release));
+    assert(thc_wait(out) && out[0]==3); assert(thc_wait(out) && out[0]==4);
+}
+#endif
+
 static void check_geometry(int lines, int cell_height) {
     assert(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy"));
     if (!thc_open("software", 2, 80, lines, cell_height)) {
@@ -214,6 +246,9 @@ static void check_geometry(int lines, int cell_height) {
     assert(width == 1280 && height == 800);
     thc_size(&cols, &rows);
     assert(cols == 80 && rows == lines);
+#ifdef _WIN32
+    if (cell_height==16) check_file_drag_cancel(windows[0]);
+#endif
     check_crt(SDL_GetRenderer(windows[0]), lines, cell_height/8.0);
     check_unicode(SDL_GetRenderer(windows[0]));
     check_font_traits(SDL_GetRenderer(windows[0]));
