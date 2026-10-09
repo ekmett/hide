@@ -99,9 +99,9 @@ helloParser = withObject "remote hello" $ \o -> do
   resume <- o .:? "resume" .!= False
   pure (Hello session client ack args resume)
 
-readFirstPacket :: Handle -> IO WirePacket
-readFirstPacket h = do
-  packet <- timeout 15000000 (readPacket h)
+readFirstPacket :: IO (Maybe WirePacket) -> IO WirePacket
+readFirstPacket receive = do
+  packet <- timeout 15000000 receive
   case packet of
     Just (Just p) -> pure p
     _ -> failure "Expected protocol packet within 15 seconds"
@@ -112,7 +112,7 @@ parseHelloPacket _ = failure "Expected remote protocol hello"
 
 readHello :: Handle -> IO (Hello, WirePacket)
 readHello h = do
-  packet <- readFirstPacket h
+  packet <- readFirstPacket (readPacket h)
   greeting <- parseHelloPacket packet
   pure (greeting,packet)
 
@@ -301,8 +301,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
             d <- tick (desktop s)
             refreshRequestedPaste pasteReads d
             pure s {desktop=d}
-        serve shutdown awaitInspectionEnd connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
-          first <- readFirstPacket connection
+        serve shutdown receiveChunk connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
+          first <- readFirstPacket (readPacketWith receiveChunk)
           case first of
             JsonPacket _ | packetType first==Just "session-status" -> do
               current <- readMVar state
@@ -335,7 +335,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                     pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
                   -- Start deferred work masked before accepting cancellation. Its
                   -- interruptible waits install their cleanup before EOF can stop it.
-                  withAsync finish $ \response -> withAsync (restore awaitInspectionEnd) $ \eof ->
+                  withAsync finish $ \response -> withAsync (restore (void (receiveChunk 1))) $ \eof ->
                     flip finally (do
                       shutdown
                       when exited $ do
@@ -356,7 +356,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
               available <- tryTakeMVar writer
               case available of
                 Nothing -> writePacket connection (json "error" ["message" .= ("Remote editor already has a writer"::T.Text)])
-                Just () -> finally (attachment connection client clientAck) (do
+                Just () -> finally (attachment receiveChunk connection client clientAck) (do
                   closing<-atomically (writeTVar activeDisplay False >> readTVar inspectionClosing)
                   when closing (void (tryPutMVar done ()))
                   -- Wait behind accepted commands before another writer can attach.
@@ -364,7 +364,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                   atomically (writeTBQueue commands (0,0,Blur,barrier))
                   void (atomically (takeTMVar barrier))
                   putMVar writer ())
-        attachment connection client clientAck = do
+        attachment receiveChunk connection client clientAck = do
           (ack,attachmentEpoch,replay) <- modifyMVar state $ \s -> do
             when (stopped s || suspending s) (failure "Editor session is closing or suspending")
             cancelRequestedPaste pasteReads
@@ -387,13 +387,13 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
           inflight <- newTVarIO (0::Int)
           settledFrame <- newIORef (-1::Int)
           let receive = forever $ do
-                packet <- readPacket connection >>= maybe (failure "Remote client detached") pure
+                packet <- readPacketWith receiveChunk >>= maybe (failure "Remote client detached") pure
                 value <- case packet of JsonPacket v -> pure v; _ -> failure "Unexpected remote binary input"
                 (serial,received,input) <- decodeValue (\v -> (,,) <$> withObject "sequence" (\o -> o .: "seq") v <*> withObject "receipt" (\o -> o .:? "received" .!= 0) v <*> parseInput v) value
                 unless (serial>0) (failure "Remote input sequence must be positive")
                 complete <- case input of
                   UploadFile name _ -> do
-                    payload <- timeout 30000000 (readPacket connection)
+                    payload <- timeout 30000000 (readPacketWith receiveChunk)
                     case payload of Just (Just (BinaryPacket bytes)) -> pure (UploadFile name bytes); _ -> failure "Expected upload bytes"
                   _ -> pure input
                 reply <- newEmptyTMVarIO
@@ -486,6 +486,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                     writePacket connection (json "closed" [])
                     void (tryPutMVar done ())
                   Nothing -> send nextTransfers (Just (key,resetKey,rows,metadata,scene))
+          -- The chunk reader remains cancellable with a partial packet and an
+          -- open Windows peer. Join it before the outer owner sends an error;
+          -- shutting down both socket directions here would discard that reply.
           race_ receive (race_ respond (send (CanvasSender canvasEpoch M.empty) Nothing)) `finally` do
             s <- readMVar state
             when (stopped s) (void (tryPutMVar done ()))
@@ -565,9 +568,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
       rememberSession record {sessionId=session,sessionHost=Nothing}
       let acceptLoop = forever $ do
             (sock,_) <- N.accept socket
-            (connection,shutdown,awaitInspectionEnd) <- socketToEndpoint sock
+            (connection,shutdown,receiveChunk) <- socketToEndpoint sock
             void (forkIO (finally
-              ((authenticate connection >> serve shutdown awaitInspectionEnd connection) `catch` \(_::IOException) -> pure ())
+              ((authenticate connection >> serve shutdown receiveChunk connection) `catch` \(_::IOException) -> pure ())
               (quietClose connection)))
           drainInspections=do
             let empty=atomically (readTVar inspections >>= check . M.null)

@@ -18,6 +18,7 @@ import System.IO
 import qualified Hide.Commands as Commands
 import qualified Hide.Bindings as Bindings
 import Data.List (nub, findIndex, isInfixOf)
+import Data.IORef (newIORef, atomicModifyIORef')
 import qualified Data.Map.Strict as M
 import qualified Graphics.Vty as V
 import Hide.Protocol
@@ -55,9 +56,23 @@ checks profile = withEditorFixture "" (initialDesktop (80,25)) $ \primary->do
     hSeek h AbsoluteSeek 0
     actual<-sequence [readPacket h,readPacket h,readPacket h]
     check "binary and Unicode packets round trip with clean EOF" (actual==map Just packets++[Nothing])
+    end<-hTell h
+    hSeek h AbsoluteSeek 0
+    encoded<-BS.hGet h (fromIntegral end)
+    forM_ [1,2,3,5,4096] $ \limit->do
+      remaining<-newIORef encoded
+      let receive count=atomicModifyIORef' remaining $ \bytes->
+            let (chunk,rest)=BS.splitAt (min count limit) bytes in (rest,chunk)
+      chunks<-sequence [readPacketWith receive,readPacketWith receive,readPacketWith receive]
+      check "short chunk reads preserve packet boundaries and clean EOF" (chunks==map Just packets++[Nothing])
     forM_ [BS.pack [0],BS.pack [0,0,0,3,0,123],BS.pack [255,255,255,255],BS.pack [0,0,0,1,9]] $ \bad->do
       hSetFileSize h 0; hSeek h AbsoluteSeek 0; BS.hPut h bad; hSeek h AbsoluteSeek 0
       rejects "truncated, oversized and unknown-kind packets fail" (readPacket h >> pure ())
+    forM_ [BS.pack [0],BS.pack [0,0,0,3],BS.pack [0,0,0,3,0,123],BS.pack [255,255,255,255],BS.pack [0,0,0,1,9]] $ \bad->do
+      remaining<-newIORef bad
+      let receive count=atomicModifyIORef' remaining $ \bytes->
+            let (chunk,rest)=BS.splitAt (min count 1) bytes in (rest,chunk)
+      rejects "short chunk reads preserve truncation, length and kind rejection" (readPacketWith receive >> pure ())
   let source=T.replicate 200 "main = putStrLn \"hello 👩🏽\x200d\&💻\"\n"
       opened=addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer source) (initialDesktop (180,55))
       docked=opened {sideTree=Just (emptySidebar "/project" 24 False),

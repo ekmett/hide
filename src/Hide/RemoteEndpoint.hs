@@ -8,7 +8,7 @@
 module Hide.RemoteEndpoint
   (sessionEndpoint, connectEndpoint, connectEndpointWithShutdown, socketToEndpoint, endpointExists, withEndpointListener, randomIdentity, spawnDetached, privateDirectory, withSessionLock) where
 import Control.Exception
-import Control.Monad (unless, void)
+import Control.Monad (unless)
 import qualified Data.ByteString as BS
 import Data.Char (isHexDigit, isDigit, isLower)
 import qualified Network.Socket as N
@@ -22,6 +22,10 @@ import Control.Concurrent.Async (withAsync, wait)
 import Data.Bits ((.|.), xor)
 import qualified Data.ByteString.Char8 as B8
 import Data.Word (Word8, Word32)
+import Data.IORef (readIORef)
+import GHC.IO.Buffer (isEmptyBuffer)
+import GHC.IO.Handle.Internals (wantReadableHandle_)
+import GHC.IO.Handle.Types (Handle__(haByteBuffer))
 import Foreign (Ptr, alloca, allocaBytes, castPtr, peek, nullPtr)
 import Foreign.C.String (CWString, withCWString)
 import System.Directory (getHomeDirectory)
@@ -101,11 +105,16 @@ connectEndpoint :: FilePath -> IO Handle
 connectEndpoint path = fst <$> connectEndpointWithShutdown path
 
 -- | Transfer socket ownership to the Handle and return borrowed shutdown and
--- inspection-end actions. Join the inspection waiter before closing the Handle;
--- neither action may outlive it, since the descriptor could then be reused.
--- On Windows, shutdown precedes cancellation; shutdown alone need not wake a
--- local Handle reader. Inspection consumes at most one byte before returning.
-socketToEndpoint :: N.Socket -> IO (Handle, IO (), IO ())
+-- chunk-read actions. Join every reader before closing the Handle; neither
+-- action may outlive it, since the descriptor could then be reused. The chunk
+-- reader accepts a positive byte count and returns up to that many bytes, or
+-- an empty chunk at EOF. One owner must serialize all reads, including any
+-- earlier authentication reads through the Handle, use byte operations only,
+-- and retain binary mode.
+-- On Windows it drains Handle read-ahead before polling the socket. Bounded
+-- waits admit cancellation even with an incomplete packet and an open peer;
+-- shutdown alone need not wake a local Handle reader.
+socketToEndpoint :: N.Socket -> IO (Handle, IO (), Int -> IO BS.ByteString)
 socketToEndpoint sock = mask_ $ do
 #ifdef mingw32_HOST_OS
   descriptorNumber <- N.withFdSocket sock pure
@@ -118,15 +127,19 @@ socketToEndpoint sock = mask_ $ do
     hSetBinaryMode h True
     hSetBuffering h NoBuffering
 #ifdef mingw32_HOST_OS
-    let awaitEnd=do
-          code<-c_waitInput (fromIntegral descriptorNumber)
-          if code==258 then awaitEnd else do
-            checkWindows "Wait for remote inspection input" code
-            void (BS.hGetSome h 1)
+    let receive count=do
+          -- NoBuffering still permits binary Handle read-ahead. Polling only
+          -- Winsock would strand bytes already held by an earlier Handle read.
+          buffered<-wantReadableHandle_ "remote chunk read" h $ \handleState->
+            not . isEmptyBuffer <$> readIORef (haByteBuffer handleState)
+          code<-if buffered then pure 0 else c_waitInput (fromIntegral descriptorNumber)
+          if code==258 then receive count else do
+            checkWindows "Wait for remote input" code
+            BS.hGetSome h count
 #else
-    let awaitEnd=void (BS.hGetSome h 1)
+    let receive=BS.hGetSome h
 #endif
-    pure (h,shutdown,awaitEnd)
+    pure (h,shutdown,receive)
 
 #ifdef mingw32_HOST_OS
 -- Bounded Winsock wait: GHC fdReady treats a SOCKET as a Unix fd index and
