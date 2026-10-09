@@ -328,7 +328,8 @@ terminal frontend. See [sessions](sessions.md) for the other frontends.
 Saving replaces the file atomically. Background file reads can finish against the
 previous version while new opens see the saved version, including on Windows. The
 save still checks its disk baseline before replacement and refuses a detected
-conflict.
+conflict. Windows saves also support long directory paths; the temporary file
+stays beside the destination so replacement remains atomic.
 
 A title star means the buffer has unsaved edits. The branch badge's star means
 saved changes in Git; saving a buffer can clear one while setting the other.

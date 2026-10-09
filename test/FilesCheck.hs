@@ -167,18 +167,23 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
     current <- BS.readFile sharedPath
     check "replacement preserves reader bytes and updates the path"
       (previous=="old bytes" && current=="new bytes")
-  -- GHC's Windows temporary-file helper has its own path-length limit. Keep
-  -- the native read/rename long-path check independent of that save helper.
-  let longPath = foldl (</>) dir (replicate 6 (replicate 48 'p')) </> "shared-λ.bin"
+  let longPath = foldl (</>) dir (replicate 6 ('\x1f4c1':replicate 47 'p')) </> "shared-λ.bin"
   createDirectoryIfMissing True (takeDirectory longPath)
   replaceFile sharedPath longPath
   withFileRead longPath $ \reader -> do
-    BS.writeFile sharedPath "latest bytes"
-    replaceFile sharedPath longPath
+    (longState, _) <- loadFile longPath >>= right "load long-path file"
+    entriesBefore <- sort <$> listDirectory (takeDirectory longPath)
+    savedLong <- saveFile longState (newBuffer "latest bytes") >>= right "save long-path file"
     previous <- BS.hGetContents reader
     current <- BS.readFile longPath
-    check "long-path replacement preserves overlapping readers"
-      (previous=="new bytes" && current=="latest bytes")
+    check "long-path save preserves overlapping readers and updates the baseline"
+      (previous=="new bytes" && current=="latest bytes" && diskBytes savedLong==Just current)
+    interrupted <- try (saveFile savedLong (newBuffer (error "long-path encoding interrupted")))
+      :: IO (Either SomeException (Either String FileState))
+    afterInterrupted <- BS.readFile longPath
+    entriesAfter <- sort <$> listDirectory (takeDirectory longPath)
+    check "long-path successful and interrupted saves leave no temporary sibling"
+      (isLeft interrupted && afterInterrupted==current && entriesAfter==entriesBefore)
   -- A failed replacement must not unlink either side, including its source.
   let destinationDirectory = dir </> "occupied"
   createDirectory destinationDirectory

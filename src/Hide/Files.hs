@@ -6,7 +6,7 @@
 -- still has a concurrent-writer race; atomic replacement is not power-loss durability.
 module Hide.Files (FileState(..), FileRepresentation(..), loadFile, loadFileForDisplay, fileBuffer, saveFile) where
 
-import Hide.FileIO (readFileBytes, withFileRead, replaceFile)
+import Hide.FileIO (readFileBytes, withFileRead, openTemporaryFile, replaceFile)
 
 import Control.Exception (bracket, evaluate, mask)
 import Control.Monad (unless)
@@ -16,7 +16,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath, copyPermissions, pathIsSymbolicLink, removeFile)
 import System.FilePath (takeDirectory)
-import System.IO (hClose, hFlush, openBinaryTempFile, hSeek, SeekMode(AbsoluteSeek))
+import System.IO (hClose, hFlush, hSeek, SeekMode(AbsoluteSeek))
 import Hide.Plugin.Canvas (isImageContent)
 import System.IO.Error (catchIOError, isDoesNotExistError, tryIOError)
 import Hide.Buffer (Buffer, newBuffer, newByteBuffer, bufferByteStream, byteMode, textBuffer)
@@ -70,7 +70,7 @@ fileBuffer bytes=case TE.decodeUtf8' bytes of
 saveFile :: FileState -> Buffer -> IO (Either String FileState)
 saveFile state buffer = fileResult path $ mask $ \restore -> do
   checkDisk
-  bracket (openBinaryTempFile (takeDirectory path) ".hide-")
+  bracket (openTemporaryFile (takeDirectory path))
           (\(temporary, handle) -> ignoreIO (hClose handle) >> ignoreIO (removeFile temporary)) $
     \(temporary, handle) -> do
       bytes <- restore $ do
