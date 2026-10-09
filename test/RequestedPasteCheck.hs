@@ -128,10 +128,10 @@ checks=do
     (restoredHint,_)<-applyRequestedPaste requests changedVersion "stale" hint
     check "hint immutable replacement expires requested paste despite matching numeric revision" (unchangedHint restoredHint)
     oldMount<-token hint
-    let closed=closeActive hint
-    refreshRequestedPaste requests closed
-    withAutocompleteFixture "replacement completion trace" closed $ \replacement->do
-      let next=setComposerInput (composerBuffer hint) (composerSelection hint) True replacement
+    let closedHint=closeActive hint
+    refreshRequestedPaste requests closedHint
+    withAutocompleteFixture "replacement completion trace" closedHint $ \replacementHint->do
+      let next=setComposerInput (composerBuffer hint) (composerSelection hint) True replacementHint
       (reopened,_)<-applyRequestedPaste requests oldMount "stale" next
       check "hint frame replacement cannot revive requested paste"
         (activeEditorMount next/=activeEditorMount hint && unchangedHint reopened)
