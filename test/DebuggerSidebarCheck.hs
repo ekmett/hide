@@ -154,7 +154,9 @@ session mode=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,logPath,_)-
     else do
       stack<-expand "main λ" root >>= wait "stack" (has "sibling frame")
       first<-expand "entry λ  :2" stack
-      second<-expand "sibling frame  :1" first
+      -- The fixture delays this reply until the sibling request arrives.
+      firstPending<-waitIO "first frame scopes request" (\_->any (\request->field "command" request==Just ("scopes"::T.Text) && (field "arguments" request >>= field "frameId")==Just (11::Int)) <$> requests) first
+      second<-expand "sibling frame  :1" firstPending
       prepared<-wait "interleaved frame scopes" (\d->has "Locals 11" d && has "Locals 12" d && maybe False (\tree->treeProjectionRevision tree==treeRevision tree) (sideTree d)) second
       let frameRow=one "frame row" [row | row<-rows prepared,"sibling frame" `T.isPrefixOf` P.infoLabel (rowInfo row)]
           trace=maybe [] (hitTrace (keyOf (rowHit frameRow))) (sideTree prepared)

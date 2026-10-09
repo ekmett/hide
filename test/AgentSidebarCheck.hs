@@ -82,7 +82,7 @@ checks=bracket temporary removePathForcibly $ \root->
             _->False)
         let choose=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) choicesDialog
         acceptedChoice<-act (handleEvent (V.EvKey V.KEnter []) choose)
-        let modelSaved _=readAutocompleteFor root >>= pure . (\value->case value of Right configValue->field "model" configValue==Just ("large"::T.Text); _->False)
+        let modelSaved d=readAutocompleteFor root >>= pure . (\value->status d=="Completion setting updated." && case value of Right configValue->field "model" configValue==Just ("large"::T.Text); _->False)
         configured<-awaitIO tick modelSaved acceptedChoice
         ensure "completion model settings remain separate from Primary" (null (agentSettings configured))
         let staleSubmission=handleEvent (V.EvKey V.KEnter []) choose
@@ -193,7 +193,8 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "old numeric submission cannot choose a different ID after reorder"
           (formRef staleIndex==formRef selectedLarge && any (\option->settingId option=="model" && settingCurrent option=="small") (agentSettings staleIndex))
         let capturedPrimary=handleEvent (V.EvKey V.KEnter []) staleIndex
-        primaryUpdated<-act capturedPrimary >>= await tick (any (\option->settingId option=="model" && settingCurrent option=="large") . agentSettings)
+        -- The advertised setting can arrive before its control worker retires.
+        primaryUpdated<-act capturedPrimary >>= await tick (\d->status d=="Conversation settings updated." && any (\option->settingId option=="model" && settingCurrent option=="large") (agentSettings d))
         stalePrimary<-act (primaryUpdated,snd capturedPrimary) >>= await tick (T.isInfixOf "expired" . status)
         ensure "Primary model change retains its exact conversation" (T.null (conversationTarget stalePrimary))
         -- Real named form remains private, preserves drafts and captures workspace.
@@ -252,7 +253,8 @@ checks=bracket temporary removePathForcibly $ \root->
         childId<-case children of [entry] | Just who<-field "id" entry->pure (AH.AgentId who); _->error "Missing created child"
         let childReady desktop=do
               current<-AH.agentConfiguration hub childId
-              pure (has "Child  idle" desktop && case current of Right (_,options)->any ((=="model").AH.configId) options; _->False)
+              pure (has "Child  idle" desktop && "Model" `elem` map fst (contextItemsFor (popupFor "Child  idle" desktop)) &&
+                case current of Right (_,options)->any ((=="model").AH.configId) options; _->False)
         idleChild<-awaitIO tick childReady createdDesktop
         childChoices<-act (chooseMenuAt 1 "Child  idle" idleChild) >>= await tick (maybe False agentChoicePurpose . dialog)
         let selectedChild=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) childChoices
