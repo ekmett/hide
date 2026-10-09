@@ -1,15 +1,25 @@
 # Haskell plugin API
 
-Status: implemented typed command registration, immutable buffer reads and checked
-strict diffs, scoped menus/bindings, shared sidebar trees, prepared plugin text
-windows, fixed rows with readonly Details, persistent multiline editors, and
-host-owned input and choice forms.
-The current APIs are in
-`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Sidebar`, `Window`, `Editor` and
-`Form`. The signatures below sketch the broader proposed contracts and are not a
-compilable SDK. The
-approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
-model.
+Plugins use typed commands, immutable buffer reads and checked diffs, scoped
+menus and bindings, shared sidebar trees, prepared text windows and host-owned
+forms and editors. The executable chooses its linked plugins in `app/Main.hs`.
+
+Four packages build independently of the editor's private model and native
+frontends:
+
+| Package | Contents |
+| --- | --- |
+| `hide-plugin-api` | Scoped commands, tools, forms, menus, trees and session composition |
+| `hide-agent-api` | Provider contracts, directory metadata and attributed orchestration services |
+| `hide-acp` | ACP transport and provider adapter |
+| `hide-agents` | Agents sidebar, its forms and the nine agent-coordination tools |
+
+Buffer, window and multiline-editor APIs still live in the main `hide` library.
+Conversation presentation, input bindings and the broader editor-tool surface
+are the next package boundaries. The sections below distinguish implemented APIs
+from proposed contracts; proposed signatures are design sketches, not compilable
+SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
+navigation model.
 
 **Agents > Rename** and **Files > Rename** use single-input forms. **New Agent**
 uses named Name and Task inputs. **Model** and **Effort** use choice forms for
@@ -47,9 +57,10 @@ Its `Sidebar c r` capability keeps invocation context and host reply types opaqu
 to the provider. The host supplies origin and workspace inspection, form replies
 and scoped publication; domain operations use a separate typed reply injection.
 The workspace is the editor's working directory, independent of the Files tree
-root. `AgentSidebar` uses this boundary without importing the desktop model or
-its sidebar interpreter. Conversation registration and the complete public API
-package remain independent work.
+root. `Hide.AgentUI` in `hide-agents` uses this boundary without importing the
+desktop model or its sidebar interpreter. `Hide.Plugin.Session` scopes its
+registrations and metadata worker; provider services retain their own session
+lifetimes. Conversation registration remains in the host.
 
 ## Direction
 
@@ -386,8 +397,9 @@ alongside the draft and its history. Source capture is independent of painting:
 closed conversations retain incoming output, and suspension captures accepted
 owner output before saving. Hidden conversations need no layout during restore, and
 visible conversations reflow at their recovered width. Restored controls, links,
-shell actions and provider credentials remain inactive. This does not complete
-the separate first-party plugin package.
+shell actions and provider credentials remain inactive. These conversation
+owners still live in the host; the linked Agents sidebar and tool package uses
+the narrower public services described below.
 
 Inline questions keep public prompt structure separate from the live answer.
 The host paints the answer and selected choice only where the current viewport
@@ -854,8 +866,10 @@ package in `plugins/hide-acp`. Its only Hide dependency is `hide-agent-api` in
 requests, attributed messages, public capabilities/events and a driver lifetime.
 The adapter does not import the hub, Model, Render or Conversation. Capability
 decoding belongs to ACP; the hub decodes its own checkpoint representation.
-This extracts the provider, not yet the complete conversation/sidebar/tool plugin.
-The rest of the public API is still being established through those consumers.
+The linked `hide-agents` package separately supplies the Agents sidebar and
+coordination tools through `hide-plugin-api`. Conversation presentation and the
+broader editor tools still use host types; those consumers define the remaining
+public boundaries.
 
 The hub remains the owner of agent IDs, ancestry, limits, workspaces, task tickets
 and message attribution. A provider plugin supplies a driver; a conversation

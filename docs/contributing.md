@@ -144,8 +144,7 @@ contracts: review those against implementation and the relevant behavioral tests
 
 ## Plugin command implementation
 
-`Hide.Plugin.Command` is the first implemented part of the
-[plugin design](design/haskell-plugins.md). Define a typed `CommandDef` with input
+Define a typed `CommandDef` from `Hide.Plugin.Command` with input
 and output codecs and a narrow host-supplied context. `withRegistry` scopes live
 registrations; `registerCommand` rejects duplicate names. Native callers use the
 typed handle with `invoke`. Wire adapters capture a `CommandRef` before queueing
@@ -159,7 +158,7 @@ run outside the registry lock. Errors are forced before return; successful typed
 values remain lazy and their consumers own later evaluation. Registration grants no authority and does not
 automatically expose an MCP tool.
 
-The first consumer is `hide.docs.read` in `Hide.Documentation`. Its context only
+`hide.docs.read` in `Hide.Documentation` is a small working example. Its context only
 resolves a documentation corpus root; it neither imports nor receives `Desktop`.
 `Hide.DocsMCP` owns the session registration and adapts the explicit `docs_read`
 tool to it, retaining permission checks and deferred filesystem work. Listing and
@@ -264,9 +263,10 @@ switch it preserves the exact existing encoding comparison, deferred to the
 worker from narrow current/baseline text inputs, without retaining Buffer/Undo. The receipt does not grant edit authority or create a public
 plugin CallContext.
 
-This is an implementation slice, not a complete plugin SDK. Plugin
-activation/task scopes, arbitrary prepared-edit grants, subscriptions/events
-and custom widget/window types remain tracked in
+Session activation and teardown are available through `Hide.Plugin.Session`.
+Buffer and window APIs still live in the editor library. Moving those boundaries
+into independently buildable packages, along with broader subscriptions and
+custom widget/window types, remains tracked in
 [the delivery plan](https://github.com/ekmett/hide/issues/1).
 
 ## Host checked edit ownership
