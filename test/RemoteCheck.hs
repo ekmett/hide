@@ -435,10 +435,10 @@ sessionSwitchCheck = do
         withEndpointListener delayedPath $ \listener authenticate->do
           let delayedServer=do
                 (sock,_)<-N.accept listener
-                (h,stop,_)<-socketToEndpoint sock
+                (h,stop,receiveChunk)<-socketToEndpoint sock
                 flip finally (stop >> hClose h) $ do
                   authenticate h
-                  greeting<-bounded "delayed target hello" (readPacket h)
+                  greeting<-bounded "delayed target hello" (readPacketWith receiveChunk)
                   case greeting of Just (JsonPacket (Object fields))->check "candidate names the delayed target" (KM.lookup "session" fields==Just (toJSON (S.sessionId delayed)));_->error "Invalid candidate hello"
                   putMVar preparing ()
                   takeMVar release
@@ -446,7 +446,7 @@ sessionSwitchCheck = do
                   writePacket h (JsonPacket (object ["type" .= ("assets"::T.Text)]))
                   let batch state=do
                         updated<-foldM (\current _->do
-                          packet<-bounded "candidate display setting" (readPacket h)
+                          packet<-bounded "candidate display setting" (readPacketWith receiveChunk)
                           case packet of
                             Just (JsonPacket value@(Object fields))->do
                               input<-either error pure (parseEither parseInput value)
@@ -463,7 +463,8 @@ sessionSwitchCheck = do
                   finalTarget<-batch initialTarget
                   putMVar configured finalTarget
                   showFrame 6 finalTarget
-                  void (readPacket h)
+                  -- The owning async must be cancellable while its peer stays open.
+                  void (readPacketWith receiveChunk)
           withAsync delayedServer $ \server->do
             link server
             switch (S.sessionId target) (S.sessionId delayed)
