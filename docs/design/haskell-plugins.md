@@ -258,8 +258,16 @@ The implemented `Hide.Plugin.Buffer.listBuffers` discovers opaque session-bound
 references and shallow metadata through the existing reader and Permissions
 owner. It preserves the current `list_buffers` metadata mask, confers no capture
 authority and retains no source image or Undo. The actual MCP listing consumes
-that typed service on its reply worker. Generic plugin activation/subscriptions
-and public atomic multi-buffer preparation/commit remain proposed.
+that typed service on its reply worker. Linked callers submit atomic edits with
+`applyBufferDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])`.
+Each `BufferDiff` carries a session reference, exact captured version and strict
+unified diff. The batch is bounded to 1–16 distinct open text buffers and 1 MiB
+characters of patches. One permission ticket covers all targets; Prompt shows an
+editable diff for each. Every source and review version must still match before
+one atomic commit. Results follow input order, each changed buffer gets ordinary
+Undo, and nothing is saved. `applyBufferDiff` is its singleton case. Generic
+plugin activation/subscriptions and the arbitrary prepared-edit API sketched
+above remain proposed.
 
 Measured line/range reads share the existing finger-tree machinery. Whole-buffer
 reads are explicit worker operations. Reads from a retained snapshot remain
@@ -527,11 +535,11 @@ cells, canvas-local coordinates, frontend logical points and device pixels. Any
 filter distortion must also participate in geometry conversion. Hit testing uses
 that same transform and capture rules. Plugins cannot paint or accept clicks over an approval dialog by enlarging their content bounds.
 
-Ordinary file opening chooses the representation from the file signature. A PNG
+Ordinary file opening chooses the representation from the file signature. A PNG or JPEG
 opens in an image window through the same Files, file dialog, command-line and
 drop routes as a source file. No separate viewing service is required.
 
-The PNG decoder prepares immutable RGBA8 on a worker through
+The PNG/JPEG decoder prepares immutable RGBA8 on a worker through
 `prepareImageWindow`, then uses `openWindow` for ordinary scoped publication.
 Additional image formats belong before that boundary: recognize the encoding,
 check allocation bounds, decode, apply orientation and color conversion, then
@@ -907,8 +915,15 @@ owner ticks refresh only the exact installed `WindowRef`. Closing the frame
 preserves its warm provider and independent hint draft, and later trace output
 cannot reopen it. The hint pane is bound to that reference rather than the title.
 Readable output grants no input authority. Recovery retains the transcript as an
-inert private text view and clears the hint binding and draft. The hint editor
-itself remains an existing host control; its typed editor migration is separate.
+inert private text view and clears the hint binding and draft.
+
+The hint uses the same `PreparedEditor`, `DraftRef` and frame mount as conversation
+input. Its typed action runs on the existing completion worker. Enter captures
+an immutable version without clearing it; provider failure, a full queue or an
+expired mount leaves the draft intact. Successful delivery clears only that
+submitted version, including a hidden draft. Later typing survives. Configuration
+changes invalidate queued submissions rather than sending them to a replacement
+provider. The hint is ephemeral and grants no agent input authority.
 
 ## Cabal navigation as a second example
 

@@ -28,7 +28,7 @@ import Data.Char (toLower)
 import System.Mem.StableName
 import Text.Read (readMaybe)
 import Hide.Browser
-import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,Selection(..))
+import Hide.Buffer (Buffer,bufferLength,bufferBytes,byteMode,captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,Selection(..))
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..),FileRepresentation(..),loadFileForDisplay,fileBuffer)
 import Hide.Plugin.Canvas (isImageContent)
@@ -60,6 +60,7 @@ data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackage
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
   | FileJob !Menu.MenuOrigin !(Maybe Int) !Int !(Async (Either CommandError SidebarReply)) !Bool
+  | ExportJob !Int !Int !ContentVersion ![Integer] !(Async (Either CommandError SidebarReply)) !Bool
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
   | EditorJob !Editor.DraftSubmission !(Async (Either CommandError SidebarReply)) !Bool
 data FileRequest = FilePathRequest !Menu.MenuOrigin !FilePath | FileBytesRequest !Text !BS.ByteString
@@ -139,6 +140,7 @@ publishFormRefreshFromHost (SidebarHost _ _ queue _ _ closed) prepared=atomicall
 actionWorker :: ActionJob -> Async (Either CommandError SidebarReply)
 actionWorker (ActionJob _ _ _ _ worker _)=worker
 actionWorker (FileJob _ _ _ worker _)=worker
+actionWorker (ExportJob _ _ _ _ worker _)=worker
 actionWorker (FormJob _ worker _)=worker
 actionWorker (EditorJob _ worker _)=worker
 -- | Withdrawal belongs to the session owner, so queued/late results cannot race
@@ -329,6 +331,7 @@ sidebarEffects host@(SidebarHost _ ref _ _ _ closed) core d effects=do
           case resolved of
             Left err->pure (False,current {status="Cannot open file: "<>T.pack (show err)})
             Right actual->(False,) <$> queueFileOpen host (FilePathRequest origin actual) current
+      ExportBufferDocument wid bid->(False,) <$> exportBuffer host wid bid current
       OpenFileBytes name bytes->(False,) <$> queueFileOpen host (FileBytesRequest name bytes) current
       OpenChoice origin base input pattern->do
         let chosen=if T.null input then pattern else input
@@ -695,6 +698,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
   case actionJob state of
     Nothing->pure d
     Just (FileJob origin active serial worker cancelled)->finishFileJob host origin active serial worker cancelled d
+    Just (ExportJob wid bid version view worker cancelled)->finishExport host wid bid version view worker cancelled d
     Just (FormJob reference worker cancelled)->finishFormJob host core d reference worker cancelled
     Just (EditorJob submitted worker cancelled)->finishEditorJob host core d submitted worker cancelled
     Just (ActionJob trace reference origin columns worker cancelled)->do
@@ -756,6 +760,69 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarExistingImage{})->d {status="Sidebar result expired."}
               Right (Right SidebarImage{})->d {status="Sidebar result expired."}
               Right (Right SidebarUpload{})->d {status="Dropped file has no opening request."}
+
+-- Source export borrows an immutable buffer and scalar UI receipt. Preparation
+-- is bounded on the existing action worker; adoption never walks its contents.
+exportBuffer :: SidebarHost -> Int -> Int -> Desktop -> IO Desktop
+exportBuffer (SidebarHost _ ref _ _ _ _) wid bid d=do
+  state<-readIORef ref
+  case (actionJob state,activeWindow d,M.lookup bid (buffers d)) of
+    (Nothing,Just window,Just doc) | windowId window==wid,bufferId window==Just bid,
+      commandEnabled d ExportBuffer->do
+        version<-captureVersion (documentBuffer doc)
+        let captured=documentBuffer doc
+            name=T.pack (maybe (fromMaybeName captured (documentSuggestedName doc)) (takeFileName.filePath) (documentFile doc))
+            serial=fst (pendingFileExport d)
+        worker<-async $ do
+          prepared<-evaluate (bufferExportBytes captured)
+          pure (SidebarExportFile serial name <$> prepared)
+        writeIORef ref state {actionJob=Just (ExportJob wid bid version (fileExportView d) worker False)}
+        pure d {status="Preparing buffer copy…"}
+    _->pure d {status="Buffer export is unavailable or busy."}
+  where
+    fromMaybeName buffer=maybe (if byteMode buffer then "NONAME.bin" else "NONAME.HS") takeFileName
+
+bufferExportBytes :: Buffer -> Either CommandError BS.ByteString
+bufferExportBytes buffer
+  -- Scalar count rejects oversized buffers before flattening; UTF-8 encoding
+  -- can require at most four bytes per remaining scalar. All work stays here.
+  | bufferLength buffer>=limit=tooLarge
+  | BS.length bytes>=limit=tooLarge
+  | otherwise=Right bytes
+  where
+    limit=16*1024*1024
+    bytes=bufferBytes buffer
+    tooLarge=Left (CommandRejected "Buffer export exceeds 16 MiB; save the file instead.")
+
+finishExport :: SidebarHost -> Int -> Int -> ContentVersion -> [Integer]
+  -> Async (Either CommandError SidebarReply) -> Bool -> Desktop -> IO Desktop
+finishExport (SidebarHost _ ref _ cancellation _ _) wid bid version view worker cancelled d=do
+  same<-case (activeWindow d,M.lookup bid (buffers d)) of
+    (Just window,Just doc) | windowId window==wid,bufferId window==Just bid,
+      view==fileExportView d,commandEnabled d ExportBuffer,dialog d==Nothing,
+      menu d==Nothing,contextMenu d==Nothing->versionCurrent version (documentBuffer doc)
+    _->pure False
+  let current=same && not cancelled
+  completed<-poll worker
+  case completed of
+    Nothing | not current && not cancelled->do
+      queued<-atomically $ do full<-isFullTBQueue cancellation; if full then pure False else writeTBQueue cancellation (Cancellation worker) >> pure True
+      modifyIORef' ref (\state->state {actionJob=Just (ExportJob wid bid version view worker queued)})
+      pure d {status="Buffer export expired."}
+    Nothing->pure d
+    Just result->do
+      modifyIORef' ref (\state->state {actionJob=Nothing})
+      pure $ case result of
+        Right (Right (SidebarExportFile serial name bytes)) | current,Just window<-activeWindow d ->
+          let r=bounds window
+              row=Rect (left r+1) (top r) (max 1 (width r-2)) 1
+              offered=d {pendingFileExport=(serial+1,Nothing)}
+          in offered {pendingFileExport=(serial+1,Just (ExportFileCopy name bytes row (fileExportView offered))),
+            status="Buffer copy ready; drag its title on macOS, or use the frontend's export control."}
+        _ | not current->d {status="Buffer export expired."}
+        Left err->d {status="Buffer export failed: "<>T.pack (displayException err)}
+        Right (Left err)->d {status="Buffer export failed: "<>T.pack (show err)}
+        _->d {status="Buffer export reply was invalid."}
 
 -- Ordinary opens share the existing single action worker. A bounded FIFO keeps
 -- drop bursts in order; only that worker's own successful openings advance the

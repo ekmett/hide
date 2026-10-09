@@ -484,6 +484,11 @@ nothing. A successful prompted patch returns `appliedDiff`, `userModified` and
 the resulting `revision`, so the requesting agent sees the human's actual edit.
 The buffer remains unsaved; approval never writes the file to disk.
 
+The same `buffer_apply_diff` permission covers linked plugins' atomic batches of
+up to 16 open buffers. Their approval shows one editable diff per file. Allow
+applies all of them together or none; the single-buffer MCP arguments above are
+unchanged.
+
 A pending approval can be cancelled; cancellation does not undo an operation
 already executed. Questions return pending without waiting for the human. HLS
 and debugger reply waits release the desktop lock. After a disconnect or uncertain reply, inspect current

@@ -126,8 +126,6 @@ data RenderState = RenderState
   , keyInlineEpoch :: Int
   , keyAutocompleteWindow :: Maybe PluginWindow.WindowRef
   , keyAutocompleteACPEnabled :: Bool
-  , keyAutocompleteSelection :: Selection
-  , keyAutocompleteFocused :: Bool
   , keyDockedTerminals :: M.Map Int (Rect,Maybe Rect)
   , keyBottomTerminal :: Maybe Int
   } deriving Eq
@@ -207,7 +205,6 @@ renderKey original = do
   documents<-mapM document (buffers original)
   drafts<-mapM draft (editorDrafts original)
   mapM_ payload (inlinePreview original)
-  payload (autocompleteDraft original)
   views<-mapM view (conversationViews original)
   question'<-traverse question (chatQuestion original)
   dialog'<-traverse dialogKey (dialog original)
@@ -286,8 +283,6 @@ renderKey original = do
         , keyInlineEpoch=inlineEpoch original
         , keyAutocompleteWindow=autocompleteWindow original
         , keyAutocompleteACPEnabled=autocompleteACPEnabled original
-        , keyAutocompleteSelection=autocompleteSelection original
-        , keyAutocompleteFocused=autocompleteFocused original
         , keyDockedTerminals=dockedTerminals original
         , keyBottomTerminal=bottomTerminal original
         }
@@ -442,10 +437,6 @@ renderSceneWith canvases d=(privacyLayers++layers,visibleCursor)
           cy=top rect
           body=pluginTextRect d w
           in if inside body cx cy then V.Cursor cx cy else V.NoCursor
-        (Just w,_) | activeAutocomplete d && autocompleteFocused d -> let
-          b=autocompleteDraft d; (r,c)=bufferLineColumn b (caret (autocompleteSelection d)); (sr,sc)=autocompleteComposerScroll d w
-          rect=autocompleteComposerRect d w
-          in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn (bufferLineAt b r) c-sc) (top rect+r-sr) else V.NoCursor
         (Just w,_) | composerActive d,Just draft<-windowEditorDraft d w -> let
           b=editorDraftBuffer draft; (r,c)=bufferLineColumn b (caret (editorDraftSelection draft)); (sr,sc)=composerScroll d w
           rect=composerRect d w; (marker,line)=if windowEditorCode w then composerLine b r else (0,bufferLineAt b r)
@@ -484,17 +475,16 @@ hostWindowFrame d active w frame=
 -- The host paints one input owner identically over source and prepared bodies.
 composerLayers :: Desktop -> Bool -> Window -> [V.Image]
 composerLayers d active w
-  | not (windowHasEditor d w) && not hintComposer = []
+  | not (windowHasEditor d w) = []
   | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges
   where
     attached=windowEditorDraft d w
-    hintComposer=autocompletePane d w
-    rect=if hintComposer then autocompleteComposerRect d w else composerRect d w
-    draft=if hintComposer then autocompleteDraft d else maybe emptyEditorBuffer editorDraftBuffer attached
-    draftSelection=if hintComposer then autocompleteSelection d else maybe (Selection 0 0) editorDraftSelection attached
-    draftFocused=if hintComposer then autocompleteFocused d else maybe False editorDraftFocused attached
-    (sr,sc)=if hintComposer then autocompleteComposerScroll d w else composerScroll d w
-    draftLine n=if not hintComposer && windowEditorCode w then composerLine draft n else (0,bufferLineAt draft n)
+    rect=composerRect d w
+    draft=maybe emptyEditorBuffer editorDraftBuffer attached
+    draftSelection=maybe (Selection 0 0) editorDraftSelection attached
+    draftFocused=maybe False editorDraftFocused attached
+    (sr,sc)=composerScroll d w
+    draftLine n=if windowEditorCode w then composerLine draft n else (0,bufferLineAt draft n)
     thoughtEdges
       | width rect<=0 || height rect<=0 = []
       | otherwise = [place (left rect-1) (top rect) (edgeImage True),
