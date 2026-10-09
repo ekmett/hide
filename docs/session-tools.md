@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Work with the editor
 
 The agent in a conversation can use the same editor you do: read an unsaved buffer, ask HLS for its type, rename a symbol, move a window, inspect a stopped program, or run a build and read the result. The built-in `editor` MCP server is supplied automatically when an ACP conversation starts or resumes.

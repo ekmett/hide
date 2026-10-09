@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Agent writes to the editor clipboard and attached frontend clipboard queue.
+-- |
+-- Module      : Hide.ClipboardMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Agent writes to the editor clipboard and attached frontend clipboard queue.
 --
 -- The tool never reads the user's system clipboard. A serial marks a new export
 -- for the frontend, whose browser/terminal permissions can still reject the copy;

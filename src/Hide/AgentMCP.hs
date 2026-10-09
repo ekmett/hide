@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Strict MCP schemas and dispatch for agent orchestration.
+-- |
+-- Module      : Hide.AgentMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Strict MCP schemas and dispatch for agent orchestration.
 --
 -- The host supplies the actor and working directory; tool arguments cannot replace
 -- either. Creation combines hub reservation with explicit first-message enqueueing,

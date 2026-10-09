@@ -1,4 +1,12 @@
--- | Bundled bitmap atlas and exact-pixel glyph selection.
+-- |
+-- Module      : Hide.Font
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Bundled bitmap atlas and exact-pixel glyph selection.
 --
 -- Material icons take precedence over IBM VGA and then Unicode fallback glyphs.
 -- The exact-bitmap repertoire is retained separately so native frontends can shape

@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Shared sidebar state and its cached, indexed visible projection.
+-- |
+-- Module      : Hide.Sidebar
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Shared sidebar state and its cached, indexed visible projection.
 --
 -- Input only changes bounded metadata and splices cached subtree spans. Full
 -- projection preparation belongs to a host worker; painting and hit testing use

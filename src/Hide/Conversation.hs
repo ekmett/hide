@@ -1,5 +1,13 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Primary ACP conversation ownership and child-agent transcript projection.
+-- |
+-- Module      : Hide.Conversation
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- Primary ACP conversation ownership and child-agent transcript projection.
 --
 -- The session tick consumes protocol and hub mailbox events. Owned workers prepare
 -- prompt context, file captures and consoles before adoption; capture itself does

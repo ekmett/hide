@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: BSD-3-Clause */
+/* SPDX-FileCopyrightText: 2026 Edward Kmett
+ * SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 */
 /* Hidden renderer execution, cell/atlas counters and full-origin clipping. */
 #include "../cbits/window.h"
 #include "../cbits/shaders/power-mode.h"

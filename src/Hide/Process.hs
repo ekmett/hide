@@ -1,5 +1,13 @@
 {-# LANGUAGE ScopedTypeVariables #-}
--- | Best-effort shutdown for owned subprocess groups.
+-- |
+-- Module      : Hide.Process
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : ScopedTypeVariables
+--
+-- Best-effort shutdown for owned subprocess groups.
 --
 -- Capture cleanup immediately after spawn, before another waiter can reap the
 -- PID. The returned action serializes repeated cleanup, terminates the process

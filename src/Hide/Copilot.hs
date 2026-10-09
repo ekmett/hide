@@ -1,6 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Copilot language-server transport and completion adaptation.
+-- |
+-- Module      : Hide.Copilot
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Copilot language-server transport and completion adaptation.
 --
 -- The adapter keeps one synchronized document and converts editor character
 -- positions to UTF-16. Synchronization batches and remembered document state are

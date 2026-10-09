@@ -1,4 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- |
+-- Module      : SidebarCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module SidebarCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,wait,poll,waitCatch,asyncThreadId)

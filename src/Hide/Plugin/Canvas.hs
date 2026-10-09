@@ -1,6 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Immutable bounded PNG resources and the host-composed image scene.
+-- |
+-- Module      : Hide.Plugin.Canvas
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Immutable bounded PNG resources and the host-composed image scene.
 -- Preparation runs on a worker. IDs identify bytes, never permission or input
 -- authority; a surface may retain a resource while every cell is occluded.
 module Hide.Plugin.Canvas

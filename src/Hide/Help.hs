@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Plain-text layout helper for a small Markdown subset.
+-- |
+-- Module      : Hide.Help
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Plain-text layout helper for a small Markdown subset.
 --
 -- This is the older unstyled layout API, retained separately from the CommonMark
 -- renderer used by interactive help and conversations. It wraps in display cells,

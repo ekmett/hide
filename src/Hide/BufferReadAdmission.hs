@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Host-owned callback receipt for one granted capture. Policy owns minting;
+-- |
+-- Module      : Hide.BufferReadAdmission
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Host-owned callback receipt for one granted capture. Policy owns minting;
 -- this lightweight adapter keeps receipt expiry independent of UI model types.
 module Hide.BufferReadAdmission
   ( ReadAdmission, withReadAdmission, readReference, resolveReadReference ) where

@@ -1,5 +1,12 @@
--- SPDX-License-Identifier: BSD-3-Clause
--- | Ephemeral requested clipboard reads owned by one serialized frontend session.
+-- |
+-- Module      : Hide.RequestedPaste
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Ephemeral requested clipboard reads owned by one serialized frontend session.
 -- A matching receipt is consumed before input application. Leaving its immutable
 -- input target retires it permanently, even if focus later returns. Nothing here
 -- retains a buffer, compares text/Undo, runs a plugin or persists a capability.

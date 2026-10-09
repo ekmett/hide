@@ -1,4 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- |
+-- Module      : ProtocolCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module ProtocolCheck (checks) where
 import EditorFixture (withEditorFixture)
 import Control.Exception (SomeException, bracket, try, evaluate, displayException)

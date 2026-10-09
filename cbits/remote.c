@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 /* Windows session descriptors inherit no access from other local accounts. */
 #define WIN32_LEAN_AND_MEAN
 #ifndef _WIN32_WINNT

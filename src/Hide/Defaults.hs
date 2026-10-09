@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Strict parsing of optional startup defaults.
+-- |
+-- Module      : Hide.Defaults
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Strict parsing of optional startup defaults.
 --
 -- Absent fields remain Nothing so the caller can apply CLI, environment and
 -- configuration precedence. Parsing reuses frontend validators for backend/scale

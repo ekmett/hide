@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Own a captured build/run and publish prepared output snapshots.
+-- |
+-- Module      : Hide.BuildJobs
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Own a captured build/run and publish prepared output snapshots.
 --
 -- A supervisor executes commands sequentially until failure. Bounded output events
 -- feed an aggregation worker, which prepares buffer measures and diagnostics before

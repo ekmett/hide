@@ -1,4 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
+-- |
+-- Module      : AgentHubCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module AgentHubCheck (checks) where
 import Control.Concurrent
 import Control.Concurrent.Async (withAsync, cancel, wait, waitCatch)

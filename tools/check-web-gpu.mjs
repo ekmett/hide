@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 // Execute the production WebGL2 grid shader headlessly; no server or visible UI.
 import fs from 'node:fs/promises';
 import os from 'node:os';

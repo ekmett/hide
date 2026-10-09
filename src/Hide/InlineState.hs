@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Bounded completion previews and partial word acceptance.
+-- |
+-- Module      : Hide.InlineState
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Bounded completion previews and partial word acceptance.
 --
 -- Provider edits are validated, normalized and trimmed into preview rows; source
 -- buffers and undo trees stay outside the derived view. Scalar view guards select

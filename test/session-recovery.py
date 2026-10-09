@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Kill a private test daemon and recover unsaved edits through another frontend.
 Usage: python3 test/session-recovery.py /absolute/path/to/hide
 POSIX integration harness; operates only on its own temporary session.

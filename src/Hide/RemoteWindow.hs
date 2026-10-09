@@ -1,5 +1,13 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables, BangPatterns #-}
--- | Native SDL frontend for remotely owned editor sessions.
+-- |
+-- Module      : Hide.RemoteWindow
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings, ScopedTypeVariables, BangPatterns
+--
+-- Native SDL frontend for remotely owned editor sessions.
 --
 -- A receiver worker validates/decodes frames and downloads; SDL events and drawing
 -- stay on the window thread. Draining pending messages allows one presentation of

@@ -1,4 +1,12 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- |
+-- Module      : RemoteWindowCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+
 module RemoteWindowCheck (checks) where
 import Control.Monad (unless)
 import Data.List (elemIndex)

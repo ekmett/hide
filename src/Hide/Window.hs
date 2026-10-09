@@ -1,5 +1,13 @@
 {-# LANGUAGE BangPatterns, CPP, ForeignFunctionInterface, OverloadedStrings #-}
--- | SDL/Metal/Vulkan adapter for the common Vty picture and input model.
+-- |
+-- Module      : Hide.Window
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : BangPatterns, CPP, ForeignFunctionInterface, OverloadedStrings
+--
+-- SDL/Metal/Vulkan adapter for the common Vty picture and input model.
 --
 -- Grapheme-aware spans select exact bitmap tiles for interface geometry and native
 -- shaping for other text. The window thread owns SDL calls, event handling and

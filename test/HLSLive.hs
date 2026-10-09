@@ -1,6 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Run against an installed HLS with the project's supported GHC first in PATH.
 -- Compile: cabal exec -- ghc -threaded -isrc test/HLSLive.hs -o /tmp/thc-hls-live
+-- |
+-- Module      : Main
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module Main (main) where
 
 import Control.Concurrent (threadDelay)

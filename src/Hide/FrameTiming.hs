@@ -1,4 +1,12 @@
--- | Outstanding native redraw demands, identified by the input sequence echoed
+-- |
+-- Module      : Hide.FrameTiming
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Outstanding native redraw demands, identified by the input sequence echoed
 -- by a presented frame. Times use the frontend's monotonic nanosecond clock;
 -- clocks on different machines are never compared. Retiring a coalesced prefix
 -- returns its oldest demand once. A no-op receipt retires without drawing.

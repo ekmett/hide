@@ -1,5 +1,13 @@
 {-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
--- | DAP orchestration, editor inspection views and debugger terminal ownership.
+-- |
+-- Module      : Hide.Debugger
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : ExistentialQuantification, OverloadedStrings
+--
+-- DAP orchestration, editor inspection views and debugger terminal ownership.
 --
 -- Stopped-state generations scope stack and variable handles; late replies cannot
 -- update a newer stop. Inspection distinguishes lazy references because expanding

@@ -1,4 +1,12 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- |
+-- Module      : MCPPermissionsCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+
 module MCPPermissionsCheck (checks,policyResponsivenessChecks,policyWakeChecks,settledTool,settleDialog) where
 
 import SourceWindowFixture (sourceFixtureBuffer)

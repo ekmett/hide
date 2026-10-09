@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # hide — Haskell IDE
 
 ![Haskell 9.14.1](https://img.shields.io/badge/Haskell-9.14.1-5e5086?style=flat&logo=haskell&logoColor=white)

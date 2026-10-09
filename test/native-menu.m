@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 /* Run tools/check-native.sh on macOS. This owns its application, menus and
  * temporary window; no existing editor session or configuration is touched. */
 #import <Cocoa/Cocoa.h>

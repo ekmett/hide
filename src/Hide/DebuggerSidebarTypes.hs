@@ -1,9 +1,10 @@
--- | Module      : Hide.DebuggerSidebarTypes
--- Copyright   : (c) Edward Kmett 2026
--- License     : BSD-3-Clause
--- Maintainer  : Edward Kmett
+-- |
+-- Module      : Hide.DebuggerSidebarTypes
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
--- Portability : Haskell2010
+-- Portability : GHC2021
 --
 -- Captured debugger targets carry the stopped epoch and their DAP owner IDs.
 -- Labels and filesystem paths cannot select a debugger operation.

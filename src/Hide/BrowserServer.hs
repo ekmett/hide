@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
--- | Loopback HTTP/WebSocket host shared by browser frontends.
+-- |
+-- Module      : Hide.BrowserServer
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings, ScopedTypeVariables
+--
+-- Loopback HTTP/WebSocket host shared by browser frontends.
 --
 -- An unpredictable URL path, exact Host/Origin checks and a single-viewer slot
 -- restrict attachment. This is local capability-based access, not user-account

@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
--- | Canonical shared directories and persistent Git worktrees for agents.
+-- |
+-- Module      : Hide.AgentWorkspace
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings, ScopedTypeVariables
+--
+-- Canonical shared directories and persistent Git worktrees for agents.
 --
 -- A worktree starts from a resolved commit, not the parent's dirty or unsaved
 -- contents. It may use a new named branch or detached HEAD. Successful worktrees

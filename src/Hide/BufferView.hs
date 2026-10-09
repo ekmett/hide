@@ -1,4 +1,12 @@
--- | Compact row projections for inline and side-by-side change views.
+-- |
+-- Module      : Hide.BufferView
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Compact row projections for inline and side-by-side change views.
 --
 -- The projection stores runs, aligned hunks and collapsed context gaps, never
 -- source text. Binary searches map display rows to the full change-row space;

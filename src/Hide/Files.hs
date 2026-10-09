@@ -1,4 +1,12 @@
--- | Byte-preserving file loading and baseline-checked replacement saves.
+-- |
+-- Module      : Hide.Files
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Byte-preserving file loading and baseline-checked replacement saves.
 --
 -- Loaded paths are canonicalized. Invalid UTF-8 or NUL-containing input selects
 -- byte mode. Saving writes a sibling temporary file, preserves existing permissions

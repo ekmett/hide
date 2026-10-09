@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Immutable file/context capture and checked ACP writes.
+-- |
+-- Module      : Hide.AgentFiles
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Immutable file/context capture and checked ACP writes.
 --
 -- Eligible open source buffers override bounded UTF-8 disk reads. Stable buffer
 -- and file identities let worker results be invalidated without comparing source

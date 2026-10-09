@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Image viewer example
 
 `alpine-lake.png` is an AI-generated sample for opening an image in the editor

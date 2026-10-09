@@ -1,6 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Convert web-bandwidth.hs snapshots into actual adaptive wire packets.
 -- cabal exec -- runghc -package=hide tools/web-wire-trial.hs < frames.jsonl > packets.jsonl
+-- |
+-- Module      : Main
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as K

@@ -1,4 +1,12 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
+-- |
+-- Module      : PluginWindowsCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+
 module PluginWindowsCheck (checks,rowsChecks,imageChecks) where
 import Control.Concurrent (threadDelay,yield)
 import Control.Concurrent.MVar

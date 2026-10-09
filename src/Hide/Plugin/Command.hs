@@ -1,5 +1,13 @@
 {-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
--- | Typed commands with explicit wire codecs and revocable registrations.
+-- |
+-- Module      : Hide.Plugin.Command
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : ExistentialQuantification, OverloadedStrings
+--
+-- Typed commands with explicit wire codecs and revocable registrations.
 --
 -- Registration, lookup and admission hold a short registry lock. Codecs and
 -- handlers run after it is released; nested invocation cannot hold that lock

@@ -1,4 +1,12 @@
--- | Host adapters for immutable plugin reads and conservative version checks.
+-- |
+-- Module      : Hide.Plugin.BufferHost
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Host adapters for immutable plugin reads and conservative version checks.
 --
 -- The host applies its session/privacy policy before capture. No authority is
 -- granted by these adapters. Identity capture/checks evaluate only the buffer

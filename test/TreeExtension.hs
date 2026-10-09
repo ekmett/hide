@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Independent declaration: no Model command constructor or production row tag.
+-- |
+-- Module      : TreeExtension
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module TreeExtension (declare) where
 import Data.Aeson (Value(Null))
 import Hide.Plugin.Command

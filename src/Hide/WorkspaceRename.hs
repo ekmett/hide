@@ -1,6 +1,13 @@
 {-# LANGUAGE ForeignFunctionInterface, OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Checked workspace path rename shared by the human Files form and MCP owner.
+-- |
+-- Module      : Hide.WorkspaceRename
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : ForeignFunctionInterface, OverloadedStrings
+--
+-- Checked workspace path rename shared by the human Files form and MCP owner.
 -- Preparation owns canonicalization, dirty checks and immutable receipts.
 -- Adoption preserves buffer/Undo identity and refuses a changed source or an
 -- occupied destination. The platform rename never replaces a destination; the

@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Discover GHC installations and prepare exact debugger/compiler pairings.
+-- |
+-- Module      : Hide.Compilers
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Discover GHC installations and prepare exact debugger/compiler pairings.
 --
 -- GHCup discovery is offline and time bounded. Project compiler selection asks
 -- Cabal instead of parsing its configuration. Debug preparation canonicalizes the

@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Session-owned registration and MCP adaptation for offline documentation.
+-- |
+-- Module      : Hide.DocsMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Session-owned registration and MCP adaptation for offline documentation.
 --
 -- The initial call captures a corpus resolver and returns a deferred action.
 -- Resolution, codecs and reads run after the desktop lock is released. Registering

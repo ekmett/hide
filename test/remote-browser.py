@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Exercise HOST:PATH, SSH bootstrap, browser framing, clipboard and reattachment.
 Uses a local SSH stand-in; authentication itself remains OpenSSH's responsibility.
 """

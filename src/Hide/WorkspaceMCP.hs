@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Agent navigation, window organization and project inspection.
+-- |
+-- Module      : Hide.WorkspaceMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Agent navigation, window organization and project inspection.
 --
 -- Window/buffer IDs select the live model; source locations use one-based lines
 -- and columns while hex navigation uses byte offsets. Mutations reuse model

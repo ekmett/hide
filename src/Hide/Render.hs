@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings, ExistentialQuantification #-}
--- | Compose the desktop into the common Vty character grid.
+-- |
+-- Module      : Hide.Render
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings, ExistentialQuantification
+--
+-- Compose the desktop into the common Vty character grid.
 --
 -- Painting consumes model geometry and prepared document rows. Layers implement
 -- windows, menus, dialogs, shadows and privacy masks before grapheme-aware

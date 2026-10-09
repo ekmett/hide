@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 # Discover the checkout's Ghostty while retaining the system pkg-config database.
 set -eu
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

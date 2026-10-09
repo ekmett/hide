@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Build, run, debug, and resume
 
 Compile (Alt+F9), Make (F9), and Run (Ctrl+F9) use the selected THC or GHC

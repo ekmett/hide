@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Policy for host-attributed agent input, readable cells and authority files.
+-- |
+-- Module      : Hide.GuestAccess
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Policy for host-attributed agent input, readable cells and authority files.
 --
 -- Readability, clickability, command/effect validation and post-transition checks
 -- protect different paths into the editor. The host selects input origin and

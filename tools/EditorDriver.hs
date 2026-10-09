@@ -1,6 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Trusted local automation over the real editor model, effects and Metal renderer.
 -- Agent-facing control continues to use ControlMCP and its input restrictions.
+-- |
+-- Module      : EditorDriver
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module EditorDriver (command, input, typeText, await, captureMetal) where
 
 import Control.Concurrent (threadDelay)

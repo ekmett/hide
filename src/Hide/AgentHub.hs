@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Agent identities, relationships, message tickets and bounded history in STM.
+-- |
+-- Module      : Hide.AgentHub
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Agent identities, relationships, message tickets and bounded history in STM.
 --
 -- Reservations enforce live limits before provider startup. Each agent has a
 -- worker that delivers queued prompts outside the state transaction. The host

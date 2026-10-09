@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Closed prepared-window adoption shared by existing menu/sidebar owners.
+-- |
+-- Module      : Hide.PluginWindowHost
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Closed prepared-window adoption shared by existing menu/sidebar owners.
 -- Workers retain preparation and cancellation; this adapter observes only exact
 -- scope/instance metadata and never runs extension callbacks or scans text.
 module Hide.PluginWindowHost (adoptWindowUpdate, replaceWindowUpdate, tickPluginWindows, retireClosedWindow, adoptEditorWindowUpdate, applyEditorUpdate, installEditorDraft) where

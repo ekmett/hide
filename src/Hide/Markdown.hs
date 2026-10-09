@@ -1,5 +1,13 @@
 {-# LANGUAGE BangPatterns, OverloadedStrings #-}
--- | CommonMark layout into borrowed styled rows for help and conversations.
+-- |
+-- Module      : Hide.Markdown
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : BangPatterns, OverloadedStrings
+--
+-- CommonMark layout into borrowed styled rows for help and conversations.
 --
 -- Parsing builds a small block representation, then wrapping and table layout
 -- use display-cell widths. Code panels retain their original source separately

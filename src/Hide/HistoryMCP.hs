@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Bounded undo previews and revision-checked history application for agents.
+-- |
+-- Module      : Hide.HistoryMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Bounded undo previews and revision-checked history application for agents.
 --
 -- Previews describe the edits that undo/redo would apply and do not mutate the
 -- buffer. Application uses the normal edit path, keeps the user's window ordering

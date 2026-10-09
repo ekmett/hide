@@ -1,14 +1,12 @@
--- SPDX-FileCopyrightText: 2026 Edward Kmett
--- SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
 {-# LANGUAGE OverloadedStrings #-}
 
 -- |
 -- Module      : Main
--- Copyright   : (C) 2026 Edward Kmett
--- License     : UPL-1.0 AND BSD-3-Clause
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
 -- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
--- Portability : Native GHC; host filesystem/process services
+-- Portability : OverloadedStrings
 --
 -- Build and validate the public documentation site and revision-pinned source links.
 module Main (main) where

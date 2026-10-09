@@ -1,10 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
 -- |
 -- Module      : Hide.DownloadsWindow
--- Copyright   : (c) Edward Kmett
--- License     : BSD-3-Clause
--- Maintainer  : Edward Kmett
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 --

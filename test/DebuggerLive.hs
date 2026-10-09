@@ -1,6 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Real THC/DAP qualification; see docs/contributing.md#live-debugger-checks.
 -- This catches broken source identity, stale stops, and failed termination.
+-- |
+-- Module      : Main
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module Main (main) where
 
 import SourceWindowFixture (sourceFixtureBuffer)

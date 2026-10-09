@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | JSON-RPC/MCP bridge between agent subprocesses and the owning editor session.
+-- |
+-- Module      : Hide.EditorMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- JSON-RPC/MCP bridge between agent subprocesses and the owning editor session.
 --
 -- A private endpoint exposes the current desktop without claiming the display.
 -- Tool initiation and reply waiting are separate phases so HLS, DAP and human

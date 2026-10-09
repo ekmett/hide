@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | The live typed strict-diff command. Its context contains only a host-bound
+-- |
+-- Module      : Hide.BufferDiffCommand
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- The live typed strict-diff command. Its context contains only a host-bound
 -- editor, opaque target and exact read version. Permission waits, preparation,
 -- editable approval and adoption belong to the existing Permissions owner;
 -- command codecs and final JSON run on the invoking worker.

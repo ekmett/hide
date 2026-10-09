@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Build/run and terminal tools backed by the editor's shared runtime services.
+-- |
+-- Module      : Hide.RuntimeMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Build/run and terminal tools backed by the editor's shared runtime services.
 --
 -- Agent commands use the same build-job and console owners as menus and ACP
 -- terminal requests. Captured builds occupy the single shared job slot; terminals

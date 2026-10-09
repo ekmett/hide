@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Typed measured read consumer. Its context is a freshly checked session
+-- |
+-- Module      : Hide.BufferReadCommand
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Typed measured read consumer. Its context is a freshly checked session
 -- reader plus an opaque target, never Desktop. Capture waits and complete JSON
 -- formatting run on the invoking worker; registration follows session lifetime.
 module Hide.BufferReadCommand

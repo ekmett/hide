@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Worker-prepared visual rows with original semantic character ranges.
+-- |
+-- Module      : Hide.TextLayout
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Worker-prepared visual rows with original semantic character ranges.
 -- Widening never inserts padding or wrapping newlines into the source. Render,
 -- hit testing and navigation consume one measured snapshot. Layout equality
 -- observes its fresh immutable identity, never text or glyph vectors.

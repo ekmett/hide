@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Background filesystem polling with coalesced observations.
+-- |
+-- Module      : Hide.External
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Background filesystem polling with coalesced observations.
 --
 -- Callers subscribe canonical file paths with baseline tokens. Desired-state updates
 -- do no file IO; the worker checks metadata plus a rotating overdue byte rescan.

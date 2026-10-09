@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Session ownership of captured builds, settings, compiler discovery and consoles.
+-- |
+-- Module      : Hide.SessionServices
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Session ownership of captured builds, settings, compiler discovery and consoles.
 --
 -- Provider retirement releases only its own terminal IDs. These services outlive
 -- Conversation, and prepared builds still re-enter the full runtime authority

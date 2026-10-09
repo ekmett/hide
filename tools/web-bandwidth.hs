@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Run with cabal exec -- runghc -package=hide tools/web-bandwidth.hs
+-- |
+-- Module      : Main
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 import Data.Aeson
 import qualified Data.ByteString.Lazy.Char8 as BL
 import qualified Data.Text.IO as T

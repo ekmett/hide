@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 # Documentation is independent of the editor and its optional native backends.
 .DEFAULT_GOAL := docs
 CABAL ?= cabal

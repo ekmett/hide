@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Adopt background filesystem observations into buffers and the Files pane.
+-- |
+-- Module      : Hide.Reconcile
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Adopt background filesystem observations into buffers and the Files pane.
 --
 -- Observation tokens follow disk baselines rather than edit revisions: edits must
 -- not hide disk changes, and old observations must not undo a save. Clean existing

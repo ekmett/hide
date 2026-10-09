@@ -1,6 +1,13 @@
 {-# LANGUAGE BangPatterns, MagicHash, MultiParamTypeClasses, UnboxedTuples #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Persistent borrowed storage inside a long physical source line.
+-- |
+-- Module      : Hide.LineChunks
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : BangPatterns, MagicHash, MultiParamTypeClasses, UnboxedTuples
+--
+-- Persistent borrowed storage inside a long physical source line.
 --
 -- Loaded text shares lazy geometric vector blocks of complete bounded-item receipts.
 -- Exact seeks reuse those receipts; editing shares raw ranges of immutable

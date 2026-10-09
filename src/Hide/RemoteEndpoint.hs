@@ -1,5 +1,13 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, ScopedTypeVariables #-}
--- | Private local transport and lifetime locking for editor sessions.
+-- |
+-- Module      : Hide.RemoteEndpoint
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, ForeignFunctionInterface, ScopedTypeVariables
+--
+-- Private local transport and lifetime locking for editor sessions.
 --
 -- POSIX uses owner-only Unix socket paths. Windows uses a private descriptor,
 -- loopback TCP and mutual challenge-response authentication. A kernel-held lock

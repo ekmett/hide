@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Graphical editor window
 
 User request: an optional Metal/Vulkan window with the existing UI, tightly joined cells, preferably a classic IBM font. Play the interface straight. Terminal mode stays available and its build need not acquire graphical dependencies.

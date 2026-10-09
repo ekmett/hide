@@ -1,5 +1,13 @@
 {-# LANGUAGE CPP, OverloadedStrings, PackageImports #-}
--- | Versioned editor checkpoints and cheap persistence invalidation keys.
+-- |
+-- Module      : Hide.Recovery
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings, PackageImports
+--
+-- Versioned editor checkpoints and cheap persistence invalidation keys.
 --
 -- Checkpoints preserve buffers, history, views and preferences, not running
 -- background processes. Transient approvals are excluded and private question

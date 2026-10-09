@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 // Exercise the production resource handler, including delayed WebSocket replies
 // for which browsers no longer grant popup activation.
 import fs from 'node:fs';

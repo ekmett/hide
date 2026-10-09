@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Adapt one ACP provider session to the agent hub driver interface.
+-- |
+-- Module      : Hide.AgentACP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Adapt one ACP provider session to the agent hub driver interface.
 --
 -- A pump correlates protocol replies and publishes public updates; prompt/config
 -- operations and permission handling have separate serialized ownership. Native

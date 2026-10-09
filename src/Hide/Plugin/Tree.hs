@@ -1,5 +1,13 @@
 {-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
--- | Typed tree providers for a shared sidebar, scoped by command registration.
+-- |
+-- Module      : Hide.Plugin.Tree
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : ExistentialQuantification, OverloadedStrings
+--
+-- Typed tree providers for a shared sidebar, scoped by command registration.
 --
 -- Providers prepare bounded pages on workers. Metadata has no callable handler;
 -- node actions retain typed arguments and an exact command lifetime. The host

@@ -1,6 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Optional saved-file drag delegation. The frontend's owned helper worker runs
+-- |
+-- Module      : Hide.FileDragHelper
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Optional saved-file drag delegation. The frontend's owned helper worker runs
 -- this blocking operation; cancellation terminates the helper's process group.
 -- Human admission and canonical privacy checks belong to the caller, before this
 -- operation. No helper is needed for ordinary editing.

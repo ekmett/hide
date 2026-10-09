@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Accessibility for the native and browser frontends
 
 Status: visible sidebar, PNG image descriptions and current modal dialogs have

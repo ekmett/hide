@@ -1,4 +1,12 @@
--- | Bash completion from existing option descriptors and directory entries.
+-- |
+-- Module      : Hide.Completion
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Bash completion from existing option descriptors and directory entries.
 --
 -- Completion reads GetOpt metadata without evaluating option constructors or
 -- executing shell text. Fixed argument choices come from supported options;

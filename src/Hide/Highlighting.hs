@@ -1,6 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Bounded background source highlighting with identity-checked adoption.
+-- |
+-- Module      : Hide.Highlighting
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Bounded background source highlighting with identity-checked adoption.
 --
 -- One worker initializes Skylighting and evaluates rows before publication.
 -- The desktop tick coalesces pending visible-buffer requests and installs only

@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Resolve document links on the session host and external opens on the client.
+-- |
+-- Module      : Hide.Links
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Resolve document links on the session host and external opens on the client.
 --
 -- Markdown loading, layout and indexing can be prepared by a worker and then
 -- installed as an immutable document. External resources travel as HTTP(S) URLs

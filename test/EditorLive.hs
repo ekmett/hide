@@ -1,6 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- Compile after cabal build: cabal exec -- ghc -threaded -package hide test/EditorLive.hs -o /tmp/hide-live
 -- Run with an installed HLS and its supported GHC on PATH; fixtures are disposable.
+-- |
+-- Module      : Main
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module Main (main) where
 
 import Control.Concurrent (threadDelay)

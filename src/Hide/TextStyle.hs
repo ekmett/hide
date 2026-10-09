@@ -1,4 +1,12 @@
--- | Packed colors and four font traits shared by display frontends.
+-- |
+-- Module      : Hide.TextStyle
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Packed colors and four font traits shared by display frontends.
 -- For 24-bit colors and flags drawn from bold1/italic2/underline8/strike16,
 -- @textStyleFromAttr (textStyleAttr s) == s@. Bit4 belongs to explicit glyph
 -- width, not paint. Other terminal attributes remain owned by Vty.

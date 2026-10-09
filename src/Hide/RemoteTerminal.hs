@@ -1,5 +1,13 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
--- | Vty frontend for validated remote cell frames.
+-- |
+-- Module      : Hide.RemoteTerminal
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings, ScopedTypeVariables
+--
+-- Vty frontend for validated remote cell frames.
 --
 -- Bounded sender/receiver queues keep transport and frame decoding outside input
 -- handling. Disconnects retain the last picture with a notice and suppress remote

@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Resolve build context and plan THC/GHC commands without executing them.
+-- |
+-- Module      : Hide.Build
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Resolve build context and plan THC/GHC commands without executing them.
 --
 -- Source selection ignores labeled output windows. Saved targets are scoped to
 -- their working directory so changing projects does not reuse an unrelated target.

@@ -1,6 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- cabal exec -- ghc -O2 -package hide test/HighlightBench.hs -o /tmp/thc-highlight-bench
 -- /tmp/thc-highlight-bench
+-- |
+-- Module      : Main
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 import Control.Exception (evaluate)
 import Control.Monad (forM_)
 import qualified Data.Text as T

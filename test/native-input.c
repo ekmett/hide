@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 /* Run tools/check-native.sh from the repository root.
  * Uses SDL's event queue and dummy video driver; no real window or user input.
  */

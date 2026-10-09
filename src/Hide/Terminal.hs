@@ -1,5 +1,13 @@
 {-# LANGUAGE CPP, ForeignFunctionInterface, OverloadedStrings #-}
--- | Managed PTY/ConPTY and libghostty-vt foreign-function boundary.
+-- |
+-- Module      : Hide.Terminal
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, ForeignFunctionInterface, OverloadedStrings
+--
+-- Managed PTY/ConPTY and libghostty-vt foreign-function boundary.
 --
 -- An MVar serializes access and prevents native-pointer use after release.
 -- Snapshots copy native memory into Haskell values; output chunks are incremental,

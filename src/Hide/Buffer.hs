@@ -1,5 +1,13 @@
 {-# LANGUAGE DeriveFoldable, DeriveFunctor, DeriveTraversable, MultiParamTypeClasses, OverloadedStrings #-}
--- | Persistent editable text, byte-preserving buffers and change provenance.
+-- |
+-- Module      : Hide.Buffer
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : DeriveFoldable, DeriveFunctor, DeriveTraversable, MultiParamTypeClasses, OverloadedStrings
+--
+-- Persistent editable text, byte-preserving buffers and change provenance.
 --
 -- A finger tree stores newline-inclusive lines. Its measure counts live text,
 -- review text, inserted/deleted lines and encoding flags. Deleted baseline lines

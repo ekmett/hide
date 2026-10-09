@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Bounded, privacy-filtered inspection of an existing Cabal plan.json.
+-- |
+-- Module      : Hide.CabalPlan
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Bounded, privacy-filtered inspection of an existing Cabal plan.json.
 --
 -- This module never invokes Cabal. It prioritizes local units and limits file,
 -- row and encoded-response sizes. Source paths must remain in the workspace and

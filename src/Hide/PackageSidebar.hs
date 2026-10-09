@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Cabal package roots on the shared sidebar. A metadata worker observes the
+-- |
+-- Module      : Hide.PackageSidebar
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Cabal package roots on the shared sidebar. A metadata worker observes the
 -- selected directory and package files; lazy tree workers resolve source paths.
 -- The UI owner only publishes scope changes and four invalidations per tick.
 -- Source actions retain the package revision, then use the common file adopter.

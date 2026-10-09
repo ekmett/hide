@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Live sharing and multiple displays
 
 Status: design proposal, 4 October 2026. This is the intended architecture, not a

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 // Exercise the production authorized-byte export handler without a GPU/session.
 import fs from 'node:fs';
 import vm from 'node:vm';

@@ -1,5 +1,13 @@
 {-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
--- | Session-scoped menu contributions to named slots and groups.
+-- |
+-- Module      : Hide.Plugin.Menu
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : ExistentialQuantification, OverloadedStrings
+--
+-- Session-scoped menu contributions to named slots and groups.
 --
 -- Snapshots contain only bounded metadata and opaque registration identities.
 -- Typed arguments are retained with their command, never recovered from later

@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Session-owned live menu worker and Help contribution.
+-- |
+-- Module      : Hide.MenuCommands
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Session-owned live menu worker and Help contribution.
 --
 -- Only immutable context and exact registrations cross into the worker. Typed
 -- command handlers, docs IO and Markdown preparation run there. Tick checks the

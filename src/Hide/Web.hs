@@ -1,5 +1,13 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | In-process browser display for the shared desktop model.
+-- |
+-- Module      : Hide.Web
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- In-process browser display for the shared desktop model.
 --
 -- An IORef retains the desktop across browser reconnects. Each attached browser
 -- loop runs the supplied tick, applies serialized input/effects and emits compressed

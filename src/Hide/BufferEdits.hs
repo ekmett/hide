@@ -1,5 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Host-owned worker preparation and atomic adoption of buffer edits.
+-- |
+-- Module      : Hide.BufferEdits
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Host-owned worker preparation and atomic adoption of buffer edits.
 --
 -- This is the shared owner extracted from the HLS workspace edit path.
 -- Preparation builds/forces immutable replacements on the owning worker;

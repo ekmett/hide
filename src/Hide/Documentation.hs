@@ -1,5 +1,13 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Bounded offline documentation access for editor and compiler corpora.
+-- |
+-- Module      : Hide.Documentation
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- Bounded offline documentation access for editor and compiler corpora.
 --
 -- The documentation command depends only on a corpus-root resolver, not on
 -- Desktop or an MCP dispatcher. File validation and read budgets live here;
