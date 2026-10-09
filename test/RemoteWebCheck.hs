@@ -33,7 +33,7 @@ checks = do
       bracket (hDuplicate stderr) hClose $ \saved->bracket_ (hDuplicateTo logHandle stderr) (hFlush stderr >> hDuplicateTo saved stderr) $ do
         queue<-newTChanIO
         let feed packets=atomically (mapM_ (writeTChan queue . Just) packets)
-            peer=RemotePeer (const (pure ())) (const (pure ())) (atomically (readTChan queue))
+            peer=RemotePeer (const (pure ())) (const (pure ())) (atomically (readTChan queue)) (pure 0) (pure "")
             epoch=T.replicate 48 "a";ident=T.replicate 48 "b";other=T.replicate 48 "c"
             control kind fields=JsonPacket (object (["type" .= (kind::T.Text),"epoch" .= epoch]++fields))
             reset=control "canvas-reset" []
@@ -81,7 +81,7 @@ checks = do
           bounded "relay completion" (wait server)
         let reject packets=do
               badQueue<-newTChanIO
-              let badPeer=RemotePeer (const (pure ())) (const (pure ())) (atomically (readTChan badQueue))
+              let badPeer=RemotePeer (const (pure ())) (const (pure ())) (atomically (readTChan badQueue)) (pure 0) (pure "")
               withAsync (runRemoteWeb 1 "safe-host" badPeer) $ \server->do
                 atomically (mapM_ (writeTChan badQueue . Just) packets)
                 result<-bounded "malformed relay refusal" (waitCatch server)

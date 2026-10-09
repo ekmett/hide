@@ -16,5 +16,6 @@ import Data.Text (Text)
 -- owner rechecks registration lifetime, current identity and modal availability.
 data SessionSidebarRequest
   = SelectSessionWindow !Text !Int
+  | SwitchSession !Text !Int -- Target and requesting display lifetime.
   | SessionDeleted !Text
   deriving (Eq,Show)

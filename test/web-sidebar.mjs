@@ -105,7 +105,7 @@ assert.equal(packets.length,0);
 const sockets=[],noOp=()=>{};
 Object.assign(context,{URL,ArrayBuffer,location:{href:'http://localhost/'},navigator:{platform:'MacIntel'},
  WebSocket:class {static OPEN=1;constructor(){this.readyState=1;this.sent=[];sockets.push(this);}send(value){this.sent.push(value);}close(){this.readyState=3;this.onclose({code:1000,reason:''});}},
- closed:false,ready:false,attachmentEpoch:0,glyphs:new Map(),tiles:new Map(),atlasEntries:new Map(),socket:null,
+ closed:false,ready:false,sessionFrontend:false,peerAttachment:0,attachmentEpoch:0,glyphs:new Map(),tiles:new Map(),atlasEntries:new Map(),socket:null,
  images:{chunk:null,clear:noOp,receive:noOp,describe:noOp},downloadInfo:null,frame:null,mode:3,rows:[],unsaved:false,clipboard:'',mouse:[-1,-1],dirty:false,
  systemTheme:{matches:false},performance:{now:()=>0},console:{info:noOp},setTimeout:noOp,
  clearClipboardRequest:noOp,decodeRows:rows=>rows,updateTitle:noOp,guardLeave:noOp,allocate:()=>true,
@@ -168,3 +168,30 @@ clearSent();const resizeDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(re
 await message({type:'frame',rows:[],reset:true});clearSent();finishRead(pngBytes);await resizeDrop;
 assert.equal(uploads().length,2);assert.equal(inputFocus,1); // A normal display reset does not change attachment authority.
 console.log('Browser ordinary raw-file drops, safe original names, size/read-only bounds and socket/relay/reset upload receipts passed');
+
+// The same browser/socket survives a session handoff and waits for its RESET.
+vm.runInContext('connect()',context);
+const switchingSocket=sockets.at(-1),socketCount=sockets.length;
+await message({type:'remote',host:'host',attachment:0});
+await message({type:'assets',glyphs:[[65,1,[0]]],scale:2});
+await message({type:'connection',connected:true,attachment:0});
+assert.equal(context.ready,false);
+await message({type:'frame',size:[80,25],mode:3,rows:[],reset:true,semanticSidebar:snapshot});
+assert.equal(context.ready,true);
+clearSent();const switchingDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})}]);
+await message({type:'connection',connected:false,switching:true,attachment:1});
+assert.equal(sidebarAccess.hidden,false); // Failed admission can restore the retained surface.
+vm.runInContext("send({type:'key',key:'x'});send({type:'theme',dark:true})",context);
+assert.equal(switchingSocket.sent.length,1);assert.equal(JSON.parse(switchingSocket.sent[0]).type,'theme');assert.equal(JSON.parse(switchingSocket.sent[0]).attachment,1);
+await message({type:'session',session:'b'.repeat(48),attachment:2});
+assert.equal(sidebarAccess.hidden,true);assert.equal(context.frame,null);
+await message({type:'assets',glyphs:[[65,1,[0]]],scale:2});
+await message({type:'connection',connected:true,attachment:2});
+assert.equal(context.ready,false);
+await message({type:'frame',size:[91,31],mode:3,rows:[],reset:true});
+assert.equal(context.ready,true);assert.equal(sidebarAccess.hidden,true);
+clearSent();finishRead(pngBytes);await switchingDrop;assert.equal(uploads().length,0);
+vm.runInContext("send({type:'key',key:'y'})",context);
+assert.equal(JSON.parse(switchingSocket.sent.at(-1)).attachment,2);
+assert.equal(sockets.length,socketCount);assert.equal(sockets.at(-1),switchingSocket);
+console.log('Browser session handoff retains its socket, gates keys until RESET, reports safe configuration and revokes old upload/semantic state');

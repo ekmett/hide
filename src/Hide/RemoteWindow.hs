@@ -58,7 +58,7 @@ import Hide.Font
 import Hide.Protocol (WirePacket(..), decodeFrame,parseClipboardRequest,clipboardReplyInput)
 import Hide.Links (openResource)
 import Hide.FileExport (FileExports,withFileExports,stageFileExport,startHelperFileExport)
-import Hide.Remote (peerSendBatch, peerReceive)
+import Hide.Remote (peerSendBatch, peerReceive, peerAttachment)
 import Hide.Window hiding (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
 #endif
 
@@ -496,6 +496,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
             (serial,changed)<-parseIO (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) value
             if changed then go rows metadata download serial canvasState
               else emit (Control value) >> go rows metadata download demand canvasState
+          "session" -> emit (Control value) >> go [] (object []) Nothing 0 emptyCanvasReceiveState
           "connection" -> emit (Control value) >> go rows (case metadata of Object fields->Object (KM.delete "semanticDialog" (KM.delete "canvas" fields)); _->metadata) Nothing 0 emptyCanvasReceiveState
           _ | kind `elem` ["canvas-reset","canvas-resource","canvas-chunk","canvas-release"]->do
             unless (case download of Nothing->True; _->False) (ioError (userError "Canvas control interrupted a download pair"))
@@ -639,14 +640,17 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
   incoming <- newTBQueueIO 8
   outgoing <- newTBQueueIO 256
   queuedBytes <- newTVarIO (0::Int)
+  attachment<-peerAttachment peer >>= newIORef
+  attachmentStarted<-newIORef (0::Word64)
   let driver = case backend of Metal -> "metal"; Vulkan -> "vulkan"; _ -> if os=="darwin" then "metal" else "vulkan"
       send packets = do
         now<-getMonotonicTimeNSec
         started<-fromMaybe now <$> readIORef inputDemand
         before<-readIORef demands
+        lifetime<-readIORef attachment
         let tag state (JsonPacket (Object fields))=
               let (serial,next)=requestFrame started state
-              in (next,JsonPacket (Object (KM.insert "seq" (toJSON serial) fields)))
+              in (next,JsonPacket (Object (KM.insert "attachment" (toJSON lifetime) (KM.insert "seq" (toJSON serial) fields))))
             tag state packet=(state,packet)
             (after,tagged)=mapAccumL tag before packets
             size = sum [case packet of JsonPacket value -> fromIntegral (BL.length (encode value)); BinaryPacket bytes -> BS.length bytes | packet<-tagged]
@@ -657,6 +661,14 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           else writeTBQueue outgoing (size,tagged) >> writeTVar queuedBytes (used+size) >> pure True
         if accepted then writeIORef demands after
           else hPutStrLn stderr "Remote input queue full; input was not sent."
+      retireInput value=do
+        serial<-parseIO (withObject "attachment" (\o->o .:? "attachment")) value
+        forM_ serial (writeIORef attachment)
+        atomically $ do
+          abandoned<-flushTBQueue outgoing
+          modifyTVar' queuedBytes (subtract (sum (map fst abandoned)))
+        writeIORef demands emptyFrameTiming
+        writeIORef presentationDemand Nothing
       sendJSON value = send [JsonPacket value]
       sendEvent = maybe (pure ()) sendJSON . nativeEventInput
       pasteReply request = do
@@ -796,11 +808,31 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
               request<-parseIO parseClipboardRequest value
               pasteReply request
               pure (frame,atlas,connection,changed,closed)
-            "connection" -> do
-              connected <- parseIO (withObject "connection" (.: "connected")) value
+            "session" -> do
+              retireInput value
+              getMonotonicTimeNSec >>= writeIORef attachmentStarted
               clearSidebar
               resetCanvas
-              when connected resize
+              c_cancel_file_drag
+              writeIORef exportGesture Nothing
+              pure (Nothing,atlas," (switching session)",True,closed)
+            "notice" -> do
+              message<-parseIO (withObject "notice" (.: "message")) value
+              hPutStrLn stderr (T.unpack message)
+              pure (frame,atlas,connection,changed,closed)
+            "connection" -> do
+              retireInput value
+              connected <- parseIO (withObject "connection" (.: "connected")) value
+              handoff<-parseIO (withObject "connection" (\o->o .:? "switching" .!= False)) value
+              unless connected $ do
+                getMonotonicTimeNSec >>= writeIORef attachmentStarted
+                unless handoff (clearSidebar >> resetCanvas)
+              when connected $ do
+                getMonotonicTimeNSec >>= writeIORef attachmentStarted
+                sendJSON (object ["type" .= ("frontend"::T.Text),"mode" .= mode,"mac" .= (os=="darwin")])
+                dark<-(/=0) <$> c_system_dark
+                sendJSON (object ["type" .= ("theme"::T.Text),"dark" .= dark])
+                resize
               pure (frame,atlas,if connected then "" else " (reconnecting)",True,closed)
             _ -> pure (frame,atlas,connection,changed,closed)
       loop receiver sender frame atlas connection previousTheme repaint = do
@@ -836,7 +868,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
 #endif
           updateTiming status current
           dark <- (/=0) <$> c_system_dark
-          when (previousTheme/=Just dark && (connected || previousTheme==Nothing)) (sendJSON (object ["type" .= ("theme"::T.Text),"dark" .= dark]))
+          when (previousTheme/=Just dark) (sendJSON (object ["type" .= ("theme"::T.Text),"dark" .= dark]))
           event <- allocaArray 6 $ \p -> check "Read remote window event" (c_wait p) >> map fromIntegral <$> peekArray 6 p
           case event of
             kind:_ | kind `elem` [1,2,5,7,9,10,11,14] -> c_cancel_file_drag >> writeIORef exportGesture Nothing
@@ -845,10 +877,13 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           queuedAge<-c_event_age_ns
           let requested=observed-min observed queuedAge
           when (nativeRepaint event) (modifyIORef' presentationDemand (Just . maybe requested (min requested)))
+          began<-readIORef attachmentStarted
           unless (remoteDetachShortcut event || remoteCloseDetaches connected event) $ do
             writeIORef inputDemand (Just requested)
-            when (remoteInputAllowed connected event) (dispatch connected current event) `finally` writeIORef inputDemand Nothing
-            loop receiver sender current glyphs status (if connected || previousTheme==Nothing then Just dark else previousTheme) (nativeRepaint event)
+            (case event of
+              5:_ | not connected->sendEvent event
+              _->when (requested>=began && remoteInputAllowed connected event) (dispatch connected current event)) `finally` writeIORef inputDemand Nothing
+            loop receiver sender current glyphs status (Just dark) (nativeRepaint event)
   bracket_ (pure ()) c_close $ do
 #ifdef darwin_HOST_OS
     c_menu_prepare

@@ -13,7 +13,7 @@ import Control.Concurrent.Async (race_)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception (finally, evaluate)
-import Control.Monad (forever, unless, when, void)
+import Control.Monad (forever, unless, when, void, forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseEither, parseMaybe)
 import qualified Data.Aeson.KeyMap as KM
@@ -31,7 +31,7 @@ import Hide.BrowserServer
 -- remains attached while the browser is absent, so tooling continues running.
 data Cache = Cache
   { cachedAssets :: Maybe Value, cachedRows :: [Value], cachedMeta :: Object
-  , cachedConnection :: Maybe Value, pendingBinary :: Maybe BinaryPurpose
+  , cachedConnection :: Maybe Value, cachedSession :: Maybe Value, pendingBinary :: Maybe BinaryPurpose
   , cachedCanvas :: CanvasCache, sessionClosed :: Bool }
 
 -- One current cursor and immutable completed resources. Byte admission includes
@@ -100,10 +100,11 @@ canvasReplay current =
 -- Uploads enter the peer as atomic metadata/payload batches.
 runRemoteWeb :: Double -> String -> RemotePeer -> IO ()
 runRemoteWeb scale host peer = do
-  cache<-newTVarIO (Cache Nothing [] KM.empty Nothing Nothing emptyCanvas False)
+  cache<-newTVarIO (Cache Nothing [] KM.empty Nothing Nothing Nothing emptyCanvas False)
   subscriber<-newTVarIO Nothing
   generation<-newTVarIO (0::Integer)
   nextSerial<-newTVarIO (0::Integer)
+  attachment<-peerAttachment peer >>= newTVarIO
   aliases<-newTVarIO M.empty
   -- Command results survive a browser disconnect, including a Cut whose edit
   -- has already committed remotely. Downloads are retained as complete pairs.
@@ -151,9 +152,19 @@ runRemoteWeb scale host peer = do
               Just "assets" -> do
                 let adjusted=case value of Object fields->Object (KM.insert "scale" (toJSON scale) fields); _->value
                 atomically $ modifyTVar' cache (\c->c {cachedAssets=Just adjusted,cachedRows=[],cachedMeta=KM.empty,cachedCanvas=emptyCanvas}) >> emit (JsonPacket adjusted)
+              Just "session" -> atomically $ do
+                serial<-either (throwSTM . userError) pure (parseEither (withObject "session" (.: "attachment")) value)
+                writeTVar attachment serial
+                writeTVar aliases M.empty
+                modifyTVar' cache (\c->c {cachedSession=Just value,cachedRows=[],cachedMeta=KM.empty,cachedCanvas=emptyCanvas,pendingBinary=Nothing})
+                emit packet
               Just "connection" -> atomically $ do
+                serial<-either (throwSTM . userError) pure (parseEither (withObject "connection" (\o->o .:? "attachment")) value)
+                mapM_ (writeTVar attachment) serial
                 let disconnected=parseMaybe (withObject "connection" (\o->o .: "connected")) value==Just False
-                modifyTVar' cache (\c->if disconnected then c {cachedConnection=Just value,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "canvas" (cachedMeta c)} else c {cachedConnection=Just value})
+                let handoff=parseMaybe (withObject "connection" (\o->o .:? "switching" .!= False)) value==Just True
+                when disconnected (writeTVar aliases M.empty)
+                modifyTVar' cache (\c->if disconnected && not handoff then c {cachedConnection=Just value,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "canvas" (cachedMeta c)} else c {cachedConnection=Just value})
                 emit packet
               Just kind | "canvas-" `T.isPrefixOf` kind -> do
                 (updated,purpose)<-either (ioError . userError) pure (canvasControl (cachedCanvas before) value)
@@ -188,7 +199,7 @@ runRemoteWeb scale host peer = do
         BinaryPacket bytes->WS.sendBinaryData conn bytes
       session conn = do
         queue<-newTBQueueIO 128
-        (gen,snapshot)<-atomically $ do
+        (gen,serial,snapshot)<-atomically $ do
           current<-readTVar cache
           case cachedAssets current of Nothing->retry; Just _->pure ()
           -- Subscribe between binary pairs; a current PNG prefix is replayed
@@ -198,15 +209,19 @@ runRemoteWeb scale host peer = do
           gen<-readTVar generation
           writeTVar aliases M.empty
           writeTVar subscriber (Just queue)
-          pure (gen,current)
+          serial<-readTVar attachment
+          pure (gen,serial,current)
         let cleanup=atomically (writeTVar subscriber Nothing)
             number value = do
-              serial<-either (ioError . userError) pure (parseEither (withObject "event" (\o->o .:? "seq" .!= 0)) value :: Either String Integer)
+              frontendSerial<-either (ioError . userError) pure (parseEither (withObject "event" (\o->o .:? "seq" .!= 0)) value :: Either String Integer)
+              stamp<-either (ioError . userError) pure (parseEither (withObject "event" (.: "attachment")) value :: Either String Int)
               atomically $ do
-                modifyTVar' nextSerial (+1)
-                key<-readTVar nextSerial
-                modifyTVar' aliases (M.insert key (gen,serial))
-                pure (case value of Object fields->Object (KM.insert "seq" (toJSON key) fields); _->value)
+                live<-readTVar attachment
+                if stamp/=live then pure Nothing else do
+                  modifyTVar' nextSerial (+1)
+                  key<-readTVar nextSerial
+                  modifyTVar' aliases (M.insert key (gen,frontendSerial))
+                  pure (Just (case value of Object fields->Object (KM.insert "seq" (toJSON key) fields); _->value))
             incoming=forever $ do
               bytes<-WS.receiveData conn :: IO BL.ByteString
               value<-either (ioError . userError) pure (eitherDecode bytes)
@@ -221,8 +236,8 @@ runRemoteWeb scale host peer = do
                     Just (WS.Binary payload) | BL.length payload<=16777216 -> pure (BL.toStrict payload)
                     _->ioError (userError "Expected upload bytes (maximum 16 MiB)")
                   numbered<-number value
-                  peerSendBatch peer [JsonPacket numbered,BinaryPacket payload]
-                _ -> number value >>= peerSend peer . JsonPacket
+                  mapM_ (\event->peerSendBatch peer [JsonPacket event,BinaryPacket payload]) numbered
+                _ -> number value >>= mapM_ (peerSend peer . JsonPacket)
             outgoing=forever $ do
               work<-atomically $ (do
                 pending<-readTVar replies
@@ -240,7 +255,10 @@ runRemoteWeb scale host peer = do
                 JsonPacket value | messageType value `elem` [Just "closed",Just "detached"] -> void (tryPutMVar done ())
                 _->pure ()
         finally (do
-          sendPacket conn (JsonPacket (object ["type" .= ("remote"::T.Text),"host" .= host]))
+          sendPacket conn (JsonPacket (object ["type" .= ("remote"::T.Text),"host" .= host,"attachment" .= serial]))
+          forM_ (cachedSession snapshot) $ \value->sendPacket conn (JsonPacket (case value of
+            Object fields->Object (KM.insert "attachment" (toJSON serial) fields)
+            _->value))
           mapM_ (sendPacket conn . JsonPacket) (cachedAssets snapshot)
           mapM_ (sendPacket conn) (canvasReplay (cachedCanvas snapshot))
           unless (null (cachedRows snapshot)) $ sendPacket conn (BinaryPacket (BL.toStrict (framePacket True [] (cachedRows snapshot) (KM.toList (cachedMeta snapshot)))))

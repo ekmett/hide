@@ -52,7 +52,7 @@ initializeGPU();
 let cellGrid=new Uint32Array(),gridCols=0,gridRows=0;
 const atlasStats={tiles:0,tileBytes:0,gridBytes:0,draws:0};
 let glyphs=new Map(), tiles=new Map(), rows=[], frame=null, scale=2, initialScale=2, cols=80, lines=25, mode=3;
-let socket, attachmentEpoch=0, ready=false, closed=false, mouse=[-1,-1], leftDown=false, cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
+let socket, peerAttachment=0, attachmentEpoch=0, ready=false, closed=false, mouse=[-1,-1], leftDown=false, cursorEpoch=performance.now(), blinkPhase=-1, dirty=true, composing=false, clipboard='', lastSize='';
 let remoteHost="", sessionFrontend=false, detaching=false, detached=false;
 const drawTimes=[];
 let titleTick=0, timingText='', rasterTime=0;
@@ -71,8 +71,8 @@ function guardLeave(){
 }
 const rgb=n=>`#${n.toString(16).padStart(6,'0')}`;
 function send(value){
- if(socket?.readyState!==WebSocket.OPEN||!ready||detaching)return;
- value.seq=++serial;
+ if(socket?.readyState!==WebSocket.OPEN||detaching||!ready&&!(sessionFrontend&&['frontend','theme','resize'].includes(value.type)))return;
+ value.attachment=peerAttachment;value.seq=++serial;
  if(['key','paste','command','upload','mouse'].includes(value.type)){pendingEdit=serial;guardLeave();}
  socket.send(JSON.stringify(value));
 }
@@ -80,7 +80,7 @@ function mods(e){return [e.shiftKey?'shift':null,e.ctrlKey?'ctrl':null,e.metaKey
 function cellHeight(){return mode===259?8:16;}
 function metrics(){return [canvas.width/cols,canvas.height/lines];}
 function resize(){
- if(!ready)return;
+ if(!ready&&!sessionFrontend)return;
  const w=Math.max(40,Math.min(512,Math.floor(screen.clientWidth/(8*scale))));
  const h=Math.max(12,Math.min(256,Math.floor(screen.clientHeight/(cellHeight()*scale))));
  const key=`${w},${h}`;
@@ -505,7 +505,8 @@ function connect(){
  attachmentEpoch++;
  socket=new WebSocket(new URL('socket',location.href).href.replace(/^http/,'ws'));
  socket.binaryType='arraybuffer';
- const connection=socket,wireRows=[];let incoming=Promise.resolve(),platformSent=false,stopped=false;
+ const connection=socket,wireRows=[];let incoming=Promise.resolve(),platformSent=false,stopped=false,transportConnected=false,hasFrame=false;
+ function publishFrontend(){if(!ready||platformSent)return;platformSent=true;lastSize='';send({type:'frontend',mode:frame?.mode||3,mac:navigator.platform.includes('Mac')});send({type:'theme',dark:systemTheme.matches});resize();}
  socket.onmessage=e=>{incoming=incoming.then(()=>{if(!stopped&&connection===socket)return receive(e);}).catch(error=>{if(stopped||connection!==socket)return;status.textContent=`Display error: ${error.message}`;connection.close();});};
  async function receive(e){
    let message;
@@ -522,14 +523,15 @@ function connect(){
    }
    if(stopped||connection!==socket)return;
    if(message.type?.startsWith('canvas-')){images.control(message);dirty=true;
-   }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
+   }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;peerAttachment=message.attachment;
+   }else if(message.type==='session'){
+     peerAttachment=message.attachment;attachmentEpoch++;ready=false;hasFrame=false;platformSent=false;frame=null;rows=[];wireRows.length=0;serial=acknowledged=pendingEdit=0;clipboard='';nativeCopies=[];leftDown=false;mouse=[-1,-1];lastSize='';clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;
    }else if(message.type==='connection'){
-     ready=message.connected&&glyphs.size>0;if(!ready){attachmentEpoch++;clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
+     transportConnected=message.connected;peerAttachment=message.attachment??peerAttachment;ready=message.connected&&glyphs.size>0&&(!sessionFrontend||hasFrame);if(!message.connected){attachmentEpoch++;clearClipboardRequest();if(!message.switching){clearSidebar();clearDialog();images.clear();}dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');publishFrontend();
    }else if(message.type==='assets'){
      attachmentEpoch++;clearSidebar();clearDialog();images.clear();dirty=true;
-     glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
+     if(!glyphs.size)scale=initialScale=message.scale||2;glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();hasFrame=false;ready=!sessionFrontend;status.textContent=ready?'Connected':'Connecting…';lastSize='';if(ready)send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
-     if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
      message.rows=decodeRows(message.rows);
      const oldCursor=JSON.stringify(frame?.cursor);
      const changedMode=Object.hasOwn(message,'mode')&&mode!==message.mode;
@@ -544,7 +546,9 @@ function connect(){
      for(const [y,r] of message.rows)rows[y]=r;
      if(oldCursor!==JSON.stringify(frame.cursor))cursorEpoch=performance.now();
      if(!allocate())drawRows(message.rows);
+     hasFrame=true;ready=glyphs.size>0&&(!sessionFrontend||transportConnected);publishFrontend();
      if(changedMode)lastSize='';resize();
+   }else if(message.type==='notice'){status.textContent=message.message;
    }else if(message.type==='download'){
      downloadInfo=message;
    }else if(message.type==='open-resource'){

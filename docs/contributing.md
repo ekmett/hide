@@ -786,5 +786,18 @@ publishes forced scalar window IDs/titles through `editorWindowEntries` and
 compares separate catalog/window revisions, invalidating at most two nodes.
 Closed `SessionSidebarRequest` values pass the ordinary tree hit/lifetime/modal
 checks, then the live session owner rechecks session identity and window
-availability via `activateEditorWindow`. No new permission map or attachment
-manager is introduced. Cross-frontend explicit resume remains the next slice.
+availability via `activateEditorWindow`. Switch/Recover also captures the display
+attachment epoch: a late sidebar reply cannot move a replacement display. Delete
+uses the existing confirmation form and rechecks the saved record under the
+session lifetime lock before removing a stopped checkpoint.
+
+`withSessionPeer` owns handoff within the existing frontend callback. It prepares
+a candidate with a fresh input journal while continuing to receive the old
+session's committed replies. Candidate admission waits for a complete reset frame
+after applying the frontend, theme and dimensions. The transport owner then
+selects the target and retires the old attachment. Preparation failure leaves the
+old session usable; a later target failure reconnects only to that target.
+Frontend queues stamp inputs with their displayed attachment, and admission
+rejects old stamps. Native and terminal event queues also discard input collected
+during the transition. These checks use scalar lifetimes and the three display
+settings; they do not compare desktops, buffers or undo history.

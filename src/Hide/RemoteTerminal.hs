@@ -42,7 +42,7 @@ import System.IO (stdout, stderr, hPutStrLn, hFlush, openBinaryTempFile, hClose)
 import System.Timeout (timeout)
 import Hide.Protocol (WirePacket(..), decodeFrame,parseClipboardRequest,clipboardReplyInput)
 import Hide.FileExport (FileExports,withFileExports,startHelperFileExport)
-import Hide.Remote (peerReceive, peerSend)
+import Hide.Remote (peerReceive, peerSend, peerAttachment)
 import Hide.RemoteWindow (parseRemoteFrame, sanitizeDownloadName)
 import Hide.Unicode (updateDisplayOps)
 #endif
@@ -149,19 +149,29 @@ runRemoteTerminal peer = withFileExports $ \exports -> bracket (mkVty V.defaultC
   incoming <- newTBQueueIO 8
   outgoing <- newTBQueueIO 64
   queued <- newTVarIO (0::Int)
+  attachment<-peerAttachment peer >>= newTVarIO
   let send value = do
-        let size=fromIntegral (BL.length (encode value))
         accepted <- atomically $ do
+          serial<-readTVar attachment
+          let tagged=case value of Object fields->Object (KM.insert "attachment" (toJSON serial) fields);_->value
+              size=fromIntegral (BL.length (encode tagged))
           full <- isFullTBQueue outgoing
           bytes <- readTVar queued
           if full || bytes+size>33554432 then pure False else do
-            writeTBQueue outgoing (size,value)
+            writeTBQueue outgoing (size,tagged)
             writeTVar queued (bytes+size)
             pure True
         unless accepted (ioError (userError "Remote terminal input queue is full"))
       drain = do
         sent <- timeout 2000000 (atomically (readTVar queued >>= check . (==0)))
         when (sent==Nothing) (hPutStrLn stderr "Some terminal input could not be handed to the session before detaching.")
+      retireInput value=do
+        serial<-parseIO (withObject "attachment" (\o->o .:? "attachment")) value
+        atomically $ do
+          forM_ serial (writeTVar attachment)
+          abandoned<-flushTBQueue outgoing
+          modifyTVar' queued (subtract (sum (map fst abandoned)))
+      drainEvents=V.nextEventNonblocking vty >>= maybe (pure ()) (const drainEvents)
       resize = V.displayBounds (V.outputIface vty) >>= \(w,h) -> forM_ (terminalEventInput (V.EvResize w h)) send
       render frame message = do
         size <- V.displayBounds (V.outputIface vty)
@@ -179,8 +189,15 @@ runRemoteTerminal peer = withFileExports $ \exports -> bracket (mkVty V.defaultC
             kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
             case kind of
               "closed" -> pure ()
+              "session" -> do
+                retireInput value
+                drainEvents
+                render Nothing "Switching session; Ctrl+] detaches"
+                loop receiver sender Nothing False Nothing ""
               "connection" -> do
+                retireInput value
                 live <- parseIO (withObject "connection" (.: "connected")) value
+                drainEvents
                 when live resize
                 render frame (if live then "" else "Reconnecting; Ctrl+] detaches")
                 loop receiver sender frame live clipboard ""
@@ -210,7 +227,7 @@ runRemoteTerminal peer = withFileExports $ \exports -> bracket (mkVty V.defaultC
             case event of
               Just (V.EvKey (V.KChar ']') [V.MCtrl]) -> pure ()
               _ -> do
-                when connected (forM_ (event >>= \input->maybe (terminalEventInput input) (\value->remoteBindingInput value input (terminalEventInput input)) frame) send)
+                when (connected || case event of Just V.EvResize{}->True;_->False) (forM_ (event >>= \input->maybe (terminalEventInput input) (\value->remoteBindingInput value input (terminalEventInput input)) frame) send)
                 when (connected && event/=Nothing && not (T.null notice)) (render frame "")
                 loop receiver sender frame connected clipboard (if event==Nothing then notice else "")
   resize
@@ -254,6 +271,7 @@ receiveTerminalFrames exports peer queue = go [] (object []) Nothing
           "canvas-resource" -> go rows metadata download
           "canvas-release" -> go rows metadata download
           "download" -> parseIO (withObject "download" $ \o->(,) <$> o .: "name" <*> o .:? "purpose") value >>= go rows metadata . Just
+          "session" -> emit (Control value) >> go [] (object []) Nothing
           "connection" -> emit (Control value) >> go rows metadata Nothing
           _ -> emit (Control value) >> go rows metadata download
       Just (BinaryPacket bytes) -> case download of

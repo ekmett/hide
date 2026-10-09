@@ -64,6 +64,17 @@ withSessionSidebar host current initial use=withRegistry $ \registry->do
   command<-registerCommand registry (CommandDef "hide.sidebar.sessions.window" "Select window" hidden hidden $ \ctx request->
     pure $ if sidebarOrigin ctx==Menu.HumanMenu then Right (SidebarSession request)
       else Left (CommandRejected "Session selection requires the human.")) >>= required
+  switchSaved<-registerCommand registry (CommandDef "hide.sidebar.sessions.switch" "Open saved session" hidden hidden $ \ctx sid->
+    if sidebarOrigin ctx/=Menu.HumanMenu || Just sid==currentId
+      then pure (Left (CommandRejected "Select another saved session.")) else do
+        saved<-S.loadSession (T.unpack sid)
+        case saved of
+          Just record | S.sessionHost record==Nothing->do
+            state<-S.sessionState record
+            pure $ if state `elem` ["running","recoverable"]
+              then Right (SidebarSession (SwitchSession sid (sidebarAttachment ctx)))
+              else Left (CommandRejected "Saved session is no longer available.")
+          _->pure (Left (CommandRejected "Select a session on the current host."))) >>= required
   deleteSaved<-registerCommand registry (CommandDef "hide.sidebar.sessions.delete-confirmed" "Delete saved session" hidden hidden $ \ctx captured->
     if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Session deletion requires the human.")) else
       (do
@@ -92,7 +103,10 @@ withSessionSidebar host current initial use=withRegistry $ \registry->do
         let here=Just sid==currentId
             short=T.pack (S.shortSessionId (T.unpack sid) (map T.unpack allIds))
             title=label (project<>"  "<>short<>"  "<>(if here then "current" else state)<>"  "<>hostName)
-        in P.NodeDef (P.NodeInfo (sessionNode sid) title "" here Nothing) Nothing
+        in P.NodeDef (P.NodeInfo (sessionNode sid) title "" here Nothing) Nothing $
+          [P.ActionMenu (if state=="recoverable" then "Recover" else "Switch to session")
+             (P.treeAction registry switchSaved sid (\_ value->pure value))
+          | not here,hostName=="local",state `elem` ["running","recoverable"]] ++
           [P.ActionMenu "Delete..." (P.treeAction registry deleteMenu (sid,short) (\_ value->pure value))
           | not here,hostName=="local",state=="recoverable"]
       children _ (P.ChildRequest key cursor)=do
@@ -159,6 +173,12 @@ sessionSidebarEffects (SessionSidebar provider current _ _) fallback=foldM step 
       live<-P.treeCurrent provider
       pure (False,if live && Just sid==current && editorWindowAvailable d wid then activateEditorWindow wid d
         else d {status="Session window expired or is unavailable."})
+    step (_,d) (SessionSidebarAction (SwitchSession sid attachment))=do
+      live<-P.treeCurrent provider
+      pure (False,if live && Just sid/=current && attachment==sessionAttachment d &&
+          dialog d==Nothing && not (questionActive d) && pendingSessionSwitch d==Nothing
+        then d {pendingSessionSwitch=Just sid,status="Opening saved session…"}
+        else d {status="Session selection expired or is unavailable."})
     step (_,d) (SessionSidebarAction (SessionDeleted sid))=do
       live<-P.treeCurrent provider
       pure (False,if live && Just sid/=current then d {status="Saved session deleted."} else d)

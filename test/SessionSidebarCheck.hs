@@ -77,6 +77,11 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
                        in fst (handleEvent (V.EvMouseDown 5 (2+i-scroll) V.BRight []) d)
               _->error "Missing context-menu target"
             menuLabels d=maybe [] (const (map fst (contextItemsFor d))) (contextMenu d)
+            choose node title d=do
+              let opened=popup node d
+              case [i | (i,(name,_))<-zip [0..] (contextItemsFor opened),name==title] of
+                i:_->act (handleEvent (V.EvKey V.KEnter []) opened {contextMenu=fmap (\(rect,_)->(rect,i)) (contextMenu opened)})
+                _->fail "Missing session action"
             currentNode="session:"<>T.pack (sessionId current)
         started<-initializeSidebar host initial
         mounted<-wait "Sessions root" (has "Sessions") started
@@ -124,13 +129,22 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
         writeFile savedPath "saved unsaved work"
         let savedNode="session:"<>T.pack (sessionId saved)
             confirmation d=maybe False (T.isPrefixOf "Delete session ".dialogTitle) (dialog d)
-            openDelete d=act (handleEvent (V.EvKey V.KEnter []) (popup savedNode d)) >>= wait "delete confirmation" confirmation
+            openDelete d=choose savedNode "Delete..." d >>= wait "delete confirmation" confirmation
         catalogued<-wait "saved session" (\d->hasId savedNode d && ready d) selected
-        unless (menuLabels (popup savedNode catalogued)==["Delete..."] &&
+        unless ("Delete..." `elem` menuLabels (popup savedNode catalogued) &&
                 null (menuLabels (popup currentNode catalogued)) &&
                 null (menuLabels (popup ("session:"<>T.pack (sessionId other)) catalogued)))
           (fail "Session deletion menu does not distinguish stopped local/current/remote targets")
-        opened<-openDelete catalogued
+        switching<-choose savedNode "Recover" catalogued >>= wait "captured session recovery"
+          ((==Just (T.pack (sessionId saved))).pendingSessionSwitch)
+        unless ((windowId <$> activeWindow switching)==(windowId <$> activeWindow catalogued))
+          (fail "Session request changed the old desktop before attachment")
+        let request=SessionSidebarAction (SwitchSession (T.pack (sessionId saved)) (sessionAttachment catalogued))
+        (_,expiredSwitch)<-core catalogued {sessionAttachment=sessionAttachment catalogued+1} [request]
+        (_,modalSwitch)<-core modal [request]
+        unless (pendingSessionSwitch expiredSwitch==Nothing && pendingSessionSwitch modalSwitch==Nothing && not (guestEffectsAllowed [request]))
+          (fail "Session request crossed display lifetime, modal or input authority")
+        opened<-openDelete switching {pendingSessionSwitch=Nothing}
         unless (not (guestKeyboardAllowed opened) && maybe False (\dg->null (fields dg) && buttons dg==["Delete","Cancel"]) (dialog opened))
           (fail "Deletion is not a human-only button confirmation")
         cancelled<-act (handleEvent (V.EvKey V.KEsc []) opened)

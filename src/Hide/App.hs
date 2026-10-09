@@ -224,6 +224,7 @@ runEditor args = do
             [ident] -> fresh {sessionId=ident}
             _ -> fresh
       wasInterrupted<-newIORef False
+      displayedSession<-newIORef (sessionId record)
       let reattach=resume/=Nothing || any isSession flags
           attach=case sessionHost record of
             Nothing -> withLocalPeer (sessionId record) reattach (sessionArguments record)
@@ -241,13 +242,14 @@ runEditor args = do
               Web -> runRemoteWeb scale (maybe "" id (sessionHost record)) peer
               _ -> runRemoteWindow backend scale dimensions screenMode (maybe "" id (sessionHost record)) peer
           report = do
-            saved<-loadSession (sessionId record)
+            ident<-readIORef displayedSession
+            saved<-loadSession ident
             detached<-readIORef wasInterrupted
-            when (saved/=Nothing || detached) $ putStrLn ("Session: "++sessionId record++"\nResume: hide --resume "++sessionId record) >> hFlush stdout
+            when (saved/=Nothing || detached) $ putStrLn ("Session: "++ident++"\nResume: hide --resume "++ident) >> hFlush stdout
       -- A local session starts beside the project that created it. Reattachment
       -- needs only its endpoint, so a removed/renamed working directory is fine.
       (withDetachSignals (do
-          attach interruptedDisplay
+          attach (\peer->interruptedDisplay peer `finally` (peerSession peer >>= writeIORef displayedSession))
           stopped <- readIORef wasInterrupted
           when (Daemon `elem` flags && not stopped) (awaitSessionDetached record))
         `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)

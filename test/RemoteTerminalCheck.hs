@@ -162,6 +162,8 @@ packetChecks=unless (os=="mingw32") $ bracket temporary removePathForcibly $ \ro
     let peer=RemotePeer
           { peerSend = \_->error "terminal receiver sent a transport packet"
           , peerSendBatch = \_->error "terminal receiver sent a transport batch"
+          , peerAttachment=pure 0
+          , peerSession=pure ""
           , peerReceive=atomicModifyIORef' packets (\pending->case pending of []->([],Nothing); packet:rest->(rest,Just packet))
           }
     withFileExports $ \exports->do
