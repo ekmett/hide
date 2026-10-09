@@ -27,15 +27,16 @@ import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Graphics.Vty as V
 import Hide.Frontend
+import Hide.TextStyle
 import Hide.Model (Command(..), MenuItem(..), menus, menuContributionSlots)
 import Data.List (elemIndex, nub)
 import qualified Data.IntSet as IS
-import Data.Maybe (fromMaybe)
 import Hide.Window (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
 import Hide.Remote (RemotePeer)
 import Hide.Unicode (Script(..), scalarWidth, clusterWidth, graphemes)
 import qualified Data.Vector as Vec
 #if defined(WITH_WINDOW) && defined(WITH_REMOTE)
+import Data.Maybe (fromMaybe)
 import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM hiding (check)
 import Control.Exception (bracket, bracket_, throwIO, IOException, catch, finally)
@@ -53,7 +54,6 @@ import System.FilePath ((</>), takeFileName)
 import System.Info (os)
 import System.Timeout (timeout)
 import System.IO (withBinaryFile, IOMode(ReadMode), hFileSize, openBinaryTempFile, hClose, hPutStrLn, stderr)
-import Hide.TextStyle
 import Hide.Font
 import Hide.Protocol (WirePacket(..), decodeFrame,parseClipboardRequest,clipboardReplyInput)
 import Hide.Links (openResource)
@@ -419,8 +419,11 @@ remoteDockWindowInput frame generation event=do
   ident<-nativeDockWindow (remoteWindows frame) generation event
   pure (object ["type" .= ("focus-window"::T.Text),"id" .= ident])
 
+#if defined(WITH_WINDOW) && defined(WITH_REMOTE)
 contributionCatalogue :: RemoteFrame -> [(T.Text,T.Text,Integer,T.Text,T.Text,Int,T.Text,T.Text)]
 contributionCatalogue frame=[(contributionId item,contributionRegistry item,contributionGeneration item,contributionSlot item,contributionGroup item,contributionOrder item,contributionTitle item,contributionKey item) | item<-remoteContributions frame]
+
+#endif
 
 -- Drag/wheel updates are painted when their resulting frame arrives. Painting
 -- the previous frame first spends an extra vblank on obsolete selection/layout.

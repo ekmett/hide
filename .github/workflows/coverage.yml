@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
+name: Coverage
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  coverage:
+    name: ${{ matrix.flag }} / GHC 9.14.1
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            flag: Linux_X64
+          - runner: macos-15
+            flag: macOS_ARM64
+          - runner: windows-2025
+            flag: Windows_X64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - uses: haskell-actions/setup@0f8e8c99d88aeb3fbfd523f1ef2c6f762d10d64d # v2.12.1, Node 24
+        id: haskell
+        with:
+          ghc-version: '9.14.1'
+          cabal-version: '3.16.0.0'
+      - name: Install pkg-config (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes pkg-config ninja-build
+      - name: Install pkg-config (macOS)
+        if: runner.os == 'macOS'
+        run: brew install pkgconf ninja
+      - name: Prepare native Windows fixtures
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install pkgconfiglite --yes --no-progress
+          $pkg = Get-ChildItem C:/ProgramData/chocolatey/lib/pkgconfiglite -Recurse -Filter pkg-config.exe | Select-Object -First 1
+          if (-not $pkg) { throw 'pkg-config.exe was not installed' }
+          $pkg.DirectoryName >> $env:GITHUB_PATH
+          # Fixtures use real symlinks and a native python3 executable, not WSL.
+          New-Item -Path 'HKLM:/SOFTWARE/Microsoft/Windows/CurrentVersion/AppModelUnlock' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:/SOFTWARE/Microsoft/Windows/CurrentVersion/AppModelUnlock' -Name AllowDevelopmentWithoutDevLicense -Value 1 -Type DWord
+          $python = (Get-Command python.exe).Source
+          $python3 = Join-Path (Split-Path $python) python3.exe
+          if (-not (Test-Path $python3)) { New-Item -ItemType HardLink -Path $python3 -Target $python | Out-Null }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: JuliaStrings/utf8proc
+          ref: 79cdd5ab40c79afa559f689ffc13b76812dee1ac # v2.12.0
+          path: .deps/utf8proc-source
+          persist-credentials: false
+      - name: Build matching utf8proc
+        shell: python
+        run: |
+          import ast, os, pathlib, shutil, subprocess
+          run = subprocess.check_call
+          prefix = pathlib.Path('.deps/coverage').resolve()
+          options = []
+          if os.name == 'nt':
+              # Use GHC's MinGW toolchain, not an MSVC library with a different CRT.
+              info = dict(ast.literal_eval(subprocess.check_output(['ghc', '--info'], text=True)))
+              compiler = info['C compiler command']
+              compiler = shutil.which(compiler) or compiler
+              options.append('-DCMAKE_C_COMPILER=' + compiler.replace('\\', '/'))
+          run(['cmake', '-S', '.deps/utf8proc-source', '-B', '.deps/utf8proc-build', '-G', 'Ninja',
+               '-DCMAKE_BUILD_TYPE=Release', '-DBUILD_SHARED_LIBS=OFF', '-DCMAKE_INSTALL_LIBDIR=lib',
+               '-DUTF8PROC_ENABLE_TESTING=OFF', '-DCMAKE_INSTALL_PREFIX=' + prefix.as_posix(), *options])
+          run(['cmake', '--build', '.deps/utf8proc-build', '--parallel', '2'])
+          run(['cmake', '--install', '.deps/utf8proc-build'])
+          pc = prefix / 'lib/pkgconfig/libutf8proc.pc'
+          # Upstream's template marks consumers EXPORTS even for a static build.
+          pc.write_text(pc.read_text().replace('-DUTF8PROC_EXPORTS', '-DUTF8PROC_STATIC'))
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write('PKG_CONFIG_PATH=' + str(pc.parent) + '\n')
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ steps.haskell.outputs.cabal-store }}
+            build/coverage
+          key: hpc-v1-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'cabal.project') }}-${{ github.sha }}
+          restore-keys: |
+            hpc-v1-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'cabal.project') }}-
+      - name: Install report converter
+        run: cabal install hpc-codecov-0.6.4.1 --installdir="$RUNNER_TEMP/coverage-tools" --install-method=copy --overwrite-policy=always
+      - name: Prepare fresh report directory
+        shell: python
+        run: |
+          import pathlib, shutil
+          shutil.rmtree('build/coverage-results', ignore_errors=True)
+          pathlib.Path('build/coverage-results').mkdir(parents=True)
+          # A restored cache must never supply a previous run's execution counts.
+          for path in pathlib.Path('build/coverage').rglob('*.tix'):
+              path.unlink()
+      - name: Build instrumented Haskell
+        run: cabal build editor-tests --builddir=build/coverage --enable-coverage -O1 -j2 -f-window -f-terminal
+      - name: Run editor checks once
+        id: tests
+        run: cabal test editor-tests --builddir=build/coverage --enable-coverage -O1 -j2 -f-window -f-terminal --test-show-details=direct --test-options="--xml=build/coverage-results/tests.xml"
+      - name: Collect HPC and JUnit reports
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        run: python tools/coverage.py --builddir build/coverage --output build/coverage-results --converter "$RUNNER_TEMP/coverage-tools/hpc-codecov"
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() && hashFiles('build/coverage-results/coverage.info') != '' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: build/coverage-results/coverage.info
+          disable_search: true
+          flags: ${{ matrix.flag }}
+          name: ${{ matrix.flag }}-hpc
+          fail_ci_if_error: true
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && hashFiles('build/coverage-results/tests.xml') != '' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          report_type: test_results
+          use_oidc: true
+          files: build/coverage-results/tests.xml
+          disable_search: true
+          flags: ${{ matrix.flag }}
+          name: ${{ matrix.flag }}-tests
+          fail_ci_if_error: true
+      - name: Retain coverage evidence
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.flag }}
+          path: |
+            build/coverage-results/
+            build/coverage/**/hpc/**/*.mix
+            build/coverage/**/*.tix
+            build/coverage/cache/plan.json
+          retention-days: 7
+          if-no-files-found: error

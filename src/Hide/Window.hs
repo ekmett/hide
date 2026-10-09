@@ -18,15 +18,16 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #endif
   ) where
 import Hide.Frontend
-import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import Hide.Commands (builtinCommands, builtinAction)
 import Hide.Bindings (readChord)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Keys
 import Data.Char (chr, toLower)
+import Data.Bits ((.|.))
 import Data.Maybe (mapMaybe)
 #ifdef WITH_WINDOW
+import qualified Hide.Plugin.Menu as PluginMenu
 import Data.List (elemIndex)
 import qualified Data.Bits as Bits
 import Data.IORef

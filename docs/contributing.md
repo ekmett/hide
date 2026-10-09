@@ -35,6 +35,44 @@ disk baselines or Undo. Equal numeric revisions do not authorize replacement.
 Human input remains a pure model transition; screen permission hints run on the
 capture worker and do not replace admission checks.
 
+
+## Coverage and test results
+
+The separate [Coverage workflow](https://github.com/ekmett/hide/actions/workflows/coverage.yml)
+runs the editor checks with GHC HPC on Linux x64, macOS ARM64 and native Windows
+x64. Each host uploads source coverage and JUnit test results to
+[Codecov](https://app.codecov.io/github/ekmett/hide) under its own platform flag.
+Coverage statuses are informational while we establish a baseline. Missing reports
+and upload errors fail the workflow; a failed test run still uploads the reports
+it produced. Canceled jobs do not invent results.
+
+These runs use GHC 9.14.1 with the browser and shared editor services enabled.
+SDL windows and Ghostty terminals are omitted from this common configuration;
+HPC measures Haskell execution, not C code or shaders. Native frontend and terminal
+checks remain part of their ordinary feature builds. Windows does not run the
+POSIX-only hdb binary acquisition fixture. Filesystem checks retain portable
+behavior and isolate assertions that require POSIX permissions or filenames.
+
+To generate the same reports locally from the repository root:
+
+```sh
+cabal install hpc-codecov-0.6.4.1
+mkdir -p build/coverage-results
+cabal test editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-options="--xml=build/coverage-results/tests.xml"
+python3 tools/coverage.py
+```
+
+The test runner names each existing check group and runs them in order because
+some fixtures temporarily change the process environment or working directory.
+Use `--test-options="--pattern=BufferTree"` to select a group. Full coverage reports
+come from the whole suite; a focused run measures only the selected work.
+
+Instrumented builds use their own directory and cache. CI discards old `.tix`
+counts before running, and retains the matching `.mix` files, raw HPC counts,
+converted LCOV report, JUnit and host/toolchain metadata for seven days. Each platform
+converts its own instrumentation before uploading; Codecov combines the reports
+for the commit, without carrying old platform coverage forward.
+
 ## Source documentation
 
 Each `Hide.*` module starts with an overview of its role, ownership and notable
