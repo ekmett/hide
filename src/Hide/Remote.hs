@@ -32,7 +32,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as B8
 import Data.Char (isHexDigit, isLower, isDigit, isSpace)
 import Data.IORef
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Network.Socket as N
@@ -778,7 +778,7 @@ withSessionPeer host session resume remoteArgs action = do
         (input,output)<-pipes connection
         hSetBinaryMode input True; hSetBinaryMode output True; hSetBuffering input NoBuffering
         greeting<-hello selected reattach
-        responseResult <- try (writePacket input greeting >> mapM_ (writePacket input) configuration >> timeout 20000000 (readPacket output))
+        responseResult <- try (writePacket input greeting >> timeout 20000000 (readPacket output))
         let response=either (const Nothing) id (responseResult :: Either IOException (Maybe (Maybe WirePacket)))
             (_,_,_,process,_)=connection
         value <- case response of
@@ -816,6 +816,10 @@ withSessionPeer host session resume remoteArgs action = do
                 case payload of Just binary@BinaryPacket{}->(\rest->packet:binary:rest) <$> replay (n-2);_->failure "Remote download replay interrupted"
               else (packet:) <$> replay (n-1)
         retained<-replay replayCount
+        -- Admission precedes input. Sending settings before a refusal is read
+        -- can turn its explanatory reply into a reset when the server closes
+        -- with those unwanted bytes unread (notably on Windows TCP).
+        mapM_ (writePacket input) configuration
         pure (ack,assets:retained)
       prepare target = mask $ \restore -> do
         selected<-freshLifetime target []
@@ -949,7 +953,10 @@ withSessionPeer host session resume remoteArgs action = do
                   receiver
                 Just "closed" -> do
                   resumable <- case packet of JsonPacket value -> decodeValue (withObject "closed" (\o -> o .:? "resumable" .!= False)) value;_->pure False
-                  unless resumable (forgetSession (lifetimeId selected))
+                  -- The local daemon removes its checkpoint after joining the
+                  -- publisher. A frontend must not race that owner on Exit.
+                  -- SSH keeps a separate local discovery record to retire here.
+                  when (not resumable && isJust host) (forgetSession (lifetimeId selected))
                   emit packet
                   atomically (writeTBQueue incoming (Right Nothing))
                   pure ()
