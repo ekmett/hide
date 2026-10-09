@@ -1,6 +1,7 @@
 # hide — Haskell IDE
 
-![Haskell](https://img.shields.io/badge/Haskell-%235e5086.svg?style=for-the-badge&logo=haskell&logoColor=white)
+![Haskell 9.14.1](https://img.shields.io/badge/Haskell-9.14.1-5e5086?style=flat&logo=haskell&logoColor=white)
+[![Zig 0.16.0](https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=flat&logo=zig&logoColor=white)](docs/install.md#embedded-terminal)
 [![Docs build](https://github.com/ekmett/hide/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/ekmett/hide/actions/workflows/docs.yml)
 [![docs: pandoc](https://img.shields.io/badge/docs-pandoc-blue?style=flat)](https://ekmett.github.io/hide/)
 
