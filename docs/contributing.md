@@ -65,8 +65,11 @@ To generate the same reports locally from the repository root:
 ```sh
 cabal install hpc-codecov-0.6.4.1
 reports=$(mktemp -d "${TMPDIR:-/tmp}/hide-coverage.XXXXXX")
-export MSYS2_ARG_CONV_EXCL=--test-option=--pattern=
-cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-option='--pattern=/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --test-option="--xml=$reports/allocation-tests.xml"
+export MSYS2_ARG_CONV_EXCL=--pattern=
+cabal build editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal
+test_exe=$(cabal list-bin editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal)
+test_exe=${test_exe%$'\r'}
+cabal exec --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal -- "$test_exe" --pattern='/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --xml="$reports/allocation-tests.xml"
 cabal build editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal
 test_exe=$(cabal list-bin editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal)
 test_exe=${test_exe%$'\r'}
