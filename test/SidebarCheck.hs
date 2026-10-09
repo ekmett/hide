@@ -335,6 +335,10 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
       (M.null (buffers photograph) && case pictures photograph of
         [image]->Canvas.imageFormat image=="JPEG" && Canvas.imageWidth image==5 && Canvas.imageHeight image==3 && Canvas.imageEncoded image==jpeg
         _->False)
+    check "canvas descriptions retain each image's detected format and dimensions"
+      (all (\(desktop,description)->case Canvas.canvasSurfaces (snd (renderCellRowsAndCanvas desktop)) of
+        [surface]->description `T.isPrefixOf` Canvas.canvasDescription surface
+        _->False) [(uploaded,"PNG 3 × 2."),(photograph,"JPEG 5 × 3.")])
     uploadedJPEG<-open host initial [OpenFileBytes "upload.jpg" jpeg]
     check "uploaded JPEG uses the same canvas without a server path"
       (map Canvas.imageEncoded (pictures uploadedJPEG)==[jpeg] && (Window.preparedWindowSemantics (body uploadedJPEG) >>= Window.textLinkBase)==Nothing)
