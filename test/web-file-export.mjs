@@ -20,6 +20,8 @@ const context=vm.createContext({URL:ExportURL,Blob,downloadAction:action,status,
 vm.runInContext(handler,context);
 function receive(name,purpose,bytes=new Uint8Array([0,255,13,10,128])){
   context.metadata={name,purpose};context.bytes=bytes;
+  if(purpose==='file-export')Object.assign(context.metadata,{row:[3,4,58,1],
+    view:[9,80,25,0,0,0,0,0,0,0,0,0,0,71,8,3,2,4,60,18]});
   vm.runInContext('receiveDownload(metadata,bytes)',context);
 }
 function drag(){

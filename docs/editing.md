@@ -42,6 +42,32 @@ files within the same directory; directory moves remain a separate operation.
 closing open buffers. Enter browses into the selected directory, Browse opens
 a typed path, and OK accepts the displayed directory.
 
+## Export a buffer copy
+
+Choose **File > Export buffer copy…**, or right-click in a source editor and
+choose **Export buffer copy…**, to export the current buffer. The copy includes
+unsaved edits, preserves text line endings and exports binary buffers byte for
+byte. Unnamed buffers use their suggested filename or a default name. Exporting
+does not save the buffer, clear its unsaved state or change the file on disk.
+
+In a browser, use the **Download** link above the editor. Click it to download
+the snapshot, or drag it to another application in Chromium where supported.
+The link remains available when the destination cannot receive the drag.
+**File > Download** also downloads the current buffer directly.
+
+In the native macOS window, wait for the snapshot to become ready, then drag the
+source window's title to the desktop, Finder or another application. This exports
+a copy. Editing, moving, resizing or changing the source window invalidates the
+prepared gesture; choose Export buffer copy again. Other native frontends and
+text terminals use an optional [file drag helper](configuration.md#terminal-file-drag-helper),
+which opens a separate window to drag from. The export is prepared on the
+connected frontend, including when the editor runs over SSH.
+
+Snapshots are limited to 16 MiB. Native and helper frontends retain at most four
+copies until the frontend closes, allowing the receiving application to finish
+reading them. Right-clicking a file in Files and choosing **Export saved copy…**
+continues to export its saved disk contents.
+
 ## Cabal packages
 
 The sidebar shows each `.cabal` package in the selected directory as a separate
