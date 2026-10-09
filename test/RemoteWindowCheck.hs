@@ -103,15 +103,48 @@ checks = do
     (not (nativeRepaint [17,0,0,0,0,0]) && nativeEventInput [17,0,0,0,0,0]==Nothing)
   check "remote Unicode rows validate" (valid rows)
   let exportMetadata receipt=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"fileExportView" .= receipt]
-  check "export gesture metadata rejects unbounded receipts"
-    (either (const True) (const False) (parseRemoteFrame (exportMetadata (replicate 14 (1::Integer))) rows))
-  check "export gesture metadata excludes negative identities"
-    (either (const True) (const False) (parseRemoteFrame (exportMetadata ([-1]::[Integer])) rows))
+      sourceReceipt=[9,80,25,0,0,0,0,0,0,0,0,0,0,71,8,3,2,4,60,18]::[Integer]
+      exportHeader rectangle receipt=object ["type" .= ("download"::T.Text),"purpose" .= ("file-export"::T.Text),
+        "name" .= ("copy.bin"::T.Text),"row" .= (rectangle::[Int]),"view" .= receipt]
+      invalidReceipts=[replicate 13 0,replicate 19 0,replicate 21 0,-1:replicate 19 0,9007199254740992:replicate 19 0]::[[Integer]]
+      validDownload=parseRemoteDownload (exportHeader [3,4,58,1] sourceReceipt)
+  check "native frame retains the complete source export receipt"
+    (case parseRemoteFrame (exportMetadata sourceReceipt) rows of Right value->remoteExportView value==sourceReceipt; _->False)
+  check "native frames and export offers require the current bounded receipt"
+    (all (either (const True) (const False) . (\receipt->parseRemoteFrame (exportMetadata receipt) rows)) invalidReceipts &&
+     all (either (const True) (const False) . parseRemoteDownload . exportHeader [3,4,58,1]) invalidReceipts)
+  check "native download receiver retains source title anchor and receipt"
+    (validDownload==Right ("copy.bin",Just ((3,4,58,1),sourceReceipt)))
+  check "native export receiver refuses unsafe title anchors"
+    (all (either (const True) (const False) . parseRemoteDownload . (\rectangle->exportHeader rectangle sourceReceipt))
+      [[-1,4,58,1],[3,-1,58,1],[3,4,0,1],[3,4,58,2],[511,4,2,1],[3,256,58,1]])
+  check "ordinary downloads retain their independent save route"
+    (parseRemoteDownload (object ["name" .= ("plain.bin"::T.Text)])==Right ("plain.bin",Nothing))
 #ifdef WITH_REMOTE
-  let offered=named {pendingFileExport=(9,Just (Model.ExportFileCopy "saved.hs" (BS.pack [0,255]) (Model.Rect 1 2 20 1) []))}
+  let source=named {pendingFileExport=(9,Nothing)}
+      receipt=Model.fileExportView source
+      selected=maybe (error "missing source fixture") id (Model.activeWindow source)
+      Model.Rect x y w h=Model.bounds selected
+      title=Model.Rect (x+1) y (w-2) 1
+      offered=source {pendingFileExport=(9,Just (Model.ExportFileCopy "copy.bin" (BS.pack [0,255]) title receipt))}
       detached=fst (P.applyInput P.Blur offered)
-  check "detaching invalidates prepared saved exports without touching buffers"
-    (fst (pendingFileExport detached)==10 && snd (pendingFileExport detached)==Nothing && Model.fileExportView detached/=Model.fileExportView offered)
+      matching desktop'=case parseRemoteFrame (object (P.frameMetadata "." desktop')) (P.frameRows desktop') of
+        Right value->remoteExportView value==receipt
+        _->False
+      otherBuffer=source {Model.windows=[selected {Model.windowContent=Model.SourceContent 99}],Model.buffers=Data.Map.Strict.insert 99 (maybe (error "missing source document") id (Model.activeDocument source)) (Model.buffers source)}
+      changes=[("source window identity",Model.modifyActive (\window->window {Model.windowId=99}) source),
+        ("source buffer identity",otherBuffer),("source content revision",Model.insertText "!" source),
+        ("source left",Model.modifyActive (\window->window {Model.bounds=Model.Rect (x+1) y w h}) source),
+        ("source top",Model.modifyActive (\window->window {Model.bounds=Model.Rect x (y+1) w h}) source),
+        ("source width",Model.modifyActive (\window->window {Model.bounds=Model.Rect x y (w-1) h}) source),
+        ("source height",Model.modifyActive (\window->window {Model.bounds=Model.Rect x y w (h-1)}) source),
+        ("closed source",source {Model.windows=[]})]
+  check "source export matches the actual frame and native header"
+    (matching offered && parseRemoteDownload (P.fileExportHeader (Model.ExportFileCopy "copy.bin" (BS.pack [0,255]) title receipt))==
+      Right ("copy.bin",Just ((x+1,y,w-2,1),receipt)))
+  mapM_ (\(name,changed)->check (name<>" invalidates the native export gesture") (not (matching changed))) changes
+  check "detaching invalidates prepared exports without touching buffers"
+    (fst (pendingFileExport detached)==10 && snd (pendingFileExport detached)==Nothing && not (matching detached))
 #endif
 
   let sidebar=object ["readOnly" .= True,"revision" .= (1::Int),"nodes" .= ([]::[Value])]

@@ -81,6 +81,47 @@ select :: Int -> Desktop -> Desktop
 select index d=d {sideTree=Just (treeOf d) {treeSelected=index,treeFocused=True}}
 
 -- One real Files popup/form workflow, including its filesystem refusal paths.
+bufferExportChecks :: IO ()
+bufferExportChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
+  let original=dir </> "Main.hs"
+      doc d=maybe (error "export source missing") id (activeDocument d)
+  BS.writeFile original "main = 1\n"
+  (file,buffer)<-loadFile original >>= either error pure
+  let dirtySource=insertText "local " (addDocument (Just file) buffer (initialDesktop (100,30)))
+  -- The editor action captures current bytes instead of borrowing Files' disk
+  -- export. Exercise the source popup as well as the File menu command.
+  let currentSource=dirtySource
+      selectBufferExport d=case activeWindow d of
+        Nothing->error "Missing export source window"
+        Just window->
+          let r=bounds window
+              popup=fst (handleEvent (V.EvMouseDown (left r+2) (top r+2) V.BRight []) d)
+          in case findIndex ((=="Export buffer copy…").fst) (contextItemsFor popup) of
+            Nothing->error "Source popup has no buffer export"
+            Just index->handleEvent (V.EvKey V.KEnter []) (iterate (fst . handleEvent (V.EvKey V.KDown [])) popup!!index)
+      copyReady next=case snd (pendingFileExport next) of Just _->True;_->False
+  sourceVersion<-captureVersion (documentBuffer (doc currentSource))
+  bufferOffer<-act host (selectBufferExport currentSource) >>= await (tickSidebar host applyEffects) copyReady
+  unchangedBuffer<-versionCurrent sourceVersion (documentBuffer (doc bufferOffer))
+  unchangedFile<-BS.readFile original
+  check "source export copies live dirty bytes and preserves buffer identity, disk and save state"
+    (unchangedBuffer && unchangedFile=="main = 1\n" && dirty (documentBuffer (doc bufferOffer)) &&
+      case (snd (pendingFileExport bufferOffer),activeWindow bufferOffer) of
+        (Just (ExportFileCopy name bytes row receipt),Just window)->name=="Main.hs" && bytes=="local main = 1\n" &&
+          top row==top (bounds window) && receipt==fileExportView bufferOffer
+        _->False)
+  let unnamed=addDocument Nothing (newByteBuffer (BS.pack [0,255,13,10])) currentSource
+  hexOffer<-act host (runCommand ExportBuffer unnamed) >>= await (tickSidebar host applyEffects) copyReady
+  check "unnamed hex export preserves binary bytes and is available in the File menu"
+    (any (\(MenuItem _ _ command)->command==ExportBuffer) (menuItemsFor unnamed 0) &&
+      case snd (pendingFileExport hexOffer) of Just (ExportFileCopy name bytes _ _)->name=="NONAME.bin" && bytes==BS.pack [0,255,13,10];_->False)
+  queuedBuffer<-act host (runCommand ExportBuffer currentSource)
+  expiredBuffer<-await (tickSidebar host applyEffects) (\next->"expired" `T.isInfixOf` status next) (insertText "newer " queuedBuffer)
+  check "buffer edits invalidate a pending export and agents cannot manufacture exports"
+    (snd (pendingFileExport expiredBuffer)==Nothing && not (guestCommandAllowed ExportBuffer) &&
+      not (guestEffectsAllowed [ExportBufferDocument 1 1]))
+
+
 fileRenameChecks :: IO ()
 fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
   let original=dir </> "Main.hs"
@@ -196,6 +237,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   imageOpeningChecks
   publicationLifetimeChecks
   fileRenameChecks
+  bufferExportChecks
   createDirectory (dir </> "src")
   TIO.writeFile (dir </> "Main.hs") "main = 1\n"
   TIO.writeFile (dir </> "Readme.md") "# Documentation\n"
