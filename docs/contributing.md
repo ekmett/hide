@@ -65,8 +65,11 @@ To generate the same reports locally from the repository root:
 ```sh
 cabal install hpc-codecov-0.6.4.1
 reports=$(mktemp -d "${TMPDIR:-/tmp}/hide-coverage.XXXXXX")
-export MSYS2_ARG_CONV_EXCL=--test-option=--pattern=
-cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-option='--pattern=/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --test-option="--xml=$reports/allocation-tests.xml"
+export MSYS2_ARG_CONV_EXCL=--pattern=
+cabal build editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal
+test_exe=$(cabal list-bin editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal)
+test_exe=${test_exe%$'\r'}
+cabal exec --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal -- "$test_exe" --pattern='/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --xml="$reports/allocation-tests.xml"
 cabal build editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal
 test_exe=$(cabal list-bin editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal)
 test_exe=${test_exe%$'\r'}
@@ -371,7 +374,9 @@ Other context slots and full first-party routing through the typed registry rema
 open in #2. This is not a frozen extension SDK.
 
 `sh tools/check-native.sh` checks the SDL event queue and software glyph rendering
-without opening a visible window. Set `HIDE_TEST_GPU=metal` or
+without opening a visible window. Each run owns a temporary directory for its
+binaries and captures, removed when the run exits; concurrent runs do not share
+outputs or need preparatory cleanup. Set `HIDE_TEST_GPU=metal` or
 `HIDE_TEST_GPU=vulkan` to also check the actual GPU backend: atlas growth,
 clipping, decorations and reuse of uploaded glyphs. Vulkan needs a display server
 that supports GPU presentation; a headless Wayland compositor works, while Xvfb
@@ -380,7 +385,9 @@ headless machine so a software Vulkan driver cannot stand in for the GPU.
 
 On macOS the script also checks an unshown application menu for duplicate
 enablement and retained old menu-item stamps. These checks do not start an editor
-session.
+session. To also verify restoring a minimized window, set
+`HIDE_TEST_DOCK_RESTORE=1`; that additional macOS check opens and restores a real
+window, then closes it.
 
 ## Native Windows terminals
 
