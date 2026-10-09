@@ -215,11 +215,31 @@ joining workers outside the session lock. `DiffResult` reports exact appliedDiff
 userModified and resulting revision; formatting the wire result stays on the worker.
 Retiring the command rejects later invocation without redirecting retained handles.
 
-This exposes one strict single-buffer diff operation, not arbitrary prepared-edit
-commit grants. Generic plugin activation/event lifetimes and wider authority
-contexts remain part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
-Configuration policy still reads/parses once per owner admission batch and at
-approval/adoption; moving that IO off the UI owner remains separate work.
+For edits across buffers, use the same service in one call:
+
+```haskell
+applyBufferDiffs editor
+  [ BufferDiff (capturedRef first)  (capturedVersion first)  firstPatch
+  , BufferDiff (capturedRef second) (capturedVersion second) secondPatch
+  ]
+```
+
+`applyBufferDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])`
+accepts 1–16 distinct open text buffers with at most 1 MiB characters across all
+patches. Results follow input order. One invalid, stale, private or closed target
+rejects the entire batch; success adds one ordinary Undo per changed buffer and
+saves nothing. The singleton API follows this same path.
+
+A batch uses one `buffer_apply_diff` permission ticket. In Prompt mode, each
+fixed target gets its own editable diff; the user can navigate between them
+with Tab. Allow validates every review version and original source, then installs
+all prepared changes together. Correcting a diff cannot change the target list.
+Review buffers are prepared before queueing, and full patch validation stays on
+the worker. Policy IO also runs on its worker at admission, approval and adoption.
+
+These are checked strict-diff requests, not reusable prepared-edit grants.
+Generic plugin activation/event lifetimes remain part of
+[the buffer service work](https://github.com/ekmett/hide/issues/4).
 
 ## Frontend command routing
 
@@ -641,19 +661,22 @@ publication while retaining an inert read-only snapshot. Its old references cann
 refresh or reopen it. A content owner may retain the closed snapshot for an
 explicit later opening under a fresh reference.
 
-`prepareImageWindow title disclosure origin png` prepares a PNG on the same
+`prepareImageWindow title disclosure origin encoded` prepares a PNG or JPEG on a
 worker and publishes through `openWindow`. The optional canonical origin remains
 host metadata: the current protected-path policy can hide a formerly readable
 image. Preparation caps compressed input at 16 MiB, dimensions at 4096 per side,
-and decoded area at 4 megapixels. Host admission allows 64 image views and 64 MiB
-of distinct decoded resources. Closing or scope retirement releases image bytes;
+and decoded area at 4 megapixels. JPEG frame bounds are checked before decoding;
+EXIF orientation is applied on that worker while original encoded bytes stay
+intact. Host admission allows 64 image views and 64 MiB of distinct decoded
+resources. Closing or scope retirement releases image bytes;
 retirement retains only the small text fallback.
 
-PNG windows use Fit by default, `F` to fit again, `1` for actual size, plus/minus
+Image windows use Fit by default, `F` to fit again, `1` for actual size, plus/minus
 or the wheel to zoom, and arrows or a content drag to pan. Host chrome and modal
 input retain their normal owners. Terminal fallback reports dimensions and offers
-an explicit Open externally link for file-backed images. Original PNG bytes and
-active image resources are never checkpointed.
+an explicit Open externally link for file-backed images. Recovery retains the
+inert `hide.image` description; it restores no links and never reloads the file.
+Original encoded bytes and active image resources are never checkpointed.
 
 `renderCellRowsAndCanvas` produces fallback cells and image ownership in one
 composition. Each mask cell is little-endian uint16: a frame-local image slot in

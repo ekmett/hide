@@ -1,5 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module LinksCheck (checks) where
+import qualified Codec.Picture as Picture
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.Text.Encoding as TE
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket)
 import Control.Monad (unless,forM_)
@@ -61,6 +65,12 @@ checks=bracket temporary removePathForcibly $ \root->do
   BS.writeFile (root </> "picture.png") (BS.pack [137,80,78,71])
   (_,picture)<-followLink True d (Just (root </> "picture.png")) ""
   check "image packet carries bounded bytes, not server path" ((picture >>= field "mime") == Just ("image/png"::T.Text) && (picture >>= field "data") == Just ("iVBORw=="::T.Text))
+  let jpeg=BL.toStrict (Picture.encodeJpegAtQuality 95 (Picture.generateImage (\_ _->Picture.PixelYCbCr8 140 90 210) 5 3))
+  forM_ ["photograph.bin","misnamed.png","misnamed.md"] $ \name->do
+    BS.writeFile (root </> name) jpeg
+    (_,resource)<-followLink True d (Just (root </> name)) ""
+    check "external image MIME follows the signature and preserves encoded source"
+      ((resource >>= field "mime")==Just ("image/jpeg"::T.Text) && (resource >>= field "data")==Just (TE.decodeUtf8 (B64.encode jpeg)))
   forM_ ["javascript:alert(1)","data:text/html,test","https://", "https://example.com/\n"] $ \urlText->do
     check "unsafe URL rejected" (not (validWebURL urlText))
     result<-openResource (object ["url" .= (urlText::T.Text)])

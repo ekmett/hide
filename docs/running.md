@@ -295,8 +295,9 @@ and copy text. The source remains available in its own window. Progress prepares
 in the background; refreshing keeps the selected transfer and Details selection.
 Right-click the transfer row and choose **Cancel transfer** to target that captured transfer even if progress or rows change;
 closing and reopening retires old Cancel actions. Closing the window lets transfers
-continue and background progress never reopens it. Downloads remain protected from
-agent input and screen reads; Streamer mode also hides the manager. After installation,
+continue and background progress never reopens it. Shutting down the editor session
+cancels unfinished transfers and waits for their cleanup; completed installations
+remain available. Downloads remain protected from agent input and screen reads; Streamer mode also hides the manager. After installation,
 the accepted launch continues with its original source, project, arguments and
 port. Changing the source, project or compiler settings, starting another launch,
 or stopping the debugger invalidates that continuation. The installed tool

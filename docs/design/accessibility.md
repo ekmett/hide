@@ -1,6 +1,6 @@
 # Accessibility for the native and browser frontends
 
-Status: visible sidebar, PNG image descriptions and current modal dialogs have
+Status: visible sidebar, image descriptions and current modal dialogs have
 read-only projections for browser ARIA and macOS accessibility. `editor_screen`
 uses the same host projection with the agent privacy policy. No actions,
 offscreen reads, source-text references or second widget registry are added.

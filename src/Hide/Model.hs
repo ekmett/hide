@@ -181,7 +181,7 @@ markdownDocument doc=documentLabel doc==Nothing && textBuffer (documentBuffer do
   where orName (Just value) _=Just value; orName Nothing value=value
 
 
-data Command = New | Open | Download | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
+data Command = New | Open | Download | ExportBuffer | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | PreviousWindow | Cascade | Tile
   | OpenLink LinkOrigin Text | SplitVertical | SplitHorizontal | ToggleTerminalPin | About | Help | EditorOptions | ChatInputOptions | Gallery
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
@@ -241,7 +241,7 @@ data PackageBuildTarget = PackageBuildTarget
   , packageBuildName :: !Text } deriving (Eq,Show)
 
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = TerminalMouseInput !Text !Terminal.TerminalMouseEvent | CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | OpenFile !Plugin.MenuOrigin !FilePath | OpenFileBytes !Text !ByteString | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice !Plugin.MenuOrigin FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = TerminalMouseInput !Text !Terminal.TerminalMouseEvent | CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ExportBufferDocument !Int !Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | OpenFile !Plugin.MenuOrigin !FilePath | OpenFileBytes !Text !ByteString | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice !Plugin.MenuOrigin FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -360,7 +360,7 @@ menus :: [(Text,Char,[MenuItem])]
 -- Docs: docs/site/screenshots/{file-menu,debug-menu,window-views-menu}.png (docs/editing.md, docs/running.md).
 -- Refresh the matching cropped popup after menu changes.
 menus =
-  [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Change dir..." "" ChangeDir, mi "Terminal" "" OpenTerminal, mi "Exit" "Alt+X" Quit])
+  [("File",'f',[mi "New" "" New, mi "Open..." "F3" Open, mi "Save" "F2" Save, mi "Save as..." "" SaveAs, mi "Export buffer copy…" "" ExportBuffer, mi "Disk changes..." "" ReviewDisk, mi "Close" "Alt+F3" Close, mi "Change dir..." "" ChangeDir, mi "Terminal" "" OpenTerminal, mi "Exit" "Alt+X" Quit])
   ,("Edit",'e',[mi "Undo" "Ctrl+Z" Undo, mi "Redo" "Ctrl+Shift+Z" Redo, mi "Cut" "Ctrl+X" Cut, mi "Copy" "Ctrl+C" Copy, mi "Paste" "Ctrl+V" Paste, mi "Select all" "Ctrl+A" SelectAll,mi "Text / hex mode" "" ToggleHex,mi "Complete identifier..." "Ctrl+Space" Complete])
   ,("Search",'s',[mi "Find..." "Ctrl+F" Find, mi "Replace..." "Ctrl+H" Replace, mi "Find next" "Ctrl+L" FindNext, mi "Find previous" "Ctrl+Shift+L" FindPrevious, mi "Go to line..." "Ctrl+G" GoTo,mi "Go to definition" "F12" Definition])
   ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Stop build/run" "" StopBuild,mi "Stop terminal" "" StopTerminal])
@@ -528,6 +528,7 @@ commandDescription cmd = case cmd of
   AgentNew -> "Start a new agent session."
   AgentCopyRaw -> "Copy the raw conversation text."
   Download -> "Download the current buffer, including unsaved changes."
+  ExportBuffer -> "Export a copy of the current buffer, including unsaved changes."
   FindPrevious -> "Find the previous match."
   Close -> "Close this window; ask before discarding unsaved changes."
   Quit -> "Exit the editor; ask before discarding unsaved changes."
@@ -672,6 +673,7 @@ commandEnabled d cmd | cmd `elem` [DialogFocusNext,DialogFocusPrevious,DialogAcc
 commandEnabled d cmd | dialogCommandAllowed cmd d = True
 commandEnabled d cmd | activeMarkdown d, markdownSourceCommand cmd = False
 commandEnabled d cmd | activePluginWindow d/=Nothing, sourceOnlyCommand cmd,not ((composerActive d || questionActive d) && cmd `elem` [Undo,Redo,Cut,Paste]) = False
+commandEnabled d ExportBuffer = dialog d==Nothing && not (questionActive d) && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d (DebugCommand "breakpoint") | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
@@ -718,13 +720,13 @@ commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,
 commandEnabled _ _ = True
 -- | Actions requiring editable source identity never act on plugin text.
 markdownSourceCommand :: Command -> Bool
-markdownSourceCommand cmd=sourceOnlyCommand cmd && cmd `notElem` [Save,SaveAs,Download,SplitVertical,SplitHorizontal] || case cmd of
+markdownSourceCommand cmd=sourceOnlyCommand cmd && cmd `notElem` [Save,SaveAs,Download,ExportBuffer,SplitVertical,SplitHorizontal] || case cmd of
   RevertChange{}->True
   ExecuteShellBlock{}->True
   _->False
 
 sourceOnlyCommand :: Command -> Bool
-sourceOnlyCommand cmd=horizontalMutation cmd || cmd `elem` [Save,SaveAs,Download,Undo,Redo,Cut,Paste,Find,FindNext,FindPrevious,Replace,GoTo,
+sourceOnlyCommand cmd=horizontalMutation cmd || cmd `elem` [Save,SaveAs,Download,ExportBuffer,Undo,Redo,Cut,Paste,Find,FindNext,FindPrevious,Replace,GoTo,
   InspectType,Definition,Complete,RenameSymbol,CodeActions,ToggleHex,SplitVertical,SplitHorizontal]
 
 -- | Shared current-state gate for menu invocations and frontend hints. Queued
@@ -1354,6 +1356,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
             location=T.pack (filePath file)<>":"<>T.pack (show (r+1))<>":"<>T.pack (show (col+1))
         in ((copyClipboard False location d) {status="Location copied."},[])
       _ -> (d,[])
+    go ExportBuffer d = (d,[ExportBufferDocument (windowId w) bid | commandEnabled d ExportBuffer, Just w<-[activeWindow d], Just bid<-[bufferId w]])
     go Download d = (d,[DownloadDocument bid | commandEnabled d Download, Just w<-[activeWindow d], Just bid<-[bufferId w]])
     go New d = (addDocument Nothing (newBuffer "") d,[])
     go Open d = (d,[BrowsePath (startingDirectory d) "*.hs"])
@@ -2738,7 +2741,7 @@ contextItems (LinkContext command) = [("Open",command)]
 contextItems (ShellContext command) = [("Execute in terminal",command)]
 contextItems (ChangeContext command) = ("Revert this change",command):contextItems SourceContext
 contextItems WindowRowsContext = []
-contextItems SourceContext = [("Copy Location",CopyLocation),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
+contextItems SourceContext = [("Copy Location",CopyLocation),("Export buffer copy…",ExportBuffer),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
 contextItems (AgentContext items) = items
 contextItems GitContext = [("Pull",GitPull),("Fetch",GitFetch),("Merge...",GitMerge)]
@@ -4873,11 +4876,19 @@ modeOffset b p
   | byteMode b = T.length (TE.decodeUtf8With (\_ _ -> Nothing) (BS.take p (bufferBytes b)))
   | otherwise = BS.length (TE.encodeUtf8 (T.take p (contents b)))
 
--- | Bounded sidebar identity for a frontend-owned export gesture. No row text,
--- buffer contents or host paths enter this receipt.
+-- | Bounded UI identity for a frontend-owned export gesture. Sidebar and source
+-- geometry share one fixed receipt; only IDs, revisions and scalar layout state
+-- are read. No text, history or host paths enter this receipt.
 fileExportView :: Desktop -> [Integer]
 fileExportView d = map fromIntegral [fst (pendingFileExport d),fst (screenSize d),snd (screenSize d),problemsHeight d,
-  fromEnum (dialog d/=Nothing),fromEnum (menu d/=Nothing),fromEnum (contextMenu d/=Nothing)] ++ case sideTree d of
-    Nothing -> []
-    Just tree -> [treeEpoch tree,treeRevision tree] ++ map fromIntegral
-      [treeWidth tree,treeScroll tree,treeSelected tree,fromEnum (treeFocused tree)]
+  fromEnum (dialog d/=Nothing),fromEnum (menu d/=Nothing),fromEnum (contextMenu d/=Nothing)] ++ sidebar ++ source
+  where
+    sidebar=case sideTree d of
+      Nothing -> replicate 6 0
+      Just tree -> [treeEpoch tree,treeRevision tree] ++ map fromIntegral
+        [treeWidth tree,treeScroll tree,treeSelected tree,fromEnum (treeFocused tree)]
+    source=case activeWindow d of
+      Nothing -> replicate 7 0
+      Just window -> map fromIntegral [windowId window,fromMaybe 0 (bufferId window),
+        maybe 0 (revision . documentBuffer) (activeDocument d),left r,top r,width r,height r]
+        where r=bounds window

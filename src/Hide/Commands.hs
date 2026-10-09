@@ -41,6 +41,7 @@ builtinCommands =
   ,BuiltinCommand "hide.file.new" (New)
   ,BuiltinCommand "hide.file.open" (Open)
   ,BuiltinCommand "hide.file.download" (Download)
+  ,BuiltinCommand "hide.file.export-buffer" (ExportBuffer)
   ,BuiltinCommand "hide.file.save" (Save)
   ,BuiltinCommand "hide.file.save-as" (SaveAs)
   ,BuiltinCommand "hide.file.review-disk" (ReviewDisk)

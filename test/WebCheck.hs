@@ -123,7 +123,7 @@ canvasChecks=do
   let check label good=unless good (error label)
       png=BL.toStrict (encodePng (generateImage (\x y->PixelRGBA8 (fromIntegral x) (fromIntegral y) 117 192) 300 300))
       epoch=T.replicate 48 "a"
-  image<-preparePNG png >>= either (error . T.unpack) pure
+  image<-prepareImage png >>= either (error . T.unpack) pure
   let surface=CanvasSurface 1 1 image (0,0,10,10) (0,0,10,10) "image" "300 × 300"
       scene=CanvasScene [surface] (BS.replicate 200 0)
       (first,a,more)=P.canvasTransfer (P.CanvasSender epoch M.empty) scene
@@ -145,7 +145,7 @@ canvasChecks=do
     (map kind released==[Just "canvas-release"] && take 1 (map kind reopened)==[Just "canvas-resource"])
   let (_,interrupted,_)=P.canvasTransfer first (CanvasScene [] BS.empty)
   check "closing during an upload emits no late pixel chunk" (map kind interrupted==[Just "canvas-release"])
-  other<-preparePNG png >>= either (error . T.unpack) pure
+  other<-prepareImage png >>= either (error . T.unpack) pure
   let (earlier,later)=if imageResourceId image<imageResourceId other then (image,other) else (other,image)
       activeScene=scene {canvasSurfaces=[surface {canvasImage=later}]}
       (active,_,_)=P.canvasTransfer (P.CanvasSender epoch M.empty) activeScene
