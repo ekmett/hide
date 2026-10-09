@@ -261,7 +261,12 @@ authority and retains no source image or Undo. The actual MCP listing consumes
 that typed service on its reply worker. Generic plugin activation/subscriptions
 and public atomic multi-buffer preparation/commit remain proposed.
 
-Measured line/range reads share the existing finger-tree machinery. Whole-buffer
+Measured line/range reads share the existing finger-tree machinery. The public
+`lineRange` query locates a row's absolute character range from cached measures,
+excluding its trailing CR/LF, without flattening the row. The shared `read_buffer`
+and `read_window` text formatter uses those ranges and bounded `readText` slices
+to enforce its 131072-character response cap before copying oversized rows;
+page metadata still describes the requested available rows. Whole-buffer
 reads are explicit worker operations. Reads from a retained snapshot remain
 stable; they are not live views that change underneath a parser.
 

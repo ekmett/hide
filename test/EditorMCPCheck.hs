@@ -86,6 +86,34 @@ checks = do
     Left err->error (T.unpack err))
   allocatedAfter<-getAllocationCounter
   check "MCP bounded byte read does not flatten or encode the whole buffer" (localBytes>0 && allocatedBefore-allocatedAfter<2000000)
+  let pageLimit=131072
+      -- A fragmented long row cannot borrow one already-flat source Text.
+      longText=replaceSelection (Selection 1 2) "y" (newBuffer (T.replicate (8*1024*1024) "x"))
+      longDocument=addDocument Nothing longText (initialDesktop (80,25))
+  _<-evaluate (prepareBuffer longText)
+  textAllocatedBefore<-getAllocationCounter
+  boundedText<-evaluate (case builtinTool longDocument "read_buffer" (object []) of
+    Right (Object fields)->case KM.lookup "text" fields of
+      Just (String body)->T.length body==pageLimit && KM.lookup "truncated" fields==Just (Bool True)
+      _->False
+    _->False)
+  textAllocatedAfter<-getAllocationCounter
+  check "MCP bounded text read does not flatten a complete oversized row"
+    (boundedText && textAllocatedBefore-textAllocatedAfter<2000000)
+  let pageCases=["", "λ😀\r\nsecond\r\n", T.replicate pageLimit "λ",
+        T.replicate pageLimit "λ"<>"\r\n", T.replicate (pageLimit-1) "λ"<>"\r\n",
+        T.replicate (pageLimit-1) "λ"<>"\r\n😀", T.replicate (pageLimit-2) "λ"<>"\n\n"]
+  mapM_ (\source->do
+    let pageDocument=addDocument Nothing (newBuffer source) (initialDesktop (80,25))
+        rows=map (T.dropWhileEnd (=='\r')) (T.splitOn "\n" source)
+        expected=T.intercalate "\n" rows
+    check "MCP text paging preserves row metadata, normalized endings and exact character cap"
+      (case builtinTool pageDocument "read_buffer" (object []) of
+        Right (Object fields)->KM.lookup "text" fields==Just (String (T.take pageLimit expected))
+          && KM.lookup "truncated" fields==Just (Bool (T.length expected>pageLimit))
+          && KM.lookup "lineCount" fields==Just (toJSON (length rows))
+          && KM.lookup "totalLines" fields==Just (toJSON (length rows))
+        _->False)) pageCases
   let privateReview=addReadOnly "Agent request" "private-review-token" (initialDesktop (80,25))
   check "MCP private approval buffers refuse content reads" (case builtinTool privateReview "read_buffer" (object []) of Left _->True; _->False)
   check "MCP still lists non-secret internal buffer identifiers" (case builtinTool privateReview "list_buffers" (object []) of Right value->"bufferId" `T.isInfixOf` text value && not ("private-review-token" `T.isInfixOf` text value); _->False)
