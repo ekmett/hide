@@ -181,6 +181,8 @@ fixture=unlines
   , " elif method=='session/prompt':"
   , "  context=json.loads(params['prompt'][-1]['text']); ident=context.get('requestId','hint')"
   , "  if context['intent']=='hint':"
+  , "   if os.path.exists('hint.fail'):"
+  , "    send(id=request['id'],error=dict(code=-32000,message='fixture refused hint')); continue"
   , "   assert 'requestId' not in context and 'lines' not in context"
   , "   send(method='session/update',params=dict(sessionId='private-completion',update=dict(sessionUpdate='agent_message_chunk',content=dict(type='text',text='I will prefer small total functions.'))))"
   , "  for denied in ['fs/read_text_file','fs/write_text_file','terminal/create','session/request_permission']:"

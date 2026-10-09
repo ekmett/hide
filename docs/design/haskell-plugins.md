@@ -907,8 +907,15 @@ owner ticks refresh only the exact installed `WindowRef`. Closing the frame
 preserves its warm provider and independent hint draft, and later trace output
 cannot reopen it. The hint pane is bound to that reference rather than the title.
 Readable output grants no input authority. Recovery retains the transcript as an
-inert private text view and clears the hint binding and draft. The hint editor
-itself remains an existing host control; its typed editor migration is separate.
+inert private text view and clears the hint binding and draft.
+
+The hint uses the same `PreparedEditor`, `DraftRef` and frame mount as conversation
+input. Its typed action runs on the existing completion worker. Enter captures
+an immutable version without clearing it; provider failure, a full queue or an
+expired mount leaves the draft intact. Successful delivery clears only that
+submitted version, including a hidden draft. Later typing survives. Configuration
+changes invalidate queued submissions rather than sending them to a replacement
+provider. The hint is ephemeral and grants no agent input authority.
 
 ## Cabal navigation as a second example
 

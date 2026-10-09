@@ -19,10 +19,12 @@ import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import AutocompleteACPCheck (fixture)
 import Hide.Autocomplete
+import qualified Graphics.Vty as V
 import Hide.AgentSidebarTypes
 import Hide.Buffer
 import Hide.Model
 import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Menu as Menu
 import Hide.PluginWindowHost (adoptWindowUpdate,retireClosedWindow)
 import Hide.GuestAccess (readableAt,pointerAllowedAt)
@@ -121,7 +123,9 @@ checks=bracket temporary removePathForcibly $ \root->do
       let oldRef=maybe (error "Missing completion reference") id (autocompleteWindow shown)
           traceWindow=case [w | w<-windows shown,windowContent w==PluginContent oldRef] of w:_->w; _->error "Missing completion frame"
           traceBody=pluginWindows shown M.! oldRef
-          focused=(focusWindow (windowId traceWindow) shown) {autocompleteFocused=False,autocompleteDraft=newBuffer "retained human hint"}
+          focused=setComposerInput (newBuffer "retained human hint") (Selection 0 0) False (focusWindow (windowId traceWindow) shown)
+          hintRef=maybe (error "Missing completion editor") E.mountDraft (activeEditorMount focused)
+          retainedHint d=maybe "" (contents . editorDraftBuffer) (M.lookup hintRef (editorDrafts d))
           selected=fst (runCommand SelectAll focused)
           copied=fst (runCommand Copy selected)
       check "published completion body preserves upstream secret redaction"
@@ -133,7 +137,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       let closed=fst (runCommand Close focused)
       retired<-retireClosedWindow oldRef closed
       stale<-adoptWindowUpdate Menu.HumanMenu late retired
-      check "late completion publication cannot reopen a closed frame" (not (hasTranscript stale) && contents (autocompleteDraft stale)=="retained human hint")
+      check "late completion publication cannot reopen a closed frame" (not (hasTranscript stale) && retainedHint stale=="retained human hint")
       -- A completion after frame close keeps the warm provider and the frame shut.
       continued<-send runtime "propose" [] stale
       fifth<-awaitPrompt 5
@@ -153,7 +157,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       opening<-snd <$> autocompleteEffects runtime (\state _->pure (False,state)) warm [AgentSidebarAction (ShowCompletion target)]
       reopened<-awaitDesktop runtime "reopened completion view" hasTranscript opening
       check "reopening gets a new frame identity and retains the hint"
-        (autocompleteWindow reopened/=Just oldRef && contents (autocompleteDraft reopened)=="retained human hint")
+        (autocompleteWindow reopened/=Just oldRef && retainedHint reopened=="retained human hint")
       let sourceFocused=maybe reopened (\w->focusWindow (windowId w) reopened) (activeWindow warm)
       hidden<-save runtime False sourceFocused >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
       check "debug toggle keeps the source" (activeText hidden==large)
@@ -179,6 +183,72 @@ checks=bracket temporary removePathForcibly $ \root->do
         (inlinePreview preserved==inlinePreview newerPreview && activeText preserved=="x\n")
       entries<-logs
       check "autocomplete configuration is independent of the main agent" (length [() | entry<-entries,field "method" entry==Just ("initialize"::T.Text)]==1)
+      -- Hints use the mounted editor's checked submission; provider IO does not
+      -- borrow the live composer. The same real ACP fixture controls delivery.
+      visibleHints<-save runtime True preserved >>= awaitDesktop runtime "hint pane visible" hasTranscript
+      let hintWindow state=case [w | Just ref<-[autocompleteWindow state],w<-windows state,windowContent w==PluginContent ref] of
+            w:_->w
+            _->error "Missing hint window"
+          focusHint state=focusWindow (windowId (hintWindow state)) state
+          draft text state=setComposerInput (newBuffer text) (Selection (T.length text) (T.length text)) True (focusHint state)
+          sendHint state=let (nextState,effects)=handleEvent (V.EvKey V.KEnter []) state
+            in snd <$> autocompleteEffects runtime (\d _->pure (False,d)) nextState effects
+          waitStatus prefix=awaitDesktop runtime "hint delivery" (T.isPrefixOf prefix.status)
+          hintReady=awaitIO "hint provider arrival" $ do
+            ready<-doesFileExist (root </> "hint.ready")
+            pure (if ready then Just () else Nothing)
+          releaseHint=writeFile (root </> "hint") "complete"
+          resetHint=mapM_ removeFile [root </> "hint",root </> "hint.ready"]
+      pendingHint<-sendHint (draft "keep allocations local" visibleHints)
+      hintReady
+      check "submitted hint stays editable during provider delivery" (contents (composerBuffer pendingHint)=="keep allocations local")
+      duplicateHint<-sendHint pendingHint
+      check "repeated Enter does not enqueue the same immutable hint" (status duplicateHint=="Completion hint is already pending.")
+      let newerHint=fst (handleEvent (V.EvPaste (TE.encodeUtf8 " and keep names")) pendingHint)
+      releaseHint
+      completedHint<-waitStatus "Completion hint sent." newerHint
+      check "late hint completion preserves newer typing" (contents (composerBuffer completedHint)=="keep allocations local and keep names")
+      resetHint
+      exactHint<-sendHint (draft "send this exact version" completedHint)
+      hintReady
+      releaseHint
+      clearedHint<-awaitDesktop runtime "accepted hint clear" (\d->status d=="Completion hint sent." && bufferLength (composerBuffer d)==0) exactHint
+      check "success clears only the submitted hint" (activeText preserved=="x\n" && bufferLength (composerBuffer clearedHint)==0)
+      resetHint
+      holdingTarget<-sendHint (draft "hold original target" clearedHint)
+      hintReady
+      capturedTarget<-awaitIO "hint target before configuration" $ fmap (\(CompletionSummary current _)->current) <$> completionSummary runtime
+      configuringHint<-configure capturedTarget "model-id" "model-b" holdingTarget
+      queuedOldTarget<-sendHint (draft "only for original target" configuringHint)
+      releaseHint
+      expiredTarget<-waitStatus "Completion hint expired" queuedOldTarget
+      check "queued hint refuses a changed model without clearing its draft" (contents (composerBuffer expiredTarget)=="only for original target")
+      resetHint
+      writeFile (root </> "hint.fail") "refuse"
+      failingHint<-sendHint (draft "retry this hint" expiredTarget)
+      failedHint<-waitStatus "Completion agent hint failed" failingHint
+      check "provider failure retains the entire hint" (contents (composerBuffer failedHint)=="retry this hint")
+      removeFile (root </> "hint.fail")
+      -- Closing a queued frame retires its input before the next provider call.
+      -- While one hint is in flight, later edits can queue; overflow is a refusal,
+      -- never an eager clear or truncation of the current draft.
+      blockedHint<-sendHint (draft "hold provider" failedHint)
+      hintReady
+      let fill n state
+            | n>80=error "Hint queue did not remain bounded"
+            | otherwise=do
+                let text="queued hint "<>T.pack (show n)
+                nextState<-sendHint (draft text state)
+                if status nextState=="Autocomplete is busy; draft kept."
+                  then check "queue pressure keeps the unsubmitted hint" (contents (composerBuffer nextState)==text) >> pure nextState
+                  else fill (n+1) nextState
+      fullHints<-fill (1::Int) blockedHint
+      let (closedHints,closeEffects)=runCommand Close fullHints
+      stoppedHints<-snd <$> autocompleteEffects runtime (\d _->pure (False,d)) closedHints closeEffects
+      releaseHint
+      drainedHints<-awaitDesktop runtime "closed hint queue drains" (T.isPrefixOf "Completion hint expired".status) stoppedHints
+      hintPrompts<-prompts
+      check "closed mounts do not deliver queued hints" (length [() | value<-hintPrompts,field "intent" value==Just ("hint"::T.Text)]==5 && not (hasTranscript drainedHints))
   closed<-withAutocomplete root pure
   closedChoices<-timeout 5000000 (completionChoices closed (CompletionTarget 0 Nothing) "model")
   check "choice requests refuse after owner shutdown" (case closedChoices of Just (Left _)->True; _->False)
