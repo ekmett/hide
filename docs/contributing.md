@@ -641,19 +641,22 @@ publication while retaining an inert read-only snapshot. Its old references cann
 refresh or reopen it. A content owner may retain the closed snapshot for an
 explicit later opening under a fresh reference.
 
-`prepareImageWindow title disclosure origin png` prepares a PNG on the same
+`prepareImageWindow title disclosure origin encoded` prepares a PNG or JPEG on a
 worker and publishes through `openWindow`. The optional canonical origin remains
 host metadata: the current protected-path policy can hide a formerly readable
 image. Preparation caps compressed input at 16 MiB, dimensions at 4096 per side,
-and decoded area at 4 megapixels. Host admission allows 64 image views and 64 MiB
-of distinct decoded resources. Closing or scope retirement releases image bytes;
+and decoded area at 4 megapixels. JPEG frame bounds are checked before decoding;
+EXIF orientation is applied on that worker while original encoded bytes stay
+intact. Host admission allows 64 image views and 64 MiB of distinct decoded
+resources. Closing or scope retirement releases image bytes;
 retirement retains only the small text fallback.
 
-PNG windows use Fit by default, `F` to fit again, `1` for actual size, plus/minus
+Image windows use Fit by default, `F` to fit again, `1` for actual size, plus/minus
 or the wheel to zoom, and arrows or a content drag to pan. Host chrome and modal
 input retain their normal owners. Terminal fallback reports dimensions and offers
-an explicit Open externally link for file-backed images. Original PNG bytes and
-active image resources are never checkpointed.
+an explicit Open externally link for file-backed images. Recovery retains the
+inert `hide.image` description; it restores no links and never reloads the file.
+Original encoded bytes and active image resources are never checkpointed.
 
 `renderCellRowsAndCanvas` produces fallback cells and image ownership in one
 composition. Each mask cell is little-endian uint16: a frame-local image slot in

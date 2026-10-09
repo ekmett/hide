@@ -527,11 +527,11 @@ cells, canvas-local coordinates, frontend logical points and device pixels. Any
 filter distortion must also participate in geometry conversion. Hit testing uses
 that same transform and capture rules. Plugins cannot paint or accept clicks over an approval dialog by enlarging their content bounds.
 
-Ordinary file opening chooses the representation from the file signature. A PNG
+Ordinary file opening chooses the representation from the file signature. A PNG or JPEG
 opens in an image window through the same Files, file dialog, command-line and
 drop routes as a source file. No separate viewing service is required.
 
-The PNG decoder prepares immutable RGBA8 on a worker through
+The PNG/JPEG decoder prepares immutable RGBA8 on a worker through
 `prepareImageWindow`, then uses `openWindow` for ordinary scoped publication.
 Additional image formats belong before that boundary: recognize the encoding,
 check allocation bounds, decode, apply orientation and color conversion, then

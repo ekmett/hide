@@ -243,10 +243,12 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   budgetChecks dir
   putStrLn "shared sidebar checks passed"
 
--- Ordinary file presentation exercises the actual owner, not the PNG factory.
+-- Ordinary file presentation exercises the actual owner, not just decoder factories.
 imageOpeningChecks :: IO ()
 imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
   let png=BL.toStrict (Picture.encodePng (Picture.generateImage (\_ _->Picture.PixelRGBA8 40 160 220 127) 3 2))
+      jpeg=BL.toStrict (Picture.encodeJpegAtQuality 95 (Picture.generateImage (\_ _->Picture.PixelYCbCr8 140 90 210) 5 3))
+      jpegPath=dir </> "photograph.data"
       first=dir </> "landscape.data"
       second=dir </> "second.png"
       source=dir </> "Main.hs"
@@ -256,6 +258,7 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
       body d=maybe (error "missing image window") id (activePluginWindow d)
   BS.writeFile first png
   BS.writeFile second png
+  BS.writeFile jpegPath jpeg
   BS.writeFile source "main = 1\n"
   (_,raw)<-loadFile first >>= right
   check "raw buffer reads preserve image bytes" (byteMode raw && bufferBytes raw==png)
@@ -263,7 +266,7 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
     -- CLI uses this same awaited path; a burst uses the one ordered worker.
     pair<-open host initial [OpenFile Menu.HumanMenu first,OpenFile Menu.HumanMenu second]
     check "ordinary two-image burst opens both in order without a byte buffer"
-      (length (pictures pair)==2 && M.null (buffers pair) && all (\image->Canvas.imageWidth image==3 && Canvas.imageHeight image==2 && Canvas.imagePNG image==png) (pictures pair) &&
+      (length (pictures pair)==2 && M.null (buffers pair) && all (\image->Canvas.imageWidth image==3 && Canvas.imageHeight image==2 && Canvas.imageEncoded image==png) (pictures pair) &&
        (Window.preparedWindowSemantics (body pair) >>= Window.textLinkBase)==Just second)
     mixed<-open host initial [OpenFile Menu.HumanMenu source,OpenFile Menu.HumanMenu first]
     check "named image opening keeps its file directory for ordinary navigation"
@@ -282,10 +285,28 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
       (length (pictures displayed)==1 && any ((==png).bufferBytes.documentBuffer) (M.elems (buffers displayed)))
     uploaded<-uncurry (sidebarEffects host applyEffects) (Wire.applyInput (Wire.UploadFile "unusual.bin" png) initial) >>= awaitFileOpening host . snd
     check "uploaded image keeps exact bytes and name without a server path"
-      (map Canvas.imagePNG (pictures uploaded)==[png] && M.null (buffers uploaded) && Window.preparedWindowTitle (body uploaded)=="unusual.bin" &&
+      (map Canvas.imageEncoded (pictures uploaded)==[png] && M.null (buffers uploaded) && Window.preparedWindowTitle (body uploaded)=="unusual.bin" &&
        (Window.preparedWindowSemantics (body uploaded) >>= Window.textLinkBase)==Nothing)
     check "uploaded image keeps the existing navigation directory without inventing a path"
       (startingDirectory uploaded==dir && startingDirectory uploaded {defaultDirectory=Nothing}==".")
+    photograph<-open host initial [OpenFile Menu.HumanMenu jpegPath]
+    check "ordinary JPEG opening uses signature and retains exact source"
+      (M.null (buffers photograph) && case pictures photograph of
+        [image]->Canvas.imageFormat image=="JPEG" && Canvas.imageWidth image==5 && Canvas.imageHeight image==3 && Canvas.imageEncoded image==jpeg
+        _->False)
+    uploadedJPEG<-open host initial [OpenFileBytes "upload.jpg" jpeg]
+    check "uploaded JPEG uses the same canvas without a server path"
+      (map Canvas.imageEncoded (pictures uploadedJPEG)==[jpeg] && (Window.preparedWindowSemantics (body uploadedJPEG) >>= Window.textLinkBase)==Nothing)
+    let checkpoint=dir </> "image.checkpoint"
+    writeCheckpoint checkpoint photograph >>= right
+    removeFile jpegPath
+    recoveredImage<-readCheckpoint checkpoint initial >>= right
+    check "image recovery keeps an inert description without reading the removed file"
+      (length (windows recoveredImage)==1 && null (pictures recoveredImage) && M.null (buffers recoveredImage) &&
+       "JPEG 5 × 3" `T.isInfixOf` contentSlice (Window.preparedWindowText (body recoveredImage)) 0 1024 &&
+       case Window.preparedWindowSemantics (body recoveredImage) of
+         Just semantics->Window.textDisclosure semantics==Window.PrivateWindow && Window.textLinkBase semantics==Nothing && null (Window.textLinks semantics)
+         Nothing->False)
     let invalid=BS.take 8 png<>"broken PNG"
     fallback<-open host initial [OpenFileBytes "broken.png" invalid]
     check "undecodable image bytes remain lossless and editable"
