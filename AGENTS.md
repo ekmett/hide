@@ -1,31 +1,5 @@
 # Working on hide
 
-## Test contract
-
-Before writing, changing or reviewing tests, fixtures, runners or CI, read
-[the test contract](docs/contributing.md#test-contract). This applies throughout
-the repository, including test support embedded in production modules or scripts.
-Include it in delegated test work and review briefs.
-
-A test is a repeatable build target: it must work alone, repeatedly in the same
-checkout/build directory, and independently of suite order. Each invocation owns
-its mutable state and resources. Declare prerequisites through the build graph
-or fixture setup. Observe the operation's own result or acknowledgement.
-
-Needing to delete a directory "to make room", clear old status, drain unrelated
-messages, run another test first or clean the build before a test can pass is a
-bug. Fix the test's ownership, the fixture protocol or the missing build dependency;
-never document cleanup, retries, sleeps or test ordering as the solution. Teardown
-of resources allocated by that invocation is normal; deleting shared/pre-existing
-state to establish a passing starting point is not.
-
-Review test changes against these rules. For changes to stateful tests or their
-infrastructure, record a focused standalone run and a repeat with no intervening
-cleanup. When ordering is under test, control it explicitly and check the relevant
-orders. A green full-suite run does not excuse hidden dependencies. Keep this
-verification focused; do not add a second test framework or require exhaustive
-permutations of unrelated tests.
-
 ## Interaction performance
 
 Never compare whole desktops, buffer contents, or undo histories to decide whether
