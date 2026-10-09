@@ -25,7 +25,7 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 import System.IO.Error (tryIOError)
 import Text.Read (readMaybe)
 import Hide.GuestAccess (protectedFilePath)
-import Hide.Model (Desktop(..),Effect(..),BuildAction(..),PackageBuildTarget(..),startingDirectory)
+import Hide.Model (Desktop(..),Effect(..),BuildAction(..),PackageBuildTarget(..),startingDirectory,privateFilePaths)
 import Hide.PackagePaths
 import Hide.PackageSources
 import Hide.Plugin.Command
@@ -50,7 +50,7 @@ ident=either (error . T.unpack) id . P.nodeId
 componentId :: Int -> P.NodeId
 componentId=ident . ("target:"<>) . T.pack . show
 scope :: Desktop -> Scope
-scope d=(maybe (startingDirectory d) treeRoot (sideTree d),guestPrivatePaths d)
+scope d=(maybe (startingDirectory d) treeRoot (sideTree d),privateFilePaths d)
 
 -- | Observe only package files in the selected directory. Project-file globs and
 -- configured multi-directory package discovery are separate from this service.

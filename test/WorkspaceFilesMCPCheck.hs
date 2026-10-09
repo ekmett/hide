@@ -142,6 +142,17 @@ checks=withBufferDiffCommands $ \commands->do
       (_,found)<-success "workspace_search" ["query" .= ("needle"::T.Text)] live
       let texts value=[t | item<-fromMaybe [] (field "matches" value),Just t<-[field "text" item]] :: [T.Text]
       check "workspace search respects ignores and overlays unsaved and untitled buffers" (all (`elem` texts found) ["live needle","untracked needle","untitled needle"] && not (any (`elem` texts found) ["disk needle","ignored needle"]))
+      let privateUntitled=live {buffers=M.adjust (\doc->doc {documentPrivate=True,documentBuffer=error "search forced private unsent input"})
+            (sourceFixtureBuffer (fromMaybe (error "untitled frame missing") (activeWindow live))) (buffers live)}
+      (_,hiddenInput)<-success "workspace_search" ["query" .= ("needle"::T.Text)] privateUntitled
+      check "workspace search rejects private untitled input before reading it"
+        ("untitled needle" `notElem` texts hiddenInput && "live needle" `elem` texts hiddenInput)
+      let allPrivate=live {buffers=M.map (\doc->doc {documentPrivate=True}) (buffers live)}
+      (_,hiddenSaved)<-success "workspace_search" ["query" .= ("needle"::T.Text),"trackedOnly" .= True] allPrivate
+      check "private saved buffers cannot fall back to reading their disk copies" (null (texts hiddenSaved))
+      let privateClean=allPrivate {buffers=M.map (\doc->doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers allPrivate)}
+      rejected "workspace_files" (operation "delete" "tracked.hs") privateClean
+      rejected "workspace_files" (operation "rename" "tracked.hs"++["to" .= ("private-renamed.hs"::T.Text)]) privateClean
       (_,tracked)<-success "workspace_search" ["query" .= ("needle"::T.Text),"trackedOnly" .= True] live
       check "tracked search includes only Git tracked paths with live content" (texts tracked==["live needle"])
       (_,page)<-success "workspace_search" ["query" .= ("needle"::T.Text),"offset" .= (1::Int),"limit" .= (1::Int)] live

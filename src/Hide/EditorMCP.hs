@@ -269,7 +269,7 @@ readBufferRequest desktop args=do
 
 bufferMetadata :: Desktop -> Int -> Document -> Value
 bufferMetadata desktop ident doc=object ["bufferId" .= ident,"title" .= title,"path" .= (if privateDocument desktop doc then Nothing else fmap filePath (documentFile doc)),
-  "modified" .= dirty (documentBuffer doc),"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
+  "modified" .= documentModified doc,"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
   where title | privateDocument desktop doc="[private]"
               | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
 

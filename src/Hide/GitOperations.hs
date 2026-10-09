@@ -87,7 +87,7 @@ runOperationArgs privateOutput root action args desktop = do
       repository <- owner (filePath file)
       pure (if repository==Just root && documentLabel doc==Nothing then Just (bid,file,documentBuffer doc) else Nothing)
   let mutates = action /= FetchRemote
-      unnamedDirty = any (\doc -> documentFile doc==Nothing && documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers desktop))
+      unnamedDirty = any (\doc -> documentFile doc==Nothing && documentLabel doc==Nothing && documentModified doc) (M.elems (buffers desktop))
   unless (not mutates || (not unnamedDirty && all (not . dirty . third) documents))
     (ioError (userError "Save or discard unsaved buffers in this repository before pulling or merging."))
   (code,out,err) <- runGit root args
@@ -232,7 +232,7 @@ tickGitOperations (GitOperations ref focused jobs reviews terminalLaunch) core i
           writeIORef ref Nothing
           let usable=case finished of
                 Right (Reviewed token paths outcome)
-                  | paths/=guestPrivatePaths desktop || unsaved desktop -> Right (Reviewed token paths (Left "Review context changed."))
+                  | paths/=privateFilePaths desktop || unsaved desktop -> Right (Reviewed token paths (Left "Review context changed."))
                   | otherwise -> Right (Reviewed token paths outcome)
                 _ -> finished
           forM_ jobId $ \ident -> modifyIORef' jobs $ \(latest,history) ->
@@ -330,7 +330,7 @@ completion ident result=case result of
   where failed=jobValue ident False Nothing
 
 unsaved :: Desktop -> Bool
-unsaved=any (dirty . documentBuffer) . M.elems . buffers
+unsaved=any documentModified . M.elems . buffers
 
 -- | Accept an asynchronous Git job or inspect status/review. A returned job ID
 -- means acceptance, not successful completion; review IDs are consumed once.
@@ -353,7 +353,7 @@ gitTool runtime@(GitOperations ref _ jobs reviews terminalLaunch) desktop name a
                  | otherwise -> start False (writeIORef reviews Nothing) $ do
                      root<-selectedRoot
                      token<-T.pack <$> randomIdentity
-                     Reviewed token (guestPrivatePaths desktop) <$> reviewRepositoryChecked root (protectedPathParent desktop)
+                     Reviewed token (privateFilePaths desktop) <$> reviewRepositoryChecked root (protectedPathParent desktop)
     "git_commit" -> case parseEither (\_ -> (,) <$> fields .: "reviewId" <*> fields .: "message") args of
       Left _ -> reply desktop (Left "Expected reviewId and message strings.")
       Right (token,commitMessage)

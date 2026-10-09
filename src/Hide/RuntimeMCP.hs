@@ -16,7 +16,6 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import System.Directory (canonicalizePath)
-import Hide.Buffer
 import Hide.Model
 import Hide.SessionServices
 import qualified Hide.Consoles as C
@@ -69,7 +68,7 @@ runtimeTool runtime d name args=case parseEither (withObject "arguments" pure) a
       Right (action,toolchain,target,arguments,terminal) -> do
         state<-Jobs.buildJobStatus jobs d
         if parseMaybe (withObject "status" (.: "active")) state==Just True then failWith "A build/run is already active."
-        else if any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d)) then failWith "Save modified source buffers before building files on disk."
+        else if any (\doc -> documentLabel doc==Nothing && documentModified doc) (M.elems (buffers d)) then failWith "Save modified source buffers before building files on disk."
         else case lookup (action::T.Text) [("compile",B.Compile),("make",B.Make),("run",B.Run)] of
           Nothing -> failWith "Expected compile, make or run."
           Just task | terminal && task/=B.Run -> failWith "terminal=true is only valid for run."

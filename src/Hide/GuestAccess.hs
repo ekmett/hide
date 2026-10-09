@@ -52,11 +52,11 @@ protectedWindow d w=case bufferId w of Just bid->protectedBuffer d bid; Nothing-
 
 -- | Check authority/privacy policy on an already canonicalized filesystem path.
 protectedPath :: Desktop -> FilePath -> Bool
-protectedPath d=protectedFilePath (guestPrivatePaths d)
+protectedPath d=protectedFilePath (privateFilePaths d)
 
 -- | Also protect ancestors whose removal could destroy authority stores.
 protectedPathParent :: Desktop -> FilePath -> Bool
-protectedPathParent d=protectedFilePathParent (guestPrivatePaths d)
+protectedPathParent d=protectedFilePathParent (privateFilePaths d)
 
 -- | Omit private documents and blank private conversation spans, preserving offsets.
 sanitizedBuffer :: Desktop -> Int -> Maybe Text

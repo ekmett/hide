@@ -40,6 +40,14 @@ checks = bracket temporary removePathForcibly $ \base -> do
   check "ACP cannot read authority files through disk or a live buffer" (isLeft hidden && M.null (sourceSnapshots protected) && T.null (contextText True True False protected))
   prior<-capture path dirtyDesktop
   assertRejected "ACP cannot write a snapshot that became protected" prior "changed authority" protected
+  let privateInput=original {buffers=M.map (\doc->doc {documentPrivate=True,documentBuffer=error "ACP forced private input"}) (buffers original)}
+  hiddenInput<-captureFile root path privateInput
+  check "ACP cannot fall back to the disk copy of private input" (isLeft hiddenInput)
+  let privateSaved=original {buffers=M.map (\doc->doc {documentPrivate=True}) (buffers original)}
+  savedSnapshot<-capture path original
+  assertRejected "ACP rechecks explicit document privacy after capture" savedSnapshot "changed input" privateSaved
+  let duplicatePrivate=addDocument (Just originalFile) (newBuffer "duplicate") privateSaved
+  check "new views of a saved private path retain privacy" (documentPrivate (document duplicatePrivate) && M.null (sourceSnapshots duplicatePrivate))
   let projectConfig=root </> "thc.toml"
   BS.writeFile projectConfig "[editor.agent]\ncontext = 'user guidance'\n"
   hiddenProject<-captureFile root projectConfig dirtyDesktop

@@ -4,6 +4,7 @@ import Control.Concurrent (threadDelay,yield)
 import Control.Concurrent.MVar
 import Control.Exception (evaluate,finally)
 import Control.Monad (unless,foldM)
+import Data.Aeson (Value(..))
 import qualified Codec.Picture as Picture
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -23,10 +24,10 @@ import Hide.Recovery (writeCheckpoint,readCheckpoint,checkpointKey)
 import System.Timeout (timeout)
 import System.IO.Unsafe (unsafePerformIO)
 import Hide.App (applyEffects)
-import Hide.Buffer (newBuffer,contents,contentSlice,contentLength,Selection(..))
+import Hide.Buffer (newBuffer,contents,contentSlice,contentLength,undo,redo,Selection(..))
 import Hide.Commands (configuredBindings,contributedBindingCommands)
 import Hide.DocsMCP
-import Hide.GuestAccess (guestKeyboardAllowed,pointerAllowedAt,readableAt)
+import Hide.GuestAccess (guestKeyboardAllowed,pointerAllowedAt,readableAt,protectedBuffer)
 import Hide.Debugger (withDebugger,withDownloadsCommands)
 import Hide.MenuCommands
 import qualified Hide.Plugin.Editor as E
@@ -35,14 +36,14 @@ import Hide.PluginWindowHost (adoptWindowUpdate,replaceWindowUpdate,tickPluginWi
 import Hide.Sidebar
 import Hide.SidebarCommands
 import Hide.Model
-import Hide.Plugin.Command (withRegistry,CommandError)
+import Hide.Plugin.Command (withRegistry,CommandError,CommandDef(..),Codec(..),registerCommand,retireCommand,commandRef)
 import qualified Hide.Plugin.Menu as P
 import qualified Hide.Plugin.Tree as PTree
 import Hide.Render (snapshot,renderKey,renderCellRows,renderCellRowsAndCanvas,renderCursor)
 import Hide.Unicode (CellSpan(..),CellLayer(..),cellRowsAndOwnership)
 import WindowExtension
 #ifdef WITH_PROTOCOL
-import Data.Aeson (Value(..),object,(.:),withObject)
+import Data.Aeson (object,(.:),withObject)
 import qualified Data.Aeson.KeyMap
 import Data.Aeson.Types (parseEither)
 import Hide.Protocol hiding (Paste)
@@ -272,6 +273,8 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
     refused<-timeout 5000000 (awaitExpired expired) >>= maybe (fail "late retired menu result timeout") pure
     check "retired originating command cannot adopt late plugin window" (activePluginWindow refused==Nothing && length (windows refused)==1)
   editorChecks
+  sidebarEditorRetirementChecks
+  emptyEditorRetirementChecks
   putStrLn "plugin window checks passed"
 
 -- Block the actual pure worker adapter before input admission. This is test-only
@@ -374,6 +377,110 @@ editorChecks=W.withWindowScope $ \scope->E.withDraftRef $ \draft->withDocsComman
   final<-wait "action after cancellation did not clear exact input" (clear finalBusy)
   check "embedded workflow leaves background source unchanged"
     (fmap (contents . documentBuffer) (M.lookup 1 (buffers final))==Just "background source")
+  let pendingSeed=setComposerInput (newBuffer "private preserved seed") (Selection 3 8) True final
+  pending<-submit [] pendingSeed
+  _<-wait "retiring editor submission did not enter its worker" (takeMVar accepted)
+  let mount=maybe (error "missing retiring editor mount") id (activeWindow pending >>= windowEditorMount)
+  _<-retireCommand registry (fst (E.mountActions mount)) >>= either (fail . show) pure
+  preserved<-tickMenus host core pending
+  (preservedId,_,preservedWindow)<-checkPreservedDraft "visible menu seed" "private preserved seed" (Selection 3 8) pending preserved
+  putMVar finish ()
+  let drain current=do
+        next<-tickMenus host core current
+        if status next=="Editor owner expired." then pure next else yield >> drain next
+  late<-wait "late retired menu result did not drain" (drain preserved)
+  repeated<-tickMenus host core late
+  check "late menu result cannot clear preserved input or duplicate its document"
+    (M.size (buffers repeated)==2 && maybe False ((=="private preserved seed") . contents . documentBuffer) (M.lookup preservedId (buffers repeated)))
+  let selected=focusWindow (windowId preservedWindow) repeated
+      copiedSeed=fst (runCommand Copy (fst (runCommand SelectAll selected)))
+  check "preserved input uses ordinary editable document copy"
+    (clipboard copiedSeed=="private preserved seed" && activeDocument selected/=Nothing)
+
+-- Withdrawal must preserve the user's input through the actual public owner,
+-- including a closed frame whose callable binding is still retained.
+sidebarEditorRetirementChecks :: IO ()
+sidebarEditorRetirementChecks=W.withWindowScope $ \scope->E.withDraftRef $ \draft->withRegistry $ \registry->withSidebarCommands $ \host->do
+  let check label condition=unless condition (fail label)
+      wait label action=timeout 5000000 action >>= maybe (fail label) pure
+      core _ _=error "sidebar editor escaped its typed owner"
+      unit=Codec Null (const (Right ())) (const Null)
+      opaque=Codec Null (const (Left "Editor input is host-owned.")) (const Null)
+  submitCommand<-registerCommand registry (CommandDef "example.sidebar.draft.submit" "Submit draft" opaque opaque (\_ input->pure (Right input))) >>= either (fail . show) pure
+  let action=E.editorAction registry submitCommand Right (\_ input->pure (SidebarEditorUpdate (E.clearEditorDraft input)))
+  editor<-E.prepareEditor draft (E.EditorSpec False "Apply" "Apply") "private sidebar seed" action action >>= either (fail . show) pure
+  opening<-registerCommand registry (CommandDef "example.sidebar.draft.open" "Draft" unit unit (\_ ()->pure (Right ()))) >>= either (fail . show) pure
+  let node=either (error . T.unpack) id (PTree.nodeId "draft")
+      prepare _ ()=do
+        body<-W.prepareTextWindow "Sidebar draft" "Provider body"
+        W.openEditorWindow scope body editor >>= maybe (fail "Editor scope expired") (pure . SidebarEditorWindow)
+      root=PTree.NodeDef (PTree.NodeInfo node "Sidebar draft" "" False Nothing) (Just (PTree.treeAction registry opening () prepare)) []
+  provider<-PTree.registerTree registry "example.sidebar.draft" root (\_ _->pure (Right (PTree.NodePage [] Nothing))) >>= either (fail . show) pure
+  publishTreeFromHost host provider
+  let source=installSidebar (emptySidebar "/tmp" 20 True) (addDocument Nothing (newBuffer "background source") (initialDesktop (90,30)))
+      untilReady predicate current=do
+        next<-tickSidebar host core current
+        if predicate next then pure next else yield >> untilReady predicate next
+  published<-wait "sidebar draft did not publish" (untilReady (maybe False (any ((=="Sidebar draft") . PTree.infoLabel . rowInfo) . M.elems . treeRows) . sideTree) source)
+  let index=case [i | Just tree<-[sideTree published],(i,row)<-visibleRows 0 32768 tree,PTree.infoLabel (rowInfo row)=="Sidebar draft"] of
+        i:_->i
+        _->error "Published sidebar draft has no visible row"
+      chosen=published {sideTree=fmap (\tree->tree {treeSelected=index,treeFocused=True}) (sideTree published)}
+      (invoked,effects)=handleEvent (V.EvKey V.KEnter []) chosen
+  (_,queued)<-sidebarEffects host core invoked effects
+  opened<-wait "sidebar draft did not open through its action worker" (untilReady (maybe False ((/=Nothing) . windowEditorMount) . activeWindow) queued)
+  let atEnd=setComposerInput (composerBuffer opened) (Selection 20 20) True opened
+      edited=fst (runCommand Paste atEnd {clipboard=" + edit"})
+      (hidden,closeEffects)=runCommand Close edited
+  (_,closed)<-applyEffects hidden closeEffects
+  check "frame close keeps the unsent sidebar draft and original source"
+    (M.member draft (editorDrafts closed) && length (windows closed)==1 && M.size (buffers closed)==1)
+  _<-retireCommand registry (commandRef submitCommand) >>= either (fail . show) pure
+  let modal=prompt "Existing modal" Information [] closed
+  preserved<-tickSidebar host core modal
+  (_,document,_)<-checkPreservedDraft "hidden sidebar draft" "private sidebar seed + edit" (Selection 27 27) modal preserved
+  check "preserved sidebar input retains ordinary Undo and Redo"
+    (contents (undo (documentBuffer document))=="private sidebar seed" && contents (redo (undo (documentBuffer document)))=="private sidebar seed + edit")
+  repeated<-tickSidebar host core preserved
+  check "retired hidden binding preserves one document only" (M.size (buffers repeated)==2)
+
+emptyEditorRetirementChecks :: IO ()
+emptyEditorRetirementChecks=W.withWindowScope $ \scope->E.withDraftRef $ \draft->withDocsCommands $ \docs->withRegistry $ \registry->withMenuCommands docs $ \host->do
+  let core _ _=error "empty editor escaped its menu owner"
+      await current=do
+        next<-tickMenus host core current
+        if (activeWindow next >>= windowEditorMount)/=Nothing then pure next else yield >> await next
+  reference<-registerEditorNotes registry (menuContributions host) scope draft (\input alternate->Right (input,alternate)) (\_ _->pure ()) PreparedEditorWindow PreparedEditorUpdate >>= either (fail . show) pure
+  catalogue<-P.menuSnapshot (menuContributions host)
+  let source=(addDocument Nothing (newBuffer "background source") (initialDesktop (80,25))) {contributedMenus=catalogue,menusActive=True}
+      (chosen,effects)=runCommand (RegisteredMenu reference False) source
+  (_,queued)<-menuEffects host core chosen effects
+  opened<-timeout 5000000 (await queued) >>= maybe (fail "empty editor did not open") pure
+  let empty=fst (runCommand Cut (fst (runCommand SelectAll opened)))
+      mount=maybe (error "missing empty editor mount") id (activeWindow empty >>= windowEditorMount)
+  _<-retireCommand registry (fst (E.mountActions mount)) >>= either (fail . show) pure
+  retired<-tickMenus host core empty
+  unless (M.size (buffers retired)==1 && M.null (editorDrafts retired) && all ((==Nothing) . windowEditorMount) (windows retired))
+    (fail "empty retired editor must release without creating an unsaved document")
+
+checkPreservedDraft :: String -> T.Text -> Selection -> Desktop -> Desktop -> IO (Int,Document,Window)
+checkPreservedDraft label expected selected before after=do
+  let check description condition=unless condition (fail (label++": "++description))
+      additions=[(ident,document) | (ident,document)<-M.toList (buffers after),M.notMember ident (buffers before)]
+  (ident,document)<-case additions of [value]->pure value; _->fail (label++": unsent input did not become one reachable document")
+  window<-case [w | w<-windows after,bufferId w==Just ident] of [value]->pure value; _->fail (label++": preserved document has no unique frame")
+  check "text and selection survive in an editable unsaved document"
+    (contents (documentBuffer document)==expected && selection window==selected && documentLabel document==Nothing && documentFile document==Nothing && documentModified document && windowEditorMount window==Nothing)
+  check "background preservation does not steal focus or modal ownership"
+    (fmap windowId (activeWindow after)==fmap windowId (activeWindow before) && fmap dialogTitle (dialog after)==fmap dialogTitle (dialog before) && drag after==drag before)
+  let focused=focusWindow (windowId window) after {dialog=Nothing}
+      closePrompt=dialog (fst (runCommand Close focused))
+      savePrompt=dialog (fst (runCommand Save focused))
+  check "ordinary Close and Save protect a clean untitled seed"
+    (maybe False ((==Confirm Close) . purpose) closePrompt && maybe False (\dg->case purpose dg of Saving bid _->bid==ident; _->False) savePrompt)
+  check "composer privacy stays with the preserved document"
+    (documentPrivate document && protectedBuffer after ident && not (guestKeyboardAllowed focused) && not (readableAt focused (left (bounds window)+1) (top (bounds window)+1)) && not (pointerAllowedAt focused (left (bounds window)+1) (top (bounds window)+1)) && not (expected `T.isInfixOf` snapshot focused {streamerMode=True}))
+  pure (ident,document,window)
 
 -- The real host route keeps job selection separate from changing Details text.
 rowsChecks :: IO ()

@@ -29,6 +29,7 @@ import Hide.Files
 import Hide.BufferView
 import Hide.Sidebar
 import Hide.Model
+import qualified Hide.GuestAccess as Access
 import Hide.Recovery
 import Hide.App (applyEffects)
 import Hide.SidebarCommands (withSidebarCommands,sidebarEffects,awaitFileOpening,initializeSidebar)
@@ -63,11 +64,68 @@ relativeDirectoryChecks root=do
     check "relative directory startup roundtrips through recovery"
       (fmap treeRoot (sideTree recovered)==Just expected)
 
+-- Generic editor input must survive a checkpoint without a provider codec or
+-- an active frame. Restoring it must not turn private input into agent text.
+genericDraftChecks :: FilePath -> IO ()
+genericDraftChecks root=do
+  ref<-E.newDraftRef
+  emptyRef<-E.newDraftRef
+  let initial=addDocument Nothing (newBuffer "") (initialDesktop (80,25))
+      edited=undo (replaceSelection (Selection 0 0) "later " (replaceSelection (Selection 0 0) "typed " (newBuffer "seed")))
+      state=initial {editorDrafts=M.fromList [(ref,EditorDraft edited (Selection 1 4) True Nothing),
+        (emptyRef,EditorDraft (newBuffer "") (Selection 0 0) False Nothing)]}
+      path=root </> "generic-input.checkpoint"
+  writeCheckpoint path state >>= right
+  restored<-readCheckpoint path initial >>= right
+  let [(bid,doc)]=filter (documentPrivate . snd) (M.toList (buffers restored))
+      buffer=documentBuffer doc
+      [frame]=filter ((==Just bid).bufferId) (windows restored)
+      focused=focusWindow (windowId frame) restored
+  check "generic input recovery creates one private unsaved ordinary document"
+    (M.null (editorDrafts restored) && documentFile doc==Nothing && documentLabel doc==Nothing && documentModified doc &&
+     documentSuggestedName doc==Just "Recovered input.txt" && contents buffer=="typed seed" && selection frame==Selection 1 4 &&
+     fmap windowId (activeWindow restored)==fmap windowId (activeWindow initial))
+  check "generic input recovery preserves Undo and Redo"
+    (contents (undo buffer)=="seed" && contents (redo buffer)=="later typed seed")
+  check "recovered input stays protected from agent reads and input"
+    (Access.protectedBuffer focused bid && maybe True (const False) (Access.sanitizedBufferContent focused bid) &&
+     not (Access.pointerAllowedAt focused (left (bounds frame)+1) (top (bounds frame)+1)))
+  let (closing,_)=runCommand Close focused
+  check "recovered input reaches ordinary save-discard confirmation"
+    (maybe False ((==Confirm Close).purpose) (dialog closing))
+  let seedState=initial {editorDrafts=M.singleton ref (EditorDraft (newBuffer "unchanged seed") (Selection 0 0) True Nothing)}
+      seeded=preserveEditorDrafts [ref] seedState
+      [(seedId,seedDoc)]=filter (documentPrivate . snd) (M.toList (buffers seeded))
+      [seedFrame]=filter ((==Just seedId).bufferId) (windows seeded)
+      seedFocus=focusWindow (windowId seedFrame) seeded
+      (leaving,_)=runCommand Quit seedFocus
+  check "a clean seeded draft needs saving without rewriting its baseline"
+    (not (dirty (documentBuffer seedDoc)) && documentModified seedDoc && maybe False ((==Confirm Quit).purpose) (dialog leaving))
+  case dialog leaving of
+    Just prompt->check "explicit discard permits quit" (Exit `elem` snd (submitDialog 1 prompt leaving))
+    Nothing->fail "Missing save prompt"
+  let savedPath=root </> "saved-input.txt"
+      duplicate=addDocument (Just (FileState savedPath Nothing)) (newBuffer "") seedFocus
+      duplicateId=nextId seedFocus
+  (_,savedDraft)<-applyEffects duplicate [SaveDocument seedId (Just savedPath) Nothing]
+  let savedDoc=buffers savedDraft M.! seedId
+  check "saving clears the unsaved obligation and preserves explicit privacy"
+    (not (documentModified savedDoc) && documentPrivate savedDoc && documentFile savedDoc/=Nothing &&
+     documentPrivate (buffers savedDraft M.! duplicateId) && Access.protectedPath savedDraft savedPath)
+  writeCheckpoint path savedDraft >>= right
+  restoredSaved<-readCheckpoint path initial >>= right
+  check "explicit document privacy survives saving and another checkpoint"
+    (documentPrivate (buffers restoredSaved M.! seedId) && Access.protectedBuffer restoredSaved seedId)
+  before<-checkpointKey state
+  after<-checkpointKey state {editorDrafts=M.adjust (\draft->draft {editorDraftBuffer=replaceSelection (Selection 0 0) "new " edited}) ref (editorDrafts state)}
+  check "generic input edits invalidate checkpoint metadata without requiring a view" (before/=after)
+
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope->do
   relativeDirectoryChecks root
   keyChecks root
   sharedTextChecks root
+  genericDraftChecks root
   primaryRef<-E.newDraftRef
   childRef<-E.newDraftRef
   let path=root </> "session.checkpoint"
@@ -511,7 +569,7 @@ logicalFixture root target name records anchored selected=do
         "anchor" .= anchored,"column" .= (0::Int),"replySelection" .= selected]
       set key value (Object fields)=Object (KM.insert key value fields)
       set _ _ value=value
-      input=set "schemaVersion" (toJSON (5::Int)) . set "strings" (toJSON [""::T.Text]) .
+      input=set "schemaVersion" (toJSON (6::Int)) . set "strings" (toJSON [""::T.Text]) .
         set "buffers" (toJSON ([]::[Value])) .
         set "conversationTarget" (toJSON target) . set "conversationViews" (toJSON [view]) $ base
   BL.writeFile path (encode input)

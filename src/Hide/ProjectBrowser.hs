@@ -43,7 +43,7 @@ projectBrowserEffects ref fallback=foldM step . (False,)
       worker<-async $ restore $ do
         root<-resolveBuildRoot desktop
         value<-cabalPlan desktop root
-        pure (root,guestPrivatePaths desktop,value)
+        pure (root,privateFilePaths desktop,value)
       let next=token+1
       writeIORef ref (Browser next (Just worker) Nothing)
       pure desktop {dialog=Just (Dialog "Cabal project" (ProjectLoading next) [] 0 ["Cancel"] ["Reading the existing Cabal plan..."]),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
@@ -52,7 +52,7 @@ projectBrowserEffects ref fallback=foldM step . (False,)
       case cached of
         Just (Cached token root private value) | token==actionToken action -> do
           current<-tryIOError (resolveBuildRoot desktop)
-          if current/=Right root || private/=guestPrivatePaths desktop
+          if current/=Right root || private/=privateFilePaths desktop
             then pure desktop {status="Project changed; reopen the project browser."}
             else pure $ case action of
               ProjectPage _ page -> chooser token page value desktop
@@ -83,7 +83,7 @@ tickProjectBrowser ref desktop=do
           Left _ -> pure (message "Cabal project" ["Could not read the Cabal plan.","No build was started."] desktop)
           Right (root,private,value) -> do
             current<-tryIOError (resolveBuildRoot desktop)
-            if current/=Right root || private/=guestPrivatePaths desktop
+            if current/=Right root || private/=privateFilePaths desktop
               then pure desktop {dialog=Nothing,status="Project changed; reopen the project browser."}
               else do
                 writeIORef ref (Browser token Nothing (Just (Cached token root private value)))

@@ -14,12 +14,12 @@ import qualified Hide.Plugin.Window as W
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import Hide.GuestAccess (sanitizedBufferContent,privateDocument)
-import Hide.Model (Desktop(..),Document(..),Window(..),WindowContent(..),conversationTargetFor,conversationLogicalBody)
+import Hide.Model (Desktop(..),Document(..),Window(..),WindowContent(..),conversationTargetFor,conversationLogicalBody,captureDocumentModified,snapshotDocumentModified)
 import Hide.ConversationBody (LogicalBody,logicalBodyIdentity)
 import Hide.BufferReadAdmission (ReadAdmission,resolveReadReference,readReference)
 import Hide.Plugin.BufferHost (BufferRef,CapturedRead(..),BufferMetadata(..),ListedBuffer(..))
 import Hide.Plugin.BufferHost (captureVersion)
-import Hide.Buffer (captureDirty,snapshotDirty,revision,byteMode)
+import Hide.Buffer (revision,byteMode)
 import Hide.Files (filePath)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
@@ -39,13 +39,13 @@ captureBuffer admission desktop reference=do
           -- Masked Conversation content must be built by the reply worker.
           image<-if documentLabel doc==Just "Conversation" then pure content else evaluate content
           version<-captureVersion (documentBuffer doc)
-          changed<-evaluate (captureDirty (documentBuffer doc))
+          changed<-evaluate (captureDocumentModified doc)
           -- Resolve the selector without traversing the path. A labeled file
           -- otherwise leaves Just(filePath fileState) retaining unrelated state.
           sourcePath<-traverse (evaluate . filePath) (documentFile doc)
           let metadata=BufferMetadata ident
                 (fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc))
-                sourcePath (snapshotDirty changed) (revision (documentBuffer doc))
+                sourcePath (snapshotDocumentModified changed) (revision (documentBuffer doc))
           bounded<-evaluate metadata
           pure (Right (CapturedRead reference version image redacted bounded))
 
@@ -62,9 +62,9 @@ listBuffers admission desktop=sequence <$> traverse capture (M.toAscList (buffer
         Right ref->do
           let private=privateDocument desktop doc
           sourcePath<-if private then pure Nothing else traverse (evaluate . filePath) (documentFile doc)
-          changed<-evaluate (captureDirty (documentBuffer doc))
+          changed<-evaluate (captureDocumentModified doc)
           let title=if private then "[private]" else fromMaybe (maybe "Untitled" T.pack sourcePath) (documentLabel doc)
-              metadata=BufferMetadata ident title sourcePath (snapshotDirty changed) (revision (documentBuffer doc))
+              metadata=BufferMetadata ident title sourcePath (snapshotDocumentModified changed) (revision (documentBuffer doc))
           entry<-evaluate (ListedBuffer ref metadata (byteMode (documentBuffer doc)))
           pure (Right entry)
 

@@ -70,7 +70,7 @@ captureFile root path d = do
   result <- try $ do
     unless (isAbsolute path && '\0' `notElem` path) (ioError (userError "Expected an absolute file path."))
     resolved <- canonicalizePath path
-    when (protectedPath d resolved) (ioError (userError "Agent authority files are private; use agent_settings for public context."))
+    when (protectedPath d resolved) (ioError (userError "This file is private; use agent_settings for public context."))
     base <- canonicalizePath root
     let relative=makeRelative base resolved
     when (isAbsolute relative || ".." `elem` splitDirectories relative) (ioError (userError "File is outside this session's project."))
@@ -98,7 +98,7 @@ captureFile root path d = do
 -- This explicit write boundary can compare full contents; it is not a redraw check.
 acceptWrite :: Snapshot -> Text -> Desktop -> IO (Either Text Desktop)
 acceptWrite (Snapshot file expected oldText) text d
-  | protectedPath d (filePath file) = pure (Left "Agent authority files require human input.")
+  | protectedPath d (filePath file) = pure (Left "Private files require human input.")
   | T.any (=='\0') text = pure (Left "Text contains NUL bytes.")
   | textTooLarge text = pure (Left "ACP text files are limited to 16 MiB.")
   | otherwise = case current of
@@ -116,7 +116,7 @@ acceptWrite (Snapshot file expected oldText) text d
     matching=find (\(_,doc) -> fmap filePath (documentFile doc)==Just (filePath file)) (M.toList (buffers d))
     current=case (expected,matching) of
       (Just (bid,version),Just (now,doc))
-        | bid==now,documentLabel doc==Nothing,textBuffer (documentBuffer doc),revision (documentBuffer doc)==version,
+        | bid==now,not (protectedBuffer d bid),documentLabel doc==Nothing,textBuffer (documentBuffer doc),revision (documentBuffer doc)==version,
           contents (documentBuffer doc)==oldText,documentFile doc==Just file -> Right (bid,documentBuffer doc,d)
       (Nothing,Nothing) -> let opened=addDocument (Just file) (newBuffer oldText) d
         in Right (nextId d,newBuffer oldText,opened)

@@ -323,8 +323,11 @@ owner accepts both in one operation, or neither. Refreshing ordinary prepared
 content cannot install new actions or reset input.
 
 A draft outlives its visible mount. Switching conversations retains each draft;
-closing and reopening a window creates a fresh mount. Ending the owning session
-or plugin scope releases the retained draft. A widget has one live attachment;
+closing and reopening a window creates a fresh mount. Withdrawing its owner
+releases empty input and moves nonempty input into a private, unsaved source
+window named **Recovered input.txt**. The window opens in the background, retaining
+selection and Undo/Redo; the user can Save or Discard it normally. A late callback
+cannot consume that recovered input. A widget has one live attachment;
 opening it through another owner must not take over its state. Input requires the
 current focused mount. Outstanding clipboard reads expire on a focus or target
 change, even if the user switches back before the reply arrives.
@@ -338,6 +341,9 @@ runs plugin callbacks on the UI owner. A plugin reply uses `clearEditorDraft` or
 preserve the draft. Two slots may invoke the same command with different typed
 arguments; labels do not resolve commands. Recovery restores conversation drafts
 into fresh identities and never restores callable bindings or replays submissions.
+Other retained editor drafts, including hidden ones, recover as private unsaved
+source windows through the same handoff. A plugin needs no checkpoint codec to
+preserve its user's input.
 
 ### Prepared transcript content
 

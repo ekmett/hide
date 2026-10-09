@@ -615,7 +615,7 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
         rawPath=frame s >>= field "source" >>= field "path"
     backing<-traverse evaluate rawPath
     base<-evaluate (root s)
-    private<-evaluate (guestPrivatePaths d)
+    private<-evaluate (privateFilePaths d)
     writeIORef ref next
     let WatchFrame _ _ _ _ fid=fresh
         (command,args)=case mode of
@@ -717,10 +717,10 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
       current<-readIORef ref
       pure (desktop,case failure current of
         Just err->pure (Left err)
-        Nothing->publicDebuggerStatus (root current) (guestPrivatePaths desktop) (merge (object ["accepted" .= True]) (debuggerStatus current)))
+        Nothing->publicDebuggerStatus (root current) (privateFilePaths desktop) (merge (object ["accepted" .= True]) (debuggerStatus current)))
     run ToolStatus=do
       current<-readIORef ref
-      pure (d,publicDebuggerStatus (root current) (guestPrivatePaths d) (debuggerStatus current))
+      pure (d,publicDebuggerStatus (root current) (privateFilePaths d) (debuggerStatus current))
     run (ToolStart action values)=do
       desktop<-perform runtime action values d
       current<-readIORef ref
@@ -733,7 +733,7 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
       current<-readIORef ref
       shown<-case view of
         Nothing -> pure d
-        Just "source" -> maybe (pure d) (openFrame runtime True (Just (guestPrivatePaths d)) d) (frame current)
+        Just "source" -> maybe (pure d) (openFrame runtime True (Just (privateFilePaths d)) d) (frame current)
         Just "stack" -> showChoices runtime "Call stack" "frame" (frames current) (map frameLabel (frames current)) d
         Just command -> perform runtime command [] d
       snapshot shown
@@ -753,7 +753,7 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
             let key=sourceKey src
                 linesRequested=M.keys (M.fromList [(row,()) | row<-rows])
                 old=maybe [] snd (M.lookup key (breakpoints s))
-                modified=dirty (documentBuffer doc)
+                modified=documentModified doc
                 unchanged=map bpLine old==linesRequested && M.findWithDefault False key (breakModified s)==modified
                 points=if unchanged then old else [Breakpoint row Null | row<-linesRequested]
             unless unchanged $ do
@@ -769,7 +769,7 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
         Just (SourceObservation stamp backing)->do
           captured<-evaluate (generation state)
           base<-evaluate (root state)
-          private<-evaluate (guestPrivatePaths d)
+          private<-evaluate (privateFilePaths d)
           reply<-newEmptyMVar
           pure (d,do
             origin<-canonicalSourcePath base backing
@@ -791,7 +791,7 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
         prepared<-case result of
           Nothing->pure (Left "Debugger inspection timed out; refresh debug_status.")
           Just (Left err)->pure (Left err)
-          Just (Right body) | command=="stackTrace"->publicStack (root s) (guestPrivatePaths d) body
+          Just (Right body) | command=="stackTrace"->publicStack (root s) (privateFilePaths d) body
                             | otherwise->pure (Right body)
         pure $ prepared >>= \body -> boundedResult (object
           ["generation" .= generation s,"request" .= command,"body" .= body]))
@@ -1115,7 +1115,7 @@ startSession runtime@(Debugger ref _ _ _ _) directory (LaunchConfig transport re
 
 launchTarget :: Debugger -> Int -> Desktop -> IO Desktop
 launchTarget runtime@(Debugger ref _ _ _ _) port d
-  | any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d)) =
+  | any (\doc -> documentLabel doc==Nothing && documentModified doc) (M.elems (buffers d)) =
       pure d {status="Save modified source files before launching the disk build."}
   | otherwise = do
       directory<-resolveBuildRoot d
@@ -1745,7 +1745,7 @@ tickSourcePreparation runtime@(Debugger ref _ _ _ _) d=do
                       title="Source "<>sourceLabel source<>" ["<>tshow reference<>"]"
                       opened=addReadOnlyBuffer title prepared d
                       bid=fromMaybe (nextId d) (activeWindow opened >>= bufferId)
-                      styled=opened {buffers=M.adjust (\doc->doc {documentOrigin=origin,documentSuggestedName=Just (T.unpack (sourceLabel source))}) bid (buffers opened)}
+                      styled=opened {buffers=M.adjust (\doc->doc {documentOrigin=origin,documentPrivate=private,documentSuggestedName=Just (T.unpack (sourceLabel source))}) bid (buffers opened)}
                       private=maybe False (protectedPath d) origin
                   modifyIORef' ref (\state->state {sources=M.insert bid (epoch,stamp,source) (sources state)})
                   pure (moveTo False offset styled) {status=if private then "Stopped in private debugger source." else "Stopped in "<>frameLabel selected}
@@ -1825,7 +1825,7 @@ toggleBreakpoint runtime@(Debugger ref _ _ _ _) d = do
       case source of
         Nothing -> pure d {status="Choose a source file or debugger source first."}
         Just src ->toggleBreakpointSource runtime src
-          (1+fst (bufferLineColumn (documentBuffer doc) (caret (selection window)))) (dirty (documentBuffer doc)) d
+          (1+fst (bufferLineColumn (documentBuffer doc) (caret (selection window)))) (documentModified doc) d
     _ -> pure d {status="Choose a source file first."}
 
 sendBreakpoints :: Debugger -> Text -> Value -> [Breakpoint] -> IO ()
@@ -1931,7 +1931,7 @@ exceptionText body=T.unlines (filter (not . T.null)
 type HdbContext=(Maybe FilePath,Maybe FilePath,Maybe FilePath,Toolchain,[(Int,Maybe FilePath,Int,StableName Buffer,Bool)])
 data GhcLaunch=GhcLaunch FilePath Build.BuildConfig FilePath Int HdbContext
   | PackageLaunch !PackageBuildTarget !(Either Text FilePath) !Int !PackageDebugContext
-      ![DirtySnapshot] !(Maybe Build.BuildConfig) !(IORef (Maybe FilePath))
+      ![DocumentModification] !(Maybe Build.BuildConfig) !(IORef (Maybe FilePath))
 -- Source identity, path and current toolchain only. No source/draft/history Eq.
 type PackageDebugContext=(Maybe FilePath,Maybe FilePath,Toolchain,[(Int,Maybe FilePath,ContentVersion)])
 data PackagePrepared=PackageGhc !FilePath ![(String,String)] !Value
@@ -1955,12 +1955,12 @@ hdbContext d=do
   where identity (bid,doc)=do
           buffer<-evaluate (documentBuffer doc)
           stable<-makeStableName buffer
-          pure (bid,filePath <$> documentFile doc,revision buffer,stable,dirty buffer)
+          pure (bid,filePath <$> documentFile doc,revision buffer,stable,documentModified doc)
 hdbCurrent :: GhcLaunch -> HdbContext -> Bool
 hdbCurrent PackageLaunch{} _=False
 hdbCurrent (GhcLaunch _ _ _ _ context) current@(_,_,_,_,identities)=context==current &&
   not (any (\(_,_,_,_,modified)->modified) identities)
-packageDebugContext :: Desktop -> IO (PackageDebugContext,[DirtySnapshot])
+packageDebugContext :: Desktop -> IO (PackageDebugContext,[DocumentModification])
 packageDebugContext d=do
   entries<-mapM capture [(bid,doc) | (bid,doc)<-M.toAscList (buffers d),documentLabel doc==Nothing]
   let directory=defaultDirectory d; tree=treeRoot <$> sideTree d
@@ -1969,7 +1969,7 @@ packageDebugContext d=do
   pure ((directory,tree,fromMaybe GHC (toolchain d),map fst entries),map snd entries)
   where capture (bid,doc)=do
           version<-captureVersion (documentBuffer doc)
-          snapshot<-evaluate (captureDirty (documentBuffer doc))
+          snapshot<-evaluate (captureDocumentModified doc)
           path<-evaluate (filePath <$> documentFile doc)
           mapM_ (evaluate . length) path
           pure ((bid,path,version),snapshot)
@@ -2061,7 +2061,7 @@ preparePackageDebug prepare allowOffer (PackageLaunch target entry port context 
   settings<-getXdgDirectory XdgConfig "thc-edit"
   saved<-Build.loadBuildConfig settings (packageBuildRoot target)
   before<-packageBuildManifestCurrent target
-  unsaved<-evaluate (any snapshotDirty snapshots)
+  unsaved<-evaluate (any snapshotDocumentModified snapshots)
   let config=saved {Build.buildTarget=packageBuildName target}
       captured=PackageLaunch target entry port context snapshots (Just saved) owned
   result<-if not before then pure (Left "Package debug target changed; refresh the tree.")

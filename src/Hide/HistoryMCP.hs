@@ -46,7 +46,7 @@ historyTool d name args=pure $ case parseEither parse args of
     Just doc ->
       let b=documentBuffer doc
           (step,available)=if direction=="undo" then (undo,length (undoStack b)) else (redo,length (redoStack b))
-          info changed=object ["bufferId" .= bid,"revision" .= revision changed,"modified" .= dirty changed,"binary" .= byteMode changed,
+          info changed=object ["bufferId" .= bid,"revision" .= revision changed,"modified" .= documentModified doc {documentBuffer=changed},"binary" .= byteMode changed,
             "undoCount" .= length (undoStack changed),"redoCount" .= length (redoStack changed)]
       in if name=="editor_history" then
         let states=take (available+1) (iterate step b)

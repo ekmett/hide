@@ -251,7 +251,7 @@ captureNavigation origin (Just (MessagesTarget _ _ (Just location@(path,_,_)))) 
       image<-evaluate (bufferContent (documentBuffer doc))
       pure (Just (OpenSource (windowId window) bid version image))
     _->pure Nothing
-  privatePaths<-evaluate (guestPrivatePaths d)
+  privatePaths<-evaluate (privateFilePaths d)
   pure (Just (NavigationInput location opened (if origin==Plugin.AgentMenu then Just privatePaths else Nothing)))
 captureNavigation _ _ _=pure Nothing
 
@@ -354,7 +354,8 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
                 if valid then snd <$> core d [DebugSourceAction prepared] else pure d {status="Source action target changed."}
 
 -- Retain callable ownership independently of a visible frame; a scope end
--- retires even a hidden draft and never retains its Undo in a prepared seed.
+-- retires even a hidden draft. Unsent input moves to an ordinary private
+-- document; callable bindings and prepared seeds retain no duplicate Undo.
 tickEditorBindings :: MenuHost -> Desktop -> IO Desktop
 tickEditorBindings (MenuHost _ _ _ _ ref _) d=do
   state<-readIORef ref
@@ -365,7 +366,7 @@ tickEditorBindings (MenuHost _ _ _ _ ref _) d=do
   mapM_ (Editor.retireDraftRef . fst) expired
   let removed=map fst expired
   modifyIORef' ref (\s->s {menuEditors=foldr M.delete (menuEditors s) removed})
-  pure d {editorDrafts=foldr M.delete (editorDrafts d) removed}
+  pure (preserveEditorDrafts removed d)
 
 adoptMenuEditor :: MenuHost -> Plugin.MenuOrigin -> PluginWindow.EditorWindowUpdate MenuContext MenuReply -> Desktop -> IO Desktop
 adoptMenuEditor host@(MenuHost _ _ _ _ ref _) origin update original=do

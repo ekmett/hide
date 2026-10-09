@@ -14,7 +14,6 @@ import Data.Maybe (fromMaybe)
 import Data.Char (isDigit, isSpace, isAlphaNum)
 import Text.Read (readMaybe)
 import qualified Data.Text as T
-import Hide.Buffer
 import qualified Hide.Build as B
 import qualified Hide.BuildJobs as Jobs
 import Hide.SessionServices
@@ -43,7 +42,7 @@ testsTool runtime d name arguments = case parseEither (withObject "test argument
       Right (target,toolchain) -> do
         current<-Jobs.buildJobStatus jobs d
         if field "active" current==Just True then done d (Left "A build, run or test is already active; use build_stop first.")
-        else if any (\doc -> documentLabel doc==Nothing && dirty (documentBuffer doc)) (M.elems (buffers d)) then done d (Left "Save modified source buffers before testing files on disk.")
+        else if any (\doc -> documentLabel doc==Nothing && documentModified doc) (M.elems (buffers d)) then done d (Left "Save modified source buffers before testing files on disk.")
         else do
           root<-B.resolveBuildRoot d
           config<-B.loadBuildConfig directory root

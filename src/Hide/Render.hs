@@ -132,7 +132,7 @@ data RenderState = RenderState
   , keyBottomTerminal :: Maybe Int
   } deriving Eq
 
-data DocumentKey = DocumentKey (Maybe (FilePath,Bool)) (Maybe Text) Int Bool (Maybe FilePath) Bool deriving Eq
+data DocumentKey = DocumentKey (Maybe (FilePath,Bool)) (Maybe Text) Int Bool (Maybe FilePath) Bool Bool deriving Eq
 data ViewKey = ViewKey (Maybe PluginWindow.WindowRef) !(Maybe Unique) Text Editor.DraftRef (Maybe Editor.EditorMount) (Maybe Int) !BodyAnchor !Int !Int !(Maybe BodySelection) deriving Eq
 data DraftKey = DraftKey Selection Bool (Maybe Editor.EditorMount) deriving Eq
 data QuestionKey = QuestionKey Int (Maybe Int) Selection Bool deriving Eq
@@ -166,7 +166,7 @@ renderKey original = do
         payload (documentLinks value)
         payload (documentShellBlocks value)
         pure (DocumentKey f (documentLabel value) (documentWidth value)
-          (documentCursorVisible value) (documentSuggestedName value) (present (documentSourceRows value)))
+          (documentCursorVisible value) (documentSuggestedName value) (present (documentSourceRows value)) (documentPrivate value))
       view value=do
         case conversationBody value of
           InstalledBody _ receipt->mapM_ (\(BodyControlReceipt prepared _ _ _ _)->payload prepared) receipt
@@ -606,7 +606,7 @@ windowLayers _ d active original =
     file=maybe (maybe ("NONAME"<>maybe "" (T.pack . show) (bufferId w)<>".HS") T.pack (documentSuggestedName doc)) (T.pack . takeFileName . filePath) (documentFile doc)
     -- Measured line changes are shared by all views; never diff text while drawing.
     -- Docs: docs/editing.md (unsaved change counts in each buffer title).
-    name=fromMaybe file (documentLabel doc)<>(if dirty b then " *" else "")
+    name=fromMaybe file (documentLabel doc)<>(if documentModified doc then " *" else "")
     (added,deleted)=bufferLineChanges b
     badge=if documentLabel doc==Nothing && (added/=0 || deleted/=0)
       then [("+"<>T.pack (show added),attr (V.RGBColor 85 255 85) background),

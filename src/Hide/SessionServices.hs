@@ -42,7 +42,6 @@ import Hide.PackageSidebar (packageBuildManifestCurrent)
 import Hide.MCPPermissions (AdmittedBuild, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild)
 import Hide.Plugin.BufferHost (ContentVersion, captureVersion, versionCurrent)
 import Hide.Files (filePath)
-import Hide.Buffer
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import Hide.Model
@@ -333,7 +332,7 @@ startBuildPreparationAt (SessionServices directory _ _ ref) action target d = ma
       if not admitted then pure d {status="Admitted input can start only one build intent."} else do
         captured<-forM (buildSourceDocuments d) $ \(bid,doc) -> do
           version<-captureVersion (documentBuffer doc)
-          snapshot<-evaluate (captureDirty (documentBuffer doc))
+          snapshot<-evaluate (captureDocumentModified doc)
           let path=filePath <$> documentFile doc
           mapM_ (evaluate . length) path
           pure ((bid,path,version),snapshot)
@@ -352,14 +351,14 @@ startBuildPreparationAt (SessionServices directory _ _ ref) action target d = ma
 buildSourceDocuments :: Desktop -> [(Int,Document)]
 buildSourceDocuments d=[(bid,doc) | (bid,doc)<-M.toList (buffers d),documentLabel doc==Nothing]
 
-prepareBuild :: FilePath -> Maybe B.BuildAction -> Maybe PackageBuildTarget -> FilePath -> Maybe FilePath -> [DirtySnapshot] -> IO (Either Text PreparedBuild)
+prepareBuild :: FilePath -> Maybe B.BuildAction -> Maybe PackageBuildTarget -> FilePath -> Maybe FilePath -> [DocumentModification] -> IO (Either Text PreparedBuild)
 prepareBuild directory action target start source snapshots = do
   result<-try $ do
     root<-maybe (B.resolveBuildRootFrom start) (pure . packageBuildRoot) target
     saved<-B.loadBuildConfig directory root
     let config=maybe saved (\component->saved {B.buildTarget=packageBuildName component}) target
     before<-maybe (pure True) packageBuildManifestCurrent target
-    unsaved<-case action of Nothing->pure False; Just _->evaluate (any snapshotDirty snapshots)
+    unsaved<-case action of Nothing->pure False; Just _->evaluate (any snapshotDocumentModified snapshots)
     prepared<-if not before then pure (Left "Package build target changed during preparation.") else case action of
       Nothing -> do
         let options=buildOptions root config

@@ -284,7 +284,7 @@ fileAction apply original action wid bid path rev decision
           else if maybe False invalidPath path then failure original "Invalid destination path."
           else if maybe False (`notElem` ["save","discard"]) decision then failure original "dirtyAction must be save or discard."
           else if action=="save" && isJust decision then failure original "dirtyAction is only used by close."
-          else if action=="close" && dirty b && decision==Nothing then failure original "Dirty buffer: specify dirtyAction save or discard."
+          else if action=="close" && documentModified doc && decision==Nothing then failure original "Dirty buffer: specify dirtyAction save or discard."
           else if action=="close" && decision/=Just "save" then success (closeActive d)
           else if isJust (documentLabel doc) then failure original "This buffer is read-only."
           else if documentFile doc==Nothing && path==Nothing then failure original "Untitled buffer: save with a destination path first."
@@ -298,7 +298,7 @@ fileAction apply original action wid bid path rev decision
               Right destination -> do
                 (_,savedDesktop)<-apply d [SaveDocument sourceId destination Nothing]
                 case windowDocument (buffers savedDesktop) window of
-                  Just savedDoc | not (dirty (documentBuffer savedDoc)),isJust (documentFile savedDoc),dialog savedDesktop==Nothing ->
+                  Just savedDoc | not (documentModified savedDoc),isJust (documentFile savedDoc),dialog savedDesktop==Nothing ->
                     success (if action=="close" then closeActive (focusWindow (windowId window) savedDesktop) else savedDesktop)
                   _ -> failure savedDesktop ("Save did not complete: "<>failureDetail savedDesktop)
         _ -> failure original "No active buffer."
@@ -321,7 +321,7 @@ layout d=object ["screen" .= object ["columns" .= fst (screenSize d),"rows" .= s
       case windowDocument (buffers d) w of
         Nothing -> []
         Just doc -> let b=documentBuffer doc; (row,column)=bufferLineColumn b (caret (selection w)) in
-          ["path" .= visiblePath d doc,"label" .= (if privateDocument d doc then Just "[private]" else documentLabel doc),"dirty" .= dirty b,"revision" .= revision b,
+          ["path" .= visiblePath d doc,"label" .= (if privateDocument d doc then Just "[private]" else documentLabel doc),"dirty" .= documentModified doc,"revision" .= revision b,
            "mode" .= (if byteMode b then "hex" else "text"::Text),"line" .= (row+1),"column" .= (column+1),
            "byteOffset" .= (if byteMode b then Just (caret (selection w)) else Nothing),"readOnly" .= isJust (documentLabel doc)])
 
@@ -330,7 +330,7 @@ visiblePath d doc=if privateDocument d doc then Nothing else fmap filePath (docu
 
 unsaved :: Desktop -> [Value]
 unsaved d=take 256 [object ["bufferId" .= ident,"path" .= visiblePath d doc,"revision" .= revision b,"byteLength" .= BS.length (bufferBytes b)]
-  | (ident,doc)<-M.toAscList (buffers d),let b=documentBuffer doc,dirty b]
+  | (ident,doc)<-M.toAscList (buffers d),let b=documentBuffer doc,documentModified doc]
 
 diagnosticValue :: Desktop -> Diagnostic -> Value
 diagnosticValue d entry=object ["path" .= diagnosticPath entry,"line" .= (diagnosticRow entry+1),"column" .= (diagnosticColumn entry+1),

@@ -682,7 +682,7 @@ applyEffects = foldM apply . (False,)
         Right review -> apply (False,(addReadOnly "Git diff" (reviewText review) d) {gitReview=Just review,status="Review saved changes; Tools > Approve changes commits them."}) (RefreshGit (reviewRoot review))
     -- Docs: docs/site/screenshots/git-commit.png (docs/git.md); refresh if approval changes.
     apply (_,d) AskGitCommit
-      | any (dirty . documentBuffer) (M.elems (buffers d)) = pure (False,message "Unsaved changes" ["Save changed buffers before approving a commit."] d)
+      | any documentModified (M.elems (buffers d)) = pure (False,message "Unsaved changes" ["Save changed buffers before approving a commit."] d)
       | Just review <- gitReview d = pure (False,d {dialog=Just (Dialog "Approve changes" Committing [Input "Commit message" "" 0] 0 ["Commit","Cancel"] ["Commit all reviewed saved changes in:",T.pack (reviewRoot review)]),menu=Nothing})
       | otherwise = apply (False,d) ReadGitDiff
     apply (_,d) (WriteGitCommit text)=case gitReview d of
@@ -715,7 +715,11 @@ applyEffects = foldM apply . (False,)
           Right file->do
             let b=documentBuffer doc
                 clean=restyle doc {documentFile=Just file,documentBuffer=markSaved b}
-                updated=clampReviewWindows (normalizeDocumentViews bid d {buffers=M.insert bid clean (buffers d),status="File saved."})
+                -- Transfer the saved path's privacy once, including duplicate
+                -- source views; frame masks then read a stored Bool.
+                protect other | documentPrivate clean,fmap filePath (documentFile other)==Just (filePath file)=other {documentPrivate=True}
+                              | otherwise=other
+                updated=clampReviewWindows (normalizeDocumentViews bid d {buffers=M.map protect (M.insert bid clean (buffers d)),status="File saved."})
             (_,refreshed)<-apply (False,updated) (RefreshGit (takeDirectory (filePath file)))
             case after of
               Nothing->pure (False,refreshed)

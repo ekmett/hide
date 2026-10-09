@@ -103,6 +103,9 @@ undo/redo history, split views, window placement, Files, display preferences and
 each retained conversation draft, including its editing history. Source files
 are never overwritten during recovery.
 If a file changed on disk, the usual conflict checks still apply when saving.
+Unsent input from other plugin windows opens as private **Recovered input.txt**
+source windows, with its selection and Undo/Redo. Save or Discard it normally.
+Withdrawing a plugin during a session preserves its input the same way.
 
 Conversation transcripts and their provider resume IDs are retained per editor
 session. Resume the provider explicitly to reconnect. Terminal output is restored
@@ -116,7 +119,9 @@ keeps a partial write from replacing the previous checkpoint. Up to a second of
 recent work can be lost on abrupt termination; this is process-crash recovery,
 not a guarantee against power loss. A checkpoint over 256 MiB reports an error
 and retains the previous complete version rather than trimming your history.
-Save important files normally.
+Save important files normally. Checkpoint format 6 records explicit document
+privacy. Earlier checkpoint formats are rejected without overwriting them; save
+files before upgrading from a build that writes an older format.
 
 **File > Exit** removes the completed session's checkpoint. A crash or lost
 frontend leaves it available. Session ownership uses an OS-held lock so concurrent

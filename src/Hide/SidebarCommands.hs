@@ -151,7 +151,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d))
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d))
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -1045,7 +1045,8 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
         _->pure d {status=if not consumed then "Input form expired." else "Input form submission failed."}
 
 -- A frame close retains one binding per draft. Scope/registration retirement
--- drops both binding and sole host input state, even while the draft is hidden.
+-- drops the binding and preserves unsent input as an ordinary private document,
+-- even while the draft is hidden. Empty drafts release their host state.
 tickEditors :: SidebarHost -> Desktop -> IO Desktop
 tickEditors (SidebarHost _ ref _ _ _ _) d=do
   state<-readIORef ref
@@ -1056,7 +1057,7 @@ tickEditors (SidebarHost _ ref _ _ _ _) d=do
   mapM_ (Editor.retireDraftRef . fst) expired
   let removed=map fst expired
   modifyIORef' ref (\s->s {editorBindings=foldr M.delete (editorBindings s) removed})
-  pure d {editorDrafts=foldr M.delete (editorDrafts d) removed}
+  pure (preserveEditorDrafts removed d)
 
 adoptEditor :: SidebarHost -> Menu.MenuOrigin -> PluginWindow.EditorWindowUpdate SidebarContext SidebarReply -> Desktop -> IO Desktop
 adoptEditor host@(SidebarHost _ ref _ _ _ _) origin update original=do

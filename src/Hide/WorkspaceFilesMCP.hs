@@ -13,7 +13,7 @@ import Hide.WorkspaceRename (checkedPath,operationPath,within)
 import qualified Hide.WorkspaceRename as Rename
 import Hide.Sidebar
 import Control.Exception (IOException, bracket, try, evaluate)
-import Control.Monad (forM, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as KM
@@ -116,7 +116,8 @@ fileOperation core desktop operation raw target
   | operation=="rename"=do
       root<-resolveBuildRoot desktop
       files<-Rename.captureRenameFiles desktop
-      source<-Rename.prepareRenameSource False root (guestPrivatePaths desktop) raw files
+      source<-Rename.prepareRenameSource False root (privateFilePaths desktop) raw files
+      rejectPrivateBuffers (Rename.renameSourcePath source)
       destination<-maybe (ioError (userError "rename requires to")) pure target
       prepared<-Rename.prepareWorkspaceRename source destination
       updated<-Rename.commitWorkspaceRename prepared desktop >>= either (ioError . userError . T.unpack) pure
@@ -127,11 +128,12 @@ fileOperation core desktop operation raw target
     root<-resolveBuildRoot desktop >>= canonicalizePath
     path<-operationPath root raw
     rejectPrivate path
+    rejectPrivateBuffers path
     affected<-fmap catMaybes $ forM (M.toList (buffers desktop)) $ \(bid,doc) -> case documentFile doc of
       Nothing -> pure Nothing
       Just file -> do canonical<-canonicalizePath (filePath file)
                       pure (if within path canonical then Just (bid,doc,canonical) else Nothing)
-    when (any (\(_,doc,_)->dirty (documentBuffer doc)) affected) (ioError (userError "Save or close dirty open buffers before changing their paths"))
+    when (any (\(_,doc,_)->documentModified doc) affected) (ioError (userError "Save or close dirty open buffers before changing their paths"))
     exists<-doesPathExist path
     updated<-case operation of
       "mkdir" -> do
@@ -153,7 +155,12 @@ fileOperation core desktop operation raw target
       _ -> ioError (userError "Unknown file operation")
     refreshed<-case sideTree updated of Nothing -> pure updated; Just tree -> catchIOError (snd <$> core updated [ReadTree (treeRoot tree)]) (\err->pure updated {status="Filesystem operation completed; tree refresh failed: "<>T.pack (show err)})
     pure (refreshed,Right (object ["operation" .= operation,"path" .= path,"to" .= target,"savedBuffers" .= False]))
-  where rejectPrivate path=when (protectedPathParent desktop path) (ioError (userError "This path contains private editor configuration or session data"))
+  where
+    rejectPrivate path=when (protectedPathParent desktop path) (ioError (userError "This path contains private editor configuration or session data"))
+    rejectPrivateBuffers path=forM_ (M.toList (buffers desktop)) $ \(bid,doc)->
+      when (protectedBuffer desktop bid) $ forM_ (documentFile doc) $ \file->do
+        canonical<-canonicalizePath (filePath file)
+        when (within path canonical) (ioError (userError "This operation would change a private open buffer."))
 
 -- | A strict diff replacement prepared by a worker, with exact reply metadata.
 -- No constructor or structural Eq/Show is exposed; adoption uses BufferEdits.
@@ -293,10 +300,10 @@ searchWorkspace desktop query tracked offset count=do
       live<-fmap M.fromList $ fmap catMaybes $ forM (M.toList (buffers desktop)) $ \(bid,doc) -> case documentFile doc of
         Just file -> do
           path<-canonicalizePath (filePath file)
-          pure $ if within root path && not (protectedBuffer desktop bid) then Just (path,(bid,doc)) else Nothing
+          pure $ if within root path then Just (path,(bid,doc)) else Nothing
         Nothing -> pure Nothing
       let candidates=sort (nub (paths++[path | path<-M.keys live,not tracked]))
-          untitled=[(Nothing,Just (bid,revision (documentBuffer doc)),contents (documentBuffer doc)) | (bid,doc)<-M.toList (buffers desktop),not tracked,documentFile doc==Nothing,textBuffer (documentBuffer doc),documentLabel doc==Nothing]
+          untitled=[(Nothing,Just (bid,revision (documentBuffer doc)),contents (documentBuffer doc)) | (bid,doc)<-M.toList (buffers desktop),not tracked,not (protectedBuffer desktop bid),documentFile doc==Nothing,textBuffer (documentBuffer doc),documentLabel doc==Nothing]
       (loaded,truncated,skipped)<-loadCandidates desktop root live 33554432 (take 10000 candidates)
       let (inputs,liveTruncated)=boundInputs 33554432 (take 10000 (loaded++untitled))
           allMatches=take 10001 (concatMap matches inputs)
@@ -325,7 +332,8 @@ loadCandidates desktop root live budget (path:rest)=do
     Right canonical | protectedPath desktop canonical -> skip
     Right canonical -> do
       loaded<-case M.lookup canonical live of
-        Just (bid,doc) | textBuffer (documentBuffer doc) -> pure (Just (Just (bid,revision (documentBuffer doc)),contents (documentBuffer doc)))
+        Just (bid,doc) | protectedBuffer desktop bid -> pure Nothing
+                      | textBuffer (documentBuffer doc) -> pure (Just (Just (bid,revision (documentBuffer doc)),contents (documentBuffer doc)))
                       | otherwise -> pure Nothing
         Nothing -> do
           bytes<-(try (withBinaryFile canonical ReadMode (\h -> BS.hGet h 1048577)) :: IO (Either IOException BS.ByteString))

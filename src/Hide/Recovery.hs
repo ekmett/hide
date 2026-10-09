@@ -262,7 +262,7 @@ documentValueWith buffer baseline (ident,doc)=do
   encoded<-buffer (documentBuffer doc)
   file<-traverse (fileValueWith baseline) (documentFile doc)
   pure (object ["id" .= ident,"buffer" .= encoded,"file" .= file,
-    "label" .= recoveredLabel (documentLabel doc),"suggestedName" .= documentSuggestedName doc,"origin" .= documentOrigin doc])
+    "label" .= recoveredLabel (documentLabel doc),"suggestedName" .= documentSuggestedName doc,"origin" .= documentOrigin doc,"private" .= documentPrivate doc])
   where
     recoveredLabel (Just label) | "Terminal " `T.isPrefixOf` label=Just ("Ended "<>label)
     recoveredLabel label=label
@@ -326,7 +326,7 @@ desktopValueWith buffer baseline plugin body desktop=do
   plugins<-mapM (\(window,prepared,(kind,version))->do
     text<-plugin prepared
     pure (object ["id" .= windowId window,"kind" .= kind,"version" .= version,"title" .= W.preparedWindowTitle prepared,"text" .= text])) durable
-  pure (object ["schemaVersion" .= (5::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
+  pure (object ["schemaVersion" .= (6::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
     "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
     "bottomTerminal" .= bottomTerminal d,
     "pluginWindows" .= plugins,
@@ -336,7 +336,12 @@ desktopValueWith buffer baseline plugin body desktop=do
       ["wordStar" .= wordStar d,"wideSectionTitles" .= wideSectionTitles d,"hapticFeedback" .= hapticFeedback d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
        "defaultBufferView" .= fromEnum (defaultBufferView d),"chatSubmit" .= chatSubmitName (chatSubmit d),"macKeySymbols" .= macKeySymbols d,"materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
        "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]])
-  where d=rememberConversationView desktop
+  where
+        remembered=rememberConversationView desktop
+        conversationDrafts=S.fromList (map conversationDraftRef (M.elems (conversationViews remembered)))
+        -- Generic input has no provider codec. Recover its unsent text through
+        -- the same inert, private document handoff used at owner withdrawal.
+        d=preserveEditorDrafts [ref | ref<-M.keys (editorDrafts remembered),S.notMember ref conversationDrafts] remembered
         documents=M.filter keptDocument (buffers d)
         durableIds=S.fromList [windowId w | (w,_,_)<-durable]
         durable=[(w,prepared,recovery) | w<-windows d,conversationTargetFor d w==Nothing,PluginContent reference<-[windowContent w],Just prepared<-[M.lookup reference (pluginWindows d)],Just recovery<-[W.preparedWindowRecovery prepared]]
@@ -483,7 +488,7 @@ sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll
 desktopParser :: Desktop -> Value -> Parser (Desktop,[WindowSeed],[(Int,Text,Int,Text,Text)],[(Text,ConversationSeed)])
 desktopParser baseline=withObject "checkpoint" $ \o->do
   version<-o .: "schemaVersion"
-  unless (version==(5::Int)) (fail "Unsupported checkpoint version")
+  unless (version==(6::Int)) (fail "Unsupported checkpoint version")
   strings<-o .: "strings"
   size@(cols,rows)<-o .: "screen"
   unless (cols>0 && rows>0 && cols<=4096 && rows<=4096 && toInteger cols*toInteger rows<=1048576) (fail "Invalid desktop dimensions")
@@ -556,8 +561,9 @@ documentParser strings=withObject "document" $ \o->do
   label<-o .: "label" >>= traverse (boundedText 32768)
   suggested<-o .: "suggestedName" >>= traverse (checkedPath False)
   origin<-o .:? "origin" >>= traverse (checkedPath True)
+  private<-o .: "private"
   unless (label `notElem` [Just "Agent request",Just "Proposed agent edit",Just "Conversation"] && maybe True (not . T.isPrefixOf "Terminal ") label) (fail "Transient document")
-  pure (ident,restyle (newDocument buffer file) {documentLabel=label,documentSuggestedName=suggested,documentOrigin=origin})
+  pure (ident,restyle (newDocument buffer file) {documentLabel=label,documentSuggestedName=suggested,documentOrigin=origin,documentPrivate=private})
 windowParser :: M.Map Int Document -> M.Map Int Text -> M.Map Text ConversationSeed -> Value -> Parser WindowSeed
 windowParser documents plugins conversations=withObject "window" $ \o->do
   ident<-o .: "id" >>= positive

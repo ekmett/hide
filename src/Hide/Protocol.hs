@@ -29,7 +29,7 @@ import Hide.Accessibility (SemanticAudience(OwnerSemantics), sidebarSemantics, d
 import Hide.GuestAccess
 import Hide.Model hiding (Paste)
 import qualified Hide.Model as Model
-import Hide.Buffer (dirty, selectedText)
+import Hide.Buffer (selectedText)
 import Hide.TextStyle
 import Hide.Font
 import Hide.Render (renderCursor, renderCellRowsAndCanvas)
@@ -257,7 +257,7 @@ framePacket reset old rows metadata = foldl1 smaller (frameCandidates reset old 
   where smaller a b=if BL.length b<BL.length a then b else a
 
 webDirty :: Desktop -> Bool
-webDirty d = any (dirty . documentBuffer) (M.elems (buffers d)) || conversationHasDraft d
+webDirty d = any documentModified (M.elems (buffers d)) || conversationHasDraft d
 
 
 protocolVersion :: Int

@@ -34,6 +34,10 @@ submit a human's answer, or type into a human composer. Generic reads of approva
 and Git-review buffers are refused; structured Git tools provide separately checked
 results. Public conversation transcripts are distinct from their protected spans.
 Plugin windows remain private until the host accepts explicit semantic access.
+Recovered unsent plugin input stays private through Save and restart. While a
+saved private document remains open, its canonical path is also protected from
+agent file reads, search and filesystem changes. New views of that path inherit
+the flag; source rendering reads it directly without walking other buffers per cell.
 
 Structured records whose owning source is an authority path are omitted as records,
 including their path and diagnostic body. Screens preserve geometry with masked

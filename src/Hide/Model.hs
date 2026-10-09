@@ -67,10 +67,33 @@ inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 -- | Shared buffer and prepared presentation metadata; split windows reference its ID.
 -- documentOrigin retains canonical privacy provenance for generated source. It
 -- does not authorize saving, filesystem access or debugger source operations.
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: StyledText, documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Seq.Seq SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: StyledText, documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Seq.Seq SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath, documentPrivate :: !Bool } deriving (Eq,Show)
+-- Explicit host privacy survives Save and recovery; a label or suggested name
+-- never declassifies recovered input.
+
+-- | A cheap captured document save obligation. Buffer representation comparison
+-- stays lazy until the owning worker asks 'snapshotDocumentModified'.
+data DocumentModification = DocumentModification !Bool !DirtySnapshot
+
+-- | /O(1)/ measured capture, without retaining a Document or its Undo. Nonempty
+-- untitled input needs saving even when its seed equals the buffer baseline.
+captureDocumentModified :: Document -> DocumentModification
+captureDocumentModified doc=DocumentModification
+  (documentFile doc==Nothing && documentLabel doc==Nothing && bufferLength (documentBuffer doc)>0)
+  (captureDirty (documentBuffer doc))
+
+-- | Evaluate a captured save obligation; encoded-mode comparison may scan text.
+snapshotDocumentModified :: DocumentModification -> Bool
+snapshotDocumentModified (DocumentModification untitled changed)=untitled || snapshotDirty changed
+
+-- | Needs Save/Discard at the document boundary. Diff provenance still uses the
+-- buffer baseline, so preserving an input draft never rewrites its history.
+documentModified :: Document -> Bool
+documentModified=snapshotDocumentModified . captureDocumentModified
+
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
-newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing Nothing [] [] Nothing Nothing)
+newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing Nothing [] [] Nothing Nothing False)
 
 restyle :: Document -> Document
 restyle doc = doc {documentHighlight=[],documentHasLayoutMetadata=False,documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
@@ -875,12 +898,19 @@ moveWindowRow delta d=case activeWindow d of
 -- origin remains host metadata, never a resource ID or frontend field.
 privatePreparedWindow :: Desktop -> PluginWindow.PreparedWindow -> Bool
 privatePreparedWindow d prepared=PluginWindow.preparedWindowDisclosure prepared/=PluginWindow.ReadableWindow ||
-  maybe False (Privacy.protectedFilePath (guestPrivatePaths d)) (PluginWindow.preparedWindowSemantics prepared >>= PluginWindow.textLinkBase)
+  maybe False (Privacy.protectedFilePath (privateFilePaths d)) (PluginWindow.preparedWindowSemantics prepared >>= PluginWindow.textLinkBase)
+
+-- | Canonical private paths captured by service workers. Explicit document
+-- privacy follows a saved draft onto disk; this projection reads metadata only.
+-- Source painting uses the stored flag instead of rebuilding this set per cell.
+privateFilePaths :: Desktop -> [FilePath]
+privateFilePaths d=guestPrivatePaths d++[path | doc<-M.elems (buffers d),
+  documentPrivate doc,Just path<-[filePath <$> documentFile doc,documentOrigin doc]]
 
 -- | Shared document authority classification. Titles, buffer reads and screen
 -- masks use the same canonical path and host-owned document-role rules.
 privateDocument :: Desktop -> Document -> Bool
-privateDocument d doc=maybe False privateLabel (documentLabel doc) || maybe False (privatePath . filePath) (documentFile doc) || maybe False privatePath (documentOrigin doc)
+privateDocument d doc=documentPrivate doc || maybe False privateLabel (documentLabel doc) || maybe False (privatePath . filePath) (documentFile doc) || maybe False privatePath (documentOrigin doc)
   where
     privatePath=Privacy.protectedFilePath (guestPrivatePaths d)
     privateLabel "Git diff"=True
@@ -907,12 +937,39 @@ fitRect (sw,sh) (Rect x y w h) = Rect (max 0 (min x (sw-w'))) (max 1 (min y (sh-
   where w' = max 1 (min sw (max 16 w)); h' = max 1 (min (max 1 (sh-2)) (max 5 h))
 
 addDocument :: Maybe FileState -> Buffer -> Desktop -> Desktop
-addDocument file b d = d { windows = w : windows d, buffers = M.insert i (newDocument b file) (buffers d), nextId = i+1, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d) }
+addDocument file b d = d { windows = w : windows d, buffers = M.insert i document (buffers d), nextId = i+1, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d) }
   where
+    document=(newDocument b file) {documentPrivate=maybe False (\state->filePath state `elem` privateFilePaths d) file}
     i = nextId d
     offset = length (windows d) `mod` 5
     (sw,sh) = screenSize d
     w = Window i (SourceContent i) (fitWindow d (Rect offset (1+offset) (sw-offset) (sh-2-offset))) (Selection 0 0) 0 0 Nothing False False (nextWindowNumber d) (if byteMode b || (defaultBufferView d==MarkdownView && not (markdownDocument (newDocument b file))) then CurrentView else defaultBufferView d) Nothing 50 Nothing Nothing Nothing Nothing Canvas.fitCanvasView
+
+-- | Preserve nonempty withdrawn input as ordinary private unsaved documents.
+-- Buffer roots, Undo and selection are shared, never flattened or compared.
+-- Fresh background frames keep hidden drafts reachable without taking focus,
+-- changing a modal/gesture, or reviving a retired plugin capability. Empty input
+-- is released. Applying this twice for the same references is idempotent.
+preserveEditorDrafts :: [Editor.DraftRef] -> Desktop -> Desktop
+preserveEditorDrafts references original=foldl' preserve original references
+  where
+    preserve desktop reference=case M.lookup reference (editorDrafts desktop) of
+      Nothing->desktop
+      Just draft->let
+        detached=desktop {editorDrafts=M.delete reference (editorDrafts desktop),windows=map detach (windows desktop)}
+        detach window | maybe False ((==reference).Editor.mountDraft) (windowEditorMount window)=window {windowEditorMount=Nothing}
+                      | otherwise=window
+        buffer=editorDraftBuffer draft
+        ident=nextId detached
+        added=addDocument Nothing buffer detached
+        document= \doc->doc {documentPrivate=True,documentSuggestedName=Just "Recovered input.txt"}
+        foreground=windows detached
+        fresh=case windows added of
+          window:_->[window {selection=editorDraftSelection draft,bufferView=CurrentView}]
+          []->[]
+        in if bufferLength buffer==0 then detached else added
+          {buffers=M.adjust document ident (buffers added),windows=foreground++fresh,
+           problemsFocused=problemsFocused detached,sideTree=sideTree detached}
 
 nextWindowNumber :: Desktop -> Int
 nextWindowNumber d = choose 1
@@ -1400,14 +1457,14 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       Just _ | maybe False ((/=Nothing) . documentLabel) (activeDocument d) -> (d {status="This window is read-only."},[])
       Just w | Just bid<-bufferId w -> (prompt "Save file as" (Saving bid Nothing) [Input "Name" (currentPath d) (T.length (currentPath d))] d,[])
       _ -> (d,[])
-    go Quit d = case find (dirty . documentBuffer . snd) (M.toList (buffers d)) of
+    go Quit d = case find (documentModified . snd) (M.toList (buffers d)) of
       Nothing | conversationHasDraft d -> (d {dialog=Just (Dialog "Unsent query" DiscardDraft [] 0 ["Discard","Cancel"] ["Discard the unsent conversation query?"])},[])
               | otherwise -> (d,[Exit])
       Just (bid,_) -> let focused = maybe d (\w -> focusWindow (windowId w) d) (find ((==Just bid) . bufferId) (windows d))
                      in confirm Quit focused
     go Close d = case (activeWindow d, activeDocument d) of
       (Just w,Nothing) | PluginContent reference<-windowContent w ->(closeActive d,map RetirePluginWindow (nub (reference:closingConversationBodies d w))++closingEditors d w)
-      (Just w, Just doc) | dirty (documentBuffer doc) && length (filter ((==bufferId w) . bufferId) (windows d)) == 1 -> confirm Close d
+      (Just w, Just doc) | documentModified doc && length (filter ((==bufferId w) . bufferId) (windows d)) == 1 -> confirm Close d
       (Just w,_) -> (closeActive d,closingEditors d w)
       _ -> (d,[])
     go command@(ExecuteShellBlock origin block) d
