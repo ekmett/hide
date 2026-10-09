@@ -81,6 +81,47 @@ select :: Int -> Desktop -> Desktop
 select index d=d {sideTree=Just (treeOf d) {treeSelected=index,treeFocused=True}}
 
 -- One real Files popup/form workflow, including its filesystem refusal paths.
+bufferExportChecks :: IO ()
+bufferExportChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
+  let original=dir </> "Main.hs"
+      doc d=maybe (error "export source missing") id (activeDocument d)
+  BS.writeFile original "main = 1\n"
+  (file,buffer)<-loadFile original >>= either error pure
+  let dirtySource=insertText "local " (addDocument (Just file) buffer (initialDesktop (100,30)))
+  -- The editor action captures current bytes instead of borrowing Files' disk
+  -- export. Exercise the source popup as well as the File menu command.
+  let currentSource=dirtySource
+      selectBufferExport d=case activeWindow d of
+        Nothing->error "Missing export source window"
+        Just window->
+          let r=bounds window
+              popup=fst (handleEvent (V.EvMouseDown (left r+2) (top r+2) V.BRight []) d)
+          in case findIndex ((=="Export buffer copy…").fst) (contextItemsFor popup) of
+            Nothing->error "Source popup has no buffer export"
+            Just index->handleEvent (V.EvKey V.KEnter []) (iterate (fst . handleEvent (V.EvKey V.KDown [])) popup!!index)
+      copyReady next=case snd (pendingFileExport next) of Just _->True;_->False
+  sourceVersion<-captureVersion (documentBuffer (doc currentSource))
+  bufferOffer<-act host (selectBufferExport currentSource) >>= await (tickSidebar host applyEffects) copyReady
+  unchangedBuffer<-versionCurrent sourceVersion (documentBuffer (doc bufferOffer))
+  unchangedFile<-BS.readFile original
+  check "source export copies live dirty bytes and preserves buffer identity, disk and save state"
+    (unchangedBuffer && unchangedFile=="main = 1\n" && dirty (documentBuffer (doc bufferOffer)) &&
+      case (snd (pendingFileExport bufferOffer),activeWindow bufferOffer) of
+        (Just (ExportFileCopy name bytes row receipt),Just window)->name=="Main.hs" && bytes=="local main = 1\n" &&
+          top row==top (bounds window) && receipt==fileExportView bufferOffer
+        _->False)
+  let unnamed=addDocument Nothing (newByteBuffer (BS.pack [0,255,13,10])) currentSource
+  hexOffer<-act host (runCommand ExportBuffer unnamed) >>= await (tickSidebar host applyEffects) copyReady
+  check "unnamed hex export preserves binary bytes and is available in the File menu"
+    (any (\(MenuItem _ _ command)->command==ExportBuffer) (menuItemsFor unnamed 0) &&
+      case snd (pendingFileExport hexOffer) of Just (ExportFileCopy name bytes _ _)->name=="NONAME.bin" && bytes==BS.pack [0,255,13,10];_->False)
+  queuedBuffer<-act host (runCommand ExportBuffer currentSource)
+  expiredBuffer<-await (tickSidebar host applyEffects) (\next->"expired" `T.isInfixOf` status next) (insertText "newer " queuedBuffer)
+  check "buffer edits invalidate a pending export and agents cannot manufacture exports"
+    (snd (pendingFileExport expiredBuffer)==Nothing && not (guestCommandAllowed ExportBuffer) &&
+      not (guestEffectsAllowed [ExportBufferDocument 1 1]))
+
+
 fileRenameChecks :: IO ()
 fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
   let original=dir </> "Main.hs"
@@ -196,6 +237,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   imageOpeningChecks
   publicationLifetimeChecks
   fileRenameChecks
+  bufferExportChecks
   createDirectory (dir </> "src")
   TIO.writeFile (dir </> "Main.hs") "main = 1\n"
   TIO.writeFile (dir </> "Readme.md") "# Documentation\n"
@@ -243,10 +285,12 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   budgetChecks dir
   putStrLn "shared sidebar checks passed"
 
--- Ordinary file presentation exercises the actual owner, not the PNG factory.
+-- Ordinary file presentation exercises the actual owner, not just decoder factories.
 imageOpeningChecks :: IO ()
 imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
   let png=BL.toStrict (Picture.encodePng (Picture.generateImage (\_ _->Picture.PixelRGBA8 40 160 220 127) 3 2))
+      jpeg=BL.toStrict (Picture.encodeJpegAtQuality 95 (Picture.generateImage (\_ _->Picture.PixelYCbCr8 140 90 210) 5 3))
+      jpegPath=dir </> "photograph.data"
       first=dir </> "landscape.data"
       second=dir </> "second.png"
       source=dir </> "Main.hs"
@@ -256,6 +300,7 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
       body d=maybe (error "missing image window") id (activePluginWindow d)
   BS.writeFile first png
   BS.writeFile second png
+  BS.writeFile jpegPath jpeg
   BS.writeFile source "main = 1\n"
   (_,raw)<-loadFile first >>= right
   check "raw buffer reads preserve image bytes" (byteMode raw && bufferBytes raw==png)
@@ -263,7 +308,7 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
     -- CLI uses this same awaited path; a burst uses the one ordered worker.
     pair<-open host initial [OpenFile Menu.HumanMenu first,OpenFile Menu.HumanMenu second]
     check "ordinary two-image burst opens both in order without a byte buffer"
-      (length (pictures pair)==2 && M.null (buffers pair) && all (\image->Canvas.imageWidth image==3 && Canvas.imageHeight image==2 && Canvas.imagePNG image==png) (pictures pair) &&
+      (length (pictures pair)==2 && M.null (buffers pair) && all (\image->Canvas.imageWidth image==3 && Canvas.imageHeight image==2 && Canvas.imageEncoded image==png) (pictures pair) &&
        (Window.preparedWindowSemantics (body pair) >>= Window.textLinkBase)==Just second)
     mixed<-open host initial [OpenFile Menu.HumanMenu source,OpenFile Menu.HumanMenu first]
     check "named image opening keeps its file directory for ordinary navigation"
@@ -282,10 +327,28 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
       (length (pictures displayed)==1 && any ((==png).bufferBytes.documentBuffer) (M.elems (buffers displayed)))
     uploaded<-uncurry (sidebarEffects host applyEffects) (Wire.applyInput (Wire.UploadFile "unusual.bin" png) initial) >>= awaitFileOpening host . snd
     check "uploaded image keeps exact bytes and name without a server path"
-      (map Canvas.imagePNG (pictures uploaded)==[png] && M.null (buffers uploaded) && Window.preparedWindowTitle (body uploaded)=="unusual.bin" &&
+      (map Canvas.imageEncoded (pictures uploaded)==[png] && M.null (buffers uploaded) && Window.preparedWindowTitle (body uploaded)=="unusual.bin" &&
        (Window.preparedWindowSemantics (body uploaded) >>= Window.textLinkBase)==Nothing)
     check "uploaded image keeps the existing navigation directory without inventing a path"
       (startingDirectory uploaded==dir && startingDirectory uploaded {defaultDirectory=Nothing}==".")
+    photograph<-open host initial [OpenFile Menu.HumanMenu jpegPath]
+    check "ordinary JPEG opening uses signature and retains exact source"
+      (M.null (buffers photograph) && case pictures photograph of
+        [image]->Canvas.imageFormat image=="JPEG" && Canvas.imageWidth image==5 && Canvas.imageHeight image==3 && Canvas.imageEncoded image==jpeg
+        _->False)
+    uploadedJPEG<-open host initial [OpenFileBytes "upload.jpg" jpeg]
+    check "uploaded JPEG uses the same canvas without a server path"
+      (map Canvas.imageEncoded (pictures uploadedJPEG)==[jpeg] && (Window.preparedWindowSemantics (body uploadedJPEG) >>= Window.textLinkBase)==Nothing)
+    let checkpoint=dir </> "image.checkpoint"
+    writeCheckpoint checkpoint photograph >>= right
+    removeFile jpegPath
+    recoveredImage<-readCheckpoint checkpoint initial >>= right
+    check "image recovery keeps an inert description without reading the removed file"
+      (length (windows recoveredImage)==1 && null (pictures recoveredImage) && M.null (buffers recoveredImage) &&
+       "JPEG 5 × 3" `T.isInfixOf` contentSlice (Window.preparedWindowText (body recoveredImage)) 0 1024 &&
+       case Window.preparedWindowSemantics (body recoveredImage) of
+         Just semantics->Window.textDisclosure semantics==Window.PrivateWindow && Window.textLinkBase semantics==Nothing && null (Window.textLinks semantics)
+         Nothing->False)
     let invalid=BS.take 8 png<>"broken PNG"
     fallback<-open host initial [OpenFileBytes "broken.png" invalid]
     check "undecodable image bytes remain lossless and editable"

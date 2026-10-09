@@ -6,7 +6,7 @@
 -- the latest frame. Local pointer feedback and remote content updates have distinct
 -- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
-  (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame
+  (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame, parseRemoteDownload
   , RemoteCanvas(..), RemoteCanvasSurface(..), CanvasControl(..), CanvasReceiveState, emptyCanvasReceiveState, admitCanvasControl, validateCanvasChunk
   , nativeKeyInput, nativeEventInput, remoteBindingInput, remoteMenuInput, remoteNativeMenuInput, remoteDockWindowInput, remoteMenuLayout, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
@@ -94,6 +94,28 @@ data RemoteFrame = RemoteFrame
   , remoteContributions :: [RemoteContribution], remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
 
+-- | Validate a snapshot download before its immediate binary payload. Export
+-- gestures retain the exact host-issued title/Files row and current view receipt;
+-- ordinary downloads have no gesture and use the frontend's save route.
+parseRemoteDownload :: Value -> Either String (T.Text,Maybe ((Int,Int,Int,Int),[Integer]))
+parseRemoteDownload = parseEither (withObject "download" $ \o->do
+  name<-o .: "name"
+  purpose<-o .:? "purpose"
+  receipt<-case purpose :: Maybe T.Text of
+    Just "file-export"->do
+      row@(x,y,w,h)<-o .: "row"
+      view<-o .: "view"
+      unless (x>=0 && x<=511 && y>=0 && w>0 && w<=512 && h==1 && x+w<=512 && y<256 && validExportView view) (fail "Invalid file export receipt")
+      pure (Just (row,view))
+    Nothing->pure Nothing
+    _->fail "Unknown download purpose"
+  pure (name,receipt))
+
+-- Prefix, Files and source-window receipts use one fixed current wire shape.
+-- Comparing these scalar receipts never observes buffer contents or history.
+validExportView :: [Integer] -> Bool
+validExportView view=length view==20 && all (\n->n>=0 && n<=9007199254740991) view
+
 -- | Validate dimensions, ordered nonoverlapping spans, colors, cursor and widths
 -- before any remote cells reach native drawing.
 parseRemoteFrame :: Value -> [Value] -> Either String RemoteFrame
@@ -111,8 +133,8 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   pixelated <- o .:? "pixelated" .!= False
   terminal <- o .:? "terminal" .!= False
   wordstar <- o .:? "wordstar" .!= False
-  exportView <- o .:? "fileExportView" .!= []
-  unless (length exportView<=13 && all (\n->n>=0 && n<=9007199254740991) exportView) (fail "Invalid file export view")
+  exportView <- o .:? "fileExportView" .!= replicate 20 0
+  unless (validExportView exportView) (fail "Invalid file export view")
   sidebar <- o .:? "semanticSidebar"
   unless (maybe True (\value->case value of Object{}->True; _->False) sidebar) (fail "Invalid sidebar semantics")
   let sidebarBytes=maybe BS.empty (BL.toStrict . BL.take 2097153 . encode) (sidebar::Maybe Value)
@@ -512,18 +534,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
             emit (Assets atlas)
             go [] (object ["menuCommands" .= supported]) Nothing 0 emptyCanvasReceiveState
           "download" -> do
-            offer <- parseIO (withObject "download" $ \o->do
-              name<-o .: "name"
-              purpose<-o .:? "purpose"
-              receipt<-case purpose :: Maybe T.Text of
-                Just "file-export"->do
-                  row@(x,y,w,h)<-o .: "row"
-                  view<-o .: "view"
-                  unless (x>=0 && x<=511 && y>=0 && w>0 && w<=512 && h==1 && x+w<=512 && y<256 && length view==13 && all (\n->n>=0 && n<=9007199254740991) view) (fail "Invalid file export receipt")
-                  pure (Just (row,view))
-                Nothing->pure Nothing
-                _->fail "Unknown download purpose"
-              pure (name,receipt)) value
+            offer <- either (ioError . userError) pure (parseRemoteDownload value)
             go rows metadata (Just offer) demand canvasState
           "frame-ready" -> do
             (serial,changed)<-parseIO (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) value
