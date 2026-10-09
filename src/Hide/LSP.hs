@@ -7,7 +7,7 @@
 -- applyEdit requests at receipt time, until its terminal response. Cancellation
 -- does not release ownership prematurely; only a broken transport is retired.
 module Hide.LSP
-  ( Client, Event(..), startClient, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
+  ( Client, Event(..), startClient, startClientWith, stopClient, syncDocuments, notifySaved, request, pollEvents, serverCapabilities
   , executeCommand, replyEdit, cancelRequest, retireClient
   , fileUri, uriFilePath, offsetPosition, positionOffset, positionValue
   , bufferOffsetPosition, bufferPositionOffset, bufferPositionValue
@@ -53,12 +53,19 @@ data Client = Client
   , commandOwner :: MVar (Maybe Int), replyEdit :: Value -> Bool -> Maybe Text -> IO (), retireClient :: IO (MVar ())
   }
 
--- Initialization and all subsequent writes happen off the UI thread.
+-- | Start the configured HLS executable in a project root. Initialization and
+-- subsequent writes belong to the protocol workers.
 startClient :: FilePath -> IO Client
-startClient root = mask $ \restore -> do
+startClient root = do
   executable <- fromMaybe "haskell-language-server-wrapper" <$> lookupEnv "THC_EDIT_HLS"
+  startClientWith executable ["--lsp"] root
+
+-- | Start a language server with literal arguments and a working directory.
+-- The caller supplies the complete argument list; no shell or shebang is needed.
+startClientWith :: FilePath -> [String] -> FilePath -> IO Client
+startClientWith executable arguments root = mask $ \restore -> do
   (Just input, Just output, Just errors, process) <- createProcess
-    (proc executable ["--lsp"]) { cwd = Just root, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe }
+    (proc executable arguments) { cwd = Just root, std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe }
   let ignore action = void action `catch` (\(_ :: IOException) -> pure ())
       cleanup = do
         ignore (terminateProcess process)
