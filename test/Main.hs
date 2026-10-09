@@ -143,7 +143,8 @@ main = defaultMainWithIngredients
   [includingOptions [Option (Proxy :: Proxy AllocationProfile)]
   , listingTests, composeReporters consoleTestReporter antXMLRunner] tests
 
--- Serial order is part of the fixture contract, including filtered runs.
+-- Exclude overlapping ownership of process-wide environment and cwd.
+-- Groups remain independent; no group requires a predecessor to have run.
 tests :: TestTree
 tests = askOption $ \profile->withResource
   (when (profile==Instrumented) (putStrLn "Instrumented allocation profile: counters are measured; optimized limits are enforced by the separate normal run."))

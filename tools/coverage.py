@@ -13,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import platform
-import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -21,7 +20,7 @@ import xml.etree.ElementTree as ET
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--builddir", default="build/coverage")
-    parser.add_argument("--output", default="build/coverage-results")
+    parser.add_argument("--output", required=True, help="This invocation's JUnit and editor-tests.tix directory")
     parser.add_argument("--converter", default="hpc-codecov")
     args = parser.parse_args()
     output = Path(args.output)
@@ -31,10 +30,18 @@ def main():
         converter += ".exe"
     raw = output / "hpc-all.info"
     build = Path(args.builddir).resolve()
-    # Discovery matches a directory basename; restrict it to this exact build.
-    subprocess.run([converter, "--root", str(build), "--build", build.name, "--src", str(Path.cwd()),
-                    "--exclude", "Main,Paths_hide",
-                    "--format", "lcov", "--out", str(raw), "cabal:editor-tests"], check=True)
+    # Counts belong to the invocation, never a restored build cache. HPC and the
+    # converter validate them against the exact build's instrumentation hashes.
+    tix = output / "editor-tests.tix"
+    if not tix.is_file():
+        raise ValueError("This invocation has no editor-tests.tix counts")
+    all_mix = list(build.glob("build/**/extra-compilation-artifacts/hpc/vanilla/mix/*/*.mix"))
+    if not all_mix:
+        raise ValueError("The instrumented build has no HPC mix files")
+    mix_dirs = sorted({path.parent.parent for path in all_mix})
+    subprocess.run([converter, "--src", str(Path.cwd()), "--exclude", "Main,Paths_hide",
+                    *("--mix=" + str(path) for path in mix_dirs),
+                    "--format", "lcov", "--out", str(raw), str(tix)], check=True)
     records = []
     source_files = set()
     executed = False
@@ -63,18 +70,12 @@ def main():
 
     # Cabal's HTML includes only exposed modules. Render the same library scope
     # as LCOV, retaining internal modules and HPC's original expression spans.
-    tix_files = list(build.glob("build/**/t/editor-tests/hpc/vanilla/tix/editor-tests.tix"))
-    if len(tix_files) != 1:
-        raise ValueError("Expected this run's editor-tests HPC counts")
     modules = {".".join(Path(name).with_suffix("").parts[1:]) for name in source_files}
-    mix_files = [path for path in build.glob("build/**/extra-compilation-artifacts/hpc/vanilla/mix/*/Hide.*.mix")
-                 if path.stem in modules]
+    mix_files = [path for path in all_mix if path.stem in modules]
     if len(mix_files) != len(modules) or {path.stem for path in mix_files} != modules:
         raise ValueError("Expected one matching HPC mix file per covered Hide module")
     html = output / "hpc-html"
-    if html.exists():
-        shutil.rmtree(html)
-    subprocess.run(["hpc", "markup", str(tix_files[0]), "--srcdir=" + str(Path.cwd()),
+    subprocess.run(["hpc", "markup", str(tix), "--srcdir=" + str(Path.cwd()),
                     "--destdir=" + str(html), "--verbosity=0",
                     *("--hpcdir=" + str(path) for path in sorted({path.parent.parent for path in mix_files})),
                     *("--include=" + name for name in sorted(modules))], check=True)

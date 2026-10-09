@@ -64,25 +64,32 @@ To generate the same reports locally from the repository root:
 
 ```sh
 cabal install hpc-codecov-0.6.4.1
-mkdir -p build/coverage-results
-cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-option='--pattern=/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --test-option=--xml=build/coverage-results/allocation-tests.xml
-cabal test editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-options="--instrumented --xml=build/coverage-results/tests.xml"
-python3 tools/coverage.py
+reports=$(mktemp -d "${TMPDIR:-/tmp}/hide-coverage.XXXXXX")
+export MSYS2_ARG_CONV_EXCL=--test-option=--pattern=
+cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-option='--pattern=/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --test-option="--xml=$reports/allocation-tests.xml"
+cabal build editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal
+test_exe=$(cabal list-bin editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal)
+test_exe=${test_exe%$'\r'}
+HPCTIXFILE="$reports/editor-tests.tix" cabal exec --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal -- "$test_exe" --instrumented --xml="$reports/tests.xml" +RTS --read-tix-file=no -RTS
+python3 tools/coverage.py --output "$reports"
 ```
 
-The test runner names each existing check group and runs them in order because
-some fixtures temporarily change the process environment or working directory.
+The test runner names each existing check group and excludes overlapping execution
+because some fixtures temporarily own the process environment or working directory.
+No group depends on the results or side effects of a previous group.
 Use `--test-options="--pattern=BufferTree"` to select a group. Full coverage reports
 come from the whole suite; a focused run measures only the selected work.
 
 The builds use separate directories and caches. CI saves completed builds before
-running tests, so a test failure does not discard them. Delete old `.tix` files
-and generated HPC HTML before repeating a local run; CI does this automatically.
+running tests, so a test failure does not discard them. Each invocation owns its
+reports directory; `HPCTIXFILE` keeps counts outside the reusable build and
+`--read-tix-file=no` prevents accumulation on repeated execution. No files need
+to be deleted before repeating a run or converting its reports.
 Each platform converts its own matching instrumentation before uploading; Codecov
 combines the reports for the commit without carrying old platform coverage forward.
 
 Download the workflow's `coverage-<platform>` artifact and open
-`coverage-results/hpc-html/hpc_index.html` for expression-level coverage, including
+`hpc-html/hpc_index.html` inside its report directory for expression-level coverage, including
 columns and Boolean outcomes. This is GHC's native rendering of the HPC spans.
 The artifact retains the matching `.mix` files, raw `.tix` counts, HTML, LCOV,
 both JUnit reports and host/toolchain metadata for seven days. HPC spans retain
