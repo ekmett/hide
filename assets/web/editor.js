@@ -9,6 +9,8 @@ const resourceAction = document.querySelector('#open-resource');
 const downloadAction = document.querySelector('#download-file');
 const sidebarAccess = document.querySelector('#semantic-sidebar');
 const dialogAccess = document.querySelector('#semantic-dialog');
+const sourceAccess = document.querySelector('#semantic-source');
+const sourceText = document.querySelector('#semantic-source-text');
 const imageAccess = document.querySelector('#semantic-images');
 const gl = canvas.getContext('webgl2', {alpha:false, antialias:false, preserveDrawingBuffer:true});
 if (!gl) {status.textContent='WebGL2 is unavailable in this browser.';throw new Error(status.textContent);}
@@ -389,13 +391,55 @@ sidebarAccess.addEventListener('keydown',event=>{
  }
  event.preventDefault();readSidebarItem(next);
 });
+// Source text is a complete, bounded excerpt from the host's focused viewport.
+// Reading never grants input authority or rebuilds an inferred editor tree.
+let sourceCovered=false;
+function clearSource(){
+ sourceText.value='';sourceAccess.hidden=true;
+ for(const element of [sourceAccess,sourceText]){element.removeAttribute('aria-label');element.removeAttribute('aria-description');}
+}
+function receiveSource(value){
+ const invalid=()=>{clearSource();throw new Error('Invalid source metadata');};
+ const integer=n=>Number.isSafeInteger(n)&&n>=0;
+ const textWithin=(text,limit,multiline=false,expectedLines=1)=>{
+   if(typeof text!=='string'||text.length>limit*2)return false;
+   let length=0,lineCount=1,lineLength=0;
+   for(const scalar of text){
+     const code=scalar.codePointAt(0);
+     if(++length>limit||code>=0xd800&&code<=0xdfff||(code<32||code>=127&&code<=159)&&!(multiline&&code===10))return false;
+     if(code===10){if(++lineCount>expectedLines)return false;lineLength=0;}
+     else if(multiline&&++lineLength>2048)return false;
+   }
+   return lineCount===expectedLines;
+ };
+ if(value===null||value===undefined){clearSource();return;}
+ if(!value||value.readOnly!==true||typeof value.present!=='boolean')invalid();
+ if(!value.present){clearSource();return;}
+ const id=value.id,r=value.bounds,lastLine=value.firstLine+(value.lineCount-1);
+ if(!Array.isArray(id)||id.length!==3||id[0]!=='source'||!id.slice(1).every(part=>typeof part==='string'&&/^(0|[1-9][0-9]{0,19})$/.test(part))||
+   !integer(value.revision)||typeof value.truncated!=='boolean'||
+   ![value.firstLine,value.firstColumn,value.lineCount].every(integer)||value.firstLine<1||value.lineCount<1||value.lineCount>256||
+   !Number.isSafeInteger(lastLine)||!Array.isArray(r)||r.length!==4||!r.every(integer)||
+   r[2]<1||r[3]<1||r[0]+r[2]>cols||r[1]+r[3]>lines||value.lineCount>r[3]||
+   !textWithin(value.name,256)||!textWithin(value.value,32768,true,value.lineCount))invalid();
+ if(sourceCovered){clearSource();return;}
+ const name=value.name||'Source';
+ const description=`Read-only visible source excerpt. Lines ${value.firstLine} to ${lastLine}, display column offset ${value.firstColumn}. Limited to 256 lines, 2,048 characters per line and 32,768 characters total. `+
+   (value.truncated?'More source text is not included. ':'Only the visible excerpt is included. ')+'Use editor controls to edit.';
+ sourceAccess.setAttribute('aria-label',`Visible source: ${name}`);
+ sourceText.setAttribute('aria-label',`Source excerpt: ${name}`);sourceText.setAttribute('aria-description',description);
+ sourceText.readOnly=true;sourceText.setAttribute('aria-readonly','true');sourceText.setAttribute('aria-multiline','true');
+ if(sourceText.value!==value.value)sourceText.value=value.value;
+ sourceAccess.hidden=false;
+}
 // A complete current-modal projection grants reading, never editor actions.
 function clearDialog(){
  dialogAccess.replaceChildren();dialogAccess.hidden=true;dialogAccess.removeAttribute('aria-label');
+ sourceCovered=false;sourceAccess.removeAttribute('aria-hidden');
  sidebarAccess.removeAttribute('aria-hidden');imageAccess.removeAttribute('aria-hidden');
 }
 function receiveDialog(value){
- const invalid=()=>{clearDialog();throw new Error('Invalid dialog metadata');};
+ const invalid=()=>{clearDialog();clearSource();throw new Error('Invalid dialog metadata');};
  const integer=n=>Number.isSafeInteger(n)&&n>=0;
  const validId=id=>Array.isArray(id)&&id.every(part=>typeof part==='string'&&part.length<=24)&&id[0]==='dialog'&&(id.length===1||
    id.length===3&&['field','body','button'].includes(id[1])&&/^[0-9]{1,24}$/.test(id[2])||
@@ -422,6 +466,7 @@ function receiveDialog(value){
  if(!value.present){clearDialog();return;}
  const reading=dialogAccess.contains(document.activeElement)&&document.activeElement.tagName==='TEXTAREA'?document.activeElement:null;
  if(!root)clearDialog();
+ sourceCovered=true;clearSource();sourceAccess.setAttribute('aria-hidden','true');
  sidebarAccess.setAttribute('aria-hidden','true');imageAccess.setAttribute('aria-hidden','true');
  if(!root)return; // A private modal still covers the underlying semantic surface.
  const elements=new Map(),containers=new Map(),rootItems=[];let retainedRoot=null;containers.set('["dialog"]',dialogAccess);
@@ -524,9 +569,9 @@ function connect(){
    if(message.type?.startsWith('canvas-')){images.control(message);dirty=true;
    }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;
    }else if(message.type==='connection'){
-     ready=message.connected&&glyphs.size>0;if(!ready){attachmentEpoch++;clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
+     ready=message.connected&&glyphs.size>0;if(!ready){attachmentEpoch++;clearClipboardRequest();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');
    }else if(message.type==='assets'){
-     attachmentEpoch++;clearSidebar();clearDialog();images.clear();dirty=true;
+     attachmentEpoch++;clearSidebar();clearDialog();clearSource();images.clear();dirty=true;
      glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();scale=initialScale=message.scale||2;ready=true;status.textContent='Connected';lastSize='';send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      if(!platformSent){platformSent=true;send({type:'frontend',mode:message.mode||3,mac:navigator.platform.includes('Mac')});}
@@ -536,6 +581,8 @@ function connect(){
      frame={...frame,...message};updateTitle();unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
      if(Object.hasOwn(message,'semanticDialog'))receiveDialog(message.semanticDialog);
      else if(message.reset)clearDialog();
+     if(Object.hasOwn(message,'semanticSource'))receiveSource(frame.semanticSource);
+     else if(message.reset)clearSource();
      if(Object.hasOwn(message,'semanticSidebar'))receiveSidebar(message.semanticSidebar);
      else if(message.reset)clearSidebar();
      if(Object.hasOwn(message,'canvas'))images.receive(message.canvas,cols,lines);
@@ -556,16 +603,16 @@ function connect(){
    }else if(message.type==='ack'){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='detached'){
-     attachmentEpoch++;detached=true;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
+     attachmentEpoch++;detached=true;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Session detached. Resume from your terminal with hide --resume.';
      navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
-     attachmentEpoch++;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
+     attachmentEpoch++;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{stopped=true;if(connection!==socket)return;attachmentEpoch++;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{stopped=true;if(connection!==socket)return;attachmentEpoch++;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();
@@ -582,7 +629,7 @@ canvas.addEventListener('wheel',e=>{e.preventDefault();mouseEvent(e.deltaY<0?'wh
 function release(){send({type:'blur'});leftDown=false;mouse=[-1,-1];dirty=true;}
 window.addEventListener('blur',release);document.addEventListener('visibilitychange',()=>{if(document.hidden)release();});
 window.addEventListener('resize',resize);new ResizeObserver(resize).observe(screen);
-function semanticReadingTarget(target){return sidebarAccess.contains(target)||dialogAccess.contains(target);}
+function semanticReadingTarget(target){return sidebarAccess.contains(target)||dialogAccess.contains(target)||sourceAccess.contains(target);}
 window.addEventListener('keydown',e=>{
  if(semanticReadingTarget(e.target))return;
  if(sessionFrontend&&e.key===']'&&e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey){

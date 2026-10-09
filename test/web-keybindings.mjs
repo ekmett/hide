@@ -10,7 +10,7 @@ const context=vm.createContext({
  input:{addEventListener:()=>{},value:'',setSelectionRange:()=>{}},
  navigator:{platform:'MacIntel'},HTMLButtonElement:class {},performance:{now:()=>0},
  sessionFrontend:false,composing:false,cursorEpoch:0,frame:{bindingsActive:true,bindings:[]},
- fullscreen:{},downloadAction:{},sidebarAccess:{contains:target=>target===context.sidebarAccess},dialogAccess:{contains:target=>target===context.dialogAccess||target===context.dialogChild},dialogChild:{},clipboard:'selected',nativeCopies:[],send:packet=>packets.push(packet),command:name=>commands.push(name),
+ fullscreen:{},downloadAction:{},sidebarAccess:{contains:target=>target===context.sidebarAccess},dialogAccess:{contains:target=>target===context.dialogAccess||target===context.dialogChild},sourceAccess:{contains:target=>target===context.sourceAccess},dialogChild:{},clipboard:'selected',nativeCopies:[],send:packet=>packets.push(packet),command:name=>commands.push(name),
 });
 vm.runInContext(source.slice(source.indexOf('function mods(e)'),source.indexOf('function mods(e)')+source.slice(source.indexOf('function mods(e)')).indexOf('\n')),context);
 vm.runInContext(source.slice(source.indexOf('function semanticReadingTarget('),source.indexOf("window.addEventListener('dragover'")),context);

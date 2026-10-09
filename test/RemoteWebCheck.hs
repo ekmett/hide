@@ -4,9 +4,10 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait, waitCatch)
 import Control.Concurrent.STM (newTChanIO, atomically, readTChan, writeTChan)
 import Control.Exception (bracket, bracket_)
-import Control.Monad (unless, void)
+import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as BL
@@ -42,7 +43,7 @@ checks = do
             release key=control "canvas-release" ["id" .= key]
             rows=replicate 12 (toJSON ([]::[Value]))
             scene target=object ["epoch" .= epoch,"surfaces" .= [object ["id" .= (1::Int),"resource" .= ident,"slot" .= (1::Int),"rect" .= ([0,0,2,2]::[Int]),"target" .= (target::[Double]),"name" .= ("safe.png"::T.Text),"description" .= ("2 by 2"::T.Text)]],"mask" .= ("AQAA"<>T.replicate 1276 "A")]
-            frame first canvas=BinaryPacket (BL.toStrict (framePacket first (if first then [] else rows) rows ["size" .= ([40,12]::[Int]),"canvas" .= canvas]))
+            frame first canvas=BinaryPacket (BL.toStrict (framePacket first (if first then [] else rows) rows ["size" .= ([40,12]::[Int]),"canvas" .= canvas,"semanticSource" .= object ["present" .= True,"value" .= ("source before disconnect"::T.Text)]]))
             payload=BS.pack [0..15]
         withAsync (runRemoteWeb 1 "safe-host" peer) $ \server->do
           feed ([JsonPacket (object ["type" .= ("assets"::T.Text)]),reset,resource ident]++chunk ident 0 (BS.take 4 payload)++[frame True (scene [0,0,2,2])])
@@ -72,12 +73,20 @@ checks = do
             feed ([resource other]++chunk other 0 (BS.take 4 payload)++[release other,release ident,frame False (object ["epoch" .= epoch,"surfaces" .= ([]::[Value]),"mask" .= T.replicate 1280 "A"])])
             (_,released)<-readFrame conn reader
             check "release cancels active and completed resources" (M.null released)
+          attach $ \conn->do
+            reader<-newReader
+            (metadata,resources)<-readFrame conn reader
+            check "reconnect cannot replay retired resources" (M.null resources)
+            check "attached relay replays current source metadata" (case metadata of Object fields->KM.member "semanticSource" fields;_->False)
+            feed [JsonPacket (object ["type" .= ("connection"::T.Text),"connected" .= False])]
+            awaitControl "connection" conn
+            pure ()
           client $ \conn->do
             reader<-newReader
-            (_,resources)<-readFrame conn reader
-            check "reconnect cannot replay retired resources" (M.null resources)
+            (metadata,_)<-readFrame conn reader
+            check "disconnected relay does not replay stale source text" (case metadata of Object fields->not (KM.member "semanticSource" fields);_->False)
             feed [JsonPacket (object ["type" .= ("closed"::T.Text)])]
-            void (WS.receiveDataMessage conn)
+            awaitControl "closed" conn
           bounded "relay completion" (wait server)
         let reject packets=do
               badQueue<-newTChanIO
@@ -129,5 +138,17 @@ checks = do
           writeIORef rows current
           retained<-readIORef resources
           pure (value,retained)
+    -- A reconnect replays its cached connection notice after the frame. Wait
+    -- for the requested control rather than treating that notice as shutdown.
+    awaitControl expected conn=bounded "relay control" loop
+      where
+        loop=do
+          packet<-WS.receiveDataMessage conn
+          case packet of
+            WS.Text bytes _->do
+              value<-either error pure (eitherDecode bytes)
+              kind<-field "type" value
+              unless (kind==(expected::T.Text)) loop
+            _->loop
     field :: FromJSON a => Key -> Value -> IO a
     field key value=either error pure (parseEither (withObject "metadata" (\o->o .: key)) value)
