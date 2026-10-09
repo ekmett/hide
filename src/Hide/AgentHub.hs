@@ -9,7 +9,7 @@
 module Hide.AgentHub
   ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, AgentConfigRef, agentConfigAgent, agentConfiguration, agentConfigurationCurrent, agentControlPending, configureAgentAt, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
-  , Capabilities(..), ConfigChoice(..), parseCapabilities, filterPrivateCapabilities
+  , Capabilities(..), ConfigChoice(..)
   , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, cancelExternalAgentControls, renameAgent
   , configureAgent, steerAgent, steerAgentAt, listAgents, statusAgent, sendAgent, sendAgentAt, waitAgent, cancelAgent, endAgent
   , HistoryEvent(..), HistoryPage(..), historyAgent, searchAgentHistory, recordAgentEvent, snapshotHub, restoreHub, restoreHubWithLimits
@@ -20,18 +20,19 @@ import Control.Concurrent.STM
 import Control.Exception (SomeException, SomeAsyncException, fromException, throwIO, try, mask, onException, finally)
 import Control.Monad (unless, void, forM_)
 import Data.Aeson
-import Data.Aeson.Types (Parser, parseMaybe, parseEither)
+import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString.Lazy as BL
 import Data.Char (isControl)
 import Data.Foldable (toList)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe)
 import qualified Data.Sequence as Q
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.FilePath (isAbsolute)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
+import Hide.Plugin.Agent
 import qualified Data.Text.Encoding as TE
 
 -- | Small directory projection. No task, transcript, history, capability payload
@@ -40,20 +41,7 @@ data AgentSummary = AgentSummary
   { summaryId :: !AgentId, summaryName :: !Text, summaryParent :: !(Maybe AgentId)
   , summaryStatus :: !Text, summaryModel :: !Bool, summaryEffort :: !Bool } deriving (Eq,Show)
 
--- These identities are supplied by the host bridge, never decoded from tool arguments.
-newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq,Ord,Show)
--- | Host-authenticated author identity; never decode this from an agent tool argument.
-data Actor = Human | Agent AgentId deriving (Eq,Show)
 data HubLimits = HubLimits { totalActiveAgents :: Int, directSubagents :: Int } deriving (Eq,Show)
-data Context = Fresh | Fork AgentId deriving (Eq,Show)
-data Workspace = Shared | Worktree { workspaceRef :: Maybe Text, workspaceBranch :: Maybe Text, workspaceName :: Maybe Text } deriving (Eq,Show)
-data SpawnSpec = SpawnSpec
-  { spawnName :: Text, spawnTask :: Text, spawnDirectory :: FilePath
-  , spawnWorkspace :: Workspace, spawnContext :: Context, spawnModel :: Maybe Text, spawnEffort :: Maybe Text
-  } deriving (Eq,Show)
-data ConfigChoice = ConfigChoice
-  { configId :: Text, configCategory :: Text, configCurrent :: Text, configValues :: [(Text,Text)]
-  } deriving (Eq,Show)
 -- | Opaque receipt for one agent incarnation, advertised configuration and
 -- cancellation lifetime. It contains only the stable ID and owner counters.
 data AgentConfigRef = AgentConfigRef !AgentId !Int !Int !Int deriving (Eq,Show)
@@ -61,25 +49,6 @@ data AgentConfigRef = AgentConfigRef !AgentId !Int !Int !Int deriving (Eq,Show)
 agentConfigAgent :: AgentConfigRef -> AgentId
 agentConfigAgent (AgentConfigRef ident _ _ _)=ident
 
-data Capabilities = Capabilities { supportsFork :: Bool, supportsResume :: Bool, supportsSteering :: Bool, configChoices :: [ConfigChoice] }
-  deriving (Eq,Show)
--- Only the trusted launcher and protected persistence see provider session keys.
-data PrivateSource = PrivateSource { sourceAgent :: AgentId, sourceSessionKey :: Text } deriving (Eq,Show)
-data StartRequest = StartRequest
-  { startAgent :: AgentId, startOwner :: Actor, startSpec :: SpawnSpec, startSource :: Maybe PrivateSource, startResume :: Maybe Text }
-  deriving (Eq,Show)
-data HubMessage = HubMessage
-  { messageTicket :: Int, messageAuthor :: Actor, messageText :: Text, messageIsUserSeat :: Bool }
-  deriving (Eq,Show)
--- | Provider lifetime and delivery boundary, publishing typed events back to the hub.
-data AgentDriver = AgentDriver
-  { driverDirectory :: FilePath, driverSessionKey :: Text, driverCapabilities :: Capabilities
-  , driverConfigure :: [(Text,Text)] -> IO (Either Text Capabilities)
-  , driverDeliver :: HubMessage -> IO (Either Text Value)
-  , driverCancel :: IO (), driverStop :: IO (), driverSteer :: HubMessage -> IO (Either Text Value) }
-data DriverEvent = ProviderUpdate Text Value | ProviderCapabilities Capabilities | ProviderUsage Integer Integer | ProviderClosed
-  deriving (Eq,Show)
-type StartProvider = StartRequest -> (DriverEvent -> IO ()) -> IO (Either Text AgentDriver)
 data Phase = Starting | Idle | Running | Cancelling | Ended | Failed | Recovered deriving (Eq,Show)
 -- | One retained public event. The index increases within its agent and remains
 -- unchanged across pagination and recovery. The author is host-attributed; detail
@@ -115,39 +84,6 @@ data AgentHub = AgentHub (FilePath -> IO (Either Text HubLimits)) StartProvider 
 
 emptyCaps :: Capabilities
 emptyCaps=Capabilities False False False []
-
--- ACP v1 config IDs and values remain provider-owned. No hard-coded model or
--- reasoning menu is offered. fork={} is the experimental session/fork marker.
-parseCapabilities :: Value -> Value -> Capabilities
-parseCapabilities initialized session=Capabilities (marker "fork") (marker "resume" || field "loadSession" caps==Just True) ((field "_meta" initialized >>= field "steering" >>= field "supported")==Just True) choices
-  where
-    caps=fromMaybe Null (field "agentCapabilities" initialized)
-    marker name=case field "sessionCapabilities" caps >>= field name of Just (Object _)->True; _->False
-    choices=take 128 (mapMaybe choice (fromMaybe [] (field "configOptions" session)))
-    choice value=do
-      ident<-field "id" value; category<-field "category" value
-      current<-field "currentValue" value
-      unless (field "type" value==Just ("select"::Text) && category `elem` ["model","thought_level"] && validSmall ident && validSmall current) Nothing
-      let options=take 512 (concatMap option (fromMaybe [] (field "options" value)))
-      unless (not (null options)) Nothing
-      pure (ConfigChoice ident category current options)
-    option value=case (field "value" value,field "name" value) of
-      (Just ident,Just label) | validSmall ident && validSmall label -> [(ident,label)]
-      _->concatMap (\group->case (field "value" group,field "name" group) of
-           (Just ident,Just label) | validSmall ident && validSmall label -> [(ident,label)]; _->[]) (fromMaybe [] (field "options" value))
-    validSmall t=not (T.null t) && T.length t<=4096
-
--- A private identifier cannot be replaced with a different public choice. Omit
--- the setting entirely if its IDs, current value or labels contain a binding.
-filterPrivateCapabilities :: [Text] -> Capabilities -> Capabilities
-filterPrivateCapabilities private caps=caps {configChoices=filter public (configChoices caps)}
-  where
-    keys=filter (not . T.null) private
-    public choice=not (any (\text->any (`T.isInfixOf` text) keys)
-      ([configId choice,configCategory choice,configCurrent choice]++concatMap (\(ident,label)->[ident,label]) (configValues choice)))
-
-field :: FromJSON a => Key -> Value -> Maybe a
-field key= parseMaybe (withObject "field" (.: key))
 
 newAgentHub :: HubLimits -> StartProvider -> IO AgentHub
 newAgentHub limits launcher = case checkedLimits limits of
@@ -718,6 +654,23 @@ capabilitiesValue :: Capabilities -> Value
 capabilitiesValue caps=object ["fork" .= supportsFork caps,"resume" .= supportsResume caps,"steering" .= supportsSteering caps,"configOptions" .=
   [object ["name" .= (if configCategory choice=="model" then "Model" else "Reasoning effort"::Text),"id" .= configId choice,"type" .= ("select"::Text),"category" .= configCategory choice,"currentValue" .= configCurrent choice,
     "options" .= [object ["value" .= value,"name" .= label] | (value,label)<-configValues choice]] | choice<-configChoices caps]]
+-- The checkpoint stores host capabilities, not ACP initialize/config replies.
+capabilitiesParser :: Value -> Parser Capabilities
+capabilitiesParser=withObject "capabilities" $ \o->do
+  choices<-o .: "configOptions"
+  unless (length choices<=128) (fail "Too many configuration choices")
+  Capabilities <$> o .: "fork" <*> o .: "resume" <*> o .: "steering" <*> mapM choice choices
+  where
+    small value=if not (T.null value) && T.length value<=4096 then pure value else fail "Invalid configuration text"
+    choice=withObject "configuration choice" $ \o->do
+      ident<-o .: "id" >>= small
+      category<-o .: "category" >>= small
+      current<-o .: "currentValue" >>= small
+      options<-o .: "options"
+      unless (not (null options) && length options<=512) (fail "Invalid configuration choices")
+      ConfigChoice ident category current <$> mapM option options
+    option=withObject "configuration value" $ \o->(,) <$> (o .: "value" >>= small) <*> (o .: "name" >>= small)
+
 actorValue :: Actor -> Value
 actorValue Human=object ["kind" .= ("human"::Text)]
 actorValue (Agent ident)=object ["kind" .= ("agent"::Text),"id" .= agentIdText ident]
@@ -842,8 +795,7 @@ restoreHub limits launcher value=case parseEither persisted value of
       key<-o .: "sessionKey"; unless (maybe True (\t->not (T.null t) && T.length t<=65536) key) (fail "Key")
       external<-o .: "external"
       ended<-o .: "ended"
-      capsValue<-o .: "capabilities"
-      let caps=parseCapabilities (object ["_meta" .= object ["steering" .= object ["supported" .= (field "steering" capsValue==Just True)]],"agentCapabilities" .= object ["loadSession" .= (field "resume" capsValue==Just True),"sessionCapabilities" .= object ["fork" .= (if field "fork" capsValue==Just True then object [] else Null)] ]]) capsValue
+      caps<-o .: "capabilities" >>= capabilitiesParser
       ticket<-o .: "nextTicket"; index<-o .: "nextEvent"; dropped<-o .: "dropped"
       unless (ticket>0 && ticket<=1000000000 && index>0 && index<=1000000000 && dropped>=0 && dropped<index) (fail "Counters")
       history<-o .: "history" >>= mapM eventParser

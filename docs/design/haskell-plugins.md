@@ -48,8 +48,8 @@ to the provider. The host supplies origin and workspace inspection, form replies
 and scoped publication; domain operations use a separate typed reply injection.
 The workspace is the editor's working directory, independent of the Files tree
 root. `AgentSidebar` uses this boundary without importing the desktop model or
-its sidebar interpreter. Agent transports and the separate API package remain
-independent work.
+its sidebar interpreter. Conversation registration and the complete public API
+package remain independent work.
 
 ## Direction
 
@@ -827,6 +827,15 @@ than making the conversation window own transport. Model/effort choices come fro
 Fork/resume must mean actual provider support, not an invented fresh session.
 Private resume keys use a separate host credential/checkpoint service and never
 appear in public descriptions or window state.
+
+The ACP transport and driver are linked from `hide-acp`, a separate Cabal
+package in `plugins/hide-acp`. Its only Hide dependency is `hide-agent-api` in
+`packages/hide-agent-api`, which exposes `Hide.Plugin.Agent`: typed launch
+requests, attributed messages, public capabilities/events and a driver lifetime.
+The adapter does not import the hub, Model, Render or Conversation. Capability
+decoding belongs to ACP; the hub decodes its own checkpoint representation.
+This extracts the provider, not yet the complete conversation/sidebar/tool plugin.
+The rest of the public API is still being established through those consumers.
 
 The hub remains the owner of agent IDs, ancestry, limits, workspaces, task tickets
 and message attribution. A provider plugin supplies a driver; a conversation
