@@ -9,6 +9,8 @@
 module Hide.Reconcile
   ( Reconciliation, withReconciliation, reconciliationEffects, tickReconciliation ) where
 
+import Hide.FileIO (readFileBytes)
+
 import Hide.Sidebar
 import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
@@ -212,7 +214,7 @@ resolve runtime@(Reconciliation watcher ref) conflict action desktop = case M.lo
 readCurrent :: FilePath -> IO (Either T.Text (Maybe BS.ByteString))
 readCurrent path = either (Left . T.pack . show) Right <$> tryIOError (do
   checkPath
-  bytes <- catchIOError (Just <$> BS.readFile path) (\err -> if isDoesNotExistError err then pure Nothing else ioError err)
+  bytes <- catchIOError (Just <$> readFileBytes path) (\err -> if isDoesNotExistError err then pure Nothing else ioError err)
   checkPath
   pure bytes)
   where

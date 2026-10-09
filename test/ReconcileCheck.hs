@@ -18,6 +18,7 @@ import Hide.Buffer
 import Hide.BufferView
 import Hide.TextPresentation (prepareTextPresentations)
 import Hide.Files
+import Hide.FileIO (replaceFile)
 import Hide.Model
 import Hide.Reconcile
 import qualified Hide.AgentFiles as AgentFiles
@@ -185,4 +186,4 @@ externalWrite path bytes = bracket
   \(temporary, handle) -> do
     BS.hPut handle bytes
     hClose handle
-    renameFile temporary path
+    replaceFile temporary path

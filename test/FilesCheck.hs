@@ -9,16 +9,17 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openBinaryTempFile)
 import Hide.Buffer
 import Hide.Files
+import Hide.FileIO (withFileRead, replaceFile)
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error name)
 
 right :: String -> Either String a -> IO a
-right name = either (error . ((name ++ ": ") ++)) pure
+right name = either (error . ((name ++ ": ") ++) . show) pure
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
@@ -157,6 +158,35 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   hexBytes <- BS.readFile hexPath
   check "hex pieces retain all bytes including NUL and invalid UTF-8"
     (hexBytes == hexExpected && diskBytes hexSaved == Just hexExpected)
+  let sharedPath = dir </> "shared-λ.bin"
+  BS.writeFile sharedPath "old bytes"
+  (sharedState, _) <- loadFile sharedPath >>= right "load shared file"
+  withFileRead sharedPath $ \reader -> do
+    _ <- saveFile sharedState (newBuffer "new bytes") >>= right "save while reader is open"
+    previous <- BS.hGetContents reader
+    current <- BS.readFile sharedPath
+    check "replacement preserves reader bytes and updates the path"
+      (previous=="old bytes" && current=="new bytes")
+  -- GHC's Windows temporary-file helper has its own path-length limit. Keep
+  -- the native read/rename long-path check independent of that save helper.
+  let longPath = foldl (</>) dir (replicate 6 (replicate 48 'p')) </> "shared-λ.bin"
+  createDirectoryIfMissing True (takeDirectory longPath)
+  replaceFile sharedPath longPath
+  withFileRead longPath $ \reader -> do
+    BS.writeFile sharedPath "latest bytes"
+    replaceFile sharedPath longPath
+    previous <- BS.hGetContents reader
+    current <- BS.readFile longPath
+    check "long-path replacement preserves overlapping readers"
+      (previous=="new bytes" && current=="latest bytes")
+  -- A failed replacement must not unlink either side, including its source.
+  let destinationDirectory = dir </> "occupied"
+  createDirectory destinationDirectory
+  failedReplacement <- try (replaceFile longPath destinationDirectory) :: IO (Either SomeException ())
+  afterReplacement <- BS.readFile longPath
+  directoryRemains <- doesDirectoryExist destinationDirectory
+  check "failed replacement preserves both paths"
+    (isLeft failedReplacement && afterReplacement=="latest bytes" && directoryRemains)
   putStrLn "file checks passed"
   where
     makeDirectory = do

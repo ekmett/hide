@@ -12,6 +12,8 @@
 -- content adopts into the same display slot; closing never reopens from output.
 module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDownloadsCommands, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, debuggerEffects, tickDebugger, tickPreparedDebug, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider) where
 
+import Hide.FileIO (withFileRead)
+
 import qualified Hide.Plugin.Window as W
 import qualified Hide.Plugin.Menu as Menu
 import Hide.PluginWindowHost (adoptWindowUpdate,replaceWindowUpdate)
@@ -44,7 +46,7 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory, removeFile)
-import System.IO (IOMode(ReadMode), withBinaryFile, openTempFile, hClose)
+import System.IO (openTempFile, hClose)
 import System.IO.Error (tryIOError)
 import Hide.PackageSidebar (packageBuildManifestCurrent)
 import System.FilePath (isAbsolute, takeFileName, takeExtension, takeDirectory, makeRelative, (</>))
@@ -1019,7 +1021,7 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
       result<-try $ do
         directory<-resolveBuildRoot d
         let path=if isAbsolute (T.unpack configPath) then T.unpack configPath else directory </> T.unpack configPath
-        bytes<-withBinaryFile path ReadMode (\h -> BS.hGet h (1024*1024+1))
+        bytes<-withFileRead path (\h -> BS.hGet h (1024*1024+1))
         if BS.length bytes>1024*1024 then pure (Left "Debugger configuration exceeds 1 MiB.") else
           case eitherDecodeStrict' bytes >>= parseEither parseLaunch of
             Left err -> pure (Left (T.pack err))

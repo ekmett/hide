@@ -1,12 +1,49 @@
 // SPDX-License-Identifier: BSD-3-Clause
-/* Checked no-replace filesystem rename. No fallback may overwrite a target. */
+/* File identity, checked no-replace rename, and atomic replacement. */
 #define _GNU_SOURCE
+/* FileRenameInfoEx is part of the supported Windows 10 API. */
+#if defined(_WIN32) && (!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0A00)
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <stddef.h>
+#include <wchar.h>
+#include <io.h>
+#include <fcntl.h>
+
+/* The caller transfers ownership only when a descriptor is returned. */
+int hide_read_descriptor(HANDLE handle) {
+  return _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+}
+
+/* MoveFileEx cannot replace an open destination, even with delete sharing.
+ * POSIX rename leaves existing readers on the old file object. Never fall back
+ * to a delete/copy sequence: on failure both paths must retain their contents. */
+DWORD hide_replace_file(wchar_t const *source, wchar_t const *destination) {
+  HANDLE handle = CreateFileW(source, DELETE,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+    FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (handle == INVALID_HANDLE_VALUE) return GetLastError();
+  size_t bytes = wcslen(destination) * sizeof(wchar_t);
+  size_t size = sizeof(FILE_RENAME_INFO) + bytes;
+  FILE_RENAME_INFO *info = calloc(1, size);
+  if (!info) { CloseHandle(handle); return ERROR_NOT_ENOUGH_MEMORY; }
+  info->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+  info->FileNameLength = (DWORD)bytes;
+  memcpy(info->FileName, destination, bytes);
+  BOOL ok = SetFileInformationByHandle(handle, FileRenameInfoEx, info, (DWORD)size);
+  DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+  free(info);
+  CloseHandle(handle);
+  return error;
+}
+
 static wchar_t *wide_path(char const *path) {
   int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
   if (!n) { errno = EINVAL; return NULL; }
