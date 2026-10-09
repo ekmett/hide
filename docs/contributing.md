@@ -215,11 +215,31 @@ joining workers outside the session lock. `DiffResult` reports exact appliedDiff
 userModified and resulting revision; formatting the wire result stays on the worker.
 Retiring the command rejects later invocation without redirecting retained handles.
 
-This exposes one strict single-buffer diff operation, not arbitrary prepared-edit
-commit grants. Generic plugin activation/event lifetimes and wider authority
-contexts remain part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
-Configuration policy still reads/parses once per owner admission batch and at
-approval/adoption; moving that IO off the UI owner remains separate work.
+For edits across buffers, use the same service in one call:
+
+```haskell
+applyBufferDiffs editor
+  [ BufferDiff (capturedRef first)  (capturedVersion first)  firstPatch
+  , BufferDiff (capturedRef second) (capturedVersion second) secondPatch
+  ]
+```
+
+`applyBufferDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])`
+accepts 1–16 distinct open text buffers with at most 1 MiB characters across all
+patches. Results follow input order. One invalid, stale, private or closed target
+rejects the entire batch; success adds one ordinary Undo per changed buffer and
+saves nothing. The singleton API follows this same path.
+
+A batch uses one `buffer_apply_diff` permission ticket. In Prompt mode, each
+fixed target gets its own editable diff; the user can navigate between them
+with Tab. Allow validates every review version and original source, then installs
+all prepared changes together. Correcting a diff cannot change the target list.
+Review buffers are prepared before queueing, and full patch validation stays on
+the worker. Policy IO also runs on its worker at admission, approval and adoption.
+
+These are checked strict-diff requests, not reusable prepared-edit grants.
+Generic plugin activation/event lifetimes remain part of
+[the buffer service work](https://github.com/ekmett/hide/issues/4).
 
 ## Frontend command routing
 
