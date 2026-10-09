@@ -6,15 +6,17 @@
 -- still has a concurrent-writer race; atomic replacement is not power-loss durability.
 module Hide.Files (FileState(..), FileRepresentation(..), loadFile, loadFileForDisplay, fileBuffer, saveFile) where
 
+import Hide.FileIO (readFileBytes, withFileRead, replaceFile)
+
 import Control.Exception (bracket, evaluate, mask)
 import Control.Monad (unless)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
-import System.Directory (canonicalizePath, copyPermissions, pathIsSymbolicLink, removeFile, renameFile)
+import System.Directory (canonicalizePath, copyPermissions, pathIsSymbolicLink, removeFile)
 import System.FilePath (takeDirectory)
-import System.IO (hClose, hFlush, openBinaryTempFile, withBinaryFile, IOMode(ReadMode), hSeek, SeekMode(AbsoluteSeek))
+import System.IO (hClose, hFlush, openBinaryTempFile, hSeek, SeekMode(AbsoluteSeek))
 import Hide.Plugin.Canvas (isImageContent)
 import System.IO.Error (catchIOError, isDoesNotExistError, tryIOError)
 import Hide.Buffer (Buffer, newBuffer, newByteBuffer, bufferByteStream, byteMode, textBuffer)
@@ -41,7 +43,7 @@ data FileRepresentation = BufferedFile !FileState !Buffer | ImageFile !FilePath 
 loadFileForDisplay :: FilePath -> IO (Either String FileRepresentation)
 loadFileForDisplay path=fileResult path $ do
   resolved<-canonicalizePath path
-  catchIOError (withBinaryFile resolved ReadMode $ \handle->do
+  catchIOError (withFileRead resolved $ \handle->do
     prefix<-BS.hGet handle 8
     hSeek handle AbsoluteSeek 0
     if isImageContent prefix then do
@@ -84,7 +86,7 @@ saveFile state buffer = fileResult path $ mask $ \restore -> do
         evaluate (BL.toStrict stream)
       -- ponytail: check immediately before rename; platform locking is needed for simultaneous writers.
       checkDisk
-      renameFile temporary path
+      replaceFile temporary path
       pure state { diskBytes = Just bytes }
   where
     path = filePath state
@@ -98,7 +100,7 @@ saveFile state buffer = fileResult path $ mask $ \restore -> do
         (ioError (userError "File changed on disk; reopen it before saving."))
 
 readDisk :: FilePath -> IO (Maybe ByteString)
-readDisk path = catchIOError (Just <$> BS.readFile path)
+readDisk path = catchIOError (Just <$> readFileBytes path)
   (\err -> if isDoesNotExistError err then pure Nothing else ioError err)
 
 fileResult :: FilePath -> IO a -> IO (Either String a)

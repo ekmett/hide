@@ -9,6 +9,8 @@
 -- runs in the owning permission tick; filesystem mutations remain initial-phase IO.
 module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, PatchSource, PreparedPatch, capturePatchSource, capturePatchRequest, preparePatch, commitPatches) where
 
+import Hide.FileIO (withFileRead)
+
 import Hide.WorkspaceRename (checkedPath,operationPath,within)
 import qualified Hide.WorkspaceRename as Rename
 import Hide.Sidebar
@@ -28,7 +30,7 @@ import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.Exit (ExitCode(..))
 import System.FilePath
-import System.IO (IOMode(ReadMode), withBinaryFile, hClose)
+import System.IO (hClose)
 import System.IO.Error (catchIOError)
 import System.Process
 import System.Timeout (timeout)
@@ -335,7 +337,7 @@ loadCandidates desktop root live budget (path:rest)=do
         Just (bid,doc) | textBuffer (documentBuffer doc) -> pure (Just (Just (bid,revision (documentBuffer doc)),contents (documentBuffer doc)))
                       | otherwise -> pure Nothing
         Nothing -> do
-          bytes<-(try (withBinaryFile canonical ReadMode (\h -> BS.hGet h 1048577)) :: IO (Either IOException BS.ByteString))
+          bytes<-(try (withFileRead canonical (\h -> BS.hGet h 1048577)) :: IO (Either IOException BS.ByteString))
           pure $ case bytes of
             Right value | BS.length value<=1048576,not (BS.elem 0 value),Right text<-TE.decodeUtf8' value -> Just (Nothing,text)
             _ -> Nothing

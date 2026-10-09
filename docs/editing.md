@@ -325,6 +325,11 @@ asks what to save. **File > Exit** ends the editor session. To leave the desktop
 running, detach and use `hide --resume` later; **Ctrl+]** detaches from the
 terminal frontend. See [sessions](sessions.md) for the other frontends.
 
+Saving replaces the file atomically. Background file reads can finish against the
+previous version while new opens see the saved version, including on Windows. The
+save still checks its disk baseline before replacement and refuses a detected
+conflict.
+
 A title star means the buffer has unsaved edits. The branch badge's star means
 saved changes in Git; saving a buffer can clear one while setting the other.
 

@@ -11,6 +11,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile)
 import System.Timeout (timeout)
 import Hide.External
+import Hide.FileIO (replaceFile)
 import Hide.Browser (entryName)
 
 checks :: IO ()
@@ -34,7 +35,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withWatcher $ \watcher -
   watchPaths watcher [(path, 0)] [dir]
   expect "initial observation includes bytes" (FileObserved path 0 (Just "already changed"))
   BS.writeFile replacement "replacement"
-  renameFile replacement path
+  replaceFile replacement path
   automatic <- timeout 3000000 (await (== FileObserved path 0 (Just "replacement")))
   check "automatic metadata polling finds atomic replacement" (automatic == Just ())
   stamp <- getModificationTime path

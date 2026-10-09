@@ -8,6 +8,8 @@ module Hide.SidebarCommands
   , tickSidebar, refreshTreeFromHost, initializeSidebar, awaitFileOpening, prepareSidebarFile, publishFormRefreshFromHost
   ) where
 
+import Hide.FileIO (withFileRead)
+
 import Control.Concurrent.Async (Async,async,asyncWithUnmask,cancel,poll)
 import qualified Control.Concurrent.Async
 import Control.Concurrent.STM
@@ -22,7 +24,6 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import System.Directory (canonicalizePath,doesFileExist,doesDirectoryExist)
 import qualified Data.ByteString as BS
-import System.IO (withBinaryFile,IOMode(ReadMode))
 import System.FilePath ((</>),takeExtension,takeFileName,takeDirectory,isAbsolute)
 import Data.Char (toLower)
 import System.Mem.StableName
@@ -225,7 +226,7 @@ createFiles host root=do
         exists<-doesFileExist resolved
         if not exists then pure (Left (CommandRejected "File export needs an existing saved file.")) else
           do
-            bytes<-withBinaryFile resolved ReadMode (\h->BS.hGet h (16*1024*1024))
+            bytes<-withFileRead resolved (\h->BS.hGet h (16*1024*1024))
             pure $ if BS.length bytes>=16*1024*1024 then Left (CommandRejected "File export exceeds the 16 MiB limit.")
               else Right (SidebarExportFile (sidebarExportEpoch ctx) (T.pack (takeFileName resolved)) bytes)))
   renameTo<-either (ioError . userError . show) pure =<< registerCommand registry

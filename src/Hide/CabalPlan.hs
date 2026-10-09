@@ -8,6 +8,8 @@
 -- and repository credentials are not part of the returned plan view.
 module Hide.CabalPlan (cabalPlan, publicProjectPath) where
 
+import Hide.FileIO (withFileRead)
+
 import Control.Monad (unless, forM, filterM)
 import Data.Aeson
 import Data.Aeson.Types (Parser, Pair, parseEither, parseMaybe)
@@ -23,7 +25,6 @@ import Data.Maybe (fromMaybe, mapMaybe, catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (canonicalizePath, doesFileExist, getModificationTime, listDirectory)
-import System.IO (withBinaryFile, IOMode(ReadMode))
 import System.FilePath ((</>), isAbsolute, makeRelative, splitDirectories, takeExtension)
 import System.IO.Error (tryIOError)
 import Hide.Buffer
@@ -44,7 +45,7 @@ cabalPlan desktop root=do
       Just path -> do
         exists<-doesFileExist path
         if not exists then unavailable "missing" else do
-          bytes<-withBinaryFile path ReadMode (\handle->BS.hGet handle (8*1024*1024+1))
+          bytes<-withFileRead path (\handle->BS.hGet handle (8*1024*1024+1))
           if BS.length bytes>8*1024*1024 then unavailable "too-large" else
             case eitherDecodeStrict' bytes >>= parseEither (withObject "Cabal plan" (\o->(o,) <$> o .: "install-plan")) of
               Left _ -> unavailable "invalid"

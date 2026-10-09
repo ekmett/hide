@@ -5,6 +5,8 @@
 -- Source actions retain the package revision, then use the common file adopter.
 module Hide.PackageSidebar (PackageSidebar, withPackageSidebar, tickPackageSidebar, packageBuildEffects, packageBuildManifestCurrent) where
 
+import Hide.FileIO (withFileRead)
+
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.Exception (evaluate,finally)
@@ -21,7 +23,6 @@ import Distribution.PackageDescription (Condition(..),CondTree(..))
 import Distribution.Types.Condition (cOr)
 import System.Directory (canonicalizePath,doesFileExist,getFileSize,getModificationTime,listDirectory)
 import System.FilePath ((</>),isAbsolute,makeRelative,splitDirectories,takeDirectory,takeExtension,takeFileName)
-import System.IO (withBinaryFile,IOMode(ReadMode))
 import System.IO.Error (tryIOError)
 import Text.Read (readMaybe)
 import Hide.GuestAccess (protectedFilePath)
@@ -146,7 +147,7 @@ stamp :: FilePath -> IO Stamp
 stamp file=either (const Nothing) Just <$> tryIOError ((,) <$> getModificationTime file <*> getFileSize file)
 readPackage :: FilePath -> IO (Either Text PackageSources)
 readPackage file=do
-  bytes<-tryIOError (withBinaryFile file ReadMode (\handle->BS.hGet handle (1048576+1)))
+  bytes<-tryIOError (withFileRead file (\handle->BS.hGet handle (1048576+1)))
   pure (either (const (Left "Cannot read package description.")) parsePackageSources bytes)
 filterPaths :: FilePath -> [FilePath] -> [FilePath] -> IO [FilePath]
 filterPaths root private paths=fmap concat $ forM paths $ \path->do

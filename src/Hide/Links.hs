@@ -7,6 +7,8 @@
 -- receive argument vectors; their process exit is reaped asynchronously.
 module Hide.Links (followLink, prepareLink, prepareMarkdown, LinkResult, applyLink, openResource, validWebURL) where
 
+import Hide.FileIO (withFileRead)
+
 import Control.Concurrent (forkIO)
 import Control.Exception (IOException, try, evaluate)
 import Control.Monad (unless, void)
@@ -24,7 +26,7 @@ import Network.URI (parseURIReference,uriScheme,uriAuthority,uriRegName,uriPath,
 import System.Directory (canonicalizePath,getTemporaryDirectory)
 import System.FilePath ((</>),takeDirectory,takeExtension,isAbsolute,normalise)
 import System.Info (os)
-import System.IO (withBinaryFile,IOMode(ReadMode),hFileSize,openBinaryTempFile,hClose)
+import System.IO (hFileSize,openBinaryTempFile,hClose)
 import System.Process (createProcess,proc,waitForProcess,CreateProcess(..),StdStream(NoStream))
 import Hide.Plugin.Canvas (imageContentFormat)
 import Hide.Buffer (Buffer(revision),Selection(..),bufferLength)
@@ -64,7 +66,7 @@ prepareLink stream columns directory origin target=do
           (path,fragment)<-localTarget
           -- Match ordinary image opening even when a supported image has an
           -- unusual extension. Detection reads only this bounded prefix.
-          prefix<-withBinaryFile path ReadMode (\handle->BS.hGet handle 8)
+          prefix<-withFileRead path (\handle->BS.hGet handle 8)
           let detected=imageMime prefix
               extension=map toLower (takeExtension path)
           case detected of
@@ -130,7 +132,7 @@ formats :: [(String,Text)]
 formats=[(".png","image/png"),(".jpg","image/jpeg"),(".jpeg","image/jpeg"),(".gif","image/gif"),(".webp","image/webp"),(".bmp","image/bmp"),(".svg","image/svg+xml"),(".pdf","application/pdf")]
 
 boundedRead :: FilePath -> IO BS.ByteString
-boundedRead path=withBinaryFile path ReadMode $ \h->do
+boundedRead path=withFileRead path $ \h->do
   size<-hFileSize h
   unless (size<=8388608) (ioError (userError "Link exceeds 8 MiB"))
   bytes<-BS.hGet h 8388609
