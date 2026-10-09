@@ -30,6 +30,7 @@ import Hide.Plugin.AgentDirectory (AgentDirectory(..),DirectoryRequest(..),Compl
 import qualified Hide.Plugin.Form as Form
 import Hide.Plugin.Command
 import Hide.Plugin.Session (Plugin(..),Session(..))
+import qualified Hide.AgentTools as AgentTools
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Sidebar as Sidebar
@@ -39,7 +40,10 @@ data Snapshot completion = Snapshot !(M.Map A.AgentId A.AgentSummary) !(Maybe (C
 -- | Register the Agents directory for this session. Closing its view or this
 -- registration never stops providers; the host retains their shared lifetime.
 plugin :: Plugin
-plugin=Plugin $ \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
+plugin=Plugin
+  { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
+  , pluginAgentTools=AgentTools.tools
+  }
 
 rootId :: P.NodeId
 rootId=ident "agents"

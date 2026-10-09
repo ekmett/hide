@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module SidebarCheck (checks) where
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (Async,withAsync,wait,poll,waitCatch,asyncThreadId)
+import Control.Concurrent.Async (Async,withAsync,wait,waitCatch,asyncThreadId)
 import Data.IORef
 import Data.List (findIndex)
 import Data.Aeson (object,(.=),withObject,(.:))

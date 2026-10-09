@@ -123,7 +123,7 @@ checks profile = do
   check "built-in descriptors registered for permissions are not duplicated" (case listed of
     Just (Object fields) -> KM.lookup "result" fields==Just (object ["tools" .= builtinTools])
     _ -> False)
-  let agentSpec=object ["name" .= ("agents_list"::T.Text),"inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object []]]
+  let agentSpec=object ["name" .= ("agents_list"::T.Text),"inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object []],"outputSchema" .= object ["type" .= ("object"::T.Text)]]
       strict specs req=editorResponseOnly specs execute edited req >>= snd
   emptyList<-strict [] (rpc "tools/list" (object []))
   check "strict empty server lists no built-in tools" (case emptyList of
@@ -139,6 +139,13 @@ checks profile = do
   allowed<-strict [agentSpec] (request "agents_list" (object []))
   check "strict registered tool reaches controller" (maybe False (T.isInfixOf "ready" . text) allowed)
   check "strict registered tool dispatched once" . (==3) =<< readIORef invoked
+  check "advertised object output has matching structured and text results" (case allowed >>= parseMaybe (withObject "reply" (.: "result")) of
+    Just (Object result)->case (KM.lookup "structuredContent" result,KM.lookup "content" result) of
+      (Just value@(Object _),Just (Array blocks))->case V.toList blocks of
+        [Object entry]->case KM.lookup "text" entry of Just (String encoded)->eitherDecodeStrict' (TE.encodeUtf8 encoded)==Right value; _->False
+        _->False
+      _->False
+    _->False)
   (_,readSkill)<-editorResponseWith debugTools execute edited (rpc "resources/read" (object ["uri" .= ("hide://debugging"::T.Text)]))
   skill<-readSkill
   check "MCP packaged skill readable" (maybe False (T.isInfixOf "name: debug-editor" . text) skill)

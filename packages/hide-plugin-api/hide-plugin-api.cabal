@@ -10,7 +10,7 @@ library
   ghc-options: -Wall
   hs-source-dirs: src
   exposed-modules: Hide.Plugin.Command, Hide.Plugin.Form, Hide.Plugin.Menu
-    , Hide.Plugin.Tree, Hide.Plugin.Sidebar, Hide.Plugin.Session
+    , Hide.Plugin.Tree, Hide.Plugin.Sidebar, Hide.Plugin.Session, Hide.Plugin.Tool
   other-modules: Hide.Plugin.Identity
   build-depends: base >=4.18 && <4.23, hide-agent-api ==0.1.0.0
     , text >=2.0, bytestring, aeson, deepseq, containers, stm, vector, entropy >=0.4.1.11 && <0.5
