@@ -20,7 +20,7 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Unique (Unique, newUnique)
-import Hide.RemoteEndpoint (randomIdentity)
+import Hide.Plugin.Identity (randomIdentity)
 import Hide.Plugin.Command
 
 -- | Origin is supplied by host dispatch, never frontend JSON.
