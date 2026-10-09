@@ -258,8 +258,16 @@ The implemented `Hide.Plugin.Buffer.listBuffers` discovers opaque session-bound
 references and shallow metadata through the existing reader and Permissions
 owner. It preserves the current `list_buffers` metadata mask, confers no capture
 authority and retains no source image or Undo. The actual MCP listing consumes
-that typed service on its reply worker. Generic plugin activation/subscriptions
-and public atomic multi-buffer preparation/commit remain proposed.
+that typed service on its reply worker. Linked callers submit atomic edits with
+`applyBufferDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])`.
+Each `BufferDiff` carries a session reference, exact captured version and strict
+unified diff. The batch is bounded to 1–16 distinct open text buffers and 1 MiB
+characters of patches. One permission ticket covers all targets; Prompt shows an
+editable diff for each. Every source and review version must still match before
+one atomic commit. Results follow input order, each changed buffer gets ordinary
+Undo, and nothing is saved. `applyBufferDiff` is its singleton case. Generic
+plugin activation/subscriptions and the arbitrary prepared-edit API sketched
+above remain proposed.
 
 Measured line/range reads share the existing finger-tree machinery. Whole-buffer
 reads are explicit worker operations. Reads from a retained snapshot remain
