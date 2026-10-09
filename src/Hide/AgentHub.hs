@@ -7,7 +7,7 @@
 -- Recovery retains identities and history without replaying queues or implicitly
 -- starting providers. Public descriptions and private resume snapshots differ.
 module Hide.AgentHub
-  ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, AgentConfigRef, agentConfigAgent, agentConfiguration, agentConfigurationCurrent, agentControlPending, configureAgentAt, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
+  ( AgentHub, AgentId(..), AgentSummary(..), agentSummaries, agentSummary, AgentConfigRef, agentConfigAgent, agentConfiguration, agentConfigurationCurrent, agentControlPending, configureAgentAt, Actor(..), HubLimits(..), SpawnSpec(..), Context(..), Workspace(..)
   , AgentDriver(..), DriverEvent(..), StartProvider, StartRequest(..), PrivateSource(..), HubMessage(..)
   , Capabilities(..), ConfigChoice(..)
   , newAgentHub, newAgentHubWithLimits, closeAgentHub, spawnAgent, spawnAgentWithTask, reconnectAgent, registerAgent, updateExternalAgent, setExternalAgentBusy, cancelExternalAgentControls, renameAgent
@@ -33,13 +33,8 @@ import System.FilePath (isAbsolute)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
 import Hide.Plugin.Agent
+import Hide.Plugin.AgentDirectory (AgentSummary(..))
 import qualified Data.Text.Encoding as TE
-
--- | Small directory projection. No task, transcript, history, capability payload
--- or private provider identity is retained by sidebar snapshots.
-data AgentSummary = AgentSummary
-  { summaryId :: !AgentId, summaryName :: !Text, summaryParent :: !(Maybe AgentId)
-  , summaryStatus :: !Text, summaryModel :: !Bool, summaryEffort :: !Bool } deriving (Eq,Show)
 
 data HubLimits = HubLimits { totalActiveAgents :: Int, directSubagents :: Int } deriving (Eq,Show)
 -- | Opaque receipt for one agent incarnation, advertised configuration and
@@ -622,10 +617,19 @@ ticketValue ticket result=object (["ticket" .= ticket,"status" .= (either (\reas
 agentSummaries :: AgentHub -> IO [AgentSummary]
 agentSummaries (AgentHub _ _ ref)=do
   state<-readTVarIO ref
-  pure [AgentSummary (entryId entry) (spawnName (entrySpec entry)) (entryParent entry) (entryStatus entry)
-    (available entry "model") (available entry "thought_level") | entry<-M.elems (hubEntries state)]
+  pure (map entrySummary (M.elems (hubEntries state)))
 
-  where available entry category=active entry && any ((==category).configCategory) (configChoices (entryCaps entry))
+-- | /O(log n)/. Read the same small projection for one exact identity. This
+-- trusted host read never constructs task/history JSON to obtain a row label.
+agentSummary :: AgentHub -> AgentId -> IO (Either Text AgentSummary)
+agentSummary (AgentHub _ _ ref) ident=do
+  state<-readTVarIO ref
+  pure (maybe (Left "Unknown agent.") (Right . entrySummary) (M.lookup ident (hubEntries state)))
+
+entrySummary :: Entry -> AgentSummary
+entrySummary entry=AgentSummary (entryId entry) (spawnName (entrySpec entry)) (entryParent entry) (entryStatus entry)
+  (available "model") (available "thought_level")
+  where available category=active entry && any ((==category).configCategory) (configChoices (entryCaps entry))
 
 entryStatus :: Entry -> Text
 entryStatus entry=maybe (T.toLower (T.pack (show (entryPhase entry)))) (\(_,kind)->if kind=="configuration" then "configuring" else if kind=="cancelled" then "cancelling" else "running") (entryControl entry)

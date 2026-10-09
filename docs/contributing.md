@@ -4,7 +4,7 @@ Build the editor, run the checks and exercise the frontend affected by a change.
 The source stays separate from THC's compiler and runtime.
 
 The root Cabal project builds three linked packages. `hide` owns the editor;
-`packages/hide-agent-api` contains the provider-neutral driver contract;
+`packages/hide-agent-api` contains the provider contract and typed directory API;
 `plugins/hide-acp` implements ACP transport and the provider adapter. The ACP
 package depends on the contract, not the editor or its frontend libraries.
 Ordinary `cabal build` and `cabal test` use the linked packages from this checkout.
