@@ -40,18 +40,22 @@ import qualified Hide.AgentHub as Hub
 import Control.DeepSeq (force)
 import qualified Hide.Plugin.Window as W
 import qualified Hide.Plugin.Menu as Menu
-import Hide.PluginWindowHost (adoptWindowUpdate)
+import qualified Hide.Plugin.Command as Command
+import qualified Hide.Plugin.EditorHost as Editor
+import Hide.Plugin.Editor (withDraftRef)
+import Hide.PluginWindowHost (adoptWindowUpdate,adoptEditorWindowUpdate,installEditorDraft,applyEditorUpdate)
 
 -- Snapshot identity guards adoption even when undo returns an old revision.
 data Snapshot = Snapshot InlineView Buffer (StableName Buffer) FilePath
 type CompletionChoices = (CompletionTarget,T.Text,[(T.Text,T.Text)],T.Text)
 data Job = Request Snapshot T.Text Int | Settings | Save Value | Feedback CompletionFeedback Proposal
-  | SignIn | FinishSignIn | SignOut | Hint T.Text
+  | SignIn | FinishSignIn | SignOut | Hint !CompletionTarget !Editor.DraftSubmission !(Editor.PreparedEditor Provider Editor.EditorUpdate)
   | Reveal CompletionTarget | Choices CompletionTarget T.Text (TMVar (Either T.Text CompletionChoices)) | Configure CompletionTarget T.Text T.Text
 data Reply = Ready Snapshot [InlineOption] | Notice T.Text | ShowSettings Value
   | ShowSignIn T.Text | Configured Bool Bool | Transcript W.PreparedWindow
   | RevealTranscript CompletionTarget
   | CompletionConfigured CompletionTarget Int T.Text
+  | HintCompleted !Editor.DraftSubmission !(Either T.Text Editor.EditorUpdate)
 
 data Provider = Provider
   { complete :: CompletionInput -> IO [Proposal]
@@ -67,7 +71,9 @@ data Autocomplete = Autocomplete
   , transcriptScope :: W.WindowScope, debugBody :: IORef W.PreparedWindow
   , transcriptReady :: IORef (Maybe W.PreparedWindow)
   , summary :: IORef (Maybe CompletionSummary), settingsEpoch :: IORef Int
-  , choiceClosed :: TVar Bool }
+  , choiceClosed :: TVar Bool
+  , hintEditor :: IORef (Editor.PreparedEditor Provider Editor.EditorUpdate)
+  , hintPending :: TVar [Editor.DraftSubmission] }
 
 -- | Read cheap prepared ACP metadata. This never starts a provider or retains
 -- its transcript, source snapshots or private connection identity.
@@ -75,11 +81,15 @@ completionSummary :: Autocomplete -> IO (Maybe CompletionSummary)
 completionSummary=readIORef . summary
 
 withAutocomplete :: FilePath -> (Autocomplete -> IO a) -> IO a
-withAutocomplete root use=W.withWindowScope $ \scope->do
+withAutocomplete root use=Command.withRegistry $ \registry->withDraftRef $ \draft->W.withWindowScope $ \scope->do
+  command<-Command.registerCommand registry hintCommand >>= either (ioError . userError . show) pure
+  let action=Editor.editorAction registry command Right (\_ submitted->pure (Editor.clearEditorDraft submitted))
+  editor<-Editor.prepareEditorBuffer draft (Editor.EditorSpec False "Send hint" "Send hint") (newBuffer "") action action
+    >>= either (ioError . userError . show) pure
   empty<-prepareTranscript ""
   token<-T.pack <$> randomIdentity
   runtime<-Autocomplete token <$> newTBQueueIO 64 <*> newTQueueIO <*> newTVarIO 0 <*> newIORef Nothing
-    <*> newIORef Nothing <*> newIORef Nothing <*> newIORef Nothing <*> newIORef False <*> pure scope <*> newIORef empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef 0 <*> newTVarIO False
+    <*> newIORef Nothing <*> newIORef Nothing <*> newIORef Nothing <*> newIORef False <*> pure scope <*> newIORef empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef 0 <*> newTVarIO False <*> newIORef editor <*> newTVarIO []
   servers<-editorServersFor (Just token)
   withAsync (owner runtime servers `finally` closeChoices runtime) $ \_ ->
     withAsync (traceLoop runtime) (const (use runtime)) `finally` closeChoices runtime
@@ -150,10 +160,21 @@ withAutocomplete root use=W.withWindowScope $ \scope->do
               forM_ current $ \p->forM_ challenge $ \c->try (finishSignIn p c) >>= \result->
                 emit runtime (Notice (either (const "Copilot sign-in failed.") (const "Copilot sign-in completed.") (result :: Either IOException ())))
               pure True
-            Hint text->do
-              forM_ current $ \p->try (hint p text) >>= \result->case result of
-                Left (_::IOException)->emit runtime (Notice "Completion agent hint failed.")
-                Right ()->pure ()
+            Hint expected submitted binding->do
+              live<-Editor.mountCurrent (Editor.submissionMount submitted)
+              targetValid<-targetCurrent expected
+              result<-if not targetValid || C.provider cfg/="acp" || not live
+                then pure (Left "Completion hint expired; draft kept.")
+                else case current of
+                  Nothing->pure (Left "Completion agent unavailable; draft kept.")
+                  Just provider->do
+                    delivered<-try (Editor.invokeEditorAction binding provider submitted)
+                    pure $ case delivered of
+                      Left (_::IOException)->Left "Completion agent hint failed; draft kept."
+                      Right (Left (Command.CommandFailed _))->Left "Completion agent hint failed; draft kept."
+                      Right (Left problem)->Left ("Completion hint refused: "<>T.pack (show problem))
+                      Right (Right update)->Right update
+              emit runtime (HintCompleted submitted result)
               pure True
             Reveal expected->do
               valid<-targetCurrent expected
@@ -208,13 +229,19 @@ withAutocomplete root use=W.withWindowScope $ \scope->do
               pure True
           go current=do
             job<-atomically (readTBQueue (jobs runtime))
-            let needsProvider=case job of Request{}->True; SignIn->True; FinishSignIn->True; SignOut->True; Hint{}->True; Choices{}->True; _->False
+            hintLive<-case job of
+              Hint (CompletionTarget expected _) submitted _ | expected==epoch && C.provider cfg=="acp"->Editor.mountCurrent (Editor.submissionMount submitted)
+              _->pure False
+            let needsProvider=case job of Request{}->True; SignIn->True; FinishSignIn->True; SignOut->True; Hint{}->hintLive; Choices{}->True; _->False
             if needsProvider && maybe True (const False) current && C.provider cfg/="off"
               then do
                 opened<-try (withProvider runtime servers cfg (\p->run (Just p) job >>= \again->refresh >> when again (go (Just p))))
                 case opened of
                   Left (_::IOException)->do
-                    case job of Choices _ _ answer->finishChoices answer (Left "Cannot start autocomplete provider. Check Options > Autocomplete."); _->pure ()
+                    case job of
+                      Choices _ _ answer->finishChoices answer (Left "Cannot start autocomplete provider. Check Options > Autocomplete.")
+                      Hint _ submitted _->emit runtime (HintCompleted submitted (Left "Cannot start autocomplete provider; draft kept."))
+                      _->pure ()
                     emit runtime (Notice "Cannot start autocomplete provider. Check Options > Autocomplete.") >> refresh >> go Nothing
                   Right ()->pure ()
               else run current job >>= \again->refresh >> when again (go current)
@@ -257,6 +284,52 @@ enqueue runtime job=atomically $ do
 
 autocompleteTool :: Autocomplete -> T.Text -> Value -> IO (Either T.Text Value)
 autocompleteTool runtime name args=readIORef (connection runtime) >>= maybe (pure (Left "No active completion request.")) (\c->A.callCompletionTool c name args)
+
+-- The worker reads one immutable submission, never the desktop or Undo. Bounds
+-- are checked before materializing text; a refusal preserves the full draft.
+hintCommand :: Command.CommandDef Provider Editor.DraftSubmission Editor.DraftSubmission
+hintCommand=Command.CommandDef "hide.autocomplete.hint" "Send autocomplete hint" hidden hidden $ \provider submitted->do
+  let source=Editor.submissionContent submitted
+  if contentLength source>16384 then pure (Left (Command.InvalidArguments "Hints may contain at most 16384 characters.")) else do
+    let text=contentSlice source 0 (contentLength source)
+    _<-evaluate (T.length text)
+    if T.null (T.strip text) || T.any (=='\0') text
+      then pure (Left (Command.InvalidArguments "Enter a hint without NUL characters."))
+      else hint provider text >> pure (Right submitted)
+  where hidden=Command.Codec Null (const (Left "Completion hints are host-captured.")) (const Null)
+
+-- The existing bounded provider queue owns delivery. Capturing is constant time;
+-- queue pressure or a duplicate Enter leaves the human's draft untouched.
+submitHint :: Autocomplete -> Editor.PreparedEditor Provider Editor.EditorUpdate
+  -> Editor.EditorMount -> Editor.EditorSlot -> Menu.MenuOrigin -> Desktop -> IO Desktop
+submitHint runtime binding mount slot origin d
+  | origin/=Menu.HumanMenu || not (activeAutocomplete d) || not (composerActive d) ||
+    activeEditorMount d/=Just mount || Editor.editorMount binding/=mount=
+      pure d {status="Completion hint input expired."}
+  | otherwise=do
+      captured<-Editor.captureDraftSubmission mount slot (composerBuffer d)
+      case captured of
+        Nothing->pure d {status="Completion hint input expired."}
+        Just submitted->do
+          target<-readIORef (summary runtime)
+          accepted<-atomically $ do
+            closed<-readTVar (choiceClosed runtime)
+            full<-isFullTBQueue (jobs runtime)
+            pending<-readTVar (hintPending runtime)
+            let duplicate old=Editor.submissionDraft old==Editor.submissionDraft submitted &&
+                  Editor.submissionVersion old==Editor.submissionVersion submitted
+            if closed then pure (Left "Completion owner closed; draft kept.")
+            else if any duplicate pending then pure (Left "Completion hint is already pending.")
+            else if full then pure (Left "Autocomplete is busy; draft kept.")
+            else case target of
+              Nothing->pure (Left "Completion provider changed; draft kept.")
+              Just (CompletionSummary expected _)->do
+                writeTBQueue (jobs runtime) (Hint expected submitted binding)
+                writeTVar (hintPending runtime) (submitted:pending)
+                pure (Right ())
+          case accepted of
+            Left problem->Editor.abortEditorSubmission submitted >> pure d {status=problem}
+            Right ()->pure d {status="Sending completion hint; draft kept until delivered."}
 
 snapshot :: Desktop -> IO (Maybe Snapshot)
 snapshot d | inlineEligible d,Just w<-activeWindow d,Just doc<-activeDocument d,Just bid<-bufferId w=do
@@ -313,12 +386,21 @@ autocompleteEffects runtime fallback d effects=foldM step (False,d) effects
     step (_,state) (AgentSidebarAction closedRequest) | Just job<-completionJob closedRequest=do
       enqueue runtime job
       pure (False,state)
+    step (_,state) effect@(SubmitEditor mount slot origin)=do
+      binding<-readIORef (hintEditor runtime)
+      if Editor.mountDraft mount==Editor.mountDraft (Editor.editorMount binding)
+        then (\next->(False,next)) <$> submitHint runtime binding mount slot origin state
+        else fallback state [effect]
+    step (_,state) effect@(RetireEditorMount mount)=do
+      binding<-readIORef (hintEditor runtime)
+      if Editor.mountDraft mount==Editor.mountDraft (Editor.editorMount binding)
+        then Editor.retireEditorMount mount >> pure (False,state)
+        else fallback state [effect]
     step (_,state) (AutocompleteAction action args)=do
       next<-case action of
         "propose"->request runtime action state
         "alternate-next"->request runtime action state
         "alternate-previous"->request runtime action state
-        "hint"->mapM_ (enqueue runtime . Hint . T.take 16384) (take 1 args) >> pure state
         "settings"->enqueue runtime Settings >> pure state
         "save"->case args of
           button:backend:exe:arguments:model:effort:cp:cpArgs:debug:_ | button `elem` ["0","2","3"]->do
@@ -417,6 +499,13 @@ tickAutocomplete runtime original=do
         valid<-((==serial) <$> readTVarIO (generation runtime))
         let accepted=valid && maybe False (\(CompletionSummary target _)->target==expected) current
         pure (if accepted then (clearInline state) {status=text} else state {status=text})
+      HintCompleted submitted outcome->do
+        atomically (modifyTVar' (hintPending runtime) (filter (/=submitted)))
+        case outcome of
+          Left problem->pure state {status=problem}
+          Right update->do
+            updated<-applyEditorUpdate submitted update state
+            pure updated {status="Completion hint sent."}
       Notice text->pure state {status=text}
       ShowSettings values->pure (settingsDialog values state)
       ShowSignIn code->pure state {dialog=Just (Dialog "Copilot sign in" (AutocompleteDialog "signin") [] 0 ["Continue","Cancel"] ["Enter this device code when asked:",code,"Continue opens the provider's sign-in flow."])}
@@ -425,7 +514,7 @@ tickAutocomplete runtime original=do
         writeIORef (debugVisible runtime) visible
         body<-readIORef (debugBody runtime)
         let configured=state {autocompleteACPEnabled=acp}
-        if previous==visible then pure configured else showTranscript runtime visible body configured
+        if previous==visible then syncHintEditor runtime configured else showTranscript runtime visible body configured
       Transcript body->do
         writeIORef (debugBody runtime) body
         visible<-readIORef (debugVisible runtime)
@@ -476,9 +565,30 @@ updateTranscript body d=case transcriptWindow d of
     maybe (pure d) (\publication->adoptWindowUpdate Menu.HumanMenu publication d) update
   _->pure d
 
+-- Reuse one draft across visible mounts. Trace refresh never reseeds it; disabling
+-- ACP removes only the input attachment, so a later reopen can recover typing.
+syncHintEditor :: Autocomplete -> Desktop -> IO Desktop
+syncHintEditor runtime d=case transcriptWindow d of
+  Nothing->pure d
+  Just w | not (autocompleteACPEnabled d)->do
+    mapM_ Editor.retireEditorMount (windowEditorMount w)
+    pure d {windows=map (\current->if windowId current==windowId w then current {windowEditorMount=Nothing} else current) (windows d)}
+  Just w | Just _<-windowEditorMount w->pure d
+  Just w->do
+    binding<-readIORef (hintEditor runtime)
+    current<-Editor.editorCurrent binding
+    next<-if current then pure binding else Editor.remountEditor binding
+    let mount=Editor.editorMount next
+    admitted<-atomically (Editor.claimEditorMount mount)
+    if not admitted then pure d else do
+      writeIORef (hintEditor runtime) (Editor.installedEditor next)
+      pure (installEditorDraft mount (Editor.editorInitialBuffer next) d)
+        {windows=map (\frame->if windowId frame==windowId w then frame {windowEditorMount=Just mount} else frame) (windows d)}
+
 showTranscript :: Autocomplete -> Bool -> W.PreparedWindow -> Desktop -> IO Desktop
 showTranscript _ False _ d=do
   mapM_ W.retireWindowRef (autocompleteWindow d)
+  mapM_ Editor.retireEditorMount (transcriptWindow d >>= windowEditorMount)
   pure $ case transcriptWindow d of
     Nothing->d {autocompleteWindow=Nothing}
     Just w->layoutProblems d (normalizeBottom d
@@ -487,19 +597,37 @@ showTranscript _ False _ d=do
        retiredPluginWindows=maybe (retiredPluginWindows d) (`S.delete` retiredPluginWindows d) (autocompleteWindow d),
        autocompleteWindow=Nothing,dockedTerminals=M.delete (windowId w) (dockedTerminals d)})
 showTranscript runtime True body d=case transcriptWindow d of
-  Just _->updateTranscript body d
+  Just _->updateTranscript body d >>= syncHintEditor runtime
   Nothing->do
-    update<-W.openWindow (transcriptScope runtime) body
-    case update of
-      Nothing->pure d
-      Just publication->do
-        added<-adoptWindowUpdate Menu.HumanMenu publication d
-        let reference=W.updateWindowRef publication
-        case [w | w<-windows added,windowContent w==PluginContent reference] of
-          w:_->do
-            let ident=windowId w
-                rectangle=bounds w
-                docked=layoutProblems d added {autocompleteWindow=Just reference,
-                  dockedTerminals=M.insert ident (rectangle,Nothing) (dockedTerminals added),bottomTerminal=Just ident}
-            pure (maybe docked (\previous->focusWindow (windowId previous) docked) (activeWindow d))
-          _->W.retireWindowRef reference >> pure added
+    (reference,added)<-if autocompleteACPEnabled d then do
+      binding<-readIORef (hintEditor runtime)
+      let previous=if M.member (Editor.mountDraft (Editor.editorMount binding)) (editorDrafts d)
+            then Just (Editor.editorMount binding) else Nothing
+      -- closeActive is pure and may precede its retirement effect. Retire the old
+      -- mount here as well; absence of its exact frame permits only a fresh one.
+      when (previous/=Nothing) (Editor.retireEditorMount (Editor.editorMount binding))
+      next<-if previous==Nothing then pure binding else Editor.remountEditor binding
+      update<-W.openEditorWindow (transcriptScope runtime) body next
+      case update of
+        Nothing->pure (Nothing,d)
+        Just publication->do
+          (accepted,installed)<-adoptEditorWindowUpdate Menu.HumanMenu previous publication d
+          if accepted then do
+            writeIORef (hintEditor runtime) (Editor.installedEditor next)
+            pure (Just (W.updateWindowRef (W.editorWindowBody publication)),installed)
+          else pure (Nothing,installed)
+      else do
+        update<-W.openWindow (transcriptScope runtime) body
+        case update of
+          Nothing->pure (Nothing,d)
+          Just publication->do
+            installed<-adoptWindowUpdate Menu.HumanMenu publication d
+            pure (Just (W.updateWindowRef publication),installed)
+    case [w | Just ref<-[reference],w<-windows added,windowContent w==PluginContent ref] of
+      w:_->do
+        let ident=windowId w
+            rectangle=bounds w
+            docked=layoutProblems d added {autocompleteWindow=reference,
+              dockedTerminals=M.insert ident (rectangle,Nothing) (dockedTerminals added),bottomTerminal=Just ident}
+        pure (maybe docked (\previous->focusWindow (windowId previous) docked) (activeWindow d))
+      _->mapM_ W.retireWindowRef reference >> pure added

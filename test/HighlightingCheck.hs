@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HighlightingCheck (checks) where
 
-import EditorFixture (withEditorFixture,withEditorTextFixture,installAutocompleteFixture)
+import EditorFixture (withEditorFixture,withEditorTextFixture,withAutocompleteFixture)
 import Control.Concurrent
 import Control.Exception (evaluate,finally)
 import Control.Monad (unless,foldM,forM_)
@@ -24,10 +24,9 @@ import Hide.Model
 import Hide.Render (snapshot,snapshotHtml,renderCellRows)
 import Hide.Unicode (CellSpan(..))
 import Hide.Syntax
-import qualified Hide.Plugin.Window as W
 
 checks :: IO ()
-checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase->W.withWindowScope $ \scope->do
+checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase->do
   sourceLineChecks
   composerWidthChecks
   plainSourceRowChecks
@@ -112,16 +111,16 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
     (viewportCount>0 && viewportBefore-viewportAfter<6000000)
   -- Chat and autocomplete share the visible-row renderer. Keep long draft
   -- lines borrowed even when moving the selection without changing their text.
-  forM_ [False,True] $ \hint->do
-    base<-if hint then installAutocompleteFixture scope "reply" (closeActive chatBase) else pure chatBase
-    let draft=newBuffer (T.intercalate "\n" (replicate 12 (T.replicate 100 "words 界 e\x301 👩🏽\x200d\&💻 ")))
-        chat=(setComposerInput draft (Selection 0 0) True base) {sideTree=Nothing,blinkCursor=False,appearance=LightMode,
-          autocompleteACPEnabled=True,autocompleteDraft=draft,autocompleteSelection=Selection 0 0,autocompleteFocused=True}
-    _<-evaluate (occupied (renderCellRows chat))
-    before<-getAllocationCounter
-    count<-evaluate (occupied (renderCellRows (setComposerInput draft (Selection 1 1) True chat {autocompleteSelection=Selection 1 1})))
-    after<-getAllocationCounter
-    check "draft viewport avoids rebuilding offscreen character/style pairs" (count>0 && before-after<12000000)
+  let viewportCheck base=do
+        let draft=newBuffer (T.intercalate "\n" (replicate 12 (T.replicate 100 "words 界 e\x301 👩🏽\x200d\&💻 ")))
+            chat=(setComposerInput draft (Selection 0 0) True base) {sideTree=Nothing,blinkCursor=False,appearance=LightMode}
+        _<-evaluate (occupied (renderCellRows chat))
+        before<-getAllocationCounter
+        count<-evaluate (occupied (renderCellRows (setComposerInput draft (Selection 1 1) True chat)))
+        after<-getAllocationCounter
+        check "draft viewport avoids rebuilding offscreen character/style pairs" (count>0 && before-after<12000000)
+  viewportCheck chatBase
+  withAutocompleteFixture "reply" (closeActive chatBase) viewportCheck
   let mixedText="a界e\x301\t👩🏽\x200d\&💻z"
       mixedSource=addDocument (Just (FileState "Mixed.hs" Nothing)) (newBuffer mixedText) (initialDesktop (30,12))
       styledMixed=mixedSource {sideTree=Nothing,buffers=M.map (\d->d {documentLabel=Just "Source Mixed",documentSourceRows=Just
@@ -184,12 +183,12 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
      map sourceRowText (toList undoRows)==T.splitOn "\n" (contents before))
   forM_ ["\r\n","\r\nmid\r\n","\r","\n"] $ \text->do
     let input=newBuffer "xy"
-        edited=replaceSelection (Selection 1 1) text input
-        rows=rebaseSourceRows input edited (sourceHighlightRows "xy" [("xy",Keyword)])
+        lineEdit=replaceSelection (Selection 1 1) text input
+        rebasedRows=rebaseSourceRows input lineEdit (sourceHighlightRows "xy" [("xy",Keyword)])
     check "rebased ranges preserve exact CRLF source coverage and byte endpoints"
-      (all (\row->let ranges=V.toList (sourceRowRanges row)
-                  in T.concat (map (sourceRangeText row) ranges)==sourceRowText row &&
-                     (null ranges || sourceRangeByteEnd (last ranges)==TU.lengthWord8 (sourceRowText row))) rows)
+      (all (\rebasedRow->let ranges=V.toList (sourceRowRanges rebasedRow)
+                  in T.concat (map (sourceRangeText rebasedRow) ranges)==sourceRowText rebasedRow &&
+                     (null ranges || sourceRangeByteEnd (last ranges)==TU.lengthWord8 (sourceRowText rebasedRow))) rebasedRows)
   let long=newBuffer (T.replicate (1024*1024) "x")
       longRows=sourceHighlightRows (contents long) [(contents long,Comment)]
       changed=replaceSelection (Selection 10 10) "é" long
@@ -283,11 +282,12 @@ check label ok=unless ok (error label)
 
 -- Bubble sizing stops at the available width, before rendering its visible rows.
 composerWidthChecks :: IO ()
-composerWidthChecks=withEditorFixture "" (initialDesktop (100,35)) $ \chatBase->do
+composerWidthChecks=withEditorFixture "" (initialDesktop (100,35)) $ \chatBase->
+  withAutocompleteFixture "" (closeActive chatBase) $ \hintBase->do
   let size hint b columns=
-        let d=(setComposerInput b (Selection 0 0) True chatBase) {autocompleteDraft=b}
+        let d=setComposerInput b (Selection 0 0) True (if hint then hintBase else chatBase)
             w=(fromJust (activeWindow d)) {bounds=Rect 0 1 (columns+6) 30}
-        in width ((if hint then autocompleteComposerRect else composerRect) d w)
+        in width (composerRect d w)
   forM_ [False,True] $ \hint->do
     let draft=(newBuffer (T.replicate 100000 "界"<>"\nshort"))
           {undoStack=error "composer width forced undo",saved=error "composer width forced baseline"}

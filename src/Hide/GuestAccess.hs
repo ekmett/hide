@@ -256,12 +256,11 @@ guestTransitionAllowed before after effects
   | not metadataUnchanged = pure False
   | otherwise = do
       drafts<-foldM sameDraft True (M.toList (editorDrafts before))
-      autocomplete<-sameContent (autocompleteDraft before) (autocompleteDraft after)
       question<-case (chatQuestion before,chatQuestion after) of
         (Nothing,Nothing)->pure True
         (Just a,Just b)->sameConstructor a b
         _->pure False
-      if not (drafts && autocomplete && question) then pure False else
+      if not (drafts && question) then pure False else
         foldM unchanged True (M.toList (buffers before))
   where
     metadataUnchanged=guestEffectsAllowed effects && not (guestModalBlocked after) &&
@@ -269,7 +268,6 @@ guestTransitionAllowed before after effects
       M.keys (editorDrafts before)==M.keys (editorDrafts after) &&
       editingInput before==editingInput after &&
       autocompleteWindow before==autocompleteWindow after && autocompleteACPEnabled before==autocompleteACPEnabled after &&
-      autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
       agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
       childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after
     sameDraft False _=pure False
@@ -358,7 +356,6 @@ readableAt d x y
   _ | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
         Just w | windowHasEditor d w,inside (composerRect d w) x y -> False
-        Just w | autocompletePane d w,inside (autocompleteComposerRect d w) x y -> False
         Just w | PluginContent _<-windowContent w ->case windowPluginText d w of
           Just prepared | not (privatePreparedWindow d prepared)->not (preparedCellPrivate W.textGuestHidden d prepared w x y)
           _->False
