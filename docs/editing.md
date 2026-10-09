@@ -19,8 +19,11 @@ files stay selected.
 **File > Open** (Ctrl+O or F3; ⌘O on Mac) opens the file dialog. Enter a
 name or wildcard filter, select a file and choose Open. **File > New**
 (Ctrl+N; ⌘N on Mac) starts an unnamed buffer. Double-click a directory to
-browse into it, or a file to open it.
-The list shows the file's size and local modification time.
+browse into it, or a file to open it, including in a mouse-enabled terminal.
+The file list grows with the display, giving long names more room and showing
+more entries at once. Arrow keys select entries; Left/Right change columns and
+Page Up/Down change pages. The footer shows the path, size and local modification
+time. **Change dir** uses the same picker.
 
 **Ctrl+B** (⌃B in the Mac window), or **Tools > File tree**, toggles the
 Files pane. Expand directories to browse their contents and open files from the

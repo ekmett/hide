@@ -1149,14 +1149,14 @@ dialogLayers d dg =
           CheckBox name checked -> row a fw ((if checked then "[X] " else "[ ] ")<>name)
           Radio name values chosen -> V.vertCat (row paper fw name:[row (if focus dg==i && n==chosen then selected else paper) fw ((if n==chosen then "(●) " else "( ) ")<>v) | (n,v)<-zip [0..] values])
           FileList entries chosen ->
-            let cw=max 1 ((fw-3) `div` 2); page=(max 0 chosen `div` 16)*16
+            let cw=max 1 ((fw-3) `div` 2); rows=fileListRows rect; page=(max 0 chosen `div` (2*rows))*(2*rows)
                 listColor=attr black scrollCyan
                 borderColor=attr blue scrollCyan
                 item idx=case drop idx entries of
                   e:_ -> row (if idx==chosen then attr (if focus dg==i then white else black) green else listColor) cw (" "<>entryName e<>(if entryDirectory e then "/" else ""))
                   _ -> row listColor cw ""
                 bar=label borderColor "┌" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┬" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┐"
-                line r=label borderColor "│" V.<|> item (page+r) V.<|> label borderColor "│" V.<|> item (page+8+r) V.<|> label borderColor "│"
+                line r=label borderColor "│" V.<|> item (page+r) V.<|> label borderColor "│" V.<|> item (page+rows+r) V.<|> label borderColor "│"
                 path=case purpose dg of Opening base pattern _ -> T.pack (base </> T.unpack pattern); ChangingDirectory base _ -> T.pack base; _ -> ""
                 details=case drop chosen entries of
                   entry:_ | chosen>=0 ->
@@ -1165,7 +1165,7 @@ dialogLayers d dg =
                         suffix="  "<>size<>"  "<>stamp
                     in T.take (columnOffset (entryName entry) (max 0 (fw-T.length suffix))) (entryName entry)<>suffix
                   _ -> ""
-            in V.vertCat ([row paper fw (case purpose dg of ChangingDirectory{} -> "Directories"; _ -> "Files"),bar] ++ [line r | r<-[0..7]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
+            in V.vertCat ([row paper fw (case purpose dg of ChangingDirectory{} -> "Directories"; _ -> "Files"),bar] ++ [line r | r<-[0..rows-1]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
           ListBox name values chosen -> V.vertCat (row paper fw name:[row (if n==chosen then a else paper) fw (" "<>v) | (n,v)<-take 4 (drop (max 0 (chosen-3)) (zip [0..] values))])
 
 -- | Render a colorless character-grid snapshot for inspection and tests.

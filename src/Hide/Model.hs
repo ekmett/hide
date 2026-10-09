@@ -1823,13 +1823,18 @@ dialogFieldLayout w available dg
     column x fw fs=zipWith (\y f -> Rect x y fw (fieldRows f))
       (scanl (+) (2+length (body dg)+if searching dg then 2 else 0) (map fieldRows fs)) fs
     fieldRows (TextArea _ True _ _ _ _) = max 4 (available-5-length (body dg)-sum [dialogFieldHeight dg f | f<-fields dg,not (editableArea f)])
+    fieldRows FileList{} = max 6 (min 26 (available-8-length (body dg)))
     fieldRows f = dialogFieldHeight dg f
 
 dialogRect :: Desktop -> Dialog -> Rect
 dialogRect d dg = Rect ((sw-w) `div` 2) (max 1 ((sh-h) `div` 2)) w h
   where
     (sw,sh) = screenSize d
-    w = if approvalDialog dg then min sw (min (max 20 (sw-4)) 110) else min sw 62
+    w | any isFileList (fields dg) = min sw (min (max 20 (sw-4)) 112)
+      | approvalDialog dg = min sw (min (max 20 (sw-4)) 110)
+      | otherwise = min sw 62
+    isFileList FileList{}=True
+    isFileList _=False
     h = min (sh-2) (max (if searching dg then 13 else 7) (3+maximum (2+length (body dg):[top r+height r | r<-dialogFieldLayout w (sh-2) dg])))
 
 fieldRects :: Desktop -> Dialog -> [Rect]
@@ -2970,7 +2975,7 @@ contextEvent ev (r,chosen) d = case ev of
     invoke i=case drop i items of (_,cmd):_ | contextTargetCurrent d && commandEnabled d cmd -> runCommand cmd d; _ -> close
     items=contextItemsFor d
 
--- SDL supplies click counts; terminal clicks retain the same selection and Enter path.
+-- Every frontend supplies click counts before entering the shared dialog action.
 handleDoubleClick :: Int -> Int -> Desktop -> (Desktop,[Effect])
 handleDoubleClick x y d = case dialog d of
   Just dg | Just (i,chosen) <- fileEntryAt x y d dg ->
@@ -2985,15 +2990,21 @@ handleDoubleClick x y d = case dialog d of
     jumpProblem (fst (problemsMouse x y V.BLeft d))
   _ -> handleEvent (V.EvMouseDown x y V.BLeft []) d
 
+-- | Visible rows in either file-picker column. Five field rows hold its label,
+-- borders and path/details footer; drawing and all navigation share this count.
+fileListRows :: Rect -> Int
+fileListRows r=max 1 (height r-5)
+
 fileEntryAt :: Int -> Int -> Desktop -> Dialog -> Maybe (Int,Int)
 fileEntryAt x y d dg = listToMaybe
   [(i,chosen) | (i,(r,FileList entries selected))<-zip [0..] (zip (fieldRects d dg) (fields dg))
-  , inside r x y, y>=top r+2, y<top r+10
+  , inside r x y, y>=top r+2, y<top r+2+fileListRows r
   , y>=top (dialogRect d dg)+2, y<top (dialogRect d dg)+height (dialogRect d dg)-3
   , let cw=max 1 ((width r-3) `div` 2)
         column=x-left r
   , column>=1, column<=2*cw+1, column/=cw+1
-  , let chosen=(max 0 selected `div` 16)*16+y-top r-2+(if column>cw+1 then 8 else 0)
+  , let rows=fileListRows r
+        chosen=(max 0 selected `div` (2*rows))*(2*rows)+y-top r-2+(if column>cw+1 then rows else 0)
   , chosen<length entries]
 
 -- A coalesced wheel burst retains distance but renders only its final state.
@@ -4057,7 +4068,7 @@ dialogEvent ev dg d
   V.EvKey key mods | areaFocused -> areaKey key mods
   V.EvKey key mods | ComboBox name choices chosen Nothing:_<-drop (focus dg) (fields dg),
     key==V.KChar ' ' || key==V.KDown && V.MAlt `elem` mods -> updateField (const (ComboBox name choices chosen (Just chosen)))
-  V.EvKey k mods | focus dg<count -> updateField (fieldKey k mods)
+  V.EvKey k mods | focus dg<count -> updateField (fieldKey focusedRect k mods)
   V.EvKey (V.KChar ' ') _ -> submitDialog (focus dg-count) dg d
   V.EvKey V.KLeft _ -> setFocus (focus dg-1)
   V.EvKey V.KRight _ -> setFocus (focus dg+1)
@@ -4073,7 +4084,7 @@ dialogEvent ev dg d
     Nothing -> case findIndex (\r -> inside r x y && y >= top (dialogRect d dg)+2 && y < top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
       Nothing -> (d,[])
       Just i -> let Rect l t _ _ = fieldRects d dg !! i
-                    click (FileList xs selected) = FileList xs (max 0 (min (length xs-1) ((max 0 selected `div` 16)*16+max 0 (y-t-2)+if x-l >= width (fieldRects d dg !! i) `div` 2 then 8 else 0)))
+                    click f@(FileList xs _) = case fileEntryAt x y d dg of Just (which,selected) | which==i -> FileList xs selected; _ -> f
                     click (Input label value pos) = Input label value (columnOffset value (max 0 (x-l)+max 0 (displayColumn value pos-width (fieldRects d dg !! i)+1)))
                     click (SelectedInput label value sel) = let pos=columnOffset value (max 0 (x-l)+max 0 (displayColumn value (caret sel)-width (fieldRects d dg !! i)+1)) in SelectedInput label value (Selection pos pos)
                     click (ComboBox name choices chosen _) = ComboBox name choices chosen (Just chosen)
@@ -4116,12 +4127,12 @@ dialogEvent ev dg d
       then textAreaEdit focusedRect (case key of
         V.KChar c | not prepared, V.MCtrl `elem` mods, Just cmd<-lookup (toLower c) [('z',if V.MShift `elem` mods then Redo else Undo),('y',Redo),('a',SelectAll)] -> fst . runCommand cmd
         _ -> editorKey key mods) f
-      else clampArea focusedRect (fieldKey key mods f)
+      else clampArea focusedRect (fieldKey focusedRect key mods f)
     clampArea rect f@(TextArea name editable b sel row col) = TextArea name editable b sel (min row (max 0 (bufferLineCount b-height (textAreaRect rect f)))) col
     clampArea _ f = f
     wheel x y delta = case findIndex (\r -> inside r x y && y<top (dialogRect d dg)+height (dialogRect d dg)-3) (fieldRects d dg) of
       Just i | f@TextArea{}<-fields dg !! i -> updateDialog dg {focus=i,fields=replaceAt i (clampArea (fieldRects d dg !! i) (scrollTextArea delta f)) (fields dg)}
-      _ -> updateField (fieldKey (if delta>0 then V.KDown else V.KUp) [])
+      _ -> updateField (fieldKey focusedRect (if delta>0 then V.KDown else V.KUp) [])
     setFocus i = moveDialogFocus (i-focus dg) d
     updateDialog new = (d {dialog=Just new},[])
     updateField f | focus dg<count = updateDialog (replaceDialogField (f (fields dg !! focus dg)) dg)
@@ -4169,8 +4180,8 @@ inputCommand cmd field@(Input label value pos)=
     _ -> field
 inputCommand _ field=field
 
-fieldKey :: V.Key -> [V.Modifier] -> Field -> Field
-fieldKey key mods field = case field of
+fieldKey :: Rect -> V.Key -> [V.Modifier] -> Field -> Field
+fieldKey rect key mods field = case field of
   Input{} | Just cmd<-lookup key dialogInputKeys -> inputCommand cmd field
   Input label value pos -> let set s p = Input label s (max 0 (min (T.length s) p)) in case key of
     V.KChar 'u' | V.MCtrl `elem` mods -> set "" 0
@@ -4201,7 +4212,7 @@ fieldKey key mods field = case field of
     _ -> scrollTextArea (case key of V.KUp -> -1; V.KDown -> 1; V.KPageUp -> -8; V.KPageDown -> 8; _ -> 0) field
   CheckBox label value | key==V.KChar ' ' -> CheckBox label (not value)
   Radio label values chosen -> Radio label values (step values chosen)
-  FileList values chosen -> FileList values (max 0 (min (length values-1) (case key of V.KLeft -> chosen-8; V.KRight -> chosen+8; V.KPageUp -> chosen-16; V.KPageDown -> chosen+16; V.KHome -> 0; V.KEnd -> length values-1; _ -> step values chosen)))
+  FileList values chosen -> FileList values (max 0 (min (length values-1) (case key of V.KLeft -> chosen-fileListRows rect; V.KRight -> chosen+fileListRows rect; V.KPageUp -> chosen-2*fileListRows rect; V.KPageDown -> chosen+2*fileListRows rect; V.KHome -> 0; V.KEnd -> length values-1; _ -> step values chosen)))
   ListBox label values chosen -> ListBox label values (choose values chosen)
   _ -> field
   where choose xs n = listChoice key (length xs) n

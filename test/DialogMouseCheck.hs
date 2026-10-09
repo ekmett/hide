@@ -36,6 +36,7 @@ checks profile = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase
   contextShortcutChecks
   searchChecks
   previousSearchChecks
+  filePickerGeometryChecks
   let check name ok = unless ok (error name)
       at n xs = case drop n xs of value:_ -> value; _ -> error "missing test fixture"
       desktop = addDocument Nothing (newBuffer "hello world") (initialDesktop (80,25))
@@ -543,3 +544,42 @@ textAreaRenderChecks profile=do
   after<-getAllocationCounter
   unless (count>0 && withinBudget profile (before-after) (4000000))
     (error "TextArea viewport reconstructs offscreen character lists")
+
+-- The picker has one geometry for painting, hit testing and keyboard paging.
+-- Resize while it is open as well as opening at the standard terminal sizes.
+filePickerGeometryChecks :: IO ()
+filePickerGeometryChecks=do
+  let entries=[Entry ("LongFileName"<>T.pack (show n)<>".hs") False Nothing Nothing | n<-[0..99::Int]]
+      opened=openBrowser "/project" "*" entries (initialDesktop (80,25))
+      selected d=case dialog d of Just dg | FileList _ choice:_<-drop 1 (fields dg)->choice; _->error "missing file list"
+      check label good=unless good (error label)
+  forM_ [(80,25),(160,50),(40,12)] $ \size->do
+    let desktop=fst (handleEvent (V.EvResize (fst size) (snd size)) opened)
+        dg=fromMaybe (error "missing file picker") (dialog desktop)
+        rect=fieldRects desktop dg !! 1
+        rows=fileListRows rect
+        columnWidth=(width rect-3) `div` 2
+        x=left rect+columnWidth+2
+        y=top rect+rows+1
+        (clicked,effects)=handleEvent (V.EvMouseDown x y V.BLeft []) desktop
+        (_,openedFile)=handleDoubleClick x y desktop
+        byColumn=fst (handleEvent (V.EvKey V.KRight []) desktop)
+        byPage=fst (handleEvent (V.EvKey V.KPageDown []) desktop)
+        outer=dialogRect desktop dg
+    check "file picker stays within display bounds"
+      (left outer>=0 && left outer+width outer<=fst size && top outer>=1 && top outer+height outer<=snd size-1)
+    check "file picker click and double click agree on the final visible entry"
+      (selected clicked==2*rows-1 && null effects && openedFile==[OpenFile PluginMenu.HumanMenu ("/project" </> T.unpack (entryName (entries !! (2*rows-1))))])
+    check "file picker column and page keys use its current visible height"
+      (selected byColumn==rows && selected byPage==2*rows)
+    check "file picker borders do not select filenames"
+      (all (\(px,py)->fileEntryAt px py desktop dg==Nothing)
+        [(left rect,top rect+2),(left rect+columnWidth+1,top rect+2),(x,top rect+1),(x,top rect+rows+2)])
+    whenRoom size outer rows check
+  let long="Hide.LongFileNameThatShouldFitInTheOpenDialog.hs"
+      wide=openBrowser "/project" "*" [Entry long False Nothing Nothing] (initialDesktop (160,50))
+  check "large file picker renders a modern filename without truncation" (long `T.isInfixOf` snapshot wide)
+  where
+    whenRoom (w,h) outer rows check
+      | w>=80 && h>=25=check "file picker uses more filename width and rows than the old fixed dialog" (width outer>62 && rows>8)
+      | otherwise=pure ()
