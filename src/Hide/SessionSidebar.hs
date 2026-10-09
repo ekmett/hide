@@ -15,7 +15,7 @@ module Hide.SessionSidebar
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.DeepSeq (force)
-import Control.Exception (IOException,catch,evaluate)
+import Control.Exception (IOException,catch,evaluate,displayException)
 import Control.Monad (foldM,forever)
 import Data.Aeson (Value(Null))
 import Data.IORef
@@ -26,6 +26,7 @@ import System.Timeout (timeout)
 import Hide.Model
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Menu
+import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Session as S
 import Hide.SessionSidebarTypes
@@ -63,13 +64,37 @@ withSessionSidebar host current initial use=withRegistry $ \registry->do
   command<-registerCommand registry (CommandDef "hide.sidebar.sessions.window" "Select window" hidden hidden $ \ctx request->
     pure $ if sidebarOrigin ctx==Menu.HumanMenu then Right (SidebarSession request)
       else Left (CommandRejected "Session selection requires the human.")) >>= required
+  deleteSaved<-registerCommand registry (CommandDef "hide.sidebar.sessions.delete-confirmed" "Delete saved session" hidden hidden $ \ctx captured->
+    if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Session deletion requires the human.")) else
+      (do
+        S.deleteStoppedSession current captured
+        let sid=T.pack (S.sessionId captured)
+        atomicModifyIORef' source $ \(Snapshot revision entries serial views)->
+          (Snapshot (revision+1) (filter (\(Entry value _ _ _)->value/=sid) entries) serial views,())
+        pure (Right (SidebarSession (SessionDeleted sid))))
+      `catch` (\(err::IOException)->pure (Left (CommandRejected (label (T.pack (displayException err))))))) >>= required
+  deleteMenu<-registerCommand registry (CommandDef "hide.sidebar.sessions.delete" "Delete saved session" hidden hidden $ \ctx (sid,short)->
+    if sidebarOrigin ctx/=Menu.HumanMenu || Just sid==currentId
+      then pure (Left (CommandRejected "The current session cannot be deleted.")) else do
+        captured<-S.loadSession (T.unpack sid)
+        case captured of
+          Just record | S.sessionHost record==Nothing->do
+            state<-S.sessionState record
+            if state/="recoverable" then pure (Left (CommandRejected "Only a stopped saved session can be deleted.")) else do
+              prepared<-Form.prepareForm Form.ReadableForm
+                (Form.ConfirmationFormSpec ("Delete session "<>short<>"?") "This removes its saved windows and unsaved edits." "Delete")
+                (Form.formAction registry deleteSaved (const record) (\_ reply->pure reply))
+              pure (SidebarForm <$> prepared)
+          _->pure (Left (CommandRejected "Saved session is no longer available."))) >>= required
   let windowAction sid wid=P.treeAction registry command (SelectSessionWindow sid wid) (\_ value->pure value)
       root=P.NodeDef (P.NodeInfo rootId "Sessions" "" True Nothing) Nothing []
       entryNode allIds (Entry sid hostName project state)=
         let here=Just sid==currentId
             short=T.pack (S.shortSessionId (T.unpack sid) (map T.unpack allIds))
             title=label (project<>"  "<>short<>"  "<>(if here then "current" else state)<>"  "<>hostName)
-        in P.NodeDef (P.NodeInfo (sessionNode sid) title "" here Nothing) Nothing []
+        in P.NodeDef (P.NodeInfo (sessionNode sid) title "" here Nothing) Nothing
+          [P.ActionMenu "Delete..." (P.treeAction registry deleteMenu (sid,short) (\_ value->pure value))
+          | not here,hostName=="local",state=="recoverable"]
       children _ (P.ChildRequest key cursor)=do
         Snapshot _ entries _ views<-readIORef source
         pure $ case offset cursor of
@@ -134,4 +159,7 @@ sessionSidebarEffects (SessionSidebar provider current _ _) fallback=foldM step 
       live<-P.treeCurrent provider
       pure (False,if live && Just sid==current && editorWindowAvailable d wid then activateEditorWindow wid d
         else d {status="Session window expired or is unavailable."})
+    step (_,d) (SessionSidebarAction (SessionDeleted sid))=do
+      live<-P.treeCurrent provider
+      pure (False,if live && Just sid/=current then d {status="Saved session deleted."} else d)
     step (_,d) effect=fallback d [effect]

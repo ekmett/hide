@@ -63,7 +63,7 @@ import Hide.Completion (bashCompletion)
 import Hide.RemoteTerminal (runRemoteTerminal)
 import Text.Read (readMaybe)
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Control.Monad (foldM, when)
+import Control.Monad (foldM, when, unless)
 import System.IO (hPutStrLn, stderr, hFlush, stdout, stdin, hIsTerminalDevice)
 import Hide.Debugger
 import Hide.DebuggerSidebar
@@ -77,7 +77,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
-import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, doesDirectoryExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
+import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, doesDirectoryExist, doesFileExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
 import System.FilePath ((</>), takeDirectory, takeExtension)
 import Control.Exception (try, IOException)
 import Paths_hide (getDataFileName)
@@ -97,7 +97,7 @@ import Hide.Render
 import Hide.Files
 import Hide.Reconcile
 
-data Option = Daemon | Sessions | MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Daemon | Sessions | MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | RequireCheckpoint | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
           ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
@@ -147,7 +147,7 @@ runEditor args = do
   scaleEnvironment<-lookupEnv "THC_EDIT_SCALE"
   appearanceEnvironment<-lookupEnv "THC_EDIT_APPEARANCE"
   terminalColors<-lookupEnv "COLORFGBG"
-  let (flags,paths,errors)=getOpt Permute (options++[Option [] ["mcp-editor"] (ReqArg MCPBridge "ID") "Internal editor introspection bridge",Option [] ["remote-daemon"] (ReqArg RemoteDaemon "ID") "Internal remote session process"]) (resumeArguments args)
+  let (flags,paths,errors)=getOpt Permute (options++[Option [] ["mcp-editor"] (ReqArg MCPBridge "ID") "Internal editor introspection bridge",Option [] ["remote-daemon"] (ReqArg RemoteDaemon "ID") "Internal remote session process",Option [] ["require-checkpoint"] (NoArg RequireCheckpoint) "Internal recovery precondition"]) (resumeArguments args)
   if not (null errors) then die (concat errors)
   else if Usage `elem` flags then putStr (usageInfo "Usage: hide [OPTIONS] [--] [FILE.hs ...]\n\nHaskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
   else if [ident | MCPBridge ident<-flags]/=[] then case flags of
@@ -170,6 +170,7 @@ runEditor args = do
         appearanceDefault=appearanceEnvironment <|> defaultAppearance defaults
         flagBool yes no fallback=fromMaybe fallback (lastMaybe [value | flag<-flags, Just value<-[if flag==yes then Just True else if flag==no then Just False else Nothing]])
     daemon <- case [sid | RemoteDaemon sid<-flags] of []->pure Nothing; [sid]->pure (Just sid); _->die "Specify --remote-daemon once."
+    when (RequireCheckpoint `elem` flags && daemon==Nothing) (die "--require-checkpoint requires --remote-daemon.")
     resume <- case [ident | Resume ident<-flags] of
       [] -> pure Nothing
       [ident] -> do
@@ -367,7 +368,15 @@ runEditor args = do
                     quit<-readIORef exiting
                     pure (quit,updated,finish)
               case daemon of
-                Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
+                Just sid -> do
+                  let startOwned=do
+                        -- Recovery eligibility can change after the relay spawns
+                        -- us. This callback runs under the daemon lifetime lock.
+                        when (RequireCheckpoint `elem` flags) $ do
+                          present<-checkpointPath sid >>= doesFileExist
+                          unless present (ioError (userError "Saved session was deleted before recovery started."))
+                        AR.activateAgentCheckpoint (conversationAgents conversation)
+                  runRemoteDaemonWithStartup startOwned (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
                 Nothing -> die "Missing session process identity."
 
   where

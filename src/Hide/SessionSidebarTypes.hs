@@ -14,4 +14,7 @@ import Data.Text (Text)
 
 -- | Select the captured live window in this exact editor session. The session
 -- owner rechecks registration lifetime, current identity and modal availability.
-data SessionSidebarRequest = SelectSessionWindow !Text !Int deriving (Eq,Show)
+data SessionSidebarRequest
+  = SelectSessionWindow !Text !Int
+  | SessionDeleted !Text
+  deriving (Eq,Show)

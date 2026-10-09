@@ -35,8 +35,14 @@ from the tree.
 Expand the current session to see its live editor windows. Selecting a window
 uses its captured ID and the ordinary window-selection owner. Removed windows,
 retired actions and modal controls refuse the selection; background refresh
-keeps the current focus. Other-session attachment from the sidebar remains in
-[#7](https://github.com/ekmett/hide/issues/7); use `hide --resume ID` below for now.
+keeps the current focus. To open another session, detach and run
+`hide --resume ID`.
+
+Right-click a stopped local session marked **recoverable** and choose **Delete...**
+to remove its saved windows, unsaved edits and conversation checkpoints. The
+confirmation offers **Delete** and **Cancel**. Files saved in the project are
+untouched. Current, running and remote sessions cannot be deleted here; if a
+session starts running while the confirmation is open, deletion is refused.
 
 The sidebar retains at most 1024 sessions/windows and pages 128 rows at a time.
 A discovery attempt has a ten-second limit and retains its last successful

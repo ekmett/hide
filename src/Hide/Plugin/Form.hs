@@ -58,7 +58,7 @@ import qualified Data.Vector as V
 import Hide.Plugin.Command
 
 data Phase = Pending | Open | Submitted | Retired deriving Eq
-data Catalogue = InputCatalogue | InputsCatalogue ![Text] | ChoiceCatalogue !(S.Set Text) deriving Eq
+data Catalogue = ConfirmationCatalogue | InputCatalogue | InputsCatalogue ![Text] | ChoiceCatalogue !(S.Set Text) deriving Eq
 -- | Immutable read/capture disclosure for trusted linked preparations. This
 -- grants no input or source access: owners must sanitize public metadata first.
 -- Refresh cannot change disclosure; both variants still require human submit.
@@ -77,12 +77,15 @@ data InputField = InputField
 -- | A scalar input/choice or a complete named-input submission. The host owns
 -- current drafts; the action worker validates bounds and the exact field keyset.
 data FormValue = TextValue !Text | InputValues !(M.Map Text Text) deriving (Eq,Show)
--- | Three fixed host widgets. Choice IDs are provider-owned values, never labels.
+-- | Fixed host widgets. A confirmation submits the empty scalar value.
+-- Choice IDs are provider-owned values, never labels.
 -- Choices are nonempty, unique and bounded to the existing ACP limits (512
 -- entries, 4096 scalars per ID); visible labels are at most 256 scalars.
 -- Initial input/choice applies only at opening, never on metadata refresh.
 data FormSpec
-  = InputFormSpec
+  = ConfirmationFormSpec
+    { formTitle :: !Text, formLabel :: !Text, formSubmit :: !Text }
+  | InputFormSpec
     { formTitle :: !Text, formLabel :: !Text, inputFormInitial :: !Text
     , formSubmit :: !Text }
   | InputsFormSpec
@@ -129,6 +132,9 @@ checkedSpec :: FormSpec -> IO (Either CommandError FormSpec)
 checkedSpec spec
   | any invalidLabel [formTitle spec,formSubmit spec]=invalid
   | otherwise=case spec of
+      ConfirmationFormSpec title label submit
+        | invalidLabel label->invalid
+        | otherwise->checked (ConfirmationFormSpec (T.copy title) (T.copy label) (T.copy submit))
       InputFormSpec title label initial submit
         | invalidLabel label || invalidInput initial->invalid
         | otherwise->checked (InputFormSpec (T.copy title) (T.copy label) (T.copy initial) (T.copy submit))
@@ -151,12 +157,14 @@ checkedSpec spec
     invalidChoice (ident,label)=T.null ident || T.length ident>4096 || invalidLabel label
     checked value=do
       _<-evaluate (sum (map T.length ([formTitle value,formSubmit value]++case value of
+        ConfirmationFormSpec _ label _->[label]
         InputFormSpec _ label initial _->[label,initial]
         InputsFormSpec _ fields _->concatMap (\(InputField ident label initial)->[ident,label,initial]) fields
         ChoiceFormSpec _ label choices initial _->label:initial:concatMap (\(ident,name)->[ident,name]) choices)))
       pure (Right value)
 
 catalogue :: FormSpec -> Catalogue
+catalogue ConfirmationFormSpec{}=ConfirmationCatalogue
 catalogue InputFormSpec{}=InputCatalogue
 catalogue (InputsFormSpec _ fields _)=InputsCatalogue (map inputId fields)
 catalogue (ChoiceFormSpec _ _ choices _ _)=ChoiceCatalogue (S.fromList (map fst choices))
@@ -256,6 +264,7 @@ invokeFormAction (PreparedForm _ _ _ spec _ choices (FormAction _ registry comma
   where
     input text=T.length text<=8192 && not (T.any (\c->c<' ' || c=='\DEL') text)
     valid=case (spec,value) of
+      (ConfirmationFormSpec{},TextValue text)->T.null text
       (InputFormSpec{},TextValue text)->input text
       (ChoiceFormSpec{},TextValue text)->M.member text choices
       (InputsFormSpec _ fields _,InputValues values)->

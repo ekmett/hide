@@ -600,6 +600,11 @@ closed RenameAgentTo result. Form metadata refresh carries no callback, cannot
 open a modal, and preserves draft/selection through resize. Scope retirement or
 a newer modal rejects a delayed reply. `PluginFormCheck` exercises public
 lifetime laws; `AgentSidebarCheck` covers the real input/adoption route.
+`ConfirmationFormSpec` uses the same lifecycle with no input field and an empty
+submission. Sessions uses it to confirm deletion on the sidebar action worker;
+the deletion rechecks catalog identity and liveness under the daemon lifetime
+lock. Recovery rechecks checkpoint existence under that lock before publishing
+a daemon, so a pending recovery spawn cannot recreate a deleted session.
 
 A single metadata worker prepares only names, parent IDs and states from
 `agentSummaries`; tasks, histories, transcripts and private provider keys never

@@ -919,6 +919,8 @@ adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
     let spec=Form.formSpec prepared
         choiceIndex value=maybe 0 id (Form.formChoiceIndex prepared value)
         build=case spec of
+          Form.ConfirmationFormSpec _ label _->Dialog (Form.formTitle spec) (PluginInputForm reference)
+            [] 0 [Form.formSubmit spec,"Cancel"] [label]
           Form.InputFormSpec _ label initial _->Dialog (Form.formTitle spec) (PluginInputForm reference)
             [SelectedInput label initial (Selection 0 (T.length initial))] 0 [Form.formSubmit spec,"Cancel"] []
           Form.InputsFormSpec _ inputs _->Dialog (Form.formTitle spec) (PluginInputsForm reference (map Form.inputId inputs))
@@ -926,7 +928,8 @@ adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
             0 [Form.formSubmit spec,"Cancel"] []
           Form.ChoiceFormSpec _ label choices initial _->Dialog (Form.formTitle spec) (PluginChoiceForm reference (Form.formRevision prepared))
             [ListBox label (map snd choices) (choiceIndex initial)] 0 [Form.formSubmit spec,"Cancel"] []
-        refresh dg=dg {purpose=case spec of Form.ChoiceFormSpec{}->PluginChoiceForm reference (Form.formRevision prepared); _->purpose dg,dialogTitle=Form.formTitle spec,buttons=[Form.formSubmit spec,"Cancel"],fields=case spec of
+        refresh dg=dg {purpose=case spec of Form.ChoiceFormSpec{}->PluginChoiceForm reference (Form.formRevision prepared); _->purpose dg,dialogTitle=Form.formTitle spec,buttons=[Form.formSubmit spec,"Cancel"],body=case spec of Form.ConfirmationFormSpec _ label _->[label]; _->[],fields=case spec of
+          Form.ConfirmationFormSpec{}->[]
           Form.InputFormSpec _ label _ _->[case field of SelectedInput _ text selected->SelectedInput label text selected; _->field | field<-fields dg]
           Form.InputsFormSpec _ inputs _->[case field of
             SelectedInput _ text selected->SelectedInput (Form.inputLabel input) text selected
@@ -1004,6 +1007,9 @@ forceFormReply reply@(SidebarAgent request)=case request of
   where checked option value
           | T.length option>4096 || T.length value>4096=ioError (userError "Oversized choice form result.")
           | otherwise=evaluate (T.length option+T.length value) >> evaluate reply
+forceFormReply reply@(SidebarSession (SessionDeleted ident))
+  | T.length ident==48=evaluate (T.length ident) >> evaluate reply
+  | otherwise=ioError (userError "Invalid deleted session result.")
 forceFormReply reply@SidebarRename{}=evaluate reply
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
 acceptedFormRequest :: AgentSidebarRequest -> Bool
@@ -1033,6 +1039,7 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
       consumed<-if current then Form.finishFormSubmission reference else Form.retireForm reference >> pure False
       case result of
         Right (Right (SidebarAgent request)) | consumed,acceptedFormRequest request->snd <$> core d [AgentSidebarAction request]
+        Right (Right (SidebarSession request@SessionDeleted{})) | consumed->snd <$> core d [SessionSidebarAction request]
         Right (Right (SidebarRename owner prepared)) | consumed->do
           provider<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
           if not provider then pure d {status="Files provider expired."} else do

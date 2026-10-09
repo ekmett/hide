@@ -94,7 +94,7 @@ helloParser = withObject "remote hello" $ \o -> do
   args <- o .:? "args" .!= []
   unless (length args<=128 && sum (map length args)<=65536 && all (all (/='\0')) args) (fail "Invalid remote startup arguments")
   let options=takeWhile (/="--") args
-  unless (all (`notElem` ["--remote","--remote-daemon","--ssh","--remote-session","--resume","--mcp-editor","--snapshot","--snapshot-html","--help","-h"]) options &&
+  unless (all (`notElem` ["--remote","--remote-daemon","--ssh","--remote-session","--resume","--require-checkpoint","--mcp-editor","--snapshot","--snapshot-html","--help","-h"]) options &&
     all (\arg -> not (any (`T.isPrefixOf` T.pack arg) ["--remote-daemon=","--ssh=","--remote-session=","--resume=","--mcp-editor="])) options) (fail "Invalid remote startup mode")
   resume <- o .:? "resume" .!= False
   pure (Hello session client ack args resume)
@@ -173,7 +173,7 @@ openSession args (Hello session _ _ startup resume) = do
         Nothing -> pure currentDirectory
       let effective=maybe (if null startup then args else startup) sessionArguments saved
           (options,paths)=break (=="--") effective
-          daemonArgs=options++["--remote-daemon",session]++paths
+          daemonArgs=options++["--remote-daemon",session]++["--require-checkpoint" | recovery || resume]++paths
       let logfile=path++".log"
       process <- spawnDetached executable daemonArgs logfile directory
       void (forkIO (void (waitForProcess process)))
@@ -598,6 +598,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
 
   withoutDaemon args@("--":_)=args
   withoutDaemon ("--remote-daemon":_:rest)=withoutDaemon rest
+  withoutDaemon ("--require-checkpoint":rest)=withoutDaemon rest
   withoutDaemon (arg:rest)=arg:withoutDaemon rest
   withoutDaemon []=[]
 

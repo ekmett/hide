@@ -6,7 +6,7 @@
 -- remote records remain discoverable while offline. Display prefixes can be short,
 -- but endpoint operations require the complete session identity.
 module Hide.Session
-  (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity, shortSessionId) where
+  (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, deleteStoppedSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity, shortSessionId) where
 
 import Control.Exception (IOException, bracket, bracketOnError, catch, finally)
 import Control.Monad (filterM, unless)
@@ -24,7 +24,7 @@ import System.IO (IOMode(ReadMode), hClose, hFileSize, openBinaryTempFile, withB
 import System.IO.Error (isDoesNotExistError)
 import System.Timeout (timeout)
 import Hide.Protocol (WirePacket(..), writePacket, readPacket)
-import Hide.RemoteEndpoint (sessionEndpoint, connectEndpoint, randomIdentity, privateDirectory)
+import Hide.RemoteEndpoint (sessionEndpoint, connectEndpoint, randomIdentity, privateDirectory, withSessionLock)
 
 -- Each record describes the host which owns the editor state. Remote records
 -- remain available while offline; local records include recoverable checkpoints.
@@ -102,6 +102,35 @@ forgetSession ident = do
   legacy <- (++".json") <$> sessionEndpoint ident
   mapM_ (\target -> removeFile target `catch` \(err::IOException) ->
     unless (isDoesNotExistError err) (ioError err)) [path,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json",legacy]
+
+-- | Delete a captured, stopped local session from its owning sidebar worker.
+-- The current daemon identity must be supplied: POSIX lifetime locks are
+-- process-scoped, so its own lock must never be reopened here. Calls from that
+-- worker are serialized; concurrent deletion in one process is not supported.
+--
+-- Refuse current/remote records, a live or unresponsive endpoint, an occupied
+-- lifetime lock, or a changed catalog record before removing any saved data.
+-- Recheck liveness and exact record identity under the lifetime lock, then use
+-- 'forgetSession'. The endpoint and lock file are never removed or a daemon
+-- started/stopped. Filesystem failures are reported as 'IOException'.
+deleteStoppedSession :: Maybe String -> SessionRecord -> IO ()
+deleteStoppedSession current captured=do
+  unless (current/=Just ident) (ioError (userError "Cannot delete the current editor session."))
+  unless (sessionHost captured==Nothing) (ioError (userError "Cannot delete a remote session from this host."))
+  endpoint<-sessionEndpoint ident
+  stopped endpoint
+  checkpoint<-checkpointPath ident
+  withSessionLock (checkpoint++".lock") $ do
+    stopped endpoint
+    latest<-loadSession ident
+    unless (latest==Just captured) (ioError (userError "The saved session changed or disappeared; refresh Sessions before deleting."))
+    forgetSession ident
+  where
+    ident=sessionId captured
+    stopped endpoint=do
+      result<-timeout 1000000 $ (bracket (connectEndpoint endpoint) hClose (const (pure True)))
+        `catch` \(_::IOException)->pure False
+      unless (result==Just False) (ioError (userError "The session is running or its endpoint did not respond; stop it before deleting."))
 
 loadSession :: String -> IO (Maybe SessionRecord)
 loadSession ident = do

@@ -2,7 +2,9 @@
 module SessionSidebarCheck (checks) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket,evaluate)
+import Control.Concurrent.Async (withAsync)
+import qualified Control.Concurrent.Async as Async
+import Control.Exception (bracket,evaluate,finally,try,IOException)
 import Control.Monad (foldM,unless)
 import Data.Aeson (encode)
 import qualified Data.ByteString as BS
@@ -18,10 +20,13 @@ import System.FilePath ((</>),takeFileName)
 import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
 import Hide.Buffer (newBuffer)
-import Hide.GuestAccess (guestEffectsAllowed)
+import Hide.GuestAccess (guestEffectsAllowed,guestKeyboardAllowed)
 import Hide.Model
 import Hide.Files (loadFile)
 import Hide.Session
+import Hide.RemoteEndpoint (sessionEndpoint,withEndpointListener,socketToEndpoint)
+import qualified Network.Socket as N
+import qualified Graphics.Vty as V
 import Hide.SessionSidebar
 import Hide.SessionSidebarTypes
 import Hide.Sidebar
@@ -66,6 +71,12 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
               i:_->let (requested,effects)=activateTree True i d in snd <$> sidebarEffects host core requested effects
               _->fail "Missing Sessions row"
             ready d=maybe False (\tree->treeProjectionRevision tree==treeRevision tree) (sideTree d)
+            act (d,effects)=snd <$> sidebarEffects host core d effects
+            popup node d=case [(i,row) | (i,row)<-maybe [] (visibleRows 0 32768) (sideTree d),P.nodeIdText (P.infoId (rowInfo row))==node] of
+              (i,_):_->let scroll=maybe 0 treeScroll (sideTree d)
+                       in fst (handleEvent (V.EvMouseDown 5 (2+i-scroll) V.BRight []) d)
+              _->error "Missing context-menu target"
+            menuLabels d=maybe [] (const (map fst (contextItemsFor d))) (contextMenu d)
             currentNode="session:"<>T.pack (sessionId current)
         started<-initializeSidebar host initial
         mounted<-wait "Sessions root" (has "Sessions") started
@@ -106,10 +117,37 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
         let poison=views {buffers=M.map (\doc->doc {documentBuffer=error "Sessions forced a Buffer",documentHighlight=error "Sessions forced highlights"}) (buffers views)}
         cheap<-timeout 1000000 (foldM (\d _->tickSessionSidebar service host d) poison [1..32::Int] >>= evaluate . length . windows)
         unless (cheap==Just (length (windows views))) (fail "Session metadata blocks the UI owner")
-        pure (service,selected)
+        -- Use the real sidebar context menu and host confirmation lifecycle.
+        saved<-newSessionRecord Nothing []
+        rememberSession saved
+        savedPath<-checkpointPath (sessionId saved)
+        writeFile savedPath "saved unsaved work"
+        let savedNode="session:"<>T.pack (sessionId saved)
+            confirmation d=maybe False (T.isPrefixOf "Delete session ".dialogTitle) (dialog d)
+            openDelete d=act (handleEvent (V.EvKey V.KEnter []) (popup savedNode d)) >>= wait "delete confirmation" confirmation
+        catalogued<-wait "saved session" (\d->hasId savedNode d && ready d) selected
+        unless (menuLabels (popup savedNode catalogued)==["Delete..."] &&
+                null (menuLabels (popup currentNode catalogued)) &&
+                null (menuLabels (popup ("session:"<>T.pack (sessionId other)) catalogued)))
+          (fail "Session deletion menu does not distinguish stopped local/current/remote targets")
+        opened<-openDelete catalogued
+        unless (not (guestKeyboardAllowed opened) && maybe False (\dg->null (fields dg) && buttons dg==["Delete","Cancel"]) (dialog opened))
+          (fail "Deletion is not a human-only button confirmation")
+        cancelled<-act (handleEvent (V.EvKey V.KEsc []) opened)
+        retained<-doesFileExist savedPath
+        unless retained (fail "Cancel deleted the saved session")
+        reopened<-openDelete cancelled
+        submitted<-act (handleEvent (V.EvKey V.KEnter []) reopened)
+        deleted<-wait "saved-session deletion" ((=="Saved session deleted.").status) submitted
+        checkpointRemains<-doesFileExist savedPath
+        recordRemains<-loadSession (sessionId saved)
+        unless (not checkpointRemains && recordRemains==Nothing) (fail "Confirmed deletion left saved session data")
+        hidden<-wait "deleted-session row removal" (not . hasId savedNode) deleted
+        pure (service,hidden)
       (_,expired)<-sessionSidebarEffects service (\d _->pure (False,d)) after
         [SessionSidebarAction (SelectSessionWindow (T.pack (sessionId current)) firstId)]
       unless (status expired=="Session window expired or is unavailable.") (fail "Retired Sessions registration accepted a selection")
+    deletionChecks
     putStrLn "session sidebar checks passed"
   where
     temporary=do
@@ -121,3 +159,44 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
       canonicalizePath path
     environment key value action=bracket (lookupEnv key <* set value) set (const action)
       where set=maybe (unsetEnv key) (setEnv key)
+
+-- Exercise the operation independently of the confirmation UI. A real listener
+-- also proves that an endpoint with a different/missing lifetime lock is refused.
+deletionChecks :: IO ()
+deletionChecks=do
+  captured<-newSessionRecord Nothing ["saved-session-argument"]
+  let ident=sessionId captured
+  endpoint<-sessionEndpoint ident
+  checkpoint<-checkpointPath ident
+  directory<-sessionStoreDirectory
+  let metadata=directory </> ident++".json"
+      artifacts=[metadata,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json",endpoint++".json"]
+      check label ok=unless ok (fail label)
+      refused label current record=do
+        before<-mapM BS.readFile artifacts
+        result<-try (deleteStoppedSession current record) :: IO (Either IOException ())
+        after<-mapM BS.readFile artifacts
+        check label (case result of Left _->before==after;Right _->False)
+  flip finally (forgetSession ident) $ do
+    rememberSession captured
+    mapM_ (\path->BS.writeFile path "saved private payload") (drop 1 artifacts)
+    refused "Current-session deletion preserves every saved artifact" (Just ident) captured
+    check "Current-session refusal never opens its lifetime lock" . not =<< doesFileExist (checkpoint++".lock")
+    let remote=captured {sessionHost=Just "remote.example"}
+    rememberSession remote
+    refused "Remote-session deletion preserves every saved artifact" Nothing remote
+    rememberSession captured {sessionArguments=["replacement-session-argument"]}
+    refused "Captured-session deletion refuses changed records without deleting data" Nothing captured
+    rememberSession captured
+    withEndpointListener endpoint $ \listener authenticate->
+      withAsync (do
+        (socket,_)<-N.accept listener
+        bracket (socketToEndpoint socket) (\(handle,shutdown)->shutdown `finally` hClose handle)
+          (authenticate . fst)) $ \worker->do
+        refused "Live endpoint deletion is refused even without its daemon lock" Nothing captured
+        completed<-timeout 3000000 (Async.wait worker)
+        check "Live endpoint probe reached the real listener" (completed==Just ())
+    deleteStoppedSession Nothing captured
+    absent<-mapM doesFileExist artifacts
+    check "Stopped-session deletion removes record, checkpoint and sidecars" (not (or absent))
+    check "Stopped-session deletion retains the lifetime lock file" =<< doesFileExist (checkpoint++".lock")
