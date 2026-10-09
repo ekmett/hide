@@ -136,7 +136,7 @@ runRemoteWeb scale host peer = do
               (value,rows)<-decodeFrame (cachedRows before) bytes
               fields<-case value of Object fields->pure fields; _->ioError (userError "Invalid remote display metadata")
               atomically $ do
-                modifyTVar' cache (\c->c {cachedRows=rows,cachedMeta=KM.union (foldr KM.delete fields ["type","reset","rows"]) (cachedMeta c)})
+                modifyTVar' cache (\c->c {cachedRows=rows,cachedMeta=KM.union (foldr KM.delete fields ["type","reset","rows"]) (if KM.lookup "reset" fields==Just (Bool True) then KM.delete "semanticSource" (cachedMeta c) else cachedMeta c)})
                 emit packet
             Just (DownloadBytes header) -> atomically $ do
               retain [header,packet]
@@ -164,7 +164,7 @@ runRemoteWeb scale host peer = do
                 let disconnected=parseMaybe (withObject "connection" (\o->o .: "connected")) value==Just False
                 let handoff=parseMaybe (withObject "connection" (\o->o .:? "switching" .!= False)) value==Just True
                 when disconnected (writeTVar aliases M.empty)
-                modifyTVar' cache (\c->if disconnected && not handoff then c {cachedConnection=Just value,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "canvas" (cachedMeta c)} else c {cachedConnection=Just value})
+                modifyTVar' cache (\c->if disconnected && not handoff then c {cachedConnection=Just value,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "semanticSource" (KM.delete "canvas" (cachedMeta c))} else c {cachedConnection=Just value})
                 emit packet
               Just kind | "canvas-" `T.isPrefixOf` kind -> do
                 (updated,purpose)<-either (ioError . userError) pure (canvasControl (cachedCanvas before) value)
@@ -188,7 +188,7 @@ runRemoteWeb scale host peer = do
                   Nothing->pure ()
               Just "closed" -> do
                 attached<-atomically $ do
-                  modifyTVar' cache (\c->c {sessionClosed=True,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "canvas" (cachedMeta c)})
+                  modifyTVar' cache (\c->c {sessionClosed=True,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "semanticSource" (KM.delete "canvas" (cachedMeta c))})
                   emit packet
                   maybe False (const True) <$> readTVar subscriber
                 unless attached (void (tryPutMVar done ()))

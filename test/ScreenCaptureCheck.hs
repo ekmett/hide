@@ -44,6 +44,13 @@ checksWithBody chatBase=do
   font<-loadFont
   let desktop=addDocument Nothing (newBuffer "  λ 中 ▙ é 👩🏽\x200d\&💻 ❤️\n") (initialDesktop (80,25))
       takeCapture d image=capture font d image >>= either (error . T.unpack) pure
+  sourceCapture<-takeCapture desktop False
+  check "screen metadata shares the host source excerpt"
+    (field "semanticSource" (textMetadata sourceCapture)==Just (sourceSemantics GuestSemantics desktop))
+  let secretSource=desktop {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/secret.hs"}) (buffers desktop)}
+  secretCapture<-takeCapture secretSource False
+  check "screen source metadata clears protected content"
+    (field "semanticSource" (textMetadata secretCapture)==Just (object ["present" .= False,"readOnly" .= True]))
   let overflow="a"<>T.replicate 70 "\x301"<>"Z"
       overflowView=addDocument Nothing (newBuffer overflow) (initialDesktop (80,25))
       fallbackView=addDocument Nothing (newBuffer "���Z") (initialDesktop (80,25))

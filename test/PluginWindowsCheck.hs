@@ -3,7 +3,7 @@ module PluginWindowsCheck (checks,rowsChecks,imageChecks) where
 import Control.Concurrent (threadDelay,yield)
 import Control.Concurrent.MVar
 import Control.Exception (evaluate,finally)
-import Control.Monad (unless,foldM)
+import Control.Monad (unless,foldM,forM_)
 import qualified Codec.Picture as Picture
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -457,9 +457,66 @@ rowsChecks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withMenuCommand
   where
     findSource desktop=case filter ((/=Nothing).bufferId) (windows desktop) of w:_->Just w; _->Nothing
 
+-- A small asymmetric JPEG proves orientation independently of lossy encoding:
+-- expected pixels come from the untagged reference and explicit source indices.
+jpegChecks :: IO ()
+jpegChecks=do
+  let jpeg=BL.toStrict (Picture.encodeJpegAtQuality 100 (Picture.generateImage (\x y->Picture.PixelYCbCr8 (fromIntegral (30+60*x+20*y)) 128 128) 3 2))
+      reference=either error Picture.convertRGBA8 (Picture.decodeJpeg jpeg)
+      pixel n=case Picture.pixelAt reference (n `mod` 3) (n `div` 3) of Picture.PixelRGBA8 r g b a->BS.pack [r,g,b,a]
+      check label condition=unless condition (fail label)
+      prepare source=Canvas.prepareImage source >>= either (fail . T.unpack) pure
+      number little count value=BS.pack [fromIntegral (value `div` (256^index) `mod` 256) | index<-if little then [0..count-1] else reverse [0..count-1]]
+      exif little orientation extra=let
+        word=number little 2
+        long=number little 4
+        entries=word 274<>word 3<>long 1<>word orientation<>word 0<>
+          if extra then word 256<>word 4<>long 4294967295<>long 38 else BS.empty
+        tiff=(if little then "II" else "MM")<>word 42<>long 8<>word (if extra then 2 else 1)<>entries<>long 0<>
+          if extra then long 0 else BS.empty
+        payload="Exif\0\0"<>tiff
+        in BS.pack [255,225]<>wordLength (BS.length payload+2)<>payload
+      wordLength value=BS.pack [fromIntegral (value `div` 256),fromIntegral (value `mod` 256)]
+      tagged tag=BS.take 2 jpeg<>tag<>BS.drop 2 jpeg
+      cases=[(1,[0,1,2,3,4,5]),(2,[2,1,0,5,4,3]),(3,[5,4,3,2,1,0]),(4,[3,4,5,0,1,2]),
+             (5,[0,3,1,4,2,5]),(6,[3,0,4,1,5,2]),(7,[5,2,4,1,3,0]),(8,[2,5,1,4,0,3])]
+  plain<-prepare jpeg
+  check "JPEG signature and resource preserve original source format and opaque RGBA"
+    (Canvas.imageContentFormat (BS.take 8 jpeg)==Just "JPEG" && Canvas.isImageContent jpeg && Canvas.imageFormat plain=="JPEG" &&
+     Canvas.imageEncoded plain==jpeg && Canvas.imageWidth plain==3 && Canvas.imageHeight plain==2 && Canvas.imageRGBA plain==BS.concat (map pixel [0..5]))
+  forM_ cases $ \(orientation,indices)->do
+    let source=tagged (exif (even orientation) orientation False)
+        expectedSize=if orientation>=5 then (2,3) else (3,2)
+    image<-prepare source
+    check "all EXIF orientations use correct displayed dimensions and row-major RGBA"
+      ((Canvas.imageWidth image,Canvas.imageHeight image)==expectedSize && Canvas.imageRGBA image==BS.concat (map pixel indices) && Canvas.imageEncoded image==source)
+  safeMetadata<-prepare (tagged (exif True 6 True))
+  check "JPEG decode does not allocate from unrelated EXIF vector counts"
+    (Canvas.imageRGBA safeMetadata==BS.concat (map pixel [3,0,4,1,5,2]))
+  invalidOrientation<-prepare (tagged (exif False 9 False))
+  check "invalid EXIF orientation defaults to stored pixel order" (Canvas.imageRGBA invalidOrientation==Canvas.imageRGBA plain)
+  let frame code width height=BS.pack [255,code]<>wordLength 11<>BS.singleton 8<>wordLength height<>wordLength width<>BS.pack [1,1,17,0]
+      start=BS.pack [255,216]
+      scan=BS.pack [255,218,0,8,1,1,0,0,63,0]
+      end=BS.pack [255,217]
+      firstScan=start<>frame 192 3 2<>scan<>BS.singleton 0
+      refused label expected source=do
+        result<-Canvas.prepareImage source
+        check label (either (T.isInfixOf expected) (const False) result)
+  refused "JPEG source limit precedes decode" "16 MiB" (BS.take 3 jpeg<>BS.replicate (16777216-2) 0)
+  refused "JPEG oversized first frame is rejected before decode" "limit" (start<>frame 192 4097 1)
+  refused "JPEG pixel area is bounded independently of side lengths" "limit" (start<>frame 192 2049 2048)
+  refused "JPEG later SOF cannot escape predecode bounds" "limit" (firstScan<>frame 192 4097 1<>end)
+  refused "JPEG DNL cannot introduce dimensions after preflight" "DNL" (firstScan<>BS.pack [255,220,0,4,0,2]<>end)
+  refused "JPEG zero-height frame requires unsupported dynamic dimensions" "limit" (start<>frame 192 3 0)
+  refused "JPEG multiple frames are rejected before decode" "multiple" (start<>frame 192 3 2<>frame 192 3 2<>scan<>end)
+  refused "JPEG unsupported frame kind is rejected before decode" "Unsupported" (start<>frame 195 3 2)
+  refused "JPEG truncated marker length is rejected before decode" "marker structure" (start<>BS.pack [255,224,255,255])
+
 -- Real PNG preparation, composition and capture exercise the public image route.
 imageChecks :: IO ()
 imageChecks=do
+  jpegChecks
   let check label condition=unless condition (fail label)
       bytes=BL.toStrict (Picture.encodePng (Picture.generateImage (\_ _->Picture.PixelRGBA8 200 80 40 128) 16 16))
       prepare disclosure=W.prepareImageWindow "sample.png" disclosure (Just "/images/sample.png") bytes >>= either (fail . T.unpack) pure
@@ -475,7 +532,7 @@ imageChecks=do
   public<-prepare W.ReadableWindow
   private<-prepare W.PrivateWindow
   check "PNG resource keeps exact originals and strict RGBA dimensions"
-    (Canvas.imagePNG (imageOf public)==bytes && BS.length (Canvas.imageRGBA (imageOf public))==16*16*4)
+    (Canvas.imageFormat (imageOf public)=="PNG" && Canvas.imageEncoded (imageOf public)==bytes && BS.length (Canvas.imageRGBA (imageOf public))==16*16*4)
   W.withWindowScope $ \scope->do
     opened<-ready <$> open scope public (initialDesktop (40,18))
     let initial=scene opened

@@ -94,6 +94,7 @@ sanitizedPreparedContent prepared
 guestCommandAllowed :: Command -> Bool
 guestCommandAllowed cmd=case cmd of
   RegisteredMenu _ allowed -> allowed
+  ExportBuffer -> False
   DebugCommand action | privateDebuggerAction action -> False
   GitDiff -> False
   GitCommit -> False
@@ -189,6 +190,7 @@ guestEffectsAllowed=all allowed
     allowed SaveChatSubmit{}=False
     allowed AutocompleteAction{}=False
     allowed DownloadCancelAction{}=False
+    allowed ExportBufferDocument{}=False
     allowed (DebugAction action _)=not (privateDebuggerAction action)
     allowed (ServiceAction action _)=serviceActionAllowed action
     allowed AgentAction{}=False

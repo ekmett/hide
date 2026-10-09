@@ -1,9 +1,22 @@
 # hide — Haskell IDE
 
-![Haskell 9.14.1](https://img.shields.io/badge/Haskell-9.14.1-5e5086?style=flat&logo=haskell&logoColor=white)
-[![Zig 0.16.0](https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=flat&logo=zig&logoColor=white)](docs/install.md#embedded-terminal)
-[![Docs build](https://github.com/ekmett/hide/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/ekmett/hide/actions/workflows/docs.yml)
-[![docs: pandoc](https://img.shields.io/badge/docs-pandoc-blue?style=flat)](https://ekmett.github.io/hide/)
+<!-- badges:start -->
+[![build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/nixos.yml?branch=nixos-ci&style=flat&label=build&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/nixos.yml?query=branch%3Anixos-ci)
+[![docs build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/docs.yml?branch=main&style=flat&label=docs+build&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/docs.yml?query=branch%3Amain)
+[![issues](https://img.shields.io/github/issues/ekmett/hide?style=flat&label=issues&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/hide/issues)
+[![commits](https://img.shields.io/github/commit-activity/w/ekmett/hide?style=flat&label=commits&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/hide/activity)
+
+[![Zig: 0.16.0](https://img.shields.io/static/v1?label=Zig&message=0.16.0&color=b67712&style=flat&logo=zig&logoColor=white)](docs/install.md#embedded-terminal)
+[![Haskell](https://img.shields.io/static/v1?label=&message=Haskell&color=5e5086&style=flat&logo=haskell&logoColor=white)](hide.cabal)
+[![GHC: 9.6+](https://img.shields.io/static/v1?label=GHC&message=9.6%2B&color=5e5086&style=flat&logo=haskell&logoColor=white)](docs/install.md)
+
+[![OS: Linux · macOS · Windows](https://img.shields.io/static/v1?label=OS&message=Linux+%C2%B7+macOS+%C2%B7+Windows&color=64748b&style=flat)](docs/install.md)
+
+[![license: BSD-2-Clause OR Apache-2.0](assets/badges/license.svg)](https://github.com/ekmett/hide/blob/5fb3e4328e0595f7e11ed4e6a20698823a82bb82/LICENSE)
+[![Contributor Covenant: 2.0](https://img.shields.io/static/v1?label=Contributor+Covenant&message=2.0&color=007ec6&style=flat&logo=contributorcovenant&logoColor=white)](CODE_OF_CONDUCT.md)
+
+[![docs: read](https://img.shields.io/static/v1?label=docs&message=read&color=007ec6&style=flat)](https://ekmett.github.io/hide/)
+<!-- badges:end -->
 
 hide is a Haskell IDE written in Haskell. Edit source, inspect types and
 diagnostics, build and debug programs, and work with agents. It runs in a

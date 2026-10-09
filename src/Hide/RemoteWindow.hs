@@ -6,7 +6,7 @@
 -- the latest frame. Local pointer feedback and remote content updates have distinct
 -- repaint rules, so drag/wheel rendering can await the resulting remote frame.
 module Hide.RemoteWindow
-  (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame
+  (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame, parseRemoteDownload
   , RemoteCanvas(..), RemoteCanvasSurface(..), CanvasControl(..), CanvasReceiveState, emptyCanvasReceiveState, admitCanvasControl, validateCanvasChunk
   , remoteConnectionState
   , nativeKeyInput, nativeEventInput, remoteBindingInput, remoteMenuInput, remoteNativeMenuInput, remoteDockWindowInput, remoteMenuLayout, sanitizeDownloadName
@@ -29,6 +29,7 @@ import qualified Data.Text.Unsafe as TU
 import qualified Graphics.Vty as V
 import Hide.Frontend
 import Hide.Model (Command(..), MenuItem(..), menus, menuContributionSlots)
+import Data.Char (isControl)
 import Data.List (elemIndex, nub)
 import qualified Data.IntSet as IS
 import Data.Maybe (fromMaybe)
@@ -87,11 +88,34 @@ data RemoteFrame = RemoteFrame
   , remoteCursor :: Maybe (Int,Int), remoteBlink :: Bool, remoteCRT :: Bool
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
   , remoteCanvas :: Maybe RemoteCanvas
+  , remoteSource :: Maybe BS.ByteString
   , remoteDialog :: Maybe BS.ByteString
   , remoteSidebar :: BS.ByteString, remoteExportView :: [Integer], remoteBindings :: [(T.Text,T.Text)]
   , remoteWindows :: [(Int,T.Text,Bool,Bool)]
   , remoteContributions :: [RemoteContribution], remoteMenus :: [Bool], remoteCells :: [RemoteCell]
   } deriving (Eq,Show)
+
+-- | Validate a snapshot download before its immediate binary payload. Export
+-- gestures retain the exact host-issued title/Files row and current view receipt;
+-- ordinary downloads have no gesture and use the frontend's save route.
+parseRemoteDownload :: Value -> Either String (T.Text,Maybe ((Int,Int,Int,Int),[Integer]))
+parseRemoteDownload = parseEither (withObject "download" $ \o->do
+  name<-o .: "name"
+  purpose<-o .:? "purpose"
+  receipt<-case purpose :: Maybe T.Text of
+    Just "file-export"->do
+      row@(x,y,w,h)<-o .: "row"
+      view<-o .: "view"
+      unless (x>=0 && x<=511 && y>=0 && w>0 && w<=512 && h==1 && x+w<=512 && y<256 && validExportView view) (fail "Invalid file export receipt")
+      pure (Just (row,view))
+    Nothing->pure Nothing
+    _->fail "Unknown download purpose"
+  pure (name,receipt))
+
+-- Prefix, Files and source-window receipts use one fixed current wire shape.
+-- Comparing these scalar receipts never observes buffer contents or history.
+validExportView :: [Integer] -> Bool
+validExportView view=length view==20 && all (\n->n>=0 && n<=9007199254740991) view
 
 -- | Validate dimensions, ordered nonoverlapping spans, colors, cursor and widths
 -- before any remote cells reach native drawing.
@@ -110,14 +134,15 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   pixelated <- o .:? "pixelated" .!= False
   terminal <- o .:? "terminal" .!= False
   wordstar <- o .:? "wordstar" .!= False
-  exportView <- o .:? "fileExportView" .!= []
-  unless (length exportView<=13 && all (\n->n>=0 && n<=9007199254740991) exportView) (fail "Invalid file export view")
+  exportView <- o .:? "fileExportView" .!= replicate 20 0
+  unless (validExportView exportView) (fail "Invalid file export view")
   sidebar <- o .:? "semanticSidebar"
   unless (maybe True (\value->case value of Object{}->True; _->False) sidebar) (fail "Invalid sidebar semantics")
   let sidebarBytes=maybe BS.empty (BL.toStrict . BL.take 2097153 . encode) (sidebar::Maybe Value)
   unless (BS.length sidebarBytes<=2097152) (fail "Oversized sidebar semantics")
   haptics <- o .:? "hapticFeedback" .!= False
   modal <- o .:? "semanticDialog" >>= maybe (pure Nothing) (parseRemoteDialog size haptics)
+  source <- o .:? "semanticSource" >>= maybe (pure Nothing) (parseRemoteSource size)
   bindings <- o .: "bindings"
   unless (length bindings<=8192 && all validBinding bindings) (fail "Invalid binding projection")
   supported <- o .:? "menuCommands" .!= [] :: Parser [T.Text]
@@ -133,7 +158,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   unless (IS.size (IS.fromList [ident | (ident,_,_,_)<-windows])==length windows && length [() | (_,_,True,_)<-windows]<=1) (fail "Invalid editor window catalogue")
   canvas <- o .:? "canvas" >>= traverse (parseRemoteCanvas size)
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar canvas modal sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar canvas source modal sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
   where
     validBinding (chord,name)=T.length name<=256 && case readChord chord of Right (key,mods)->chordName key mods==Just chord; _->False
     parseContribution=withObject "menu contribution" $ \o->do
@@ -178,6 +203,36 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
         start>=0 && start<w && shown>0 && shown<=w-start && shown<=cols-at &&
         (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
       foldRuns cols y paint (at+shown) (RemoteGlyph at y paint text w start shown:acc) rest
+
+-- | A focused source excerpt is a complete bounded replacement, not an editable
+-- document. Validate all text and geometry before installing copied native data.
+parseRemoteSource :: (Int,Int) -> Value -> Parser (Maybe BS.ByteString)
+parseRemoteSource size@(cols,rows) value=withObject "source semantics" (\o->do
+  present<-o .: "present"
+  readOnly<-o .: "readOnly"
+  unless readOnly (fail "Source excerpt must be read-only")
+  if not present then pure Nothing else do
+    ident<-o .: "id" :: Parser [T.Text]
+    version<-o .: "revision" :: Parser Integer
+    name<-o .: "name"
+    bounds<-o .: "bounds" :: Parser [Int]
+    first<-o .: "firstLine" :: Parser Integer
+    column<-o .: "firstColumn" :: Parser Integer
+    count<-o .: "lineCount" :: Parser Int
+    text<-o .: "value"
+    (_::Bool)<-o .: "truncated"
+    let safe n=n>=0 && n<=9007199254740991
+        part t=not (T.null t) && T.length t<=20 && (t=="0" || T.head t/='0') && T.all (\c->c>='0' && c<='9') t
+        identity=case ident of ["source",view,buffer]->part view && part buffer; _->False
+        rectangle=case bounds of [x,y,w,h]->x>=0 && y>=0 && w>0 && h>0 && x<=cols && y<=rows && w<=cols-x && h<=rows-y && count<=h; _->False
+        control c=isControl c && c/='\n'
+    unless (identity && safe version && first>0 && safe (first+toInteger count-1) && safe column &&
+      rectangle && count>=1 && count<=256 && T.length name<=256 &&
+      not (T.any isControl name) && T.length text<=32768 &&
+      not (T.any control text) && T.count "\n" text==count-1 && all ((<=2048).T.length) (T.splitOn "\n" text)) (fail "Invalid source excerpt")
+    let bytes=BL.toStrict (BL.take 262145 (encode (object ["source" .= value,"size" .= size])))
+    unless (BS.length bytes<=262144) (fail "Oversized source excerpt")
+    pure (Just bytes)) value
 
 -- | Validate a complete bounded read-only modal snapshot on the receiver worker.
 -- A hidden modal remains present with no nodes; absence/dismissal restores the
@@ -294,7 +349,7 @@ remoteConnectionState :: Value -> Value -> CanvasReceiveState -> Either String (
 remoteConnectionState connection metadata canvasState=do
   (connected,switching)<-parseEither (withObject "connection" $ \o->
     (,) <$> o .: "connected" <*> (o .:? "switching" .!= False)) connection
-  let retiredMetadata=case metadata of Object fields->Object (KM.delete "semanticDialog" (KM.delete "canvas" fields)); _->metadata
+  let retiredMetadata=case metadata of Object fields->Object (KM.delete "semanticSource" (KM.delete "semanticDialog" (KM.delete "canvas" fields))); _->metadata
   pure $ if not connected && not switching then (retiredMetadata,emptyCanvasReceiveState)
     else (metadata,canvasState)
 
@@ -491,18 +546,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
             emit (Assets atlas)
             go [] (object ["menuCommands" .= supported]) Nothing 0 emptyCanvasReceiveState
           "download" -> do
-            offer <- parseIO (withObject "download" $ \o->do
-              name<-o .: "name"
-              purpose<-o .:? "purpose"
-              receipt<-case purpose :: Maybe T.Text of
-                Just "file-export"->do
-                  row@(x,y,w,h)<-o .: "row"
-                  view<-o .: "view"
-                  unless (x>=0 && x<=511 && y>=0 && w>0 && w<=512 && h==1 && x+w<=512 && y<256 && length view==13 && all (\n->n>=0 && n<=9007199254740991) view) (fail "Invalid file export receipt")
-                  pure (Just (row,view))
-                Nothing->pure Nothing
-                _->fail "Unknown download purpose"
-              pure (name,receipt)) value
+            offer <- either (ioError . userError) pure (parseRemoteDownload value)
             go rows metadata (Just offer) demand canvasState
           "frame-ready" -> do
             (serial,changed)<-parseIO (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) value
@@ -539,7 +583,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
         Nothing -> do
           received<-getMonotonicTimeNSec
           (delta,newRows) <- decodeFrame rows bytes
-          let merged = case (delta,metadata) of (Object new,Object old) -> Object (KM.union new old); _ -> delta
+          let merged = case (delta,metadata) of (Object new,Object old) -> Object (KM.union new (if KM.lookup "reset" new==Just (Bool True) then KM.delete "semanticSource" old else old)); _ -> delta
           frame <- either (ioError . userError) pure (parseRemoteFrame merged newRows)
           emit (Frame demand received frame)
           go newRows merged Nothing demand canvasState
@@ -618,12 +662,14 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
   presentationDemand <- newIORef Nothing
   titleTiming <- newIORef (0::Double,""::T.Text)
   exportGesture <- newIORef Nothing
+  installedSource <- newIORef Nothing
   installedDialog <- newIORef Nothing
   installedSidebar <- newIORef Nothing
   installedCanvas <- newIORef Nothing
   canvasEpochRef <- newIORef Nothing
   let clearSidebar=do
         check "Clear sidebar accessibility" (c_accessibility nullPtr 0)
+        writeIORef installedSource Nothing
         writeIORef installedDialog Nothing
         writeIORef installedSidebar Nothing
         writeIORef installedCanvas Nothing
@@ -634,15 +680,23 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           let bytes=fromMaybe emptyDialogAccessibility current
           BS.useAsCStringLen bytes $ \(ptr,len)->check "Update dialog accessibility" (c_accessibility ptr (fromIntegral len))
           writeIORef installedDialog (Just current)
+          writeIORef installedSource Nothing
           writeIORef installedSidebar Nothing
           writeIORef installedCanvas Nothing
+      installSource value=do
+        previous<-readIORef installedSource
+        let current=remoteSource value
+        when (previous/=Just current) $ do
+          let bytes=fromMaybe emptySourceAccessibility current
+          BS.useAsCStringLen bytes $ \(ptr,len)->check "Update source accessibility" (c_accessibility ptr (fromIntegral len))
+          writeIORef installedSource (Just current)
       installSidebar value=do
         previous<-readIORef installedSidebar
         let bytes=remoteSidebar value
         when (previous/=Just bytes) $ do
           BS.useAsCStringLen bytes $ \(ptr,len)->check "Update sidebar accessibility" (c_accessibility ptr (fromIntegral len))
           writeIORef installedSidebar (Just bytes)
-          when (BS.null bytes) (writeIORef installedCanvas Nothing)
+          when (BS.null bytes) (writeIORef installedCanvas Nothing >> writeIORef installedSource Nothing)
       installCanvas value=do
         epoch<-readIORef canvasEpochRef
         let bytes=case remoteCanvas value of
@@ -802,7 +856,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           installDialog value
           case remoteDialog value of
             Just _->pure ()
-            Nothing->installSidebar value >> installCanvas value
+            Nothing->installSidebar value >> installCanvas value >> installSource value
           pure (Just value,atlas,connection,True,closed)
         Control value -> do
           kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text

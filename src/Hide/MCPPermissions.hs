@@ -40,7 +40,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Foldable (toList)
 import Data.IORef
-import Data.List (find, sortOn)
+import Data.List (find, findIndex, nub, sortOn)
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
@@ -56,9 +56,9 @@ import System.IO.Unsafe (unsafePerformIO)
 import Text.Read (readMaybe)
 import qualified Toml
 import qualified Toml.Syntax as TS
-import Hide.Buffer (newBuffer, revision, Selection(..))
-import Hide.Plugin.BufferHost (BufferRef,BufferNamespace,newBufferNamespace,referenceId,BufferReader,newBufferReader,CapturedRead,ListedBuffer,BufferEditor,newBufferEditor,DiffResult)
-import Hide.WorkspaceFilesMCP (PatchSource,PreparedPatch,capturePatchSource,preparePatch,commitPatch)
+import Hide.Buffer (Buffer, newBuffer, prepareBuffer, revision, Selection(..))
+import Hide.Plugin.BufferHost (BufferRef,BufferNamespace,newBufferNamespace,referenceId,BufferReader,newBufferReader,CapturedRead,ListedBuffer,BufferEditor,newBufferEditor,BufferDiff(..),DiffResult)
+import Hide.WorkspaceFilesMCP (PatchSource,PreparedPatch,capturePatchSource,preparePatch,commitPatches)
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..), saveFile)
 import Hide.Model
@@ -69,8 +69,9 @@ data Mode = Enable | Prompt | Disable deriving (Eq,Show)
 data Waiting = Waiting
   { ticket :: Int, toolName :: Text, arguments :: Value, operation :: WaitingOperation
   , active :: IORef Bool
-  , approvalRequired :: Bool, patchCaller :: IO (Either Text ()), patchAttempt :: IORef (Maybe DiffAttempt), patchSource :: Maybe PatchSource, requestClaim :: MVar (), policyStage :: IORef PolicyStage }
-data DiffAttempt = DiffAttempt (Maybe ContentVersion) (Async (Either Text PreparedPatch))
+  , approvalRequired :: Bool, patchCaller :: IO (Either Text ()), patchAttempt :: IORef (Maybe DiffAttempt), patchSources :: Maybe [PatchSource], requestClaim :: MVar (), policyStage :: IORef PolicyStage }
+type DiffReview = Maybe [(Text,ContentVersion)]
+data DiffAttempt = DiffAttempt DiffReview (Async (Either Text [PreparedPatch]))
 data WaitingOperation = WireOperation Tool (MVar (IO (Either Text Value)))
   | BuildInputOperation (AdmittedBuild -> Tool) (MVar (IO (Either Text Value)))
   | BuildAdoptionOperation AdmittedBuild
@@ -84,14 +85,14 @@ data BuildAdmissionState = BuildUnused | BuildReserved | BuildChecking Waiting
 data CaptureSubmission = CaptureSubmission BufferRef (IO (Either Text ())) (MVar (Either Text CapturedRead)) (IORef Bool) (MVar ())
   | ListingSubmission (IO (Either Text ())) (MVar (Either Text [ListedBuffer])) (IORef Bool) (MVar ())
   | WindowCaptureSubmission Reads.WindowReadTarget (IO (Either Text ())) (MVar (Either Text Reads.CapturedWindowRead)) (IORef Bool) (MVar ())
-data DiffSubmission = DiffSubmission BufferRef ContentVersion Text (IO (Either Text ())) (MVar (Either Text DiffResult)) (IORef Bool) (MVar ()) (IORef (Maybe DiffAttempt))
+data DiffSubmission = DiffSubmission [BufferDiff] [Buffer] (IO (Either Text ())) (MVar (Either Text [DiffResult])) (IORef Bool) (MVar ()) (IORef (Maybe DiffAttempt))
 data BufferSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
 data BufferIngress = BufferIngress (STM.TBQueue BufferSubmission) (STM.TVar Bool)
 -- A request retains its policy phase while worker IO is pending. The queue is
 -- transport only: Waiting remains the one request/cancellation owner.
 type Policies = Either Text (M.Map Text Mode)
-data PolicyUse = AdmitPolicy | BuildAdoptPolicy | AllowPolicy Value (Maybe ContentVersion)
-  | AdoptPolicy (Maybe ContentVersion) (Either Text PreparedPatch)
+data PolicyUse = AdmitPolicy | BuildAdoptPolicy | AllowPolicy Value DiffReview
+  | AdoptPolicy DiffReview (Either Text [PreparedPatch])
 data PolicyStage = PolicyReady | PolicyPending PolicyUse (Maybe (Int,STM.TMVar Policies))
 data PolicyTask = LoadPolicy (STM.TMVar Policies)
   | SavePolicy Text Mode (STM.TMVar Policies)
@@ -349,13 +350,24 @@ rejectCaptureOwned (WindowCaptureSubmission _ _ promise enabled _) err=finishCap
 -- | Host-only fixed actor binding. Public callers submit exact read versions;
 -- this transport grants neither Human authority nor reusable approval.
 bufferEditor :: Permissions -> IO (Either Text ()) -> BufferEditor
-bufferEditor (Permissions _ _ _ namespace retired (BufferIngress inbox closed) owner) caller=newBufferEditor namespace $ \reference version patch->mask $ \restore->do
-  if T.length patch>1048576 then pure (Left "Diff exceeds 1 MiB characters") else do
+bufferEditor (Permissions _ _ _ namespace retired (BufferIngress inbox closed) owner) caller=newBufferEditor namespace $ \patches->mask $ \restore->do
+  let bounded=take 17 patches
+      targets=[reference | BufferDiff reference _ _<-bounded]
+      size=sum [toInteger (T.length patch) | BufferDiff _ _ patch<-bounded]
+  if null bounded || length bounded>16 then pure (Left "Diff batch requires 1..16 targets")
+  else if length (nub targets)/=length targets then pure (Left "Duplicate diff targets; no buffers changed")
+  else if size>1048576 then pure (Left "Diff batch exceeds 1 MiB characters") else do
     promise<-newEmptyMVar
     enabled<-newIORef True
     claim<-newMVar ()
     attempt<-newIORef Nothing
-    let submission=DiffSubmission reference version patch caller promise enabled claim attempt
+    -- Build the fixed review seeds on the requesting worker. Opening the
+    -- approval transfers them; the UI never parses the batch or its text trees.
+    seeds<-restore $ mapM (\(BufferDiff _ _ text)->do
+      let seed=newBuffer text
+      _<-evaluate (prepareBuffer seed)
+      pure seed) bounded
+    let submission=DiffSubmission bounded seeds caller promise enabled claim attempt
     accepted<-STM.atomically $ do
       stopped<-STM.readTVar closed
       full<-STM.isFullTBQueue inbox
@@ -366,16 +378,38 @@ bufferEditor (Permissions _ _ _ namespace retired (BufferIngress inbox closed) o
       Left err->pure (Left err)
       Right ()->restore (readMVar promise) `onException` finishDiffSubmission retired submission (Left "Buffer diff cancelled")
 
-finishDiffSubmission :: IORef [MVar ()] -> DiffSubmission -> Either Text DiffResult -> IO ()
-finishDiffSubmission retired submission@(DiffSubmission _ _ _ _ _ _ claim attempt) result=withMVar claim $ \()->do
+finishDiffSubmission :: IORef [MVar ()] -> DiffSubmission -> Either Text [DiffResult] -> IO ()
+finishDiffSubmission retired submission@(DiffSubmission _ _ _ _ _ claim attempt) result=withMVar claim $ \()->do
   stopAttempt retired attempt
   finishDiffSubmissionOwned submission result
 
-finishDiffSubmissionOwned :: DiffSubmission -> Either Text DiffResult -> IO ()
-finishDiffSubmissionOwned (DiffSubmission _ _ _ _ promise enabled _ _) result=mask_ $ do
+finishDiffSubmissionOwned :: DiffSubmission -> Either Text [DiffResult] -> IO ()
+finishDiffSubmissionOwned (DiffSubmission _ _ _ promise enabled _ _) result=mask_ $ do
   writeIORef enabled False
   _<-tryPutMVar promise result
   pure ()
+
+-- A batch has the same policy and correction ticket as one strict diff. Its
+-- target list is host-owned: human edits can replace patches, never references.
+packDiffArguments :: [Value] -> Value
+packDiffArguments [single]=single
+packDiffArguments batch=object ["buffers" .= batch]
+
+diffArguments :: Value -> [Value]
+diffArguments args=fromMaybe [args] (field "buffers" args)
+
+diffFields :: Waiting -> [(Text,Value)]
+diffFields request=case operation request of
+  DiffOperation _->zip labels patches
+  _->[]
+  where
+    patches=diffArguments (arguments request)
+    labels=if length patches==1 then ["diff"] else ["diff "<>T.pack (show n) | n<-[1::Int ..length patches]]
+
+diffTargetsCurrent :: BufferNamespace -> [BufferDiff] -> Desktop -> IO Bool
+diffTargetsCurrent namespace targets desktop=and <$> mapM current targets
+  where current (BufferDiff reference expected _)=maybe (pure False) (versionCurrent expected . documentBuffer)
+          (referenceId namespace reference >>= (`M.lookup` buffers desktop))
 
 finishBufferSubmission :: Permissions -> BufferSubmission -> Text -> IO ()
 finishBufferSubmission _ (ReadSubmission submission) err=let (_,claim,_)=captureLifetime submission
@@ -397,15 +431,17 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
     admit current submission=do
       let (enabled,claim,caller)=case submission of
             ReadSubmission capture->captureLifetime capture
-            EditSubmission (DiffSubmission _ _ _ c _ e k _)->(e,k,c)
+            EditSubmission (DiffSubmission _ _ c _ e k _)->(e,k,c)
           target=case submission of
             ReadSubmission capture@ListingSubmission{}->Right ("list_buffers",object [],CaptureOperation capture)
             ReadSubmission capture@(CaptureSubmission reference _ _ _ _)->bufferTarget reference $ \ident->
               ("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
             ReadSubmission capture@(WindowCaptureSubmission reference _ _ _ _)->Right
               ("read_window",object ["windowId" .= Reads.windowReadIdentifier reference],CaptureOperation capture)
-            EditSubmission diff@(DiffSubmission reference _ patch _ _ _ _ _)->bufferTarget reference $ \ident->
-              ("buffer_apply_diff",object ["bufferId" .= ident,"revision" .= maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current)),"diff" .= patch],DiffOperation diff)
+            EditSubmission diff@(DiffSubmission targets _ _ _ _ _ _)->do
+              patches<-mapM (\(BufferDiff reference _ patch)->bufferTarget reference $ \ident->
+                object ["bufferId" .= ident,"revision" .= maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current)),"diff" .= patch]) targets
+              pure ("buffer_apply_diff",packDiffArguments patches,DiffOperation diff)
           bufferTarget reference build=maybe (Left "Buffer reference belongs to another editor session") (Right . build) (referenceId namespace reference)
       withMVar claim $ \()->do
         live<-readIORef enabled
@@ -415,16 +451,16 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
             original<-readIORef state
             liveRequests<-filterMActive (waiting original)
             if length liveRequests>=32 then finishBufferSubmissionOwned submission "Too many MCP requests are awaiting permission" else do
-              attempt<-case submission of ReadSubmission _->newIORef Nothing; EditSubmission (DiffSubmission _ _ _ _ _ _ _ a)->pure a
+              attempt<-case submission of ReadSubmission _->newIORef Nothing; EditSubmission (DiffSubmission _ _ _ _ _ _ a)->pure a
               stage<-newIORef (PolicyPending AdmitPolicy Nothing)
               captured<-case submission of
                 ReadSubmission _->pure (Right Nothing)
-                EditSubmission (DiffSubmission reference expected _ _ _ _ _ _)->do
-                  matches<-maybe (pure False) (versionCurrent expected . documentBuffer) (referenceId namespace reference >>= (`M.lookup` buffers current))
+                EditSubmission (DiffSubmission targets _ _ _ _ _ _)->do
+                  matches<-diffTargetsCurrent namespace targets current
                   if not matches then pure (Left "Buffer identity or revision changed; read the buffer again") else
-                    case capturePatchSource current args of
+                    case mapM (capturePatchSource current) (diffArguments args) of
                       Left err->pure (Left err)
-                      Right source->Right . Just <$> evaluate source
+                      Right sources->Right . Just <$> mapM evaluate sources
               case captured of
                 Left err->finishBufferSubmissionOwned submission err
                 Right source->do
@@ -491,24 +527,34 @@ stopAttempt retired attempt=mask_ $ do
       atomicModifyIORef' retired (\doneList->(done:doneList,()))
       writeIORef attempt Nothing
 
-reviewVersion :: Waiting -> Desktop -> IO (Maybe ContentVersion)
+-- An approval attempt belongs to every editable field in the same fixed order.
+-- Comparing these small receipts never touches the review text or Undo trees.
+reviewVersion :: Waiting -> Desktop -> IO DiffReview
 reviewVersion request desktop=case dialog desktop of
-  Just dg | purpose dg==PermissionDialog (approvalAction request)->case [b | TextArea "diff" True b _ _ _<-fields dg] of
-    b:_->Just <$> captureVersion b
-    _->pure Nothing
+  Just dg | purpose dg==PermissionDialog (approvalAction request)->do
+    let drafts=[(label,b) | TextArea label True b _ _ _<-fields dg]
+    if map fst drafts/=map fst (diffFields request) || null drafts then pure Nothing
+    else Just <$> mapM (\(label,b)->(label,) <$> captureVersion b) drafts
   _->pure Nothing
 
 startDiffAttempt :: Permissions -> Waiting -> Value -> Desktop -> IO Desktop
 startDiffAttempt runtime request edited desktop=withMVar (requestClaim request) (\()->startDiffAttemptOwned runtime request edited desktop)
 
 startDiffAttemptOwned :: Permissions -> Waiting -> Value -> Desktop -> IO Desktop
-startDiffAttemptOwned runtime request edited desktop=case patchSource request of
-  Nothing->diffFailureOwned runtime request "Missing original diff source" desktop
-  Just source->mask_ $ do
+startDiffAttemptOwned runtime request edited desktop=case patchSources request of
+  Nothing->diffFailureOwned runtime request "Missing original diff sources" desktop
+  Just sources->mask_ $ do
     live<-readIORef (active request)
     if not live then pure desktop else do
       stopDiffAttempt runtime request
-      let prepare=preparePatch source (if approvalRequired request then field "diff" (arguments request) else Nothing) edited
+      let proposed=diffArguments edited
+          original=diffArguments (arguments request)
+          prepare
+            | length sources/=length proposed || length sources/=length original=pure (Left "Diff attempt changed its target list")
+            | sum [toInteger (T.length text) | patch<-proposed,Just text<-[field "diff" patch]]>1048576=pure (Left "Diff batch exceeds 1 MiB characters")
+            | otherwise=sequence <$> sequence
+                [preparePatch source (if approvalRequired request then field "diff" old else Nothing) patch
+                | (source,old,patch)<-zip3 sources original proposed]
       review<-reviewVersion request desktop
       worker<-asyncWithUnmask (\unmask->unmask prepare `finally` signalPermissionWork runtime)
       writeIORef (patchAttempt request) (Just (DiffAttempt review worker))
@@ -538,7 +584,7 @@ drainDiffAttempts runtime@(Permissions _ _ ref _ retired _ _) initial=do
         Nothing->do
           enabled<-readIORef (active request)
           stage<-readIORef (policyStage request)
-          if enabled && isPolicyReady stage && not (approvalRequired request) && toolName request=="buffer_apply_diff"
+          if enabled && isPolicyReady stage && not (approvalRequired request) && not (null (diffFields request))
             then startDiffAttempt runtime request (arguments request) desktop else pure desktop
         Just (DiffAttempt review worker)->do
           completed<-poll worker
@@ -577,19 +623,34 @@ approvalReview :: Desktop -> Waiting -> Dialog
 approvalReview desktop request=Dialog "Agent permission" (PermissionDialog (approvalAction request)) reviewFields selected ["Allow once","Deny"] []
   where
     args=arguments request
-    patch=if toolName request=="buffer_apply_diff" then field "diff" args else Nothing
-    metadata=[ReadOnly "Tool" (toolName request)]++case patch of
-      Just _ -> [ReadOnly "File" (fromMaybe "Unknown buffer" $ do
-        bid<-field "bufferId" args
-        doc<-M.lookup bid (buffers desktop)
-        pure (maybe ("Untitled #"<>T.pack (show bid)) (T.pack.filePath) (documentFile doc)))]
-      Nothing -> []
+    patches=diffFields request
+    seeds=case operation request of DiffOperation (DiffSubmission _ initial _ _ _ _ _)->initial; _->[]
+    metadata=[ReadOnly "Tool" (toolName request)]++
+      [ReadOnly "Changes" (T.pack (show (length patches))<>" buffers; apply together, without saving") | length patches>1]
+    reviewFields=metadata++if null patches then [view name value | (name,value)<-members] else concatMap patchFields (zip patches seeds)
+    selected=fromMaybe 0 (findIndex editable reviewFields)
+    editable (TextArea _ True _ _ _ _)=True
+    editable _=False
     members=case args of Object entries -> sortOn fst [(K.toText key,value) | (key,value)<-KM.toList entries]; _ -> [("Arguments",args)]
-    rows=[view name value | (name,value)<-members,not (name=="diff" && patch/=Nothing)]
-    reviewFields=metadata++rows++[TextArea "diff" True (newBuffer text) (Selection 0 0) 0 0 | Just text<-[patch]]
-    selected=if patch/=Nothing then length reviewFields-1 else 0
+    patchFields ((label,patch),seed)=
+      [ReadOnly "File" (fromMaybe "Unknown buffer" $ do
+        bid<-field "bufferId" patch
+        doc<-M.lookup bid (buffers desktop)
+        pure (maybe ("Untitled #"<>T.pack (show bid)) (T.pack.filePath) (documentFile doc)))]++
+      [view name value | Object entries<-[patch],(name,value)<-sortOn fst [(K.toText key,value) | (key,value)<-KM.toList entries],name/="diff"]++
+      [TextArea label True seed (Selection 0 0) 0 0]
     view name value=let text=case value of String t -> t; _ -> TE.decodeUtf8 (BL.toStrict (encode value))
                     in if T.any (=='\n') text || T.length text>48 then TextArea name False (newBuffer text) (Selection 0 0) 0 0 else ReadOnly name text
+
+-- Only patch text is editable; reconstruct the immutable host target order.
+reviewArguments :: Waiting -> [Text] -> Maybe Value
+reviewArguments request values
+  | null patches=Just (arguments request)
+  | length patches/=length values=Nothing
+  | otherwise=packDiffArguments <$> sequence
+      [case args of Object fields->Just (Object (KM.insert "diff" (String text) fields)); _->Nothing
+      | ((_,args),text)<-zip patches values]
+  where patches=diffFields request
 
 approvalAction :: Waiting -> Text
 approvalAction request="approve:"<>T.pack (show (ticket request))
@@ -625,20 +686,20 @@ permissionAction runtime@(Permissions _ registry ref _ _ _ owner) action values 
         _ | "approve:" `T.isPrefixOf` action ->case find ((==action).approvalAction) (waiting s) of
           Nothing->close
           Just request | take 1 values/=["0"]->finish runtime request (Left "MCP request denied") >> tickPermissions runtime (closeReview request desktop)
-          Just request->do
-            let edited=case (toolName request,arguments request,drop 1 values) of
-                  ("buffer_apply_diff",Object args,text:_)->Object (KM.insert "diff" (String text) args)
-                  _->arguments request
-            withMVar (requestClaim request) $ \()->do
-              live<-readIORef (active request)
-              when live $ do
-                -- A newly accepted review supersedes the old worker attempt.
-                -- Its completion must not overwrite this fresh Allow phase.
-                stopDiffAttempt runtime request
-                review<-reviewVersion request desktop
-                writeIORef (policyStage request) (PolicyPending (AllowPolicy edited review) Nothing)
-            tickPermissions runtime desktop {status="Checking current permission policy...",dialog=fmap
-              (\dg->if purpose dg==PermissionDialog action then dg {body=[]} else dg) (dialog desktop)}
+          Just request->case reviewArguments request (drop 1 values) of
+            Nothing->pure desktop {status="Diff review changed; approve the current target list."}
+            Just edited->do
+              withMVar (requestClaim request) $ \()->do
+                live<-readIORef (active request)
+                when live $ do
+                  -- A newly accepted review supersedes the old worker attempt.
+                  -- Its completion must not overwrite this fresh Allow phase.
+                  stopDiffAttempt runtime request
+                  review<-reviewVersion request desktop
+                  writeIORef (policyStage request) (PolicyPending (AllowPolicy edited review) Nothing)
+              tickPermissions runtime desktop {status="Checking current permission policy...",dialog=fmap
+                (\dg->if purpose dg==PermissionDialog action then dg {body=[]} else dg) (dialog desktop)}
+
         _->close
   where
     -- Escape already removed this modal in the pure input transition. It can
@@ -713,7 +774,7 @@ policyWriting owner=do
   pure (case job of Just (SettingsJob _ (SaveSetting _ _) _)->True; _->False)
 
 drainPolicies :: Permissions -> Desktop -> IO Desktop
-drainPolicies runtime@(Permissions _ registry ref _ _ _ owner) original=do
+drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=do
   requests<-readIORef ref >>= filterMActive . waiting
   foldM stepSafely original requests `onException` mapM_ (\request->finish runtime request (Left "Permission request owner interrupted")) requests
   where
@@ -757,16 +818,15 @@ drainPolicies runtime@(Permissions _ registry ref _ _ _ owner) original=do
                     Right mode->applyPolicy desktop request use mode
     applyPolicy desktop request AdmitPolicy mode=do
       prepared<-case operation request of
-        DiffOperation (DiffSubmission _ expected _ _ _ _ _ _)->do
-          let doc=field "bufferId" (arguments request) >>= (`M.lookup` buffers desktop)
-          current<-maybe (pure False) (versionCurrent expected . documentBuffer) doc
-          pure (if not current then Left "Buffer identity or revision changed; read the buffer again" else Right (patchSource request))
-        _->pure (Right (patchSource request))
+        DiffOperation (DiffSubmission targets _ _ _ _ _ _)->do
+          current<-diffTargetsCurrent namespace targets desktop
+          pure (if not current then Left "Buffer identity or revision changed; read the buffer again" else Right (patchSources request))
+        _->pure (Right (patchSources request))
       case prepared of
         Left err->finishOwned runtime request (Left err) >> pure desktop {status=err}
         Right source->do
           let polling=toolName request=="ask_user" && case arguments request of Object fields->KM.keys fields==["questionId"]; _->False
-              approved=request {approvalRequired=mode==Prompt && not polling,patchSource=source}
+              approved=request {approvalRequired=mode==Prompt && not polling,patchSources=source}
           replaceRequest approved
           if approvalRequired approved then pure desktop else execute desktop approved (arguments request)
     applyPolicy desktop request BuildAdoptPolicy mode=case operation request of
@@ -790,7 +850,7 @@ drainPolicies runtime@(Permissions _ registry ref _ _ _ owner) original=do
       else case prepared of
         Left err->diffFailureOwned runtime request err desktop
         Right patch->do
-          adopted<-commitPatch patch desktop
+          adopted<-commitPatches patch desktop
           case adopted of
             Left err->diffFailureOwned runtime request err desktop
             Right (updated,response)->do
@@ -821,12 +881,13 @@ drainPolicies runtime@(Permissions _ registry ref _ _ _ owner) original=do
         pure updated
     replaceRequest request=modifyIORef' ref (\state->state {waiting=map (\old->if ticket old==ticket request then request else old) (waiting state)})
 
-reviewCurrent :: Waiting -> Maybe ContentVersion -> Desktop -> IO Bool
-reviewCurrent request Nothing _=pure (not (approvalRequired request) || toolName request/="buffer_apply_diff")
+reviewCurrent :: Waiting -> DiffReview -> Desktop -> IO Bool
+reviewCurrent request Nothing _=pure (not (approvalRequired request) || null (diffFields request))
 reviewCurrent request (Just expected) desktop=case dialog desktop of
-  Just dg | purpose dg==PermissionDialog (approvalAction request)->case [b | TextArea "diff" True b _ _ _<-fields dg] of
-    b:_->versionCurrent expected b
-    _->pure False
+  Just dg | purpose dg==PermissionDialog (approvalAction request)->do
+    let drafts=[(label,b) | TextArea label True b _ _ _<-fields dg]
+    if map fst drafts/=map fst expected || map fst drafts/=map fst (diffFields request) then pure False
+    else and <$> sequence [versionCurrent version b | ((_,version),(_,b))<-zip expected drafts]
   _->pure False
 
 closeReview :: Waiting -> Desktop -> Desktop
