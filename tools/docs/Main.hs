@@ -65,6 +65,9 @@ screenshotNames = "editor-conversation.png" : map (<.> "png")
   ["png-view","environment","find-replace","hdb-download","downloads", "permission-diff", "file-menu", "split", "preferences", "build-target", "package-target-menu", "debug-launch", "git-commit",
    "conversation", "debug-step", "debug-menu", "debug-stack", "debug-add-watch", "debug-watches", "side-by-side", "window-views-menu", "markdown-view", "shell-block-menu", "documentation-links"]
 
+badgeNames :: [FilePath]
+badgeNames = ["license.svg", "bsd-or-apache.svg"]
+
 repo :: String
 repo = "https://github.com/ekmett/hide"
 
@@ -116,6 +119,9 @@ buildSite revision pandoc = do
   forM_ screenshotNames $ \name -> do
     createDirectoryIfMissing True (site </> "assets/screenshots")
     copyFile ("docs/site/screenshots" </> name) (site </> "assets/screenshots" </> name)
+  forM_ badgeNames $ \name -> do
+    createDirectoryIfMissing True (site </> "assets/badges")
+    copyFile ("assets/badges" </> name) (site </> "assets/badges" </> name)
   forM_ guides $ \guide@(Guide source _ title) -> renderGuide revision pandoc source (guidePath guide) title
   renderGuide revision pandoc "docs/site/index.md" "home.html" "hide — Haskell IDE"
   renderShell revision ("home.html" : map guidePath guides)
@@ -238,6 +244,7 @@ guideURL revision source output url
           resolved = collapse (takeDirectory source </> decodeURL path)
           pages = ("docs/site/index.md", "home.html") : [(src, guidePath g) | g@(Guide src _ _) <- guides]
             ++ [("docs/site/screenshots" </> name, "assets/screenshots" </> name) | name <- screenshotNames]
+            ++ [("assets/badges" </> name, "assets/badges" </> name) | name <- badgeNames]
       case lookup resolved pages of
         Just target -> pure (fromPage output target ++ suffix)
         Nothing -> do
