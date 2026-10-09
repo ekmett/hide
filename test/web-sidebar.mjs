@@ -18,11 +18,12 @@ class Element {
   contains(target){return target===this||this.children.some(child=>child.contains(target));}
   querySelectorAll(){return this.children.flatMap(child=>[...(child.getAttribute('role')==='treeitem'?[child]:[]),...child.querySelectorAll()]);}
 }
-const sidebarAccess=new Element(),dialogAccess=new Element(),imageAccess=new Element(),document={activeElement:{},createElement:tag=>new Element(tag)};
+const sidebarAccess=new Element(),dialogAccess=new Element(),imageAccess=new Element(),sourceAccess=new Element(),sourceText=new Element('textarea'),document={activeElement:{},createElement:tag=>new Element(tag)};
+sourceAccess.append(sourceText);sourceAccess.hidden=true;
 assert.match(fs.readFileSync('assets/web/index.html','utf8'),/id="semantic-sidebar"[^>]*role="tree"[^>]*aria-description="Read-only visible sidebar/);
 sidebarAccess.setAttribute('role','tree');sidebarAccess.hidden=true;
 const packets=[];
-const context=vm.createContext({sidebarAccess,dialogAccess,imageAccess,document,status:{textContent:''},cols:80,lines:25,send:packet=>packets.push(packet)});
+const context=vm.createContext({sidebarAccess,dialogAccess,imageAccess,sourceAccess,sourceText,document,status:{textContent:''},cols:80,lines:25,send:packet=>packets.push(packet)});
 vm.runInContext(source.slice(start,source.indexOf('// Authorized download bytes',start)),context);
 const token='a'.repeat(48),id=name=>['tree',token,name];
 const root={id:['sidebar'],parent:null,role:'tree',name:'Sidebar',bounds:null,selected:false,focused:false,expanded:null,loading:false,childrenKnown:1,moreChildren:false,index:null,generation:1,level:0,posInSet:0,setSize:1};
@@ -112,35 +113,73 @@ Object.assign(context,{URL,ArrayBuffer,location:{href:'http://localhost/'},navig
  drawRows:noOp,resize:noOp});
 vm.runInContext(source.slice(source.indexOf('function connect(){'),source.indexOf('function point(e)')),context);
 async function message(packet){sockets.at(-1).onmessage({data:JSON.stringify(packet)});await new Promise(resolve=>setImmediate(resolve));}
-await message({type:'frame',size:[80,25],rows:[],mode:3,semanticSidebar:snapshot});
+const excerpt={present:true,readOnly:true,id:['source','1','2'],revision:0,name:'Source λ <script>.hs',bounds:[2,2,60,10],firstLine:11,firstColumn:4,lineCount:2,value:'first λ <script> line\nsecond line',truncated:false};
+await message({type:'frame',size:[80,25],rows:[],mode:3,semanticSidebar:snapshot,semanticSource:excerpt});
 assert.equal(sidebarAccess.hidden,false);
-await message({type:'frame',rows:[],semanticSidebar:{...snapshot,nodes:[root,folder,{...file,name:'same revision, new privacy mask'}]}});
+assert.equal(sourceAccess.hidden,false,'a visible source snapshot exposes its read-only excerpt');
+assert.equal(sourceText.value,excerpt.value);assert.equal(sourceText.readOnly,true);
+assert.match(sourceText.getAttribute('aria-label'),/Source λ <script>\.hs/);
+assert.match(sourceText.getAttribute('aria-description'),/Lines 11 to 12, display column offset 4/);
+assert.match(sourceText.getAttribute('aria-description'),/256 lines, 2,048 characters per line and 32,768 characters total/);
+document.activeElement=sourceText;
+await message({type:'frame',rows:[],semanticSource:{...excerpt,value:'changed\nwhile reading',truncated:true}});
+assert.equal(document.activeElement,sourceText);assert.equal(sourceAccess.children[0],sourceText);
+assert.equal(sourceText.value,'changed\nwhile reading');assert.match(sourceText.getAttribute('aria-description'),/More source text is not included/);
+function sourceExcerpt(value){context.value=value;vm.runInContext('receiveSource(value)',context);}
+for(const missing of [null,undefined,{present:false,readOnly:true}]){
+ sourceExcerpt(excerpt);sourceExcerpt(missing);assert.equal(sourceAccess.hidden,true);assert.equal(sourceText.value,'');assert.equal(sourceText.getAttribute('aria-label'),null);
+}
+const boundedLines=[...Array(15).fill('😀'.repeat(2048)),'😀'.repeat(2033)].join('\n');
+sourceExcerpt({...excerpt,name:'😀'.repeat(256),bounds:[2,2,60,16],value:boundedLines,lineCount:16});
+assert.equal(sourceAccess.hidden,false);assert.equal(Array.from(sourceText.value).length,32768); // Budgets count scalars, not UTF-16 units.
+for(const invalid of [
+ {...excerpt,readOnly:false},{...excerpt,id:['source','01','2']},{...excerpt,id:['source','1',2]},
+ {...excerpt,revision:Number.MAX_SAFE_INTEGER+1},{...excerpt,bounds:[79,2,2,10]},
+ {...excerpt,firstLine:0},{...excerpt,firstColumn:-1},{...excerpt,firstLine:Number.MAX_SAFE_INTEGER},
+ {...excerpt,lineCount:257},{...excerpt,bounds:[2,2,60,1]},{...excerpt,value:'only one line'},
+ {...excerpt,name:'😀'.repeat(257)},{...excerpt,bounds:[2,2,60,16],lineCount:16,value:boundedLines+'😀'},
+ {...excerpt,value:'x'.repeat(2049)+'\nline'},
+ {...excerpt,name:'control\u0000'},{...excerpt,value:'control\u0085\nline'},{...excerpt,value:'unpaired\ud800\nline'},
+ {...excerpt,truncated:1},
+]){sourceExcerpt(excerpt);assert.throws(()=>sourceExcerpt(invalid),/Invalid source/);assert.equal(sourceAccess.hidden,true);assert.equal(sourceText.value,'');}
+await message({type:'frame',rows:[],semanticSource:excerpt});document.activeElement=sourceText;
+await message({type:'frame',rows:[[0,[]]],cursor:[3,4],semanticSidebar:{...snapshot,nodes:[root,folder,{...file,name:'same revision, new privacy mask'}]}});
 assert.equal(items()[1].children[0].textContent,'same revision, new privacy mask');
+assert.equal(sourceAccess.hidden,false);assert.equal(sourceText.value,excerpt.value);assert.equal(document.activeElement,sourceText);assert.equal(sourceAccess.children[0],sourceText); // Row/cursor deltas retain unchanged metadata and reading focus.
 await message({type:'frame',rows:[]});assert.equal(sidebarAccess.hidden,false); // An omitted delta retains current semantics.
+await message({type:'frame',rows:[],semanticDialog:{present:false,readOnly:true,truncated:false,nodes:[]}});assert.equal(sourceText.value,excerpt.value); // Independent dialog updates cannot erase source reading.
+await message({type:'frame',rows:[],semanticSource:null});assert.equal(sourceText.value,'');
+await message({type:'frame',rows:[],semanticSource:excerpt});await message({type:'frame',rows:[],semanticSource:{present:false,readOnly:true}});assert.equal(sourceText.value,'');
 await message({type:'frame',rows:[],reset:true});assert.equal(sidebarAccess.hidden,true);
-await message({type:'frame',rows:[],reset:true,semanticSidebar:snapshot});assert.equal(sidebarAccess.hidden,false);
-await message({type:'assets',glyphs:[]});assert.equal(sidebarAccess.hidden,true);
-await message({type:'frame',rows:[],semanticSidebar:snapshot});await message({type:'connection',connected:false});
-assert.equal(sidebarAccess.hidden,true);
-await message({type:'frame',rows:[],semanticSidebar:snapshot});sockets.at(-1).close();assert.equal(sidebarAccess.hidden,true);
+await message({type:'frame',rows:[],reset:true,semanticSidebar:snapshot,semanticSource:excerpt});assert.equal(sidebarAccess.hidden,false);assert.equal(sourceAccess.hidden,false);
+await message({type:'frame',rows:[],reset:true});assert.equal(sourceAccess.hidden,true);assert.equal(sourceText.value,'');
+await message({type:'frame',rows:[],semanticSource:excerpt});await message({type:'assets',glyphs:[]});assert.equal(sidebarAccess.hidden,true);assert.equal(sourceText.value,'');
+await message({type:'frame',rows:[],semanticSidebar:snapshot,semanticSource:excerpt});await message({type:'connection',connected:false});
+assert.equal(sidebarAccess.hidden,true);assert.equal(sourceText.value,'');
+await message({type:'frame',rows:[],semanticSidebar:snapshot,semanticSource:excerpt});sockets.at(-1).close();assert.equal(sidebarAccess.hidden,true);assert.equal(sourceText.value,'');
 vm.runInContext('connect()',context);
-await message({type:'frame',size:[80,25],rows:[],semanticSidebar:snapshot});assert.equal(sidebarAccess.hidden,false);
-await message({type:'frame',rows:[],semanticDialog:modal});assert.equal(dialogAccess.hidden,false);
+await message({type:'frame',size:[80,25],rows:[],semanticSidebar:snapshot,semanticSource:excerpt});assert.equal(sidebarAccess.hidden,false);
+await message({type:'frame',rows:[],semanticDialog:modal,semanticSource:excerpt});assert.equal(dialogAccess.hidden,false);assert.equal(sourceText.value,'');
+assert.equal(sourceAccess.hidden,true);assert.equal(sourceAccess.getAttribute('aria-hidden'),'true');
 await message({type:'frame',rows:[]});assert.equal(dialogAccess.hidden,false); // Omitted metadata retains the complete snapshot.
-await message({type:'frame',rows:[],semanticDialog:{present:false,readOnly:true,truncated:false,nodes:[]}});assert.equal(dialogAccess.hidden,true);
+await message({type:'frame',rows:[],semanticDialog:{...modal,nodes:[]},semanticSource:excerpt});assert.equal(sourceText.value,''); // Private modals also cover source text.
+await message({type:'frame',rows:[],semanticSource:excerpt});assert.equal(dialogAccess.hidden,true);assert.equal(sourceAccess.hidden,true);assert.equal(sourceText.value,'');
+await message({type:'frame',rows:[],semanticDialog:{present:false,readOnly:true,truncated:false,nodes:[]}});assert.equal(dialogAccess.hidden,true);assert.equal(sourceText.value,'');
+await message({type:'frame',rows:[],semanticSource:excerpt});assert.equal(sourceAccess.hidden,false); // A dismissed modal requires a fresh source snapshot.
 await message({type:'frame',rows:[],semanticDialog:modal});await message({type:'frame',rows:[],reset:true});assert.equal(dialogAccess.hidden,true);
 await message({type:'frame',rows:[],semanticDialog:modal});await message({type:'assets',glyphs:[]});assert.equal(dialogAccess.hidden,true);
 await message({type:'frame',rows:[],semanticDialog:modal});await message({type:'connection',connected:false});assert.equal(dialogAccess.hidden,true);
 await message({type:'frame',rows:[],semanticDialog:modal});sockets.at(-1).close();assert.equal(dialogAccess.hidden,true);
 assert.ok(packets.every(packet=>['frontend','theme'].includes(packet.type))); // Projection handling emits no actions.
-console.log('Browser sidebar/dialog semantics, read-only navigation, replacement, bounds and connection lifecycle checks passed');
+console.log('Browser sidebar/dialog/source semantics, read-only reading, scalar and viewport bounds, focus and connection lifecycle checks passed');
 
 // Ordinary human drops retain exact file bytes and their local attachment receipt.
 const dropHandlers=new Map();let inputFocus=0;
 Object.assign(context,{window:{addEventListener:(name,handler)=>dropHandlers.set(name,handler)},
- input:{focus:()=>inputFocus++},serial:0,pendingEdit:0,detaching:false});
+ input:{focus:()=>inputFocus++,addEventListener:noOp},fullscreen:{},serial:0,pendingEdit:0,detaching:false});
 vm.runInContext(source.slice(source.indexOf('function send(value)'),source.indexOf('function mods(e)')),context);
 vm.runInContext(source.slice(source.indexOf('function semanticReadingTarget('),source.indexOf("window.addEventListener('keydown'")),context);
+vm.runInContext(source.slice(source.indexOf("window.addEventListener('keydown'"),source.indexOf("window.addEventListener('dragover'")),context);
 vm.runInContext(source.slice(source.indexOf("window.addEventListener('dragover'"),source.indexOf("fullscreen.addEventListener('click'")),context);
 vm.runInContext('connect()',context);await message({type:'assets',glyphs:[[65,1,[0]]],scale:2});
 const pngBytes=Uint8Array.from([137,80,78,71,13,10,26,10,0,255,128]).buffer;
@@ -154,6 +193,9 @@ assert.deepEqual(Array.from(new Uint8Array(uploads()[1])),Array.from(new Uint8Ar
 // Browser MIME/extension hints do not decide whether the host opens an image.
 clearSent();await drop([{...uploadFile,size:16777217,arrayBuffer:()=>{throw Error('oversize file was read');}}]);assert.equal(uploads().length,0);
 clearSent();await drop([uploadFile],dialogAccess);assert.equal(uploads().length,0);assert.equal(inputFocus,0);
+clearSent();await drop([uploadFile],sourceText);assert.equal(uploads().length,0);assert.equal(inputFocus,0);
+for(const type of ['keydown','keyup','copy','cut','paste'])dropHandlers.get(type)({target:sourceText,key:'Enter'});
+assert.equal(sockets.at(-1).sent.length,0);assert.equal(inputFocus,0); // Native reading/clipboard gestures never become editor packets.
 let finishRead;
 clearSent();const oldSocketDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})}]);
 sockets.at(-1).close();vm.runInContext('connect()',context);await message({type:'assets',glyphs:[[65,1,[0]]],scale:2});clearSent();
