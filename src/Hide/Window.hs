@@ -18,17 +18,17 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #endif
   ) where
 import Hide.Frontend
-import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import Hide.Commands (builtinCommands, builtinAction)
 import Hide.Bindings (readChord)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Keys
 import Data.Char (chr, toLower)
+import qualified Data.Bits as Bits
 import Data.Maybe (mapMaybe)
 #ifdef WITH_WINDOW
+import qualified Hide.Plugin.Menu as PluginMenu
 import Data.List (elemIndex)
-import qualified Data.Bits as Bits
 import Data.IORef
 import qualified Data.Map.Strict as M
 import Data.Aeson (object,(.=),encode)
@@ -545,4 +545,4 @@ nativeChordShortcut chords=case mapMaybe encodeChord chords of value:_ -> value;
           _->lookup key [(Keys.KEnter,"\r"),(Keys.KEsc,"\ESC"),(Keys.KBS,"\DEL"),(Keys.KDel,[chr 0xf728]),(Keys.KIns,[chr 0xf727]),
             (Keys.KUp,[chr 0xf700]),(Keys.KDown,[chr 0xf701]),(Keys.KLeft,[chr 0xf702]),(Keys.KRight,[chr 0xf703]),
             (Keys.KHome,[chr 0xf729]),(Keys.KEnd,[chr 0xf72b]),(Keys.KPageUp,[chr 0xf72c]),(Keys.KPageDown,[chr 0xf72d])]
-        pure (name,foldr (.|.) 0 [mask | (modifier,mask)<-[(Keys.MShift,1),(Keys.MCtrl,2),(Keys.MAlt,4),(Keys.MMeta,8)],modifier `elem` mods])
+        pure (name,foldr (Bits..|.) 0 [mask | (modifier,mask)<-[(Keys.MShift,1),(Keys.MCtrl,2),(Keys.MAlt,4),(Keys.MMeta,8)],modifier `elem` mods])

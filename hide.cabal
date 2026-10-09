@@ -63,8 +63,7 @@ library
       extra-libraries: util
   if flag(window)
     cpp-options: -DWITH_WINDOW
-    cc-options: -DWITH_WINDOW
-    c-sources: cbits/window.c
+    c-sources: cbits/window.c, cbits/unicode-window.c
     include-dirs: cbits
     pkgconfig-depends: sdl3 >=3.4
     if os(osx)
