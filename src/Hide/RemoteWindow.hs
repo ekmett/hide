@@ -8,6 +8,7 @@
 module Hide.RemoteWindow
   (runRemoteWindow, RemoteFrame(..), RemoteContribution(..), RemoteCell(..), parseRemoteFrame
   , RemoteCanvas(..), RemoteCanvasSurface(..), CanvasControl(..), CanvasReceiveState, emptyCanvasReceiveState, admitCanvasControl, validateCanvasChunk
+  , remoteConnectionState
   , nativeKeyInput, nativeEventInput, remoteBindingInput, remoteMenuInput, remoteNativeMenuInput, remoteDockWindowInput, remoteMenuLayout, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
 import Control.Monad (unless)
@@ -286,6 +287,17 @@ data CanvasReceiveState = CanvasReceiveState (Maybe T.Text) (M.Map T.Text Int) (
 emptyCanvasReceiveState :: CanvasReceiveState
 emptyCanvasReceiveState=CanvasReceiveState Nothing M.empty Nothing
 
+-- | Connection notices retain the receive snapshot and image cursor during a
+-- handoff and after attachment. Only an actual disconnect retires them; assets
+-- and session replacement have their own explicit resets in the receiver.
+remoteConnectionState :: Value -> Value -> CanvasReceiveState -> Either String (Value,CanvasReceiveState)
+remoteConnectionState connection metadata canvasState=do
+  (connected,switching)<-parseEither (withObject "connection" $ \o->
+    (,) <$> o .: "connected" <*> (o .:? "switching" .!= False)) connection
+  let retiredMetadata=case metadata of Object fields->Object (KM.delete "semanticDialog" (KM.delete "canvas" fields)); _->metadata
+  pure $ if not connected && not switching then (retiredMetadata,emptyCanvasReceiveState)
+    else (metadata,canvasState)
+
 -- | Validate owner epoch, declared residency and contiguous upload admission.
 -- Issuer IDs always identify the same immutable bytes. A release cancels
 -- the current cursor; late chunks cannot recreate a resource. A fresh explicit
@@ -497,7 +509,10 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
             if changed then go rows metadata download serial canvasState
               else emit (Control value) >> go rows metadata download demand canvasState
           "session" -> emit (Control value) >> go [] (object []) Nothing 0 emptyCanvasReceiveState
-          "connection" -> emit (Control value) >> go rows (case metadata of Object fields->Object (KM.delete "semanticDialog" (KM.delete "canvas" fields)); _->metadata) Nothing 0 emptyCanvasReceiveState
+          "connection" -> do
+            (retained,nextCanvas)<-either (ioError . userError) pure (remoteConnectionState value metadata canvasState)
+            emit (Control value)
+            go rows retained Nothing 0 nextCanvas
           _ | kind `elem` ["canvas-reset","canvas-resource","canvas-chunk","canvas-release"]->do
             unless (case download of Nothing->True; _->False) (ioError (userError "Canvas control interrupted a download pair"))
             (next,control)<-either (ioError . userError) pure (admitCanvasControl canvasState value)

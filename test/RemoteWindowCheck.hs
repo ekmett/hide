@@ -78,6 +78,23 @@ checks = do
   check "canvas empty scene shorthand clears ownership without a zero grid"
     (maybe False (\scene'->BS.null (canvasMask scene') && null (canvasSurfaces scene')) (canvasOf (scene [] BS.empty)) &&
      either (const True) (const False) (frame (scene [surface 1 [0,0,2,2]] BS.empty)))
+  let connection online switching=object ["type" .= ("connection"::T.Text),"connected" .= online,"switching" .= switching]
+      retainedMetadata=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"canvas" .= validScene]
+      transition online switching state=either error id (remoteConnectionState (connection online switching) retainedMetadata state)
+      (preparingMetadata,preparingState)=transition False True partial
+      (resumedMetadata,resumedState)=either error id (remoteConnectionState (connection True False) preparingMetadata preparingState)
+      (targetMetadata,targetState)=transition True False finished
+      (disconnectedMetadata,disconnectedState)=transition False False partial
+      retainedCanvas metadata=case parseRemoteFrame metadata rows of Right value->maybe False ((==[91]) . map canvasWindow . canvasSurfaces) (remoteCanvas value); _->False
+  check "native handoff preparation and rollback retain canvas metadata and the exact upload cursor"
+    (retainedCanvas preparingMetadata && retainedCanvas resumedMetadata &&
+     not (rejects preparingState (chunk epoch 3 13)) && not (rejects resumedState (chunk epoch 3 13)))
+  check "native target online notice preserves uploaded resources before later canvas controls"
+    (retainedCanvas targetMetadata && rejects targetState (begin 2 2 16) && not (rejects targetState release))
+  check "native actual disconnect retires canvas metadata and receive admission"
+    (case parseRemoteFrame disconnectedMetadata rows of
+      Right value->remoteCanvas value==Nothing && rejects disconnectedState (chunk epoch 3 13) && rejects disconnectedState (begin 2 2 16)
+      _->False)
   check "canvas scene rejects malformed mask bytes, absent owners and duplicate slots"
     (all (either (const True) (const False) . frame)
       [scene [surface 1 [0,0,2,2]] (BS.drop 1 mask),scene [] mask,scene [surface 1 [1,0,2,2]] mask,scene [surface 1 [0,0,2,2],surface 1 [0,0,2,2]] mask])

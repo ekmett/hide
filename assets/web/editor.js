@@ -527,7 +527,7 @@ function connect(){
    }else if(message.type==='session'){
      peerAttachment=message.attachment;attachmentEpoch++;ready=false;hasFrame=false;platformSent=false;frame=null;rows=[];wireRows.length=0;serial=acknowledged=pendingEdit=0;clipboard='';nativeCopies=[];leftDown=false;mouse=[-1,-1];lastSize='';clearClipboardRequest();clearSidebar();clearDialog();images.clear();dirty=true;
    }else if(message.type==='connection'){
-     transportConnected=message.connected;peerAttachment=message.attachment??peerAttachment;ready=message.connected&&glyphs.size>0&&(!sessionFrontend||hasFrame);if(!message.connected){attachmentEpoch++;clearClipboardRequest();if(!message.switching){clearSidebar();clearDialog();images.clear();}dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');publishFrontend();
+     transportConnected=message.connected;peerAttachment=message.attachment??peerAttachment;ready=message.connected&&glyphs.size>0&&(!sessionFrontend||hasFrame);if(!message.connected){platformSent=false;attachmentEpoch++;clearClipboardRequest();if(!message.switching){clearSidebar();clearDialog();images.clear();}dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');publishFrontend();
    }else if(message.type==='assets'){
      attachmentEpoch++;clearSidebar();clearDialog();images.clear();dirty=true;
      if(!glyphs.size)scale=initialScale=message.scale||2;glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();hasFrame=false;ready=!sessionFrontend;status.textContent=ready?'Connected':'Connecting…';lastSize='';if(ready)send({type:'theme',dark:systemTheme.matches});

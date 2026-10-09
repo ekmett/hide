@@ -170,6 +170,9 @@ assert.equal(uploads().length,2);assert.equal(inputFocus,1); // A normal display
 console.log('Browser ordinary raw-file drops, safe original names, size/read-only bounds and socket/relay/reset upload receipts passed');
 
 // The same browser/socket survives a session handoff and waits for its RESET.
+// Use the real resize publisher so rollback must resend the current viewport.
+context.screen={clientWidth:1280,clientHeight:800};
+vm.runInContext(source.slice(source.indexOf('function cellHeight()'),source.indexOf('function allocate()')),context);
 vm.runInContext('connect()',context);
 const switchingSocket=sockets.at(-1),socketCount=sockets.length;
 await message({type:'remote',host:'host',attachment:0});
@@ -178,20 +181,35 @@ await message({type:'connection',connected:true,attachment:0});
 assert.equal(context.ready,false);
 await message({type:'frame',size:[80,25],mode:3,rows:[],reset:true,semanticSidebar:snapshot});
 assert.equal(context.ready,true);
-clearSent();const switchingDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})}]);
+const retainedFrame=context.frame;
 await message({type:'connection',connected:false,switching:true,attachment:1});
+context.screen.clientWidth=1456;context.screen.clientHeight=992;context.systemTheme.matches=true;
+clearSent();vm.runInContext("resize();send({type:'theme',dark:systemTheme.matches});send({type:'key',key:'blocked'})",context);
+assert.deepEqual(switchingSocket.sent.map(value=>JSON.parse(value).type),['resize','theme']);
+assert.ok(switchingSocket.sent.every(value=>JSON.parse(value).attachment===1));
+// Preparation remembers these settings without delivering them to the old session.
+clearSent();await message({type:'connection',connected:true,attachment:1});
+assert.equal(context.ready,true);assert.equal(context.frame,retainedFrame);assert.equal(sidebarAccess.hidden,false);
+assert.deepEqual(switchingSocket.sent.map(value=>JSON.parse(value)),[
+ {type:'frontend',mode:3,mac:true,attachment:1,seq:context.serial-2},
+ {type:'theme',dark:true,attachment:1,seq:context.serial-1},
+ {type:'resize',width:91,height:31,attachment:1,seq:context.serial},
+]);
+clearSent();await message({type:'connection',connected:true,attachment:1});assert.equal(switchingSocket.sent.length,0);
+clearSent();const switchingDrop=drop([{...uploadFile,arrayBuffer:()=>new Promise(resolve=>{finishRead=resolve;})}]);
+await message({type:'connection',connected:false,switching:true,attachment:2});
 assert.equal(sidebarAccess.hidden,false); // Failed admission can restore the retained surface.
 vm.runInContext("send({type:'key',key:'x'});send({type:'theme',dark:true})",context);
-assert.equal(switchingSocket.sent.length,1);assert.equal(JSON.parse(switchingSocket.sent[0]).type,'theme');assert.equal(JSON.parse(switchingSocket.sent[0]).attachment,1);
-await message({type:'session',session:'b'.repeat(48),attachment:2});
+assert.equal(switchingSocket.sent.length,1);assert.equal(JSON.parse(switchingSocket.sent[0]).type,'theme');assert.equal(JSON.parse(switchingSocket.sent[0]).attachment,2);
+await message({type:'session',session:'b'.repeat(48),attachment:3});
 assert.equal(sidebarAccess.hidden,true);assert.equal(context.frame,null);
 await message({type:'assets',glyphs:[[65,1,[0]]],scale:2});
-await message({type:'connection',connected:true,attachment:2});
+await message({type:'connection',connected:true,attachment:3});
 assert.equal(context.ready,false);
 await message({type:'frame',size:[91,31],mode:3,rows:[],reset:true});
 assert.equal(context.ready,true);assert.equal(sidebarAccess.hidden,true);
 clearSent();finishRead(pngBytes);await switchingDrop;assert.equal(uploads().length,0);
 vm.runInContext("send({type:'key',key:'y'})",context);
-assert.equal(JSON.parse(switchingSocket.sent.at(-1)).attachment,2);
+assert.equal(JSON.parse(switchingSocket.sent.at(-1)).attachment,3);
 assert.equal(sockets.length,socketCount);assert.equal(sockets.at(-1),switchingSocket);
-console.log('Browser session handoff retains its socket, gates keys until RESET, reports safe configuration and revokes old upload/semantic state');
+console.log('Browser session handoff retains its socket, gates keys until RESET, resends current settings after failed preparation and revokes old upload/semantic state');
