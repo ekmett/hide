@@ -40,7 +40,10 @@
         optimize = "ReleaseFast";
         revision = "76895d97";
       };
-      hide = pkgs.callPackage ./nix/package.nix { inherit ghosttyVt haskellPackages; };
+      hide = import ./nix/package.nix {
+        inherit (pkgs) lib haskell utf8proc sdl3 pango;
+        inherit ghosttyVt haskellPackages;
+      };
     in {
       packages.${system} = { inherit hide; default = hide; };
       checks.${system}.nixos = import ./nix/check.nix { inherit pkgs hide; };
@@ -51,6 +54,10 @@
       };
       devShells.${system}.default = haskellPackages.shellFor {
         packages = _: [ hide ];
+        genericBuilderArgsModifier = args: args // {
+          __propagatePkgConfigDepends = false;
+          env = (args.env or {}) // { inherit (hide.env) PKG_CONFIG_PATH; };
+        };
         nativeBuildInputs = [ pkgs.cabal-install pkgs.pkg-config ];
       };
     };
