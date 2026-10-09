@@ -10,23 +10,26 @@
 --
 -- These operations do not validate a workspace, symlink or save baseline. Those
 -- checks belong to the caller. Replacement is atomic, not power-loss durability.
-module Hide.FileIO (withFileRead, readFileBytes, replaceFile) where
+module Hide.FileIO (withFileRead, readFileBytes, openTemporaryFile, replaceFile) where
 
 import qualified Data.ByteString as BS
-import System.IO (Handle, IOMode(ReadMode), withBinaryFile)
+import System.IO (Handle, IOMode(ReadMode), withBinaryFile, openBinaryTempFile)
 #ifdef mingw32_HOST_OS
-import Control.Exception (bracket, onException)
+import Control.Exception (bracket, mask_, onException)
 import Control.Monad (unless, void)
 import Data.Bits ((.|.))
 import Data.List (isPrefixOf)
 import Data.Word (Word32)
-import Foreign.C.String (CWString, withCWString)
-import Foreign.C.Types (CInt(..))
+import Foreign.C.String (CWString, withCWString, withCWStringLen, peekCWString)
+import Foreign.C.Types (CInt(..), CSize(..))
 import Foreign.C.Error (throwErrnoIfMinus1)
 import Foreign.Ptr (Ptr)
+import Foreign.Marshal.Alloc (alloca)
+import Foreign.Marshal.Array (allocaArray)
+import Foreign.Storable (peek)
 import GHC.IO.Handle.FD (fdToHandle')
 import GHC.IO.SubSystem (IoSubSystem(IoNative), ioSubSystem)
-import System.IO (hClose)
+import System.IO (hClose, IOMode(ReadWriteMode))
 import qualified System.Win32.File as Windows
 import qualified System.Win32.Types as Windows
 import qualified System.Win32.Info as Windows
@@ -63,6 +66,33 @@ withFileRead path = withBinaryFile path ReadMode
 readFileBytes :: FilePath -> IO BS.ByteString
 readFileBytes path = withFileRead path BS.hGetContents
 
+-- | Create an exclusive binary temporary file in the supplied directory.
+-- The caller owns the returned Handle and path, and must close and remove them.
+-- Windows POSIX I/O uses an extended path and a random sibling name, avoiding
+-- GHC's fixed 260-character temporary-file buffer. Native I/O retains GHC's
+-- UUID-based helper and native Handle. Acquisition masks
+-- asynchronous exceptions until ownership transfers; failed Handle creation
+-- closes and removes only the file created by this call.
+openTemporaryFile :: FilePath -> IO (FilePath, Handle)
+#ifdef mingw32_HOST_OS
+openTemporaryFile directory
+  | ioSubSystem==IoNative = openBinaryTempFile directory ".hide-"
+  | otherwise = mask_ $ do
+      absolute <- windowsPath directory
+      withCWStringLen absolute $ \(parent, count) -> allocaArray (count+40) $ \name ->
+        alloca $ \descriptor -> do
+          result <- createTemporaryFile parent (fromIntegral count) name descriptor
+          unless (result==0) (Windows.failWith ("Create temporary file in "++directory) result)
+          fd <- peek descriptor
+          let cleanup = void (closeDescriptor fd) >> void (deleteTemporaryFile name)
+          flip onException cleanup $ do
+            path <- peekCWString name
+            handle <- fdToHandle' fd Nothing False path ReadWriteMode True
+            pure (path, handle)
+#else
+openTemporaryFile directory = openBinaryTempFile directory ".hide-"
+#endif
+
 -- | Atomically move a file over a destination on the same filesystem.
 -- Existing read handles retain the old file; the source path disappears on
 -- success. Unsupported filesystem semantics fail without a copy/delete fallback.
@@ -90,6 +120,12 @@ foreign import ccall unsafe "hide_read_descriptor"
   readDescriptor :: Ptr () -> IO CInt
 foreign import ccall safe "_close"
   closeDescriptor :: CInt -> IO CInt
+
+-- The output name has room for parent plus slash, .hide-, 32 hex digits and NUL.
+foreign import ccall safe "hide_create_temporary_file"
+  createTemporaryFile :: CWString -> CSize -> CWString -> Ptr CInt -> IO Word32
+foreign import ccall safe "DeleteFileW"
+  deleteTemporaryFile :: CWString -> IO CInt
 
 foreign import ccall safe "hide_replace_file"
   replaceFileWindows :: CWString -> CWString -> IO Word32
