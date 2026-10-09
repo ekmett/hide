@@ -500,9 +500,13 @@ contextShortcutChecks=do
       popupRow d n=T.lines (snapshot d) !! (top (popupRect d)+1+n)
       spans d n=toList (displayOpsForPic (renderDesktop d) (screenSize d)) !! n
       redKey key d n=any (\op->case op of TextSpan{textSpanText=t,textSpanAttr=a}->TL.toStrict t==key && V.attrForeColor a==V.SetTo (V.RGBColor 170 0 0); _->False) (toList (spans d n))
-  check "context menu paints the effective source remap" ("Ctrl+Shift+D" `T.isInfixOf` popupRow popup 3 && not ("F12" `T.isInfixOf` popupRow popup 3))
-  check "context menu omits an explicitly unbound shortcut" (not ("Shift+F1" `T.isInfixOf` popupRow popup 4))
-  check "context shortcut uses the dropdown red key color" (redKey "Ctrl+Shift+D" popup (top (popupRect popup)+4))
+  let displayed=T.lines (snapshot popup)
+      actionRow label=fromMaybe (error ("missing context action: "++T.unpack label)) (findIndex (T.isInfixOf label) displayed)
+      definitionRow=actionRow "Go to definition"
+      inspectRow=actionRow "Inspect type"
+  check "context menu paints the effective source remap" ("Ctrl+Shift+D" `T.isInfixOf` (displayed !! definitionRow) && not ("F12" `T.isInfixOf` (displayed !! definitionRow)))
+  check "context menu omits an explicitly unbound shortcut" (not ("Shift+F1" `T.isInfixOf` (displayed !! inspectRow)))
+  check "context shortcut uses the dropdown red key color" (redKey "Ctrl+Shift+D" popup definitionRow)
   let title=T.replicate 16 "界"
       mac=openContext (ToolchainContext [(title,Find)]) 96 5 base {nativeMac=True,videoMode=Just 3}
       rect=popupRect mac

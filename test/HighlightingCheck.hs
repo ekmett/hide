@@ -184,12 +184,12 @@ checks profile = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \c
      map sourceRowText (toList undoRows)==T.splitOn "\n" (contents before))
   forM_ ["\r\n","\r\nmid\r\n","\r","\n"] $ \text->do
     let input=newBuffer "xy"
-        edited=replaceSelection (Selection 1 1) text input
-        rows=rebaseSourceRows input edited (sourceHighlightRows "xy" [("xy",Keyword)])
+        lineEdit=replaceSelection (Selection 1 1) text input
+        rebasedRows=rebaseSourceRows input lineEdit (sourceHighlightRows "xy" [("xy",Keyword)])
     check "rebased ranges preserve exact CRLF source coverage and byte endpoints"
-      (all (\row->let ranges=V.toList (sourceRowRanges row)
-                  in T.concat (map (sourceRangeText row) ranges)==sourceRowText row &&
-                     (null ranges || sourceRangeByteEnd (last ranges)==TU.lengthWord8 (sourceRowText row))) rows)
+      (all (\rebasedRow->let ranges=V.toList (sourceRowRanges rebasedRow)
+                  in T.concat (map (sourceRangeText rebasedRow) ranges)==sourceRowText rebasedRow &&
+                     (null ranges || sourceRangeByteEnd (last ranges)==TU.lengthWord8 (sourceRowText rebasedRow))) rebasedRows)
   let long=newBuffer (T.replicate (1024*1024) "x")
       longRows=sourceHighlightRows (contents long) [(contents long,Comment)]
       changed=replaceSelection (Selection 10 10) "é" long
