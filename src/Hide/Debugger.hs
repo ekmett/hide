@@ -715,12 +715,14 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
     immediate desktop result=pure (desktop,pure (result >>= boundedResult))
     snapshot desktop=do
       current<-readIORef ref
+      value<-debuggerStatus current
       pure (desktop,case failure current of
         Just err->pure (Left err)
-        Nothing->publicDebuggerStatus (root current) (guestPrivatePaths desktop) (merge (object ["accepted" .= True]) (debuggerStatus current)))
+        Nothing->publicDebuggerStatus (root current) (guestPrivatePaths desktop) (merge (object ["accepted" .= True]) value))
     run ToolStatus=do
       current<-readIORef ref
-      pure (d,publicDebuggerStatus (root current) (guestPrivatePaths d) (debuggerStatus current))
+      value<-debuggerStatus current
+      pure (d,publicDebuggerStatus (root current) (guestPrivatePaths d) value)
     run (ToolStart action values)=do
       desktop<-perform runtime action values d
       current<-readIORef ref
@@ -904,9 +906,17 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       pure (ToolInspect command args)
     _ -> fail "Unknown debugger tool"
 
-debuggerStatus :: State -> Value
-debuggerStatus s=object
-  ["generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
+debuggerStatus :: State -> IO Value
+debuggerStatus s=do
+  -- Observe completion without joining or forcing the prepared Buffer. A ready
+  -- result stays owned by the next UI tick, which may defer it behind a modal.
+  preparation<-case sourcePreparing s of
+    Nothing->pure ("idle"::Text)
+    Just (SourcePreparation _ _ _ _ _ _ worker)->do
+      result<-poll worker
+      pure (if isJust result then "ready" else "preparing")
+  pure $ object
+   ["sourcePreparation" .= preparation,"generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
    "finishing" .= (isJust (client s) && isJust (endedAt s)),"exitCode" .= programExitCode s,"connected" .= connected s,
    "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,"follow" .= followSource s,
    "threadId" .= thread s,"frame" .= frame s,"source" .= (frame s >>= (field "source" :: Value -> Maybe Value)),
