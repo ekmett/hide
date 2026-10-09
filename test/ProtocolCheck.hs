@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ProtocolCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 import EditorFixture (withEditorFixture)
 import Control.Exception (SomeException, bracket, try, evaluate, displayException)
 import Control.DeepSeq (force)
@@ -32,8 +33,8 @@ import Hide.Syntax (Style(..))
 import Hide.Unicode (Script(..))
 import Hide.RemoteWindow (RemoteCell(..),RemoteFrame(..),parseRemoteFrame)
 
-checks :: IO ()
-checks = withEditorFixture "" (initialDesktop (80,25)) $ \primary->do
+checks :: AllocationProfile -> IO ()
+checks profile = withEditorFixture "" (initialDesktop (80,25)) $ \primary->do
   let check name ok=unless ok (error name)
       rejects name action=do
         result<-try action :: IO (Either SomeException ())
@@ -71,7 +72,7 @@ checks = withEditorFixture "" (initialDesktop (80,25)) $ \primary->do
   after<-getAllocationCounter
   -- Keep a prepared redraw within its allocation budget. A larger allowance
   -- requires measured attribution and a feature benefit, not a silent rebaseline.
-  check "prepared dock-neighbor frame export stays within 6 MB" (before-after<6000000)
+  check "prepared dock-neighbor frame export stays within 6 MB" (withinBudget profile (before-after) (6000000))
   let d=addDocument Nothing (newBuffer "λ\nhello") (initialDesktop (80,25))
       screens=map frameRows [d,insertText "world " d,d {screenSize=(100,30)}]
   check "frame exposes editor window metadata for the real native session frontend"

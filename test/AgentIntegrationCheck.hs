@@ -237,7 +237,12 @@ checks=bracket temporary removePathForcibly $ \root ->
       primaryWhileQueued<-ui "show" [] secondQueued
       configuredPrimary<-ui "configure" ["0","python3",TE.decodeUtf8 (BL.toStrict (encode [script])),"{}"] primaryWhileQueued
       childAfterPrimaryConfig<-select liveChild configuredPrimary
-      awaiting<-tickUntil (pure . maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) . dialog) childAfterPrimaryConfig
+      -- Provider approval and editor-intent publication have separate owners.
+      -- Wait for both before sampling a followup that is still being transferred.
+      awaiting<-testUntil "child approval and published followup" (\desktop->do
+        entry<-AH.statusAgent hub AH.Human liveChild >>= right
+        pure (maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) (dialog desktop) &&
+          maybe False (>= (1::Int)) (field "queued" entry) && agentQueued desktop>=1)) childAfterPrimaryConfig
       ensure "human can queue a followup while child is running" (agentQueued awaiting>=1)
       _<-AH.cancelAgent hub AH.Human primary >>= right
       childStillWaiting<-tickBody presentation conversation awaiting

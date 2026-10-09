@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module ToolingCheck (checks, diagnosticCacheChecks, startupChecks, workspaceEditChecks, commandChecks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless, when, forM_, replicateM, foldM, void)
 import Control.Concurrent (threadDelay, newEmptyMVar, readMVar, putMVar, tryPutMVar, tryReadMVar)
@@ -28,8 +29,8 @@ import Hide.Model
 import qualified Hide.LSP as L
 import Hide.Tooling
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   let check name ok=unless ok (error name)
       pos n=object ["line" .= (0::Int),"character" .= (n::Int)]
       range a z=object ["start" .= pos a,"end" .= pos z]
@@ -72,7 +73,7 @@ checks = do
          fmap windowId (activeWindow moved)==fmap windowId (activeWindow opened) &&
          fmap bufferView (activeWindow moved)==Just CurrentView)
       afterJump<-getAllocationCounter
-      check "JumpTo does not traverse or split preceding document rows" (beforeJump-afterJump<1024*1024)
+      check "JumpTo does not traverse or split preceding document rows" (withinBudget profile (beforeJump-afterJump) (1024*1024))
   bracket temporary removePathForcibly $ \root -> do
     let server=root </> "fake-hls"
         source=root </> "Main.hs"

@@ -53,12 +53,20 @@ checks remain part of their ordinary feature builds. Windows does not run the
 POSIX-only hdb binary acquisition fixture. Filesystem checks retain portable
 behavior and isolate assertions that require POSIX permissions or filenames.
 
+The workflow pairs two required runs. The normal optimized build enforces the
+existing allocation limits. The full HPC run uses `--instrumented`: it still
+measures allocations and checks values, identities and behavior, but does not
+compare instrumented allocation costs against optimized limits. HPC counters can
+change optimization and allocation; increasing those limits would hide regressions
+in the normal build. The two profiles have distinct names in JUnit.
+
 To generate the same reports locally from the repository root:
 
 ```sh
 cabal install hpc-codecov-0.6.4.1
 mkdir -p build/coverage-results
-cabal test editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-options="--xml=build/coverage-results/tests.xml"
+cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-option='--pattern=/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --test-option=--xml=build/coverage-results/allocation-tests.xml
+cabal test editor-tests --builddir=build/coverage --enable-coverage -O1 -f-window -f-terminal --test-show-details=direct --test-options="--instrumented --xml=build/coverage-results/tests.xml"
 python3 tools/coverage.py
 ```
 
@@ -67,12 +75,20 @@ some fixtures temporarily change the process environment or working directory.
 Use `--test-options="--pattern=BufferTree"` to select a group. Full coverage reports
 come from the whole suite; a focused run measures only the selected work.
 
-Instrumented builds use their own directory and cache. CI saves the completed
-build before running tests, so a test failure does not discard it. Delete old
-`.tix` files before repeating a local run; CI does this automatically. It retains the matching `.mix` files, raw HPC counts,
-converted LCOV report, JUnit and host/toolchain metadata for seven days. Each platform
-converts its own instrumentation before uploading; Codecov combines the reports
-for the commit, without carrying old platform coverage forward.
+The builds use separate directories and caches. CI saves completed builds before
+running tests, so a test failure does not discard them. Delete old `.tix` files
+and generated HPC HTML before repeating a local run; CI does this automatically.
+Each platform converts its own matching instrumentation before uploading; Codecov
+combines the reports for the commit without carrying old platform coverage forward.
+
+Download the workflow's `coverage-<platform>` artifact and open
+`coverage-results/hpc-html/hpc_index.html` for expression-level coverage, including
+columns and Boolean outcomes. This is GHC's native rendering of the HPC spans.
+The artifact retains the matching `.mix` files, raw `.tix` counts, HTML, LCOV,
+both JUnit reports and host/toolchain metadata for seven days. HPC spans retain
+one-based character columns and inclusive ends, with tabs expanded to stops of
+eight columns. Codecov receives the coarser LCOV line/branch report; its upload
+does not preserve those column spans.
 
 ## Source documentation
 

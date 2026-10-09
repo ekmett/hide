@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module BuildCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, evaluate)
@@ -25,8 +26,8 @@ import Hide.Plugin.BufferHost (captureVersion)
 import Hide.PluginWindowHost (adoptWindowUpdate)
 import qualified Hide.Plugin.Menu as P
 
-checks :: IO ()
-checks = bracket temporary removePathForcibly $ \root -> do
+checks :: AllocationProfile -> IO ()
+checks profile = bracket temporary removePathForcibly $ \root -> do
   let initial=initialDesktop (80,25)
       ghc=B.BuildConfig B.GHC "ghc" "" "" "" []
       thc=B.BuildConfig B.THC "thc with spaces" "exe:hello world;literal" "compiler root" "runtime path" ["one two"]
@@ -154,7 +155,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
               messages=sum [length (diagnosticPath p)+T.length (diagnosticMessage p) | p<-buildDiagnostics fresh]
           _<-evaluate (visible+messages+sum (map scrollRow (windows fresh))+T.length (status fresh))
           after<-getAllocationCounter
-          check "UI tick does not construct output buffers or parse diagnostics" (before-after<2*1024*1024)
+          check "UI tick does not construct output buffers or parse diagnostics" (withinBudget profile (before-after) (2*1024*1024))
           pure fresh
         awaitPrepared d done=do
           answer<-timeout 15000000 (loop d)

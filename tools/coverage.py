@@ -3,7 +3,8 @@
 """Convert this run's HPC data; retain only repository library source coverage.
 
 hpc-codecov owns the HPC format. This wrapper scopes its result to Hide modules,
-normalizes Windows paths, and records the exact toolchain alongside JUnit results.
+normalizes Windows paths, and retains native HPC HTML with column-level detail.
+Both test profiles and the exact toolchain accompany the reports.
 It never turns a failed or interrupted test process into a successful run.
 """
 
@@ -12,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -59,23 +61,46 @@ def main():
         raise ValueError("HPC produced no executed Hide source coverage")
     (output / "coverage.info").write_text("".join(records), encoding="utf-8")
 
+    # Cabal's HTML includes only exposed modules. Render the same library scope
+    # as LCOV, retaining internal modules and HPC's original expression spans.
+    tix_files = list(build.glob("build/**/t/editor-tests/hpc/vanilla/tix/editor-tests.tix"))
+    if len(tix_files) != 1:
+        raise ValueError("Expected this run's editor-tests HPC counts")
+    modules = {".".join(Path(name).with_suffix("").parts[1:]) for name in source_files}
+    mix_files = [path for path in build.glob("build/**/extra-compilation-artifacts/hpc/vanilla/mix/*/Hide.*.mix")
+                 if path.stem in modules]
+    if len(mix_files) != len(modules) or {path.stem for path in mix_files} != modules:
+        raise ValueError("Expected one matching HPC mix file per covered Hide module")
+    html = output / "hpc-html"
+    if html.exists():
+        shutil.rmtree(html)
+    subprocess.run(["hpc", "markup", str(tix_files[0]), "--srcdir=" + str(Path.cwd()),
+                    "--destdir=" + str(html), "--verbosity=0",
+                    *("--hpcdir=" + str(path) for path in sorted({path.parent.parent for path in mix_files})),
+                    *("--include=" + name for name in sorted(modules))], check=True)
+
     # Missing/malformed JUnit is an error, never a synthetic passing report.
-    cases = ET.parse(output / "tests.xml").findall(".//testcase")
-    if not cases:
-        raise ValueError("JUnit report contains no test cases")
-    failed = sum(case.find("failure") is not None or case.find("error") is not None for case in cases)
+    profiles = {}
+    for name, filename in (("instrumented", "tests.xml"), ("optimized", "allocation-tests.xml")):
+        cases = ET.parse(output / filename).findall(".//testcase")
+        if not cases:
+            raise ValueError(f"{name} JUnit report contains no test cases")
+        failed = sum(case.find("failure") is not None or case.find("error") is not None for case in cases)
+        profiles[name] = {"test_cases": len(cases), "failed_cases": failed}
     metadata = {
         "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+        "worktree_dirty": bool(subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=no"], text=True).strip()),
         "platform": platform.platform(),
         "architecture": platform.machine(),
         "ghc": subprocess.check_output(["ghc", "--numeric-version"], text=True).strip(),
         "cabal": subprocess.check_output(["cabal", "--numeric-version"], text=True).strip(),
-        "configuration": "-f-window -f-terminal --enable-coverage -O1 (web enabled)",
+        "configuration": "-f-window -f-terminal -O1 (web enabled); HPC semantics and normal allocation limits",
+        "column_coverage": "hpc-html/hpc_index.html and matching raw .mix/.tix; Codecov receives LCOV",
         "scope": "Haskell Hide modules; no C, shaders, native-window or embedded-terminal backend",
-        "source_files": len(source_files), "test_cases": len(cases), "failed_cases": failed,
+        "source_files": len(source_files), "test_profiles": profiles,
     }
     (output / "host.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-    print(f"{len(source_files)} source files; {len(cases)} test cases, {failed} failed")
+    print(f"{len(source_files)} source files; test profiles: {profiles}")
 
 
 if __name__ == "__main__":

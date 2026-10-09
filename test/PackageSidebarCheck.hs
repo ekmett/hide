@@ -6,10 +6,12 @@ import Control.Exception (bracket)
 import Control.Monad (unless,when,foldM)
 import Data.IORef
 import qualified Data.Aeson as A
+import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Lazy as BL
 import System.Environment (lookupEnv,setEnv,unsetEnv)
 import Hide.Buffer
 import qualified Hide.Build as B
+import qualified Hide.BuildJobs as Jobs
 import Hide.SessionServices
 import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import qualified Hide.Plugin.Menu as Menu
@@ -130,9 +132,19 @@ checks=bracket temporary removePathForcibly $ \root->do
         unless (runArguments==[root,"run","sample:exe:second","--project-dir",root,"--thc-root","compiler root","--runtime","runtime path","--","program argument"])
           (fail "Executable Run uses captured target rather than focused source or saved target")
         stopped<-stopSessionBuild runtime running
-        -- Dirty source is captured before preparation: no target process is launched.
         removeFile invocation
-        readyToReuse<-timeout 5000000 (let loop current=do next<-tick current; pending<-buildTerminalLaunchPending runtime; if pending then threadDelay 1000 >> loop next else pure next in loop stopped) >>= maybe (fail "Run preparation did not retire") pure
+        -- Terminal launch delivery does not establish captured-job completion.
+        -- Wait for both owners before submitting a new intent to the shared slot.
+        let awaitRunRetired current=do
+              next<-tick current
+              pending<-buildTerminalLaunchPending runtime
+              facts<-Jobs.buildJobStatus (sessionBuildJobs runtime) next
+              let active=parseMaybe (A.withObject "build job status" (A..: "active")) facts
+              if not pending && active==Just False
+                then pure next
+                else threadDelay 1000 >> awaitRunRetired next
+        readyToReuse<-timeout 5000000 (awaitRunRetired stopped)
+          >>= maybe (fail "Run preparation or captured job did not retire") pure
         -- These component actions must refuse THC, rather than silently using
         -- Cabal/GHC or changing the saved toolchain.
         afterRefusals<-foldM (\current (label,action)->do

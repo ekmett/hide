@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings,ScopedTypeVariables #-}
 module TypedBufferReadsCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay,newEmptyMVar,putMVar,takeMVar)
@@ -49,8 +50,8 @@ ownerUntil owner desktop worker=do
           Nothing->threadDelay 1000 >> tickPermissions owner current >>= loop
   timeout 3000000 (loop desktop) >>= maybe (error "typed read owner did not settle") pure
 
-checks :: IO ()
-checks=do
+checks :: AllocationProfile -> IO ()
+checks profile=do
   temporary<-getTemporaryDirectory
   let root=temporary </> "hide-typed-buffer-read-check"
       path=root </> "config.toml"
@@ -98,7 +99,7 @@ checks=do
         before<-getAllocationCounter
         _<-tickPermissions owner switchedLarge
         after<-getAllocationCounter
-        check "typed admission does not encode mode-switched full text" (before-after<2000000)
+        check "typed admission does not encode mode-switched full text" (withinBudget profile (before-after) (2000000))
         _<-ownerUntil owner switchedLarge worker
         _<-wait worker >>= either (error . T.unpack) pure
         pure ()

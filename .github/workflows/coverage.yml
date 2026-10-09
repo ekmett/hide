@@ -17,7 +17,7 @@ jobs:
   coverage:
     name: ${{ matrix.flag }} / GHC 9.14.1
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
@@ -101,9 +101,12 @@ jobs:
           path: |
             ${{ steps.haskell.outputs.cabal-store }}
             build/coverage
-          key: hpc-v1-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'cabal.project') }}-${{ github.sha }}
+            build/allocation
+          key: hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'cabal.project') }}-${{ github.sha }}
           restore-keys: |
-            hpc-v1-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'cabal.project') }}-
+            hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-${{ hashFiles('hide.cabal', 'cabal.project') }}-
+            hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-
+            hpc-v1-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-
       - name: Install report converter
         run: cabal install hpc-codecov-0.6.4.1 --installdir="$RUNNER_TEMP/coverage-tools" --install-method=copy --overwrite-policy=always
       - name: Prepare fresh report directory
@@ -115,20 +118,30 @@ jobs:
           # A restored cache must never supply a previous run's execution counts.
           for path in pathlib.Path('build/coverage').rglob('*.tix'):
               path.unlink()
+          for index in pathlib.Path('build/coverage').rglob('hpc_index.html'):
+              shutil.rmtree(index.parent)
+      - name: Build optimized allocation checks
+        run: cabal build editor-tests --builddir=build/allocation --disable-coverage -O1 -j2 -f-window -f-terminal
       - name: Build instrumented Haskell
+        id: build
         run: cabal build editor-tests --builddir=build/coverage --enable-coverage -O1 -j2 -f-window -f-terminal
       # Preserve a completed build even if tests fail; execution counts stay fresh.
-      - name: Cache instrumented build
+      - name: Cache completed builds
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ${{ steps.haskell.outputs.cabal-store }}
             build/coverage
+            build/allocation
           key: ${{ steps.cache.outputs.cache-primary-key }}
-      - name: Run editor checks once
+      - name: Enforce optimized allocation limits
+        id: allocations
+        run: cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -j2 -f-window -f-terminal --test-show-details=direct --test-option='--pattern=/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --test-option=--xml=build/coverage-results/allocation-tests.xml
+      - name: Run instrumented editor checks once
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         id: tests
-        run: cabal test editor-tests --builddir=build/coverage --enable-coverage -O1 -j2 -f-window -f-terminal --test-show-details=direct --test-options="--xml=build/coverage-results/tests.xml"
+        run: cabal test editor-tests --builddir=build/coverage --enable-coverage -O1 -j2 -f-window -f-terminal --test-show-details=direct --test-options="--instrumented --xml=build/coverage-results/tests.xml"
       - name: Collect HPC and JUnit reports
         if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
         run: python tools/coverage.py --builddir build/coverage --output build/coverage-results --converter "$RUNNER_TEMP/coverage-tools/hpc-codecov"
@@ -142,7 +155,7 @@ jobs:
           flags: ${{ matrix.flag }}
           name: ${{ matrix.flag }}-hpc
           fail_ci_if_error: true
-      - name: Upload test results to Codecov
+      - name: Upload instrumented test results to Codecov
         if: ${{ !cancelled() && hashFiles('build/coverage-results/tests.xml') != '' }}
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
@@ -151,10 +164,21 @@ jobs:
           files: build/coverage-results/tests.xml
           disable_search: true
           flags: ${{ matrix.flag }}
-          name: ${{ matrix.flag }}-tests
+          name: ${{ matrix.flag }}-hpc-tests
+          fail_ci_if_error: true
+      - name: Upload allocation test results to Codecov
+        if: ${{ !cancelled() && hashFiles('build/coverage-results/allocation-tests.xml') != '' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          report_type: test_results
+          use_oidc: true
+          files: build/coverage-results/allocation-tests.xml
+          disable_search: true
+          flags: ${{ matrix.flag }}
+          name: ${{ matrix.flag }}-allocation-tests
           fail_ci_if_error: true
       - name: Retain coverage evidence
-        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        if: ${{ !cancelled() && (steps.tests.outcome != 'skipped' || steps.allocations.outcome != 'skipped') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-${{ matrix.flag }}
@@ -163,5 +187,6 @@ jobs:
             build/coverage/**/hpc/**/*.mix
             build/coverage/**/*.tix
             build/coverage/cache/plan.json
+            build/allocation/cache/plan.json
           retention-days: 7
           if-no-files-found: error

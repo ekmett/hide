@@ -45,6 +45,9 @@ checks = bracket temporary removePathForcibly $ \base -> do
   T.writeFile upstreamSource "original\n"
   commit upstream "initial"
   void (git base ["clone",upstream,work])
+  -- Background editor operations use repository identity, not this fixture's -c flags.
+  mapM_ (void . git work . ("config":))
+    [["user.name","Git Test"],["user.email","test@example.invalid"],["commit.gpgsign","false"]]
   initial<-open (initialDesktop (100,30))
   (_,configured)<-core initial [RefreshGit work]
   withGitOperations (pure False) $ \runtime -> do

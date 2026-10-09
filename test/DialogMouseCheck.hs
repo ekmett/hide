@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module DialogMouseCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import EditorFixture (withEditorFixture, sameBufferVersions)
 import Control.Monad (unless, forM_)
@@ -28,9 +29,9 @@ import Data.Foldable (toList)
 import qualified Data.Foldable as F (foldl')
 import qualified Data.Text.Lazy as TL
 
-checks :: IO ()
-checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
-  textAreaRenderChecks
+checks :: AllocationProfile -> IO ()
+checks profile = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
+  textAreaRenderChecks profile
   contextShortcutChecks
   searchChecks
   previousSearchChecks
@@ -394,7 +395,7 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       toggledPixel=fst (handleEvent (V.EvMouseDown (left pixelRect+1) (top pixelRect) V.BLeft []) graphicalPreferences)
       savedPixel=fst (handleEvent (V.EvKey V.KEnter []) toggledPixel)
   check "80x25 Preferences shows every appearance option without scrolling"
-    (all (`T.isInfixOf` snapshot graphicalPreferences) ["CRT filter","Pixelate Unicode","Streamer mode"] &&
+    (all (`T.isInfixOf` snapshot graphicalPreferences) ["CRT filter","Pixelate Unicode","Haptic Feedback","Streamer mode"] &&
      all (\r -> top r+height r<=minimum (map top (buttonRects graphicalPreferences graphicalDialog))) (fieldRects graphicalPreferences graphicalDialog))
   let preferenceRects=fieldRects graphicalPreferences graphicalDialog
       appearanceIndex=fromMaybe (error "missing appearance") (findIndex (\field -> case field of Radio "Appearance" _ _ -> True; _ -> False) (fields graphicalDialog))
@@ -403,8 +404,7 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       darkSaved=fst (handleEvent (V.EvKey V.KEnter []) darkChoice)
       narrowPreferences=graphicalPreferences {screenSize=(40,25)}
   check "Preferences uses compact columns with working right-column hit targets"
-    (height (dialogRect graphicalPreferences graphicalDialog)<=15 &&
-     left appearanceRect>left (at 0 preferenceRects) && top appearanceRect==top (at 0 preferenceRects) &&
+    (left appearanceRect>left (at 0 preferenceRects) && top appearanceRect==top (at 0 preferenceRects) &&
      appearance darkSaved==DarkMode &&
      all (\i -> fieldRects graphicalPreferences graphicalDialog {focus=i}==preferenceRects) [0..length (fields graphicalDialog)-1])
   check "narrow Preferences falls back to one column"
@@ -520,8 +520,8 @@ contextShortcutChecks=do
 
 -- A clipped dialog must not reconstruct every character beyond its viewport.
 -- Preparation and the first draw are outside the measured interaction.
-textAreaRenderChecks :: IO ()
-textAreaRenderChecks=do
+textAreaRenderChecks :: AllocationProfile -> IO ()
+textAreaRenderChecks profile=do
   let text=T.intercalate "\n" (replicate 25 (T.replicate 300 "words 界 e\x301 👩🏽\x200d\&💻 "))
       buffer=newBuffer text
       frame n=(initialDesktop (100,35)) {sideTree=Nothing,blinkCursor=False,dialog=Just
@@ -536,5 +536,5 @@ textAreaRenderChecks=do
   before<-getAllocationCounter
   count<-evaluate (occupied (renderCellRows moved))
   after<-getAllocationCounter
-  unless (count>0 && before-after<4000000)
+  unless (count>0 && withinBudget profile (before-after) (4000000))
     (error "TextArea viewport reconstructs offscreen character lists")

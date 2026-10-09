@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import EditorFixture (withEditorFixture,withEditorBodyFixture,sameBufferVersions)
 import qualified Hide.Plugin.Window as W
@@ -105,9 +106,9 @@ openChild runtime ident d=snd <$> conversationEffects runtime (\value _->pure (F
 
 -- Draft code is ordinary Markdown carried by the existing Buffer. Exercise
 -- user edits and submitted/copy payloads, without depending on bubble artwork.
-composerCodeChecks :: IO ()
-composerCodeChecks=do
-  questionInsertionChecks
+composerCodeChecks :: AllocationProfile -> IO ()
+composerCodeChecks profile=do
+  questionInsertionChecks profile
   withEditorFixture "" (initialDesktop (100,35)) $ \primary->
     withEditorFixture "child" primary $ \fixtures->do
       let press key mods=fst . handleEvent (V.EvKey key mods)
@@ -198,8 +199,8 @@ composerCodeChecks=do
 
 
 -- Normalization and the cap belong to the inserted fragment, with one Undo.
-questionInsertionChecks :: IO ()
-questionInsertionChecks=do
+questionInsertionChecks :: AllocationProfile -> IO ()
+questionInsertionChecks profile=do
   withEditorFixture "" (initialDesktop (100,35)) $ \prepared->do
     let ordinary=newBuffer "independent draft"
         chat=questionOwner 1 (draftBuffer ordinary prepared)
@@ -238,7 +239,7 @@ questionInsertionChecks=do
     beforeAllocation<-getAllocationCounter
     selected<-evaluate (maybe (-1) (caret.questionSelection) (chatQuestion (fst (runCommand SelectAll focused))))
     afterAllocation<-getAllocationCounter
-    check "inline selection does not normalize the existing answer" (selected==4096 && beforeAllocation-afterAllocation<8000)
+    check "inline selection does not normalize the existing answer" (selected==4096 && withinBudget profile (beforeAllocation-afterAllocation) (8000))
     let first=pasted inserted initial
         second=pasted "more" first
     check "successive inline edits retain earlier Undo" (textOf (fst (runCommand Undo second))==textOf first && textOf (fst (runCommand Undo (fst (runCommand Undo second))))==before)
@@ -420,8 +421,8 @@ draftReceiptChecks=withTextPresentation $ \presentation->
   where restoreDraftEnvironment name=maybe (unsetEnv name) (setEnv name)
 #endif
 
-checks :: IO ()
-checks = (draftReceiptChecks >> composerCodeChecks >>) $ withTextPresentation $ \presentation->
+checks :: AllocationProfile -> IO ()
+checks profile = (draftReceiptChecks >> composerCodeChecks profile >>) $ withTextPresentation $ \presentation->
   let tickConversation=tickPresented presentation
   in bracket temporary removePathForcibly $ \root ->
   bracket (lookupEnv "XDG_CONFIG_HOME" <* setEnv "XDG_CONFIG_HOME" (root </> "config")) restore $ \_ ->

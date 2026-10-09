@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module LSPCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, evaluate)
@@ -17,8 +18,8 @@ import System.Timeout (timeout)
 import qualified Hide.Buffer as Buffer
 import Hide.LSP
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   forM_ ["", "a😀b\r\nxλ", "\n\n", "a\r\r\nlast\r", "e\x0301\n界\0"] $ \source -> do
     let original=Buffer.newBuffer source
         edited=Buffer.replaceSelection (Buffer.Selection 0 0) "😀\n" original
@@ -46,7 +47,7 @@ checks = do
     actual<-evaluate (bufferPositionOffset long (1,column))
     check "edited long-row UTF16 prefix matches independent short source" (actual==5+positionOffset "ax😀ba😀ba😀ba😀b" (0,column))
   afterPrefix<-getAllocationCounter
-  check "UTF16 prefix lookup does not flatten the selected edited row" (beforePrefix-afterPrefix<1024*1024)
+  check "UTF16 prefix lookup does not flatten the selected edited row" (withinBudget profile (beforePrefix-afterPrefix) (1024*1024))
   let large=Buffer.newBuffer (T.replicate 200000 "a😀b\r\n")
   _<-evaluate (Buffer.prepareBuffer large)
   allocationBefore<-getAllocationCounter
@@ -55,7 +56,7 @@ checks = do
     check "deep UTF16 position seeks directly to measured line" (offset==row*5+2)
     check "deep UTF16 offset seeks directly to measured line" (bufferOffsetPosition large offset==(row,3))
   allocationAfter<-getAllocationCounter
-  check "UTF16 endpoints do not traverse or split preceding document text" (allocationBefore-allocationAfter<1024*1024)
+  check "UTF16 endpoints do not traverse or split preceding document text" (withinBudget profile (allocationBefore-allocationAfter) (1024*1024))
   let sample = "a😀b\r\nxλ"
       path = "/tmp/λ space/#%?.hs"
   check "URI Unicode and reserved characters round trip" (uriFilePath (fileUri path) == Just path)

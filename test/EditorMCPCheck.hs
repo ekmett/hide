@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module EditorMCPCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless)
 import Data.IORef
@@ -27,8 +28,8 @@ import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.Model
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   let check name ok=unless ok (error name)
       original=addDocument Nothing (newBuffer "old\nsecond") (initialDesktop (80,25))
       win=fromJust (activeWindow original)
@@ -85,7 +86,7 @@ checks = do
     Right value->BL.length (encode value)
     Left err->error (T.unpack err))
   allocatedAfter<-getAllocationCounter
-  check "MCP bounded byte read does not flatten or encode the whole buffer" (localBytes>0 && allocatedBefore-allocatedAfter<2000000)
+  check "MCP bounded byte read does not flatten or encode the whole buffer" (localBytes>0 && withinBudget profile (allocatedBefore-allocatedAfter) (2000000))
   let privateReview=addReadOnly "Agent request" "private-review-token" (initialDesktop (80,25))
   check "MCP private approval buffers refuse content reads" (case builtinTool privateReview "read_buffer" (object []) of Left _->True; _->False)
   check "MCP still lists non-secret internal buffer identifiers" (case builtinTool privateReview "list_buffers" (object []) of Right value->"bufferId" `T.isInfixOf` text value && not ("private-review-token" `T.isInfixOf` text value); _->False)

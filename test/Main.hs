@@ -88,9 +88,12 @@ import qualified ConversationCheck
 import qualified AgentFilesCheck
 import qualified TerminalCheck
 import qualified ConsolesCheck
-import Control.Monad (unless)
+import Control.Monad (unless, when)
 import System.FilePath ((</>), normalise)
-import Test.Tasty (defaultMainWithIngredients, inOrderTestGroup, TestTree)
+import AllocationProfile (AllocationProfile(..), withinBudget)
+import Data.Proxy (Proxy(..))
+import Test.Tasty (defaultMainWithIngredients, includingOptions, askOption, withResource, inOrderTestGroup, TestTree)
+import Test.Tasty.Options (OptionDescription(..))
 import Test.Tasty.HUnit (testCase)
 import Test.Tasty.Ingredients (composeReporters)
 import Test.Tasty.Ingredients.Basic (listingTests, consoleTestReporter)
@@ -137,11 +140,14 @@ check name ok = unless ok (error name)
 
 main :: IO ()
 main = defaultMainWithIngredients
-  [listingTests, composeReporters consoleTestReporter antXMLRunner] tests
+  [includingOptions [Option (Proxy :: Proxy AllocationProfile)]
+  , listingTests, composeReporters consoleTestReporter antXMLRunner] tests
 
 -- Serial order is part of the fixture contract, including filtered runs.
 tests :: TestTree
-tests = inOrderTestGroup "editor"
+tests = askOption $ \profile->withResource
+  (when (profile==Instrumented) (putStrLn "Instrumented allocation profile: counters are measured; optimized limits are enforced by the separate normal run."))
+  (const (pure ())) $ \_->inOrderTestGroup (if profile==Instrumented then "editor-instrumented" else "editor")
   [ testCase "FileExport" FileExportCheck.checks
   , testCase "FileDragHelper" FileDragHelperCheck.checks
   , testCase "Bindings" BindingsCheck.checks
@@ -151,7 +157,7 @@ tests = inOrderTestGroup "editor"
   , testCase "InlineRender" InlineRenderCheck.checks
   , testCase "AutocompleteACP" AutocompleteACPCheck.checks
   , testCase "Copilot" CopilotCheck.checks
-  , testCase "Highlighting" HighlightingCheck.checks
+  , testCase "Highlighting" (HighlightingCheck.checks profile)
   , testCase "AgentSidebar" AgentSidebarCheck.checks
   , testCase "SessionSidebar" SessionSidebarCheck.checks
   , testCase "AgentIntegration" AgentIntegrationCheck.checks
@@ -164,14 +170,14 @@ tests = inOrderTestGroup "editor"
 #ifdef WITH_REMOTE
   , testCase "Remote" RemoteCheck.checks
   , testCase "RemoteWindow" RemoteWindowCheck.checks
-  , testCase "RemoteTerminal" RemoteTerminalCheck.checks
+  , testCase "RemoteTerminal" (RemoteTerminalCheck.checks profile)
   , testCase "GuestAccess" GuestAccessCheck.checks
   , testCase "Streamer" StreamerCheck.checks
   , testCase "ClipboardMCP" ClipboardMCPCheck.checks
   , testCase "TypedBufferDiffs" TypedBufferDiffsCheck.checks
-  , testCase "TypedBufferReads" TypedBufferReadsCheck.checks
+  , testCase "TypedBufferReads" (TypedBufferReadsCheck.checks profile)
   , testCase "BufferReads" BufferReadsCheck.checks
-  , testCase "WorkerDiff" WorkerDiffCheck.checks
+  , testCase "WorkerDiff" (WorkerDiffCheck.checks profile)
   , testCase "BufferEdits" BufferEditsCheck.checks
   , testCase "PluginBuffer" PluginBufferCheck.checks
   , testCase "Accessibility" AccessibilityCheck.checks
@@ -186,7 +192,7 @@ tests = inOrderTestGroup "editor"
   , testCase "ControlMCP" ControlMCPCheck.checks
   , testCase "Defaults" DefaultsCheck.checks
   , testCase "MCPPermissions" MCPPermissionsCheck.checks
-  , testCase "EditorMCP" EditorMCPCheck.checks
+  , testCase "EditorMCP" (EditorMCPCheck.checks profile)
   , testCase "HistoryMCP" HistoryMCPCheck.checks
   , testCase "RuntimeMCP" RuntimeMCPCheck.checks
   , testCase "ScreenCapture" ScreenCaptureCheck.checks
@@ -196,7 +202,7 @@ tests = inOrderTestGroup "editor"
 #endif
 #ifdef WITH_PROTOCOL
   , testCase "RequestedPaste" RequestedPasteCheck.checks
-  , testCase "Protocol" ProtocolCheck.checks
+  , testCase "Protocol" (ProtocolCheck.checks profile)
 #endif
 #ifdef WITH_WEB
   , testCase "Web" WebCheck.checks
@@ -216,22 +222,22 @@ tests = inOrderTestGroup "editor"
   , testCase "DebuggerAcquisition" DebuggerAcquisitionCheck.checks
 #endif
   , testCase "Compilers" CompilersCheck.checks
-  , testCase "Build" BuildCheck.checks
+  , testCase "Build" (BuildCheck.checks profile)
   , testCase "Run" RunCheck.checks
-  , testCase "Conversation" ConversationCheck.checks
+  , testCase "Conversation" (ConversationCheck.checks profile)
   , testCase "AgentFiles" AgentFilesCheck.checks
   , testCase "Terminal" TerminalCheck.checks
   , testCase "Consoles" ConsolesCheck.checks
   , testCase "Main.model" modelChecks
-  , testCase "Unicode" UnicodeCheck.checks
+  , testCase "Unicode" (UnicodeCheck.checks profile)
 #ifdef WITH_REMOTE
   , testCase "Recovery" RecoveryCheck.checks
 #endif
   , testCase "BufferView" BufferViewCheck.checks
-  , testCase "BufferTree" BufferTreeCheck.checks
-  , testCase "LSP" LSPCheck.checks
-  , testCase "Tooling" ToolingCheck.checks
-  , testCase "DialogMouse" DialogMouseCheck.checks
+  , testCase "BufferTree" (BufferTreeCheck.checks profile)
+  , testCase "LSP" (LSPCheck.checks profile)
+  , testCase "Tooling" (ToolingCheck.checks profile)
+  , testCase "DialogMouse" (DialogMouseCheck.checks profile)
   , testCase "GitOperations" GitOperationsCheck.checks
   , testCase "Git" GitCheck.checks
   , testCase "MarkdownView" MarkdownViewCheck.checks
@@ -261,6 +267,8 @@ tests = inOrderTestGroup "editor"
 
 modelChecks :: IO ()
 modelChecks = do
+  check "normal allocation profile keeps strict optimized limits" (withinBudget Normal 9 10 && not (withinBudget Normal 10 10))
+  check "instrumented allocation profile separates numeric limits" (withinBudget Instrumented 10 10 && withinBudget Instrumented 20 10)
   let b = newBuffer "hello\nworld"
       edited = replaceSelection (Selection 0 5) "λ" b
   check "selection replacement" (contents edited == "λ\nworld")

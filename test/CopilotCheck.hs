@@ -16,6 +16,7 @@ import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
 import System.Process (readProcessWithExitCode)
 import System.Exit (ExitCode(..))
+import System.Info (os)
 import qualified Hide.ACP as ACP
 import Hide.Copilot
 import Hide.InlineTypes
@@ -28,6 +29,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       input text version=CompletionInput "fixture" "propose" source text version (T.length text) 0 [] Null
   writeFile server fakeServer
   withCopilot launch root $ \client->do
+    check "process probe identifies the live provider" . (==Just True) =<< running (root </> "pid")
     alternatives<-completeCopilot client (input "a😀" 1)
     check "all valid alternatives survive with Unicode offsets" (map proposalText alternatives==["😀\nnext","other"] && all (\p->proposalStart p==2 && proposalEnd p==2) alternatives)
     first<-case alternatives of item:_->pure item; []->error "Missing Copilot alternative"
@@ -66,7 +68,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         check "partial feedback converts normalized CRLF and astral text to cumulative UTF16" (field "partial" value==Just (4::Int))
         check "accepted feedback invokes server command" (field "accepted" value==Just True)
         check "device flow finishes only on explicit call" (field "finished" value==Just True && field "signedOut" value==Just True)
-  check "process exits with owning scope" =<< notRunning (root </> "pid")
+  check "process exits with owning scope" . (==Just False) =<< running (root </> "pid")
   -- Malformed protocol is rejected without including any server payload.
   writeFile server "import sys\nsys.stdout.write('Content-Length: 999999999\\r\\n\\r\\nsecret');sys.stdout.flush()\n"
   failed<-try (withCopilot launch root (const (pure ())))::IO (Either IOException ())
@@ -74,16 +76,37 @@ checks=bracket temporary removePathForcibly $ \root->do
   writeFile server "import time,os\nopen('pid','w').write(str(os.getpid()))\nopen('initializing','w').close()\ntime.sleep(30)\n"
   blocked<-async (withCopilot launch root (const (pure ())))
   bounded "initialization process starts" (waitFile (root </> "initializing"))
+  check "process probe identifies initializing provider" . (==Just True) =<< running (root </> "pid")
   bounded "initialization cancellation joins process workers" (cancel blocked)
-  check "cancelled initialization leaves no process behind" =<< notRunning (root </> "pid")
+  check "cancelled initialization leaves no process behind" . (==Just False) =<< running (root </> "pid")
   putStrLn "Copilot checks passed"
 
-notRunning :: FilePath -> IO Bool
-notRunning file=do
+-- Inspection errors stay distinct from both live and exited processes.
+running :: FilePath -> IO (Maybe Bool)
+running file=do
   pid<-readFile file
   (code,_,_)<-readProcessWithExitCode "python3"
-    ["-c","import os,sys\ntry: os.kill(int(sys.argv[1]),0)\nexcept ProcessLookupError: sys.exit(0)\nsys.exit(1)",pid] ""
-  pure (code==ExitSuccess)
+    ["-c",if os=="mingw32" then windowsProcessProbe else
+      "import os,sys\ntry: os.kill(int(sys.argv[1]),0)\nexcept ProcessLookupError: sys.exit(1)\nexcept OSError: sys.exit(2)\nsys.exit(0)",pid] ""
+  pure $ case code of
+    ExitSuccess->Just True
+    ExitFailure 1->Just False
+    _->Nothing
+
+-- Windows os.kill(pid,0) terminates the process; inspect its handle instead.
+-- Return 0 for live, 1 for absent/exited, and 2 for inspection errors.
+windowsProcessProbe :: String
+windowsProcessProbe=unlines
+  [ "import ctypes,sys"
+  , "k=ctypes.WinDLL('kernel32',use_last_error=True)"
+  , "k.OpenProcess.restype=ctypes.c_void_p"
+  , "k.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_ulong]"
+  , "k.CloseHandle.argtypes=[ctypes.c_void_p]"
+  , "handle=k.OpenProcess(0x100000,False,int(sys.argv[1]))"
+  , "if not handle: sys.exit(1 if ctypes.get_last_error()==87 else 2)"
+  , "state=k.WaitForSingleObject(handle,0);k.CloseHandle(handle)"
+  , "sys.exit(1 if state==0 else (0 if state==258 else 2))"
+  ]
 
 field :: FromJSON a => T.Text -> Value -> Maybe a
 field name=parseMaybe (withObject "fixture" (\o->o .: K.fromText name))
