@@ -418,14 +418,15 @@ privateBrowserCell d dg x y=case purpose dg of
     privateFieldCell base (r,field) | Just (_,value)<-inputValue field=inside r x y && y==top r+1 && privateName base (T.unpack value)
     privateFieldCell base (r,FileList entries chosen)
       | not (inside r x y)=False
-      | y==top r+12=privateEntry chosen
-      | y==top r+11=case purpose dg of Opening _ pattern _ -> privateName base (T.unpack pattern); _ -> privateName base base
-      | y>=top r+2 && y<top r+10,x>left r,x<left r+cw+1=privateEntry (page+y-top r-2)
-      | y>=top r+2 && y<top r+10,x>left r+cw+1,x<left r+2*cw+2=privateEntry (page+8+y-top r-2)
+      | y==top r+height r-1=privateEntry chosen
+      | y==top r+height r-2=case purpose dg of Opening _ pattern _ -> privateName base (T.unpack pattern); _ -> privateName base base
+      | y>=top r+2 && y<top r+2+count,x>left r,x<left r+cw+1=privateEntry (page+y-top r-2)
+      | y>=top r+2 && y<top r+2+count,x>left r+cw+1,x<left r+2*cw+2=privateEntry (page+count+y-top r-2)
       | otherwise=False
       where
         cw=max 1 ((width r-3) `div` 2)
-        page=(max 0 chosen `div` 16)*16
+        count=fileListRows r
+        page=(max 0 chosen `div` (2*count))*(2*count)
         privateEntry index=maybe False (privateName base . T.unpack . entryName) (at entries index)
     privateFieldCell _ _=False
 

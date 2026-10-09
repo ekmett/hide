@@ -28,7 +28,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import Hide.GuestAccess (protectedPath,privateDialogField,readableAt,streamerReadableAt)
 import Hide.Model (Desktop(..), Dialog(..), Field(..), Purpose(..), Rect(..), problemsHeight, treeContentRows,
-  dialogRect,fieldRects,buttonRects,textAreaRect,openComboBox,comboBoxRect,inside,
+  dialogRect,fieldRects,fileListRows,buttonRects,textAreaRect,openComboBox,comboBoxRect,inside,
   Document(..),Window(..),activeWindow,windowFocused,bufferId,windowDocument,
   syntaxDocument,windowPresentation,windowTitle,windowContentRows,treeWidthOf,privateDocument)
 import Hide.BufferView (BufferView(..))
@@ -248,12 +248,12 @@ dialogSemantics audience desktop=case dialog desktop of
                     _->[]
               in container "combobox" (textValue (Rect x (y+1) (max 0 (w-2)) 1) 0 chosen) Nothing Nothing
                 (state (Rect x y w 1) (maybe False (const True) preview)) False options
-            FileList entries selected->let cw=max 1 ((w-3) `div` 2); start=max 0 selected `div` 16*16 in
+            FileList entries selected->let cw=max 1 ((w-3) `div` 2); count=fileListRows rect; start=max 0 selected `div` (2*count)*(2*count) in
               container "listbox" Nothing Nothing Nothing Nothing False
                 (concat [option False "option" index (index==selected) False
-                  (Rect (x+2+(offset `div` 8)*(cw+1)) (y+2+offset `mod` 8) (max 0 (cw-1)) 1)
+                  (Rect (x+2+(offset `div` count)*(cw+1)) (y+2+offset `mod` count) (max 0 (cw-1)) 1)
                   (entryName entry<>if entryDirectory entry then "/" else "")
-                  | (offset,(index,entry))<-zip [0::Int ..] (take 16 (drop start (zip [0::Int ..] entries)))])
+                  | (offset,(index,entry))<-zip [0::Int ..] (take (2*count) (drop start (zip [0::Int ..] entries)))])
       fullyReadable popupChild rect=case clip screen rect of
         Nothing->False
         Just (Rect x y w h)->and [visible popupChild cx cy | cy<-[y..y+h-1],cx<-[x..x+w-1]]

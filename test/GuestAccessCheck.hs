@@ -245,7 +245,7 @@ checksWithBody conversation=do
       browserDialog=maybe (error "missing browser") id (dialog browser)
       fileRect=case fieldRects browser browserDialog of _:r:_->r; _->error "missing browser list"
   check "private browser names and selected details share guest and Streamer masks"
-    (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+12)) && readableAt browser (left fileRect+2) (top fileRect+3))
+    (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+height fileRect-1)) && readableAt browser (left fileRect+2) (top fileRect+3))
   forM_ [Opening "/authority" "*" [],ChangingDirectory "/authority" []] $ \browserPurpose ->
     forM_ [Input "Name" "/authority/secret.hs" 0,SelectedInput "Name" "/authority/secret.hs" (Selection 0 20)] $ \nameField -> do
       let protectedNameDialog=Dialog "Browser" browserPurpose [nameField] 0 ["OK"] []

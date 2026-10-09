@@ -3,7 +3,7 @@ module ScreenCaptureCheck (checks) where
 
 import EditorFixture (withEditorBodyFixture)
 import Codec.Picture (Image, PixelRGB8(..), convertRGB8, decodePng, imageHeight, imageWidth, pixelAt)
-import Control.Monad (unless)
+import Control.Monad (unless,forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Base64 as B64
@@ -231,6 +231,13 @@ checksWithBody chatBase=do
   browserCapture<-takeCapture browser False
   let publicListing value=let output=fromMaybe "" (field "text" (textMetadata value)) in not ("secret-session" `T.isInfixOf` output) && "public.hs" `T.isInfixOf` output
   check "screen capture redacts private filenames in Files and Open while preserving ordinary names" (publicListing listingCapture && publicListing browserCapture)
+  forM_ [(80,25),(160,50)] $ \size->do
+    let entries=concat (replicate 45 [Entry "secret-session.json" False Nothing Nothing,Entry "public.hs" False Nothing Nothing])
+        chooser=openBrowser "/authority" "*" entries (initialDesktop size) {guestPrivatePaths=[privateFile]}
+        page=chooser {dialog=fmap (\dg->dg {fields=[Input "Name" "*" 1,FileList entries 42]}) (dialog chooser)}
+    captured<-takeCapture page False
+    check "resized picker masks both columns and selected details on later pages"
+      (publicListing captured && not ("secret-session" `T.isInfixOf` TE.decodeUtf8 (BL.toStrict (encode (field "semanticDialog" (textMetadata captured)::Maybe Value)))))
   let ordinary=addDocument Nothing (newBuffer "Session: public source example\nEnvironment: source content") (initialDesktop (80,25))
   ordinaryCapture<-takeCapture ordinary False
   check "screen redaction does not scan unrelated source text" (field "text" (textMetadata ordinaryCapture)==Just (snapshot ordinary))

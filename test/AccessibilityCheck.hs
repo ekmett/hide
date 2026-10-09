@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module AccessibilityCheck (checks) where
 
-import Control.Monad (unless)
+import Control.Monad (unless,forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as Key
@@ -237,6 +237,17 @@ dialogChecks=do
         [FileList [Entry "secret.txt" False Nothing Nothing] 0] 0 ["Open"] [])}
   check "file chooser option names inherit canonical protected-path masking"
     (not ("secret.txt" `BS.isInfixOf` BL.toStrict (encode (dialogSemantics GuestSemantics files))))
+  forM_ [(80,25),(160,50)] $ \size->do
+    let entries=[Entry (T.pack (show n)<>".hs") False Nothing Nothing | n<-[0..99::Int]]
+        chooser=openBrowser "/public" "*" entries (initialDesktop size)
+        page=chooser {dialog=fmap (\picker->picker {fields=[Input "Name" "*" 1,FileList entries 45]}) (dialog chooser)}
+        dg=fromMaybe (error "missing picker") (dialog page)
+        options=[item | item<-items (project page),field "role" item==Just ("option"::T.Text)]
+        agrees item=case field "bounds" item of
+          Just [x,y,_,_] | Just (_,index)<-fileEntryAt x y page dg -> field "name" item==Just (entryName (entries !! index))
+          _->False
+    check "resized picker accessibility options match hit testing on later pages"
+      (length options==2*fileListRows (fieldRects page dg !! 1) && all agrees options)
   let clipped=modal [Input "Offscreen" "OFFSCREEN-VALUE" 0,Input "Focused" "shown" 0] 1
       shifted=project clipped {screenSize=(30,8)}
   check "scrolled-off modal fields do not publish their values"
