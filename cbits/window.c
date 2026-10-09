@@ -974,6 +974,7 @@ static double wheel_delta(const SDL_Event *event) {
 static int delivered(const SDL_Event *event,int32_t *out) {
     Uint64 now=SDL_GetTicksNS(),stamp=event->common.timestamp;
     event_age=out[0]!=0 && stamp && now>=stamp?now-stamp:0;
+    if (out[0]==2 || (out[0]==1 && (out[1]==-12 || out[1]==-13))) thc_power_mode_burst();
     return 1;
 }
 static int idle_event(int32_t *out) {

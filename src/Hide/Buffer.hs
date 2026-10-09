@@ -17,7 +17,7 @@ module Hide.Buffer
   , BufferContent, bufferContent, contentLength, contentLineCount, contentByteMode
   , contentSlice, contentByteSlice, contentLineOffset, contentLineAt
   , SourceLine, contentSourceLineAt, contentSourceLinesFrom, sourceLineText, sourceLineRawText
-  , sourceLineLength, sourceLineHasChunks, sourceLineWidth, sourceLineExtentThrough, sourceLineDisplayColumn, sourceLineColumnOffset, sourceLineWindow
+  , sourceLineLength, sourceLineRawLength, sourceLineHasChunks, sourceLineWidth, sourceLineExtentThrough, sourceLineDisplayColumn, sourceLineColumnOffset, sourceLineWindow
   , sourceLineSlice, sourceLineSuffixWidth
   , newBuffer, newByteBuffer, bufferBytes, bufferByteStream, markSaved, toggleByteMode, replaceBuffer, textBuffer
   , DirtySnapshot, captureDirty, snapshotDirty
@@ -157,6 +157,10 @@ sourceLineHasChunks (ChunkedLine {})=True
 -- | Cached scalar extent of an editor row, excluding trailing CR/LF.
 sourceLineLength :: SourceLine -> Int
 sourceLineLength line=lineCharacters line-(lineFlags line `shiftR` 3)
+
+-- | Cached highlighting-row extent, excluding LF but retaining trailing CR.
+sourceLineRawLength :: SourceLine -> Int
+sourceLineRawLength line=lineCharacters line-if lineTerminated line then 1 else 0
 
 -- | Explicit editor-row text projection. Visible rendering uses leaf groups.
 sourceLineText :: SourceLine -> Text

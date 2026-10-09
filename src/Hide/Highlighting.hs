@@ -18,6 +18,7 @@ import qualified Data.Set as S
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector as V
+import qualified Data.Sequence as Seq
 import qualified Skylighting as Syntax
 import System.Mem.StableName
 import System.Timeout (timeout)
@@ -28,7 +29,7 @@ import Hide.Syntax (StyledText,SourceRow,sourceRowText,sourceRowRanges,sourceRan
 -- Stable identity distinguishes replacements/reloads with equal revisions.
 data Key = Key Int Int FilePath (StableName Buffer) deriving Eq
 data Request = Request Key Buffer
-type Result = V.Vector SourceRow
+type Result = Seq.Seq SourceRow
 data Work = Work [Request] (Maybe Key) (M.Map Int (Key,Maybe Result))
 newtype Highlighting = Highlighting (TVar Work)
 
@@ -69,7 +70,7 @@ withHighlightingUsing initialize tokenize action = do
           let text=contents buffer
           tokens<-tokenize path text
           let rows=sourceHighlightRows text tokens
-          _<-evaluate (V.foldl' (\() row->T.length (sourceRowText row) `seq` V.foldl' (\() range->sourceRangeByteEnd range `seq` sourceRangeStyle range `seq` ()) () (sourceRowRanges row)) () rows)
+          _<-evaluate (foldl' (\() row->T.length (sourceRowText row) `seq` V.foldl' (\() range->sourceRangeByteEnd range `seq` sourceRangeStyle range `seq` ()) () (sourceRowRanges row)) () rows)
           pure rows
       atomically $ do
         Work pending _ done<-readTVar state
@@ -96,7 +97,8 @@ tickHighlighting (Highlighting state) desktop = do
     let current=M.filterWithKey (\ident _->M.member ident (buffers desktop)) done
         pending=take 8 [r | r@(Request key@(Key ident _ _ _) _)<-requests,
           Just key/=running,maybe True ((/=key).fst) (M.lookup ident current)]
-    writeTVar state (Work pending running current)
+    let consumed=M.map (\(key,result)->(key,if any (\(Request requested _)->key==requested) requests then Nothing else result)) current
+    writeTVar state (Work pending running consumed)
     pure current
   pure desktop {buffers=foldl' (install ready) (buffers desktop) requests}
   where
@@ -111,6 +113,6 @@ tickHighlighting (Highlighting state) desktop = do
       pure (Request (Key ident (revision buffer) (documentSyntaxPath doc) identity) buffer)
     install ready docs (Request key@(Key ident _ _ _) _) = case M.lookup ident ready of
       Just (completed,Just rows)
-        | key==completed, Just doc<-M.lookup ident docs, Nothing<-documentSourceRows doc ->
+        | key==completed, Just doc<-M.lookup ident docs ->
             M.insert ident doc {documentSourceRows=Just rows} docs
       _ -> docs

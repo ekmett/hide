@@ -20,6 +20,7 @@ import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import qualified Data.Text.Encoding as TE
 import qualified Data.Map.Strict as M
+import qualified Data.Sequence as Seq
 import qualified Data.Vector as Vec
 import qualified Hide.Plugin.Window as PluginWindow
 import qualified Hide.Plugin.Canvas as Canvas
@@ -45,7 +46,7 @@ import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, splitDirectories, joinPath, normalise)
 import Hide.Browser (Entry(..))
 import Hide.Git (GitReview)
-import Hide.Syntax (Style(..), StyledText, StyledRow, styledText, styledContents, styledRows, splitStyledText, SourceRow, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
+import Hide.Syntax (Style(..), StyledText, StyledRow, styledText, styledContents, styledRows, splitStyledText, SourceRow, rebaseSourceRows, prepareSourceRow, highlightFor, linkSpans, styleLayoutMetadata)
 import Hide.Frontend (modeHeight)
 import Hide.Hex
 import Hide.Unicode (textInputChar)
@@ -66,7 +67,7 @@ inside (Rect x y w h) a b = a >= x && a < x+w && b >= y && b < y+h
 -- | Shared buffer and prepared presentation metadata; split windows reference its ID.
 -- documentOrigin retains canonical privacy provenance for generated source. It
 -- does not authorize saving, filesystem access or debugger source operations.
-data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: StyledText, documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Vec.Vector SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
+data Document = Document { documentBuffer :: Buffer, documentFile :: Maybe FileState, documentLabel :: Maybe Text, documentHighlight :: StyledText, documentHasLayoutMetadata :: !Bool, documentWidth :: Int, documentCursorVisible :: Bool, documentSuggestedName :: Maybe FilePath, documentSourceRows :: Maybe (Seq.Seq SourceRow), documentShellBlocks :: [(Int,Int,Text,Text)], documentLinks :: [(Int,Int,Text)], documentMarkdownPath :: Maybe FilePath, documentOrigin :: Maybe FilePath } deriving (Eq,Show)
 -- Source colors are populated by the session worker, never forced by input or drawing.
 newDocument :: Buffer -> Maybe FileState -> Document
 newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing Nothing [] [] Nothing Nothing)
@@ -74,6 +75,14 @@ newDocument b file = restyle (Document b file Nothing [] False 0 True Nothing No
 restyle :: Document -> Document
 restyle doc = doc {documentHighlight=[],documentHasLayoutMetadata=False,documentSourceRows=Nothing,documentShellBlocks=[],documentLinks=[],
   documentWidth=if byteMode (documentBuffer doc) then hexWidth 16 else documentWidth doc}
+
+-- | Preserve paint through a local edit while the syntax worker retokenizes.
+-- Row splices share the unaffected sequence; only changed rows need new ranges.
+editDocument :: Buffer -> Document -> Document
+editDocument changed doc=(restyle doc {documentBuffer=changed})
+  {documentSourceRows=if byteMode changed || byteMode original then Nothing else
+    rebaseSourceRows original changed <$> documentSourceRows doc}
+  where original=documentBuffer doc
 
 -- | Install prepared styling and its cached layout admission together. The
 -- owner replaces content/version before installing new styles; input and layout
@@ -102,9 +111,8 @@ indexedHighlightRows=Vec.fromList . styledRows
 
 -- | Preserve original source Text while retaining borrowed tokenizer run ranges.
 -- Prepare on the highlighting worker; Markdown keeps its semantic styled rows.
-sourceHighlightRows :: Text -> StyledText -> Vec.Vector SourceRow
-sourceHighlightRows text tokens=Vec.imap (\i row->prepareSourceRow row (fromMaybe [] (styles Vec.!? i))) (Vec.fromList (T.splitOn "\n" text))
-  where styles=Vec.fromList (map fst (splitStyledText tokens))
+sourceHighlightRows :: Text -> StyledText -> Seq.Seq SourceRow
+sourceHighlightRows text tokens=Seq.fromList (zipWith prepareSourceRow (T.splitOn "\n" text) (map fst (splitStyledText tokens)++repeat []))
 
 measureDocumentWidth :: Text -> Int
 measureDocumentWidth text=maximum (0:[displayColumn line (T.length line) | raw<-textLines text,let line=T.dropWhileEnd (=='\r') raw])
@@ -1025,7 +1033,7 @@ editActive f cursor d = case (activeWindow d, activeDocument d) of
   (Just _, Just doc) | documentLabel doc /= Nothing -> d {status="This window is read-only."}
   (Just active, Just doc)
     | Just _<-bufferId active, revision changed==revision original -> maybe (modifyActive (\w -> w {reviewSelection=Nothing}) d) (\p -> moveTo False p d) cursor
-    | Just bid<-bufferId active -> clampReviewWindows (ensureVisible d { buffers = M.insert bid (restyle doc {documentBuffer = changed}) (buffers d), windows = map adjust (windows d) })
+    | Just bid<-bufferId active -> clampReviewWindows (ensureVisible d { buffers = M.insert bid (editDocument changed doc) (buffers d), windows = map adjust (windows d) })
     where
       original = documentBuffer doc
       changed = f (selection active) original

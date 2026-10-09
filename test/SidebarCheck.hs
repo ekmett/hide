@@ -214,7 +214,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   check "Files primary action opens through a typed worker" (activeText opened=="main = 1\n")
   let changed=insertText "local " opened
   edited<-await (tickSidebar host applyEffects) (\d->maybe False (\(value,_,_)->value) (M.lookup (dir </> "Main.hs") (treeBadges (treeOf d)))) changed
-  check "Files cached badge preserves dirty counts" ("Main.hs +1 -1" `T.isInfixOf` snapshot edited)
+  check "Files cached badge shows compact insert/delete markers" ("Main.hs +-" `T.isInfixOf` snapshot edited)
   removeFile (dir </> "Main.hs")
   createDirectory (dir </> "Main.hs")
   reopened<-act host (activateTree False (atLabel "Main.hs" edited) edited)

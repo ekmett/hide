@@ -23,11 +23,12 @@ browse into it, or a file to open it.
 The list shows the file's size and local modification time.
 
 **Ctrl+B** (⌃B in the Mac window), or **Tools > File tree**, toggles the
-Files pane. Expand directories to browse their contents and open files from the tree. Drag the divider to make
-room for long names; adjacent windows follow it. Unsaved filenames appear in
-red and return to normal after saving or undoing the change. Their names and
-buffer window titles show green `+n` and red `-n` counts for lines added and
-removed since opening or the last save. Changing an existing line counts as
+Files pane. Expand directories to browse their contents and open files from the
+tree. Drag the divider to make room for long names; adjacent windows follow it.
+Unsaved filenames appear in red and return to normal after saving or undoing the
+change. Files shows a green `+` when there are inserted lines and a red `-` when
+there are deleted lines. Buffer window titles keep the green `+n` and red `-n`
+counts since opening or the last save. Changing an existing line counts as
 one removal and one addition. Split views share these counts; unnamed buffers
 show them in their titles too. Saving establishes a new baseline.
 
@@ -52,7 +53,8 @@ actions, including Debug and GHC Test/Benchmark, see
 
 Source entries follow Cabal declarations, including common stanzas and conditional
 source directories. A `?` marks conditional entries; multiple existing candidates
-expand into their paths. Generated, virtual and missing sources remain visible.
+expand into their paths. Generated, virtual and missing sources remain visible,
+but entries without an available file are gray.
 Opening a source reuses an existing buffer, preserving unsaved edits.
 
 Package descriptions refresh after changes on disk. Discovery currently covers

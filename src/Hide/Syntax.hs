@@ -5,7 +5,7 @@
 -- styles. A tokenizer result is accepted only when it preserves the original
 -- characters exactly. Link and bubble annotations remain in the styled stream
 -- so later layout can retain interaction metadata without reparsing text.
-module Hide.Syntax (Style(..), StyledText, styledText, styledContents, compactStyled, styledLength, splitStyledAt, splitStyledText, StyledRow(..), MappedStyledRow(..), styledRows, sigilsText, sigilsLength, sigilsColumn, styledColumn, styleRunStep, styleGlyphAdvance, sigilsStyles, mapSigilsStyle, Grapheme, graphemeText, graphemeDisplayText, graphemeWidth, graphemeOverflow, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, plainSourceRow, plainSourceLine, attachSourceLine, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
+module Hide.Syntax (Style(..), StyledText, styledText, styledContents, compactStyled, styledLength, splitStyledAt, splitStyledText, StyledRow(..), MappedStyledRow(..), styledRows, sigilsText, sigilsLength, sigilsColumn, styledColumn, styleRunStep, styleGlyphAdvance, sigilsStyles, mapSigilsStyle, Grapheme, graphemeText, graphemeDisplayText, graphemeWidth, graphemeOverflow, Sigils(..), sourceSigilsWindow, SourceRow, SourceRange, prepareSourceRow, rebaseSourceRows, plainSourceRow, plainSourceLine, attachSourceLine, sourceRowText, sourceRowRanges, sourceRangeCharStart, sourceRangeCharEnd, sourceRangeByteStart, sourceRangeByteEnd, sourceRangeStyle, sourceRangeText, sourceStylesAt, presentationItems, styleOverflowExtent, styleLayoutMetadata, styleScript, fontTraits, sectionTitle, highlight, highlightFor, bubbleTile, linkSpans) where
 
 import Data.List (intercalate)
 import qualified Data.List as List
@@ -14,9 +14,10 @@ import Data.Word (Word32)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Vector as V
+import qualified Data.Sequence as Seq
 import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,itemSourceText,itemDisplayText,itemWidth,sourceGraphemesFrom,sourceItemAdvance,sourceGlyphAdvance,displayItems,scalarWidth,initialSourceCursor,sourceItemStep,sourceSpanStep,sourceItemsFromCursor,Script)
 import Hide.LineChunks (joinAdjacent)
-import Hide.Buffer (SourceLine,sourceLineText,sourceLineRawText,sourceLineLength,sourceLineHasChunks,sourceLineWindow)
+import Hide.Buffer (Buffer,lastChange,bufferLineColumn,bufferContent,contentSourceLineAt,sourceLineSlice,SourceLine,sourceLineText,sourceLineRawText,sourceLineLength,sourceLineRawLength,sourceLineHasChunks,sourceLineWindow)
 import qualified Skylighting as S
 import System.FilePath (takeFileName)
 
@@ -222,10 +223,46 @@ sourceRowRanges row@(LiveSourceRow line Nothing)
 data SourceRange = SourceRange
   { sourceRangeCharStart :: {-# UNPACK #-} !Int
   , sourceRangeCharEnd :: {-# UNPACK #-} !Int
-  , sourceRangeByteStart :: {-# UNPACK #-} !Int
-  , sourceRangeByteEnd :: {-# UNPACK #-} !Int
+  , sourceRangeByteStart :: Int
+  , sourceRangeByteEnd :: Int
   , sourceRangeStyle :: !Style
   } deriving (Eq,Show)
+
+-- | Keep existing colors aligned through an edit, including line joins/splits.
+-- New text borrows its left-hand style until the worker supplies lexical colors.
+-- Byte coordinates are lazy: painting uses character ranges and the live line's
+-- measured seek, so an edit does not flatten an otherwise untouched long line.
+rebaseSourceRows :: Buffer -> Buffer -> Seq.Seq SourceRow -> Seq.Seq SourceRow
+rebaseSourceRows before after rows=case lastChange after of
+  Nothing->rows
+  Just (start,end,inserted)->
+    let (first,a)=bufferLineColumn before start
+        (lastOld,z)=bufferLineColumn before end
+        (lastNew,b)=bufferLineColumn after (start+inserted)
+        prefix=pieces first 0 a 0
+        suffix=pieces lastOld z maxBound (b-z)
+        inherited=case reverse prefix of (_,_,style):_->style; _->Plain
+        rebuild n=
+          let line=contentSourceLineAt (bufferContent after) n
+              len=sourceLineLength line
+              lo=if n==first then a else 0
+              hi=if n==lastNew then b else sourceLineRawLength line
+              paints=(if n==first then prefix else [])++[(lo,hi,inherited) | hi>lo]++
+                (if n==lastNew then suffix else [])
+              ranges _ []=[]
+              ranges byte ((x,y,style):rest)=
+                let next=byte+TU.lengthWord8 (sourceLineSlice line x (y-x))+max 0 (y-max x len)
+                in SourceRange x y byte next style:ranges next rest
+          in LiveSourceRow line (Just (V.fromList (ranges 0 (foldr join [] paints))))
+        changed=Seq.fromFunction (lastNew-first+1) (rebuild . (+first))
+    in Seq.take first rows Seq.>< changed Seq.>< Seq.drop (lastOld+1) rows
+  where
+    join (x,y,style) ((a,z,other):rest) | y==a && style==other=(x,z,style):rest
+    join part rest=part:rest
+    pieces n lo hi shift=case Seq.lookup n rows of
+      Nothing->[]
+      Just row->[(max lo (sourceRangeCharStart r)+shift,min hi (sourceRangeCharEnd r)+shift,sourceRangeStyle r)
+        | r<-V.toList (sourceRowRanges row),sourceRangeCharEnd r>lo,sourceRangeCharStart r<hi]
 
 -- | Prepare compact ranges for one physical row (LF already split by the
 -- owning worker; a trailing CR may remain). The source remains
