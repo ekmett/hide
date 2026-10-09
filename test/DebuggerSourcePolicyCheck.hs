@@ -4,7 +4,7 @@ module DebuggerSourcePolicyCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,poll,wait)
 import Control.Exception (bracket,finally)
-import Control.Monad (unless,void)
+import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe,Parser)
 import qualified Data.Text as T
@@ -17,11 +17,14 @@ import Hide.Model
 import qualified Data.Map.Strict as M
 import System.Directory (getTemporaryDirectory,removeFile,canonicalizePath)
 import System.IO (openTempFile,hClose)
+import System.FilePath ((</>),takeDirectory)
 import qualified Data.Text.IO as TIO
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
-import Hide.Files (FileState(..),loadFile)
+import Hide.Files (loadFile)
 #ifndef mingw32_HOST_OS
+import Control.Monad (void)
+import Hide.Files (FileState(..))
 import System.Posix.Files (createNamedPipe)
 import qualified System.Posix.IO.ByteString as PosixBytes
 import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock)
@@ -227,8 +230,9 @@ sourceHandleCheck=bracket (Fixture.fixture "mcp") Fixture.cleanup $ \(port,_,_)-
 
 originCheck :: IO ()
 originCheck=bracket temporary removeFile $ \path->do
-  let origin="/tmp/hide-authority/thc.toml"
-      base=(addReadOnly "Source private [9]" "unique private source" (initialDesktop (80,25))) {guestPrivatePaths=["/tmp/hide-authority"]}
+  let authority=takeDirectory path </> "hide-authority"
+      origin=authority </> "thc.toml"
+      base=(addReadOnly "Source private [9]" "unique private source" (initialDesktop (80,25))) {guestPrivatePaths=[authority]}
       guarded=base {buffers=M.map (\doc->doc {documentOrigin=Just origin}) (buffers base)}
       bid=maybe (error "missing source buffer") id (activeWindow guarded >>= bufferId)
       check label valid=unless valid (fail label)
@@ -239,7 +243,7 @@ originCheck=bracket temporary removeFile $ \path->do
   check "origin does not grant file/save authority" ((activeDocument guarded >>= documentFile)==Nothing)
   saved<-writeCheckpoint path guarded
   either (fail . show) pure saved
-  restored<-readCheckpoint path (initialDesktop (80,25)) {guestPrivatePaths=["/tmp/hide-authority"]} >>= either (fail . show) pure
+  restored<-readCheckpoint path (initialDesktop (80,25)) {guestPrivatePaths=[authority]} >>= either (fail . show) pure
   check "recovery preserves generated-source privacy association" ((activeDocument restored >>= documentOrigin)==Just origin && protectedBuffer restored bid && sanitizedBuffer restored bid==Nothing)
   putStrLn "generated source origin and recovery checks passed"
   where temporary=do root<-getTemporaryDirectory; (path,h)<-openTempFile root "hide-debug-origin"; hClose h; pure path

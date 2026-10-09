@@ -24,7 +24,6 @@ import Control.Monad (unless,forM,forM_,void,replicateM_)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as S
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath ((</>))
@@ -180,7 +179,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
     (same && ids result==ids mounted && not oldExists && bytes=="main = 1\n" && not (dirty (documentBuffer (doc result))))
   check "Files Rename preserves Undo and Redo history" (activeText (sourceCommand Redo result)=="xmain = 1\n")
   collision<-open "Renamedλ.hs" result
-  TIO.writeFile (dir </> "Taken.hs") "keep me"
+  BS.writeFile (dir </> "Taken.hs") "keep me"
   refusedCollision<-submit "Taken.hs" collision >>= refused
   untouched<-BS.readFile (dir </> "Taken.hs")
   check "Rename refuses an occupied destination" (path refusedCollision==Just renamed && untouched=="keep me")
@@ -194,11 +193,11 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   check "Rename refuses a source edited after its form opened" (not dirtyTarget && path refusedDirty==Just renamed && dirty (documentBuffer (doc refusedDirty)))
   clean<-pure (sourceCommand Undo refusedDirty)
   staleForm<-open "Renamedλ.hs" clean
-  TIO.writeFile renamed "external replacement\n"
+  BS.writeFile renamed "external replacement\n"
   refusedStale<-submit "Stale.hs" staleForm >>= refused
   staleTarget<-doesPathExist (dir </> "Stale.hs")
   check "Rename refuses a changed filesystem source" (not staleTarget && path refusedStale==Just renamed)
-  TIO.writeFile renamed "main = 1\n"
+  BS.writeFile renamed "main = 1\n"
   let oldPopup=popupFor "Renamedλ.hs" refusedStale
       (captured,effects)=chooseRename oldPopup
       collapsed=captured {sideTree=Just (collapseAt 0 (treeOf captured))}
@@ -215,13 +214,13 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   check "Files Rename preserves byte-mode files" (byteMode (documentBuffer (doc binaryResult)) && binaryBytes==BS.pack [0,255,13,10])
   cachedDestination<-act host (activateTree True (atLabel "archive" binaryResult) binaryResult) >>= settle host
   (moved,answer)<-fileTool (sidebarEffects host applyEffects) cachedDestination "workspace_files"
-    (object ["operation" .= ("rename"::T.Text),"path" .= (dir </> "bytes.dat"),"to" .= (dir </> "archive/bytes.dat")])
+    (object ["operation" .= ("rename"::T.Text),"path" .= (dir </> "bytes.dat"),"to" .= (dir </> "archive" </> "bytes.dat")])
   _<-answer >>= right
   refreshedMove<-settle host moved
   check "Cross-directory MCP rename refreshes both cached parent listings"
-    (path refreshedMove==Just (dir </> "archive/bytes.dat") &&
+    (path refreshedMove==Just (dir </> "archive" </> "bytes.dat") &&
       length [() | (_,row)<-visibleRows 0 32768 (treeOf refreshedMove),P.infoLabel (rowInfo row)=="bytes.dat"]==1 &&
-      any (\(_,row)->P.infoResource (rowInfo row)==Just (dir </> "archive/bytes.dat")) (visibleRows 0 32768 (treeOf refreshedMove)))
+      any (\(_,row)->P.infoResource (rowInfo row)==Just (dir </> "archive" </> "bytes.dat")) (visibleRows 0 32768 (treeOf refreshedMove)))
   lateForm<-open "Renamedλ.hs" refreshedMove
   late<-submit "Late.hs" lateForm
   let newer=sourceCommand Find (focusWindow (windowId (case windows mounted of window:_->window; []->error "rename source window missing")) late)
@@ -239,9 +238,9 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   fileRenameChecks
   bufferExportChecks
   createDirectory (dir </> "src")
-  TIO.writeFile (dir </> "Main.hs") "main = 1\n"
-  TIO.writeFile (dir </> "Readme.md") "# Documentation\n"
-  TIO.writeFile (dir </> "thc.toml") "private = true\n"
+  BS.writeFile (dir </> "Main.hs") "main = 1\n"
+  BS.writeFile (dir </> "Readme.md") "# Documentation\n"
+  BS.writeFile (dir </> "thc.toml") "private = true\n"
   initial<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) (initialDesktop (100,30)))
   check "Files is an ordinary first root in the shared tree" (P.infoLabel (rowInfo (maybe (error "root") id (rowAt 0 (treeOf initial))))=="Files")
   collapsed<-act host (handleEvent (V.EvKey V.KEnter []) initial)
@@ -263,7 +262,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
     >>= await (tickSidebar host applyEffects) (\d->not (treeFocused (treeOf d)) || "failed" `T.isInfixOf` status d)
   check "Opening an existing dirty file survives an unreadable disk replacement and preserves its live content" (activeText reopened=="local main = 1\n" && not (treeFocused (treeOf reopened)))
   removeDirectory (dir </> "Main.hs")
-  TIO.writeFile (dir </> "Main.hs") "main = 1\n"
+  BS.writeFile (dir </> "Main.hs") "main = 1\n"
   let privateIndex=atLabel "thc.toml" reopened
       privateTree=select privateIndex reopened
   (agentState,agentEffects)<-right =<< Wire.applyGuestInput (Wire.Key "Enter" []) privateTree
@@ -496,7 +495,7 @@ refresh :: SidebarHost -> FilePath -> Desktop -> IO ()
 refresh host dir d=withReconciliation $ \watcher->do
   let nested=dir </> "src"
       tick value=tickReconciliation watcher (sidebarEffects host applyEffects) value >>= tickSidebar host applyEffects
-  TIO.writeFile (nested </> "a.hs") "a"
+  BS.writeFile (nested </> "a.hs") "a"
   let src=select (atLabel "src" d) d
   guestExpansion<-Wire.applyGuestInput (Wire.Key "ArrowRight" []) src >>= right
   check "agent directory expansion carries its actual load origin"
@@ -505,7 +504,7 @@ refresh host dir d=withReconciliation $ \watcher->do
   let selected=select (atLabel "a.hs" opened) opened
       focused=selected {sideTree=Just (treeOf selected) {treeFocused=False}}
   subscribed<-tick focused
-  TIO.writeFile (nested </> "b.hs") "b"
+  BS.writeFile (nested </> "b.hs") "b"
   refreshed<-await tick (T.isInfixOf "b.hs" . snapshot) subscribed
   check "directory refresh preserves expansion selection and input owner" (not (treeFocused (treeOf refreshed)) && P.infoLabel (rowInfo (maybe (error "selected") id (rowAt (treeSelected (treeOf refreshed)) (treeOf refreshed))))=="a.hs")
   let branch=maybe (error "src row") id (rowAt (atLabel "src" refreshed) (treeOf refreshed))
@@ -631,7 +630,7 @@ recoveryPagingChecks=bracket temporary removePathForcibly $ \base->do
   createDirectory dir
   forM_ [0..129::Int] $ \n->createDirectory (dir </> name n)
   createDirectory (dir </> "d129" </> "inner")
-  writeFile target "main = pure ()\n"
+  BS.writeFile target "main = pure ()\n"
   recovered<-withSidebarCommands $ \host->do
     initial<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) blank)
     paged<-act host (activateTree False (atLabel "More…" initial) initial) >>= settle host

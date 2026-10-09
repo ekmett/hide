@@ -372,7 +372,7 @@ mcpChecks = bracket temporary removePathForcibly $ \root -> do
     (renamed,reply)<-finish tooling unchanged rename
     check "rename reports success without a dialog" (not (isLeft reply) && dialog renamed==Nothing)
     check "rename updates open and previously closed buffers" (textAt source renamed==Just "😀 bar = 1\n" && textAt other renamed==Just "bar = 2\n")
-    onDisk<-readFile source; otherDisk<-readFile other
+    onDisk<-readUtf8 source; otherDisk<-readUtf8 other
     check "rename never saves files" (onDisk==T.unpack disk && otherDisk=="foo = 2\n")
     (waitingOther,otherReply)<-held tooling renamed "hold_other"
     let editedOther=waitingOther {buffers=M.map (\doc -> if fmap filePath (documentFile doc)==Just other then doc {documentBuffer=replaceSelection (Selection 0 0) "x" (documentBuffer doc)} else doc) (buffers waitingOther)}
@@ -497,7 +497,7 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
     target<-case targets of one:_->pure one; _->error "Missing prepared closed-file buffer"
     result<-uncurry saveFile target
     check "save refuses a post-read external disk change" (isLeft result)
-    check "failed save preserves external bytes" . (=="external update\n") =<< readFile extra
+    check "failed save preserves external bytes" . (=="external update\n") =<< readUtf8 extra
     writeUtf8 extra "third = 3\n"
   withHeld $ \tooling held answer release->do
     withAsync answer $ \waiting->threadDelay 1000 >> cancel waiting
@@ -599,8 +599,8 @@ codeActionChecks = bracket temporary removePathForcibly $ \root -> do
     check "literal action edits both open and closed buffers" (not (isLeft done) && activeText fixed=="fixed = 2\n" && any ((=="😀 fixed = 1\n").contents.documentBuffer) (M.elems (buffers fixed)))
     (_,replayed)<-apply tooling live (ident "Fix source" offered)
     check "action handles are single use" (isLeft replayed)
-    check "code actions never save files" . (=="😀 foo = 1\n") =<< readFile source
-    check "closed-file action changes also remain unsaved" . (=="foo = 2\n") =<< readFile other
+    check "code actions never save files" . (=="😀 foo = 1\n") =<< readUtf8 source
+    check "closed-file action changes also remain unsaved" . (=="foo = 2\n") =<< readUtf8 other
     stale<-list tooling live
     (untouched,badRevision)<-apply tooling (insertText "x" live) (ident "Fix source" stale)
     check "action rejects a changed source even when caller supplies its new revision" (isLeft badRevision && activeText untouched==activeText (insertText "x" live))
@@ -646,7 +646,7 @@ codeActionChecks = bracket temporary removePathForcibly $ \root -> do
     privateActions<-list tooling protected
     (privateUnchanged,privateReply)<-apply tooling protected (ident "Private file" privateActions)
     check "actions cannot change a protected closed file" (isLeft privateReply && buffers privateUnchanged==buffers protected)
-    check "protected file stays unchanged" . (=="secret = 3\n") =<< readFile private
+    check "protected file stays unchanged" . (=="secret = 3\n") =<< readUtf8 private
     cancellationActions<-list tooling live
     (pending,cancelled)<-toolingTool tooling core live "lsp_apply_code_action" (applyArgs live (ident "Hold resolve" cancellationActions))
     ready<-awaitFile tooling pending (root </> "resolve.requested")
@@ -794,7 +794,7 @@ mcpServer = unlines
   , " if not line: break"
   , " n=int(line.split(b':')[1]); sys.stdin.buffer.readline(); msg=json.loads(sys.stdin.buffer.read(n)); method=msg.get('method'); params=msg.get('params') or {}"
   , " if method=='exit': break"
-  , " if method=='textDocument/didSave': pathlib.Path('saved.marker').write_text(docs[params['textDocument']['uri']])"
+  , " if method=='textDocument/didSave': pathlib.Path('saved.marker').write_bytes(docs[params['textDocument']['uri']].encode('utf-8'))"
   , " if method=='textDocument/didOpen': docs[params['textDocument']['uri']]=params['textDocument']['text']"
   , " if method=='textDocument/didChange': docs[params['textDocument']['uri']]=params['contentChanges'][0]['text']"
   , " if method=='textDocument/didOpen': send(dict(method='textDocument/publishDiagnostics',params=dict(uri=params['textDocument']['uri'],version=params['textDocument']['version'],diagnostics=[dict(range=dict(start=dict(line=0,character=3),end=dict(line=0,character=6)),message='fix me',severity=1)])))"
@@ -895,7 +895,7 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
     _<-right nextAnswer
     afterNext<-BS.readFile (root </> "last-executor")
     check "successful commands reuse the initialized HLS process" (afterNext==beforeNext && activeText nextAction=="bar = 1\n")
-    check "command does not save disk" . (=="foo = 1\n") =<< readFile source
+    check "command does not save disk" . (=="foo = 1\n") =<< readUtf8 source
     check "command edits retain undo" (activeText (fst (runCommand Undo normal))=="foo = 1\n")
     (twice,twiceReply)<-apply tooling base "twice"
     twiceResult<-right twiceReply
@@ -921,7 +921,7 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
       (partial,answer)<-apply tooling base title
       resultValue<-right answer
       check "failed command preserves and reports preceding edit" (activeText partial==expected && field "partial" resultValue==Just True && field "commandSucceeded" resultValue==Just False && field "appliedBatches" resultValue==Just (1::Int))
-      when (title=="literal-failed") $ check "server sees adopted literal edit before command starts" . (=="lit = 1\n") =<< readFile (root </> "execute-seen")
+      when (title=="literal-failed") $ check "server sees adopted literal edit before command starts" . (=="lit = 1\n") =<< readUtf8 (root </> "execute-seen")
     cleanMarkers
     listing<-list tooling base
     (held,answer)<-begin tooling base "held" listing
@@ -957,7 +957,7 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
     (fresh,done)<-finish tooling restarted nextReply
     _<-right done
     check "next command runs after cancellation settles" (activeText fresh=="bar = 1\n")
-    starts<-lines <$> readFile (root </> "started")
+    starts<-lines <$> readUtf8 (root </> "started")
     check "success, failure and settled cancellation retain one HLS process" (length starts==1)
     cleanMarkers
     cancelableListing<-list tooling fresh
@@ -980,7 +980,7 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
     retired<-timeout 4000000 (awaitRestart hung) >>= maybe (error "Unresponsive cancellation was not retired") pure
     (recovered,recoveredReply)<-apply tooling retired "normal"
     _<-right recoveredReply
-    recoveredStarts<-lines <$> readFile (root </> "started")
+    recoveredStarts<-lines <$> readUtf8 (root </> "started")
     check "only unresponsive cancellation restarts HLS" (length recoveredStarts==2 && activeText recovered=="bar = 1\n")
   where
     fromMaybeList Nothing=[]
@@ -1036,7 +1036,7 @@ commandServer = unlines
   ,"  send(dict(id=i,result=actions));continue"
   ," if m=='workspace/executeCommand':"
   ,"  mode,uri=p['arguments']"
-  ,"  pathlib.Path('execute-seen').write_text(docs[uri])"
+  ,"  pathlib.Path('execute-seen').write_bytes(docs[uri].encode('utf-8'))"
   ,"  pathlib.Path('last-executor').write_text(str(generation))"
   ,"  pathlib.Path('execute.json').write_text(json.dumps(p))"
   ,"  if mode.startswith('pipeline'):"
@@ -1084,3 +1084,6 @@ launchServer server = L.startClientWith "python3" ["-X", "utf8", server, "--lsp"
 
 writeUtf8 :: FilePath -> String -> IO ()
 writeUtf8 path = BS.writeFile path . TE.encodeUtf8 . T.pack
+
+readUtf8 :: FilePath -> IO String
+readUtf8 path = T.unpack . TE.decodeUtf8 <$> BS.readFile path

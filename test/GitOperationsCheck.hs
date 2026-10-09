@@ -49,7 +49,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
   commit upstream "initial"
   void (git base ["clone","-c","core.autocrlf=false","-c","core.symlinks=true",upstream,work])
   -- Background editor operations use repository identity, not this fixture's -c flags.
-  mapM_ (void . git work . ("config":))
+  mapM_ (void . git work . (["config","--replace-all"]++))
     [["user.name","Git Test"],["user.email","test@example.invalid"],["commit.gpgsign","false"],["core.autocrlf","false"],["core.symlinks","true"]]
   initial<-open (initialDesktop (100,30))
   (_,configured)<-core initial [RefreshGit work]

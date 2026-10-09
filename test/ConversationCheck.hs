@@ -14,7 +14,7 @@ import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 
-import Control.Concurrent.Async (Async, withAsync, poll, wait)
+import Control.Concurrent.Async (withAsync,wait)
 import Control.Exception (bracket, evaluate)
 import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson hiding (Number)
@@ -28,7 +28,6 @@ import qualified Data.Set as S
 import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (find,findIndex,mapAccumL)
-import Data.IORef (newIORef,writeIORef,readIORef)
 import GHC.Conc (getAllocationCounter)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -36,8 +35,11 @@ import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
-import System.IO (hClose, hFlush, openTempFile)
+import System.IO (hClose,openTempFile)
 #ifndef mingw32_HOST_OS
+import Control.Concurrent.Async (Async,poll)
+import Data.IORef (newIORef,writeIORef,readIORef)
+import System.IO (hFlush)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, isEmptyMVar)
 import System.Process (withCreateProcess, proc, CreateProcess(..), StdStream(..), waitForProcess)
 import System.Exit (ExitCode(..))

@@ -132,10 +132,11 @@ checks=withBufferDiffCommands $ \commands->do
       rejected "workspace_search" ["query" .= ("needle"::T.Text),"unexpected" .= True] initial
       rejected "workspace_search" ["query" .= ("needle"::T.Text),"limit" .= (1001::Int)] initial
       callProcess "git" ["-C",root,"init","--quiet"]
-      TIO.writeFile (root </> "tracked.hs") "disk needle\n"
-      TIO.writeFile (root </> "untracked.hs") "untracked needle\n"
-      TIO.writeFile (root </> ".gitignore") "ignored.hs\n"
-      TIO.writeFile (root </> "ignored.hs") "ignored needle\n"
+      callProcess "git" ["-C",root,"config","core.autocrlf","false"]
+      BS.writeFile (root </> "tracked.hs") "disk needle\n"
+      BS.writeFile (root </> "untracked.hs") "untracked needle\n"
+      BS.writeFile (root </> ".gitignore") "ignored.hs\n"
+      BS.writeFile (root </> "ignored.hs") "ignored needle\n"
       callProcess "git" ["-C",root,"add","tracked.hs",".gitignore"]
       trackedFile<-canonicalizePath (root </> "tracked.hs")
       let live=addDocument Nothing (newBuffer "untitled needle\n") (addDocument (Just (FileState trackedFile (Just "disk needle\n"))) (replaceBuffer False "live needle\n" (newBuffer "disk needle\n")) initial)
@@ -147,7 +148,7 @@ checks=withBufferDiffCommands $ \commands->do
       (_,page)<-success "workspace_search" ["query" .= ("needle"::T.Text),"offset" .= (1::Int),"limit" .= (1::Int)] live
       check "workspace search pages deterministic results" (length (texts page)==1 && (field "total" page::Maybe Int)==field "total" found)
       createDirectory (root </> "authority")
-      TIO.writeFile (root </> "authority/config.toml") "private needle\n"
+      BS.writeFile (root </> "authority/config.toml") "private needle\n"
       secretPath<-canonicalizePath (root </> "authority/config.toml")
       let protected=initial {guestPrivatePaths=[secretPath,root </> "future/session.json"]}
           privateLive=addDocument (Just (FileState secretPath (Just "private needle\n"))) (newBuffer "unsaved private needle\n") protected

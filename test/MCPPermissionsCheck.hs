@@ -4,11 +4,10 @@ module MCPPermissionsCheck (checks,policyResponsivenessChecks,policyWakeChecks,s
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import qualified Control.Concurrent.STM as STM
-import Control.Concurrent.MVar
 import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
 import Control.Concurrent.Async (concurrently, withAsync, poll, wait, async, cancel)
 import qualified Control.Concurrent.Async
-import Control.Exception (bracket, onException, catch, IOException, SomeAsyncException,fromException,throwIO)
+import Control.Exception (bracket, onException, SomeAsyncException,fromException,throwIO)
 import Control.Monad (foldM, unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -24,6 +23,8 @@ import System.FilePath ((</>))
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose,openTempFile)
 #ifndef mingw32_HOST_OS
+import Control.Concurrent.MVar
+import Control.Exception (catch,IOException)
 import System.Posix.Files (createNamedPipe)
 import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),OpenFileFlags(nonBlock),defaultFileFlags)
 #endif

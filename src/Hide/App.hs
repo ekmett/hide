@@ -34,9 +34,11 @@ import Hide.ClipboardMCP
 import Hide.Links (followLink)
 import Hide.Environment
 import Hide.ControlMCP
-import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
-import Control.Concurrent (myThreadId, throwTo, threadDelay)
+import Control.Exception (finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
+import Control.Concurrent (threadDelay)
 #ifndef mingw32_HOST_OS
+import Control.Concurrent (myThreadId,throwTo)
+import Control.Exception (bracket)
 import System.Posix.Signals (installHandler, Handler(Catch), sigTERM, sigHUP)
 #endif
 import Data.Aeson (Value(..), object, (.=), withObject, (.:), (.:?), (.!=))

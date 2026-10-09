@@ -221,7 +221,7 @@ checks profile = bracket temporary removePathForcibly $ \root -> do
       Right projectBuild<-B.buildPlan B.Make config root (Just file)
       projectStarted<-startBuildJob jobs "Make" root projectBuild initial
       projectBuilt<-await jobs projectStarted (finished jobs)
-      check "real Cabal project build" (status projectBuilt=="Make completed.")
+      check ("real Cabal project build: "++T.unpack (output projectBuilt)) (status projectBuilt=="Make completed.")
       Right projectRun<-B.buildPlan B.Run config root (Just file)
       projectRunning<-startBuildJob jobs "Run" root projectRun projectBuilt
       projectRan<-await jobs projectRunning (finished jobs)
