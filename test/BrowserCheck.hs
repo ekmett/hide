@@ -36,6 +36,10 @@ checks = do
     (resolved, entries) <- readDirectory (dir </> ".") "*.hs" >>= right
     canonical <- canonicalizePath dir
     check "listing returns canonical directory" (resolved == canonical)
+    let demo=App.demoDesktop {launchDirectory=canonical}
+        browsing=demo {sideTree=Just (emptySidebar (canonical </> "nested") 20 False)}
+    check "unnamed demo uses the absolute launch directory" (startingDirectory demo==canonical)
+    check "project directory overrides the launch fallback" (startingDirectory browsing==canonical </> "nested")
     check "directories precede case-insensitively sorted matching files"
       (map entryName entries == ["..", "linked", "nested", "Zoo", ".hidden.hs", "a.hs", "B.hs", "dangling.hs", "file λ.hs"])
     check "directory symlinks are browsable" (any (\e -> entryName e=="linked" && entryDirectory e) entries)
@@ -64,6 +68,8 @@ checks = do
     chosenPackage<-packageFile dir
     check "package entrypoint finds the Cabal file" (chosenPackage==Just package)
     (_,project)<-App.applyEffects (initialDesktop (80,25)) [ReadPath dir]
+    check "opened file directory overrides the launch fallback"
+      (startingDirectory project {sideTree=Nothing,launchDirectory=canonical </> "nested"}==canonical)
     check "opening a package directory opens its Cabal file and explorer"
       (fmap filePath (activeDocument project >>= documentFile)==Just package && isJust (sideTree project))
     let focusPath=canonical </> "a.hs"
