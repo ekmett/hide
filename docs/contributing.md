@@ -35,6 +35,49 @@ disk baselines or Undo. Equal numeric revisions do not authorize replacement.
 Human input remains a pure model transition; screen permission hints run on the
 capture worker and do not replace admission checks.
 
+## Test contract
+
+Tests are ordinary repeatable build targets. Running one must not require a clean
+checkout, an empty shared directory, a previous test, or a particular suite order.
+Running the same command again in the same checkout and build directory must work.
+Independent invocations must not overwrite each other's fixtures or results.
+
+Each test owns the mutable resources it creates: temporary directories, processes,
+sockets, configuration and output files. Use invocation-local locations and scoped
+lifetimes, and release them on success or failure. Read immutable fixtures in place.
+Do not delete a fixed directory or clear shared state before a run. A test of
+recovery, deletion or stale data creates that state explicitly inside its own
+fixture; it does not borrow leftovers from a previous run. If a process-global
+resource cannot be isolated, give it one explicit scoped owner that restores it
+and excludes overlapping use.
+
+Build prerequisites belong in the dependency graph. Generated fixtures and reports
+must have declared inputs and owned outputs; regenerating them must not require
+`make clean`, deleting old products or touching sources to force a rebuild. If
+cleanup makes a failure disappear, diagnose the missing dependency or lifetime.
+Disk housekeeping is separate from test correctness.
+
+Synchronize with the operation being tested: its reply, completion handle, or
+published result with the relevant identity. A mutable status line is presentation,
+not a completion signal. Do not clear status, wait for unrelated work to quieten,
+or use sleeps to establish ordering. Polling an identified result is fine; a
+timeout bounds a hang, it does not supply synchronization. If request order is part
+of the scenario, use explicit fixture barriers and exercise the relevant orders.
+A concurrent protocol fixture must accept every order the protocol allows.
+
+Keep checks at the owning operation. A refused stale form can be checked when it
+is refused; ticking unrelated owners until its status text happens to appear
+obscures the result. A completion test should inspect the completed operation,
+not whichever operation most recently wrote the HUD. Do not serialize production
+code to accommodate a fixture that assumes arrival order.
+
+When changing stateful tests, fixtures, runners or CI, review resource ownership,
+prerequisites and completion observation. Run the affected test alone, then repeat
+it without cleanup in the same checkout/build directory; record the commands and
+outcomes. Exercise relevant ordering or overlap with explicit controls where it
+matters. Reuse the existing suite and keep evidence proportionate. A full suite
+pass does not prove independence, and retries or a lucky schedule are not a fix.
+
 ## Source documentation
 
 Each `Hide.*` module starts with an overview of its role, ownership and notable
