@@ -213,6 +213,8 @@ control the editor.
 The completion conversation is hidden by default. Enable **Show completion chat** to inspect it beside Messages and terminals. In ACP mode you
 can type hints there—such as “keep this allocation-free”—and discuss intent with
 the same completion agent. **Enter** (Return on Mac) sends a hint; **Shift+Enter** (⇧Return) adds a newline.
+The draft stays in place until delivery succeeds. A failure keeps it available to
+edit or retry, and a late reply never clears newer typing.
 This draft is separate from your main conversation. Closing the transcript keeps
 the provider and hint draft; reopening restores the latest output. The transcript
 is a read-only window, separate from source buffers. Recovery retains its output

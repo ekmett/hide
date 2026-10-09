@@ -23,7 +23,7 @@ import Hide.RemoteEndpoint (randomIdentity)
 
 -- Owner metadata is bounded; immutable payloads are represented only by identities.
 data Owner = SourceOwner !Int !Int !BufferView !(Maybe ReviewSelection) !Bool !Bool
-  | EditorOwner !Int !Editor.EditorMount !Bool | QuestionOwner !Int !Int | AutocompleteOwner !Int
+  | EditorOwner !Int !Editor.EditorMount !Bool | QuestionOwner !Int !Int
   deriving Eq
 data Target = DialogTarget !(StableName Dialog)
   | BufferTarget !Owner !Selection !ContentVersion | TerminalTarget !Int !Text
@@ -84,9 +84,7 @@ captureTarget d
       _->pure Nothing
   | menu d/=Nothing || contextMenu d/=Nothing = pure Nothing
   | Just w<-activeWindow d,windowFocused d w =
-      if activeAutocomplete d then
-        if autocompleteFocused d then buffered (AutocompleteOwner (windowId w)) (autocompleteSelection d) (autocompleteDraft d) else pure Nothing
-      else if questionActive d then case chatQuestion d of
+      if questionActive d then case chatQuestion d of
         Just q->buffered (QuestionOwner (windowId w) (questionToken q)) (questionSelection q) (questionBuffer q)
         _->pure Nothing
       else case activeEditorMount d of
