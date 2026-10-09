@@ -92,16 +92,15 @@ sidebarRegistry (SidebarHost registry _ _ _ _ _)=registry
 -- | Public contribution capabilities reuse this host's ordered close-aware
 -- queue. The host retains all currentness, privacy and presentation decisions.
 sidebarCapabilities :: SidebarHost -> PluginSidebar.Sidebar SidebarContext SidebarReply
-sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm SidebarEditorWindow SidebarEditorUpdate
-  (publishTreeFromHost host) (publishFormRefreshFromHost host) (tryInvalidateTree host)
+sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm
+  (publishTreeFromHost host) (publishFormRefreshFromHost host) (invalidateTree host)
 
--- Nonblocking because metadata-owner ticks call this while input is serialized.
-tryInvalidateTree :: SidebarHost -> P.TreeRef -> P.NodeId -> IO Bool
-tryInvalidateTree (SidebarHost _ _ queue _ _ closed) owner node=atomically $ do
+-- A preparation worker publishes invalidation through the same bounded queue as
+-- a tree or form. Shutdown wakes a blocked publisher and rejects its retained hit.
+invalidateTree :: SidebarHost -> P.TreeRef -> P.NodeId -> IO ()
+invalidateTree (SidebarHost _ _ queue _ _ closed) owner node=atomically $ do
   stopped<-readTVar closed
-  if stopped then throwSTM (userError "Sidebar host closed.") else do
-    full<-isFullTBQueue queue
-    if full then pure False else writeTBQueue queue (TreeInvalidation owner node) >> pure True
+  if stopped then throwSTM (userError "Sidebar host closed.") else writeTBQueue queue (TreeInvalidation owner node)
 
 withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=PluginWindow.withWindowScope $ \scope->withRegistry $ \registry->bracket (acquire scope registry) close use

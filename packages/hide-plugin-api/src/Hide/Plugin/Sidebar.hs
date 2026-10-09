@@ -10,25 +10,21 @@
 -- no capability exposes a desktop or grants command authority.
 module Hide.Plugin.Sidebar (Sidebar(..)) where
 
-import Hide.Plugin.Editor (EditorUpdate)
-import Hide.Plugin.Window (EditorWindowUpdate)
 import Hide.Plugin.Form (PreparedForm,FormUpdate)
 import Hide.Plugin.Menu (MenuOrigin)
 import Hide.Plugin.Tree (TreeProvider,TreeRef,NodeId)
 
 -- | The host supplies its captured origin and closed reply projection.
--- Publications are ordered through its bounded queue and may block a worker.
--- 'tryInvalidateTree' must never block: False means the caller retains that
--- node for a later tick; a closed host rejects explicitly. Adopting an
+-- Publications, including invalidation, are ordered through its bounded queue
+-- and may block a worker; never publish from the UI owner. Closing the host wakes
+-- blocked publishers and rejects both waiting and later calls. Adopting an
 -- invalidation reuses the node's last admitted origin, never an invented human.
 -- Neither publication nor invalidation extends a retired registration lifetime.
 data Sidebar c r = Sidebar
   { sidebarOrigin :: c -> MenuOrigin
   , sidebarWorkspace :: c -> FilePath
   , formReply :: PreparedForm c r -> r
-  , editorWindowReply :: EditorWindowUpdate c r -> r
-  , editorUpdateReply :: EditorUpdate -> r
   , publishTree :: TreeProvider c r -> IO ()
   , publishFormRefresh :: FormUpdate -> IO ()
-  , tryInvalidateTree :: TreeRef -> NodeId -> IO Bool
+  , invalidateTree :: TreeRef -> NodeId -> IO ()
   }

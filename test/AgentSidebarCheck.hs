@@ -20,7 +20,8 @@ import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
 import Hide.Autocomplete (withAutocomplete,autocompleteEffects,tickAutocomplete)
 import Hide.MCPPermissions (readAutocompleteFor)
-import Hide.AgentSidebar
+import qualified Hide.AgentUI
+import qualified Hide.Plugin.Session as Plugin
 import qualified Hide.AgentDirectoryHost as AgentDirectory
 import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub as AH
@@ -57,14 +58,14 @@ checks=bracket temporary removePathForcibly $ \root->
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation->
-      withAutocomplete root $ \autocomplete->withAgentSidebar (sidebarCapabilities host) SidebarAgent (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) $ \agents->do
+      withAutocomplete root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
         createRequests<-newIORef []
         agentRequests<-newIORef []
         let core desktop effects=do
               modifyIORef' agentRequests (++[request | AgentSidebarAction request<-effects])
               modifyIORef' createRequests (++[(workspace,name,task) | AgentSidebarAction (CreateAgent workspace name task)<-effects])
               autocompleteEffects autocomplete (conversationEffects conversation applyEffects) desktop effects
-            tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= \current->tickAgentSidebar agents >> tickSidebar host core current
+            tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= tickSidebar host core
             act (d,effects)=snd <$> sidebarEffects host core d effects
             -- Refusal is synchronous at the form owner. A later settings reply
             -- may update the HUD; it cannot change whether this action dispatched.

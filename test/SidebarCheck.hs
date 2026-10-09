@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module SidebarCheck (checks) where
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync,wait,poll,waitCatch,asyncThreadId)
+import Control.Concurrent.Async (Async,withAsync,wait,waitCatch,asyncThreadId)
 import Data.IORef
 import Data.List (findIndex)
 import Data.Aeson (object,(.=),withObject,(.:))
@@ -399,44 +399,48 @@ publicationLifetimeChecks=withRegistry $ \registry->do
   check "publication fixture opens its exact form" admitted
   update<-Form.refreshForm (Form.formReference prepared) (Form.InputFormSpec "Refresh" "Name" "Ignored" "Rename") >>= right >>= maybe (error "missing refresh") pure
   hostReady<-newEmptyMVar
+  let invalidate host=PluginSidebar.invalidateTree (sidebarCapabilities host) (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
   withAsync (readMVar hostReady >>= \host->publishTreeFromHost host provider) $ \treeWriter->
-    withAsync (readMVar hostReady >>= \host->publishFormRefreshFromHost host update) $ \formWriter->do
-      escaped<-withSidebarCommands $ \host->do
-        let capabilities=sidebarCapabilities host
-        replicateM_ 32 (PluginSidebar.publishTree capabilities provider)
-        accepted<-PluginSidebar.tryInvalidateTree capabilities (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
-        check "full shared queue refuses invalidation without blocking the owner" (not accepted)
-        putMVar hostReady host
-        mapM_ blocked [treeWriter,formWriter]
-        pure host
-      mapM_ rejected [treeWriter,formWriter]
-      treeLate<-tryIOError (publishTreeFromHost escaped provider)
-      formLate<-tryIOError (PluginSidebar.publishFormRefresh (sidebarCapabilities escaped) update)
-      invalidationLate<-tryIOError (() <$ PluginSidebar.tryInvalidateTree (sidebarCapabilities escaped) (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider))))
-      check "closed host explicitly rejects late tree form and invalidation publications"
-        (closedError treeLate && closedError formLate && closedError invalidationLate)
-      let initial=installSidebar (emptySidebar "/" 24 True) (initialDesktop (100,30))
-      effectsLate<-tryIOError (sidebarEffects escaped (\_ _->error "closed host dispatched effects") initial [])
-      check "closed host rejects effect dispatch before mounting" (case effectsLate of Left err->closedError (Left err); Right _->False)
-      next<-tickSidebar escaped (\_ _->error "closed tick dispatched effects") initial
-      check "late tick cannot mount or resurrect queued providers" (null (treeRoots (treeOf next)) && M.null (treeNodes (treeOf next)))
+    withAsync (readMVar hostReady >>= \host->publishFormRefreshFromHost host update) $ \formWriter->
+      withAsync (readMVar hostReady >>= invalidate) $ \invalidationWriter->do
+        escaped<-withSidebarCommands $ \host->do
+          let capabilities=sidebarCapabilities host
+          replicateM_ 32 (PluginSidebar.publishTree capabilities provider)
+          putMVar hostReady host
+          mapM_ awaitPublicationBlock [treeWriter,formWriter,invalidationWriter]
+          pure host
+        mapM_ rejected [treeWriter,formWriter,invalidationWriter]
+        treeLate<-tryIOError (publishTreeFromHost escaped provider)
+        formLate<-tryIOError (PluginSidebar.publishFormRefresh (sidebarCapabilities escaped) update)
+        invalidationLate<-tryIOError (invalidate escaped)
+        check "closed host explicitly rejects late tree form and invalidation publications"
+          (closedError treeLate && closedError formLate && closedError invalidationLate)
+        let initial=installSidebar (emptySidebar "/" 24 True) (initialDesktop (100,30))
+        effectsLate<-tryIOError (sidebarEffects escaped (\_ _->error "closed host dispatched effects") initial [])
+        check "closed host rejects effect dispatch before mounting" (case effectsLate of Left err->closedError (Left err); Right _->False)
+        next<-tickSidebar escaped (\_ _->error "closed tick dispatched effects") initial
+        check "late tick cannot mount or resurrect queued providers" (null (treeRoots (treeOf next)) && M.null (treeNodes (treeOf next)))
   where
-    blocked worker=do
-      ready<-timeout 1000000 (awaitBlocked worker)
-      check "full publication queue blocks each producer in STM" (ready==Just ())
-    awaitBlocked worker=do
-      state<-threadStatus (asyncThreadId worker)
-      case state of
-        ThreadBlocked BlockedOnSTM->pure ()
-        ThreadFinished->error "publisher finished before host close"
-        ThreadDied->error "publisher failed before host close"
-        _->threadDelay 1000 >> awaitBlocked worker
     rejected worker=do
       result<-timeout 1000000 (waitCatch worker)
       check "host close resolves a saturated publisher with an explicit failure" (case result of Just (Left err)->maybe False (closedError . Left) (fromException err); _->False)
     closedError result=case result of
       Left err->isUserError err
       Right ()->False
+
+-- Observe the real producer's blocking state, not an elapsed scheduling delay.
+awaitPublicationBlock :: Async a -> IO ()
+awaitPublicationBlock worker=do
+  ready<-timeout 1000000 loop
+  check "full publication queue blocks each producer in STM" (ready==Just ())
+  where
+    loop=do
+      state<-threadStatus (asyncThreadId worker)
+      case state of
+        ThreadBlocked BlockedOnSTM->pure ()
+        ThreadFinished->error "publisher finished before queue drain"
+        ThreadDied->error "publisher failed before queue drain"
+        _->threadDelay 1000 >> loop
 
 independent :: SidebarHost -> Desktop -> IO ()
 independent host d=withRegistry $ \registry->do
@@ -582,9 +586,7 @@ edgeChecks dir=withSidebarCommands $ \host->do
     -- Only registration workers backpressure; owner ticks drain four deltas.
     replicateM_ 32 (publishTreeFromHost host provider)
     advanced<-withAsync (publishTreeFromHost host provider) $ \writer->do
-      threadDelay 20000
-      blocked<-poll writer
-      check "publication queue backpressures only its producer" (case blocked of Nothing->True; _->False)
+      awaitPublicationBlock writer
       next<-tickSidebar host applyEffects reshown
       resumed<-timeout 1000000 (wait writer)
       check "bounded owner drain releases publication producer" (case resumed of Just ()->True; _->False)

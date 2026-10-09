@@ -80,10 +80,11 @@ separate extension.
 
 ## Packaging and activation
 
-Start with ordinary Cabal packages linked into the editor executable. A small
-`hide-plugin-api` package would expose the public types without SDL, Ghostty or
-private `Hide.Model` constructors. A configured application chooses its packages
-at build time; TOML enables and configures the plugins that are present.
+Start with ordinary Cabal packages linked into the editor executable.
+`hide-plugin-api` exposes the command, form, menu, tree and session types without
+SDL, Ghostty or private `Hide.Model` constructors. The executable chooses linked
+plugins; see the current composition below. The broader manifest and TOML
+activation design remains a proposed extension:
 
 ```haskell
 data Plugin = Plugin
@@ -912,11 +913,20 @@ settings. Explicit completion-choice discovery may connect the configured provid
 and refresh its metadata, on its existing worker after human input admission.
 Settings and completion requests retain opaque receipts supplied by the host;
 the tree cannot reconstruct or reinterpret them. A metadata refresh cannot
-retarget an action, and the
-existing host command/receipt checks still admit its application. These are
-trusted linked-plugin capabilities, not an MCP endpoint or a grant of human
-input authority. Retiring the tree releases its registration and metadata worker
-without stopping providers. Conversation presentation and package-level UI
+retarget an action, and the existing host command/receipt checks still admit its
+application. These are trusted linked-plugin capabilities, not an MCP endpoint
+or a grant of human input authority. Retiring the tree releases its registration and metadata worker
+without stopping providers.
+
+The command, form, menu, tree and session contracts live in `hide-plugin-api`,
+without the editor's buffer or rendering dependencies. The real Agents tree is
+the linked `hide-agents` package. Its `Hide.AgentUI.plugin`
+uses `Hide.Plugin.Session` to scope registration and its metadata worker. The
+executable selects it with `Hide.App.main [Hide.AgentUI.plugin]`; the editor
+library does not import the plugin implementation. The metadata worker publishes
+invalidations to the same bounded, close-aware queue as trees and forms. No
+plugin callback runs on the UI tick. The host drains bounded deltas and owns
+input, geometry, forms and action admission. Conversation presentation and tool
 registration remain to be separated.
 
 `SessionServices` owns builds, compiler discovery, build settings and shared

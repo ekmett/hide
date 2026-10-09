@@ -19,7 +19,7 @@ import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Aeson
-import Hide.RemoteEndpoint (randomIdentity)
+import Hide.Plugin.Identity (randomIdentity)
 import Hide.Plugin.Command
 
 -- | Provider-local identity. It is distinct from labels and resource paths.

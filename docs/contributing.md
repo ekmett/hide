@@ -3,16 +3,25 @@
 Build the editor, run the checks and exercise the frontend affected by a change.
 The source stays separate from THC's compiler and runtime.
 
-The root Cabal project builds three linked packages. `hide` owns the editor;
+The root Cabal project builds five linked packages. `hide` owns the editor;
 `packages/hide-agent-api` contains the provider contract and typed directory API;
-`plugins/hide-acp` implements ACP transport and the provider adapter. The ACP
-package depends on the contract, not the editor or its frontend libraries.
+`packages/hide-plugin-api` owns scoped commands, forms, menus and tree contracts;
+`plugins/hide-acp` implements ACP transport and the provider adapter;
+`plugins/hide-agents` contributes the Agents tree through public plugin APIs.
+The executable selects linked UI plugins in `app/Main.hs`. The ACP package
+depends on the contract, not the editor or its frontend libraries.
 Ordinary `cabal build` and `cabal test` use the linked packages from this checkout.
 To build only ACP, without resolving the editor's native dependencies, use its
 smaller project:
 
 ```sh
 cabal build --project-dir=plugins/hide-acp all
+```
+
+The Agents tree also builds without the editor or native frontend dependencies:
+
+```sh
+cabal build --project-dir=plugins/hide-agents all
 ```
 
 ## Build and check
@@ -688,8 +697,9 @@ resource rows with unresolved hints, so another restart does not lose them.
 actual keyboard input, delayed/collapsed loads, paging, retirement, privacy and
 filesystem observation refresh. Other domain providers remain subsequent work.
 
-`Hide.AgentSidebar` consumes this tree for the Agents root. Its scoped typed actions
-return only closed `AgentSidebarRequest` values. After exact hit/lifetime/modal
+`Hide.AgentUI` in `hide-agents` consumes this tree for the Agents root. Its scoped
+actions return typed `DirectoryRequest` values with opaque host receipts. The host
+specializes these as `AgentSidebarRequest`. After exact hit/lifetime/modal
 validation, `tickSidebar` dispatches one `AgentSidebarAction` through the existing
 Conversation interpreter. Plugin handlers receive no Desktop or unrestricted
 effect-list callback. Conversation owns captured-ID views and one creation attempt; AgentHub owns
@@ -707,12 +717,14 @@ the deletion rechecks catalog identity and liveness under the daemon lifetime
 lock. Recovery rechecks checkpoint existence under that lock before publishing
 a daemon, so a pending recovery spawn cannot recreate a deleted session.
 
-A single metadata worker prepares only names, parent IDs and states from
-`agentSummaries`; tasks, histories, transcripts and private provider keys never
-enter its snapshot. Ticks compare the worker revision and invalidate at most four
-scoped nodes via `refreshTreeFromHost`, which reuses ordinary request generations,
-worker cancellation and page adoption. `SelectedInput` supplies a reusable
-single-line selected range; ordinary caret-only Input behavior is unchanged.
+A single metadata worker reads the public agent directory and compares its small
+snapshot of names, parent IDs, states and advertised-choice availability. Tasks,
+histories, transcripts and private provider keys never enter that snapshot. The
+worker publishes changed-node invalidations through the bounded sidebar queue;
+there is no plugin callback on the UI tick. The host drains at most four deltas
+per tick, reusing ordinary request generations, cancellation and page adoption.
+Closing the host wakes blocked publishers and rejects later publications.
+`SelectedInput` supplies a reusable single-line selected range; ordinary caret-only Input behavior is unchanged.
 
 ## Prepared plugin windows
 
