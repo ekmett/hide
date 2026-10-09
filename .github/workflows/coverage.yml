@@ -135,8 +135,11 @@ jobs:
         id: allocations
         env:
           # Tasty slash expressions are not MSYS filesystem paths.
-          MSYS2_ARG_CONV_EXCL: --test-option=--pattern=
-        run: cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -j2 -f-window -f-terminal --test-show-details=direct --test-option='--pattern=/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --test-option="--xml=$COVERAGE_RESULTS/allocation-tests.xml"
+          MSYS2_ARG_CONV_EXCL: --pattern=
+        run: |
+          test_exe=$(cabal list-bin editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal)
+          test_exe=${test_exe%$'\r'}
+          cabal exec --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal -- "$test_exe" --pattern='/BufferTree/ || /Build/ || /Conversation/ || /EditorMCP/ || /DialogMouse/ || /Highlighting/ || /LSP/ || /Protocol/ || /RemoteTerminal/ || /TypedBufferReads/ || /Unicode/ || /WorkerDiff/ || /Tooling/' --xml="$COVERAGE_RESULTS/allocation-tests.xml"
       - name: Run instrumented editor checks once
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         id: tests

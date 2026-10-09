@@ -899,7 +899,8 @@ commandChecks = bracket temporary removePathForcibly $ \root -> do
     check "command edits retain undo" (activeText (fst (runCommand Undo normal))=="foo = 1\n")
     (twice,twiceReply)<-apply tooling base "twice"
     twiceResult<-right twiceReply
-    check "second owned batch uses updated revision baseline" (activeText twice=="baz = 1\n" && field "appliedBatches" twiceResult==Just (2::Int))
+    check ("second owned batch uses updated revision baseline: "++show (activeText twice,twiceResult))
+      (activeText twice=="baz = 1\n" && field "appliedBatches" twiceResult==Just (2::Int))
     forM_ [("pipeline","baz = 1\n",True,True,2),("pipeline-drain","baz"<>T.replicate (256*1024) "x"<>" = 1\n",True,True,2),("pipeline-failed","baz = 1\n",False,False,2),("pipeline-invalid","bar = 1\n",False,True,1)] $ \(title,expected,success,commandSucceeded,batches)->do
       (pipelined,pipelineReply)<-apply tooling base title
       pipelineResult<-right pipelineReply
