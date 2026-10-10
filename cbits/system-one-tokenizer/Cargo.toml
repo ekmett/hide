@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+[package]
+name = "hide-system-one-tokenizer"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause OR Apache-2.0"
+
+[lib]
+name = "hidesystemonetokenizer"
+crate-type = ["staticlib"]
+
+[dependencies]
+# Python 0.23.3 uses this source's Rust 0.23.2 plus parity-aware-bpe.
+tokenizers = { git = "https://github.com/huggingface/tokenizers", rev = "301277072263fb3830eb66eec7e47adadf76f1dc", default-features = false, features = ["onig", "parity-aware-bpe"] }
+
+[profile.release]
+panic = "unwind"

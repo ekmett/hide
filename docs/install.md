@@ -235,6 +235,33 @@ Keep the installed Ghostty library available at runtime, or use your system's
 normal library installation path. A build with `-f-terminal` can still edit,
 use HLS, review Git changes and hold conversations.
 
+## Native Laya decisions
+
+The optional in-process System-1 provider uses ONNX Runtime CPU 1.30.0 and a
+small Rust tokenizer library. It does not add these dependencies to the default
+build. Obtain the ORT development bundle for your platform, then build the pinned
+tokenizer from this checkout using Rust 1.90 or newer:
+
+```sh
+cargo build --release --locked --manifest-path cbits/system-one-tokenizer/Cargo.toml
+cabal build exe:hide -fsystem-one-native \
+  --extra-include-dirs=/path/to/onnxruntime/include \
+  --extra-lib-dirs=/path/to/onnxruntime/lib \
+  --extra-lib-dirs="$PWD/cbits/system-one-tokenizer/target/release"
+```
+
+Keep the ORT shared library on the operating system's loader path when running
+hide. On Linux, for example, set `LD_LIBRARY_PATH` to the ORT library directory,
+or install that library in a standard location. The tokenizer is linked
+statically. The actual inference path has been exercised on Linux x86-64.
+
+Select the model through [System-1 configuration](configuration.md#system-1-decisions).
+The provider expects an acquired, split ONNX bundle containing `manifest.json`,
+`encoder.onnx`, `encoder.onnx.data`, `head.onnx`, `head.onnx.data`, `tokenizer.json`
+and `rl_agent_config.json`. The manifest identifies each payload by filename,
+byte size and SHA256; the configured SHA256 pins the manifest itself. No model
+is downloaded or loaded merely by building or launching the editor.
+
 ## Bash completion
 
 With current `thc` and the installed `thc-edit` launcher on your `PATH`, enable Bash completion with:

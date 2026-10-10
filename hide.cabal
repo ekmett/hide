@@ -9,6 +9,7 @@ license: BSD-2-Clause OR Apache-2.0
 license-files: LICENSE.md
 data-files: LICENSE.md, docs/site/screenshots/*.png, docs/*.md, docs/design/*.md, docs/plans/*.md, skills/debug-editor/SKILL.md, assets/web/*.html, assets/web/*.js, README.md, assets/fonts/*.hex, assets/fonts/*.txt, assets/fonts/README.md
 extra-source-files: assets/examples/*.png, assets/examples/*.md, cbits/shaders/*.h, cbits/shaders/*.hlsl, tools/build-cell-shaders.sh, tools/check-web-gpu.mjs, test/launchers.sh, bin/thc-edit, bin/th, bin/thc-edit.cmd, bin/th.cmd, tools/pkgconfig/pkg-config, docs/*.md, docs/design/*.md, docs/plans/*.md, cbits/remote.h, test/editor-session.py, test/daemon-session.py, test/interrupt-session.py, test/session-recovery.py, test/remote-browser.py, test/remote-session.py, tools/web-wire-trial.hs, test/web-wire.mjs, test/web-text-style.mjs, test/web-links.mjs, test/web-canvas.mjs, test/web-file-export.mjs, test/web-sidebar.mjs, test/web-keybindings.mjs, tools/web-bandwidth.hs, tools/web-bandwidth.py, assets/icons/*.svg, tools/convert-material-icons.py, cbits/window.h, cbits/file-drag-windows.h, test/native-file-drag-windows.c, cbits/accessibility.h, cbits/unicode.h, tools/convert-font.py, tools/check-native.sh, test/native-canvas.c, test/native-input.c, test/native-atlas.c, test/native-menu.m, test/native-accessibility.m, cbits/terminal.h, test/native-terminal.c, test/native-terminal.hs, test/HighlightBench.hs, test/HLSLive.hs, test/EditorLive.hs, test/dap-session.py
+  , cbits/system-one.h, cbits/system-one-tokenizer/Cargo.toml, cbits/system-one-tokenizer/Cargo.lock, cbits/system-one-tokenizer/src/lib.rs, cbits/system-one-tokenizer/include/system-one-tokenizer.h
   , test/power-mode.c, test/compiler-discovery-fixture.hs, tools/coverage.py
 
 flag window
@@ -31,6 +32,11 @@ flag terminal
   default: True
   manual: True
 
+flag system-one-native
+  description: Link the optional in-process Laya CPU decision provider
+  default: False
+  manual: True
+
 common settings
   default-language: GHC2021
   ghc-options: -Wall
@@ -45,7 +51,13 @@ library
   hs-source-dirs: src
   other-modules: Hide.ConversationBody, Hide.ConversationSessionTypes, Hide.Plugin.EditorHost, Hide.WorkspaceRename, Hide.LineChunks, Paths_hide, Hide.DownloadsWindow, Hide.DownloadsWindowTypes
   autogen-modules: Paths_hide
-  exposed-modules: Hide.SystemOne, Hide.SystemOneEndpoint, Hide.SystemOneConfig, Hide.Accessibility, Hide.RequestedPaste, Hide.SessionSidebar, Hide.SessionSidebarTypes, Hide.AgentSidebarTypes, Hide.AgentDirectoryHost, Hide.AgentServicesHost, Hide.BufferEdits, Hide.BufferReadAdmission, Hide.BufferReadServices, Hide.BufferRequest, Hide.BufferReads, Hide.Plugin.Editor, Hide.Plugin.Window, Hide.Plugin.Canvas, Hide.PluginWindowHost, Hide.Plugin.Buffer, Hide.Plugin.BufferHost, Hide.Sidebar, Hide.SidebarCommands, Hide.Documentation, Hide.Commands, Hide.Bindings, Hide.Keybindings, Hide.InlineState, Hide.AutocompleteConfig, Hide.Autocomplete, Hide.Copilot, Hide.AgentAccess, Hide.AgentRuntime, Hide.AgentHub, Hide.AgentWorkspace, Hide.FileExport, Hide.FileDragHelper, Hide.Process, Hide.Completion, Hide.Build, Hide.Compilers, Hide.Downloads, Hide.HdbAcquisition, Hide.CabalPlan, Hide.PackageSources, Hide.PackagePaths, Hide.PackageSidebar, Hide.ProjectBrowser, Hide.BuildJobs, Hide.TextPresentation, Hide.TextLayout, Hide.TextStyle, Hide.Protocol, Hide.Remote, Hide.RemoteWeb, Hide.FrameTiming, Hide.RemoteWindow, Hide.Web, Hide.Unicode, Hide.Buffer, Hide.BufferView, Hide.Syntax, Hide.Highlighting, Hide.Model, Hide.Render, Hide.FileIO, Hide.Files, Hide.App, Hide.Frontend, Hide.Window, Hide.Browser, Hide.Help, Hide.Git, Hide.GitOperations, Hide.LSP, Hide.Tooling, Hide.External, Hide.Reconcile, Hide.AgentFiles, Hide.Conversation, Hide.SessionServices, Hide.Markdown, Hide.Terminal, Hide.Consoles, Hide.DAP, Hide.Debugger, Hide.DebuggerSidebar, Hide.DebuggerSidebarTypes, Hide.Hex
+  exposed-modules: Hide.SystemOneNative, Hide.SystemOne, Hide.SystemOneEndpoint, Hide.SystemOneConfig, Hide.Accessibility, Hide.RequestedPaste, Hide.SessionSidebar, Hide.SessionSidebarTypes, Hide.AgentSidebarTypes, Hide.AgentDirectoryHost, Hide.AgentServicesHost, Hide.BufferEdits, Hide.BufferReadAdmission, Hide.BufferReadServices, Hide.BufferRequest, Hide.BufferReads, Hide.Plugin.Editor, Hide.Plugin.Window, Hide.Plugin.Canvas, Hide.PluginWindowHost, Hide.Plugin.Buffer, Hide.Plugin.BufferHost, Hide.Sidebar, Hide.SidebarCommands, Hide.Documentation, Hide.Commands, Hide.Bindings, Hide.Keybindings, Hide.InlineState, Hide.AutocompleteConfig, Hide.Autocomplete, Hide.Copilot, Hide.AgentAccess, Hide.AgentRuntime, Hide.AgentHub, Hide.AgentWorkspace, Hide.FileExport, Hide.FileDragHelper, Hide.Process, Hide.Completion, Hide.Build, Hide.Compilers, Hide.Downloads, Hide.HdbAcquisition, Hide.CabalPlan, Hide.PackageSources, Hide.PackagePaths, Hide.PackageSidebar, Hide.ProjectBrowser, Hide.BuildJobs, Hide.TextPresentation, Hide.TextLayout, Hide.TextStyle, Hide.Protocol, Hide.Remote, Hide.RemoteWeb, Hide.FrameTiming, Hide.RemoteWindow, Hide.Web, Hide.Unicode, Hide.Buffer, Hide.BufferView, Hide.Syntax, Hide.Highlighting, Hide.Model, Hide.Render, Hide.FileIO, Hide.Files, Hide.App, Hide.Frontend, Hide.Window, Hide.Browser, Hide.Help, Hide.Git, Hide.GitOperations, Hide.LSP, Hide.Tooling, Hide.External, Hide.Reconcile, Hide.AgentFiles, Hide.Conversation, Hide.SessionServices, Hide.Markdown, Hide.Terminal, Hide.Consoles, Hide.DAP, Hide.Debugger, Hide.DebuggerSidebar, Hide.DebuggerSidebarTypes, Hide.Hex
+  if flag(system-one-native)
+    cpp-options: -DWITH_SYSTEM_ONE_NATIVE
+    build-depends: cryptohash-sha256 >=0.11 && <0.12
+    c-sources: cbits/system-one.c
+    cc-options: -std=c11
+    extra-libraries: onnxruntime, hidesystemonetokenizer
   if flag(web)
     cpp-options: -DWITH_WEB
     other-modules: Hide.BrowserServer

@@ -499,15 +499,15 @@ cannot change these settings or complete their own authentication.
 
 ## System-1 decisions
 
-Plugins can submit small classification and ranking questions to a selected
-System One endpoint. This is separate from the conversational agent: it returns
+Plugins can submit small classification and ranking questions to in-process
+Laya or a selected System One endpoint. This is separate from the conversational agent: it returns
 probabilities, not edits or commands. The consumer decides what to do with them.
 
 Select the destination in the **global** configuration:
 
 ```toml
 [editor.systemOne]
-provider = "endpoint" # off or endpoint
+provider = "endpoint" # off, endpoint or laya
 endpoint = "http://127.0.0.1:8008/v1/systemone"
 model = "kev-latest"
 tokenEnv = "" # optional, e.g. SYSTEM_ONE_TOKEN
@@ -527,6 +527,26 @@ work has finished releasing its resources. Changing the supplier expires pending
 results; it never forwards their context to the replacement. State is limited to
 64 KiB of UTF-8, with 128 KiB across state, names and questions. Inputs that exceed
 a limit are refused rather than shortened.
+
+To keep inference in the editor process, build the optional
+[native Laya provider](install.md#native-laya-decisions) and select an immutable
+model bundle by its manifest digest:
+
+```toml
+[editor.systemOne]
+provider = "laya"
+bundle = "/absolute/path/to/laya-bundle"
+manifestSHA256 = "<64 lowercase hexadecimal characters>"
+allocationLimitBytes = 3221225472 # 3 GiB of tracked model/tensor allocations
+threads = 4 # 1..8
+```
+
+The first decision verifies the manifest and every payload before loading.
+The provider retains the tokenizer and model until selection changes or the
+session ends. The allocation envelope covers ORT model/tensor storage, not
+whole-process RSS. Unsupported or overlong token sequences are refused; input
+is never silently truncated. A build without native Laya reports that the
+provider is unavailable rather than sending its context elsewhere.
 
 An endpoint's model name is reported provenance, not proof of its weights.
 Probabilities and confidence retain the provider's meaning. A consumer must apply
