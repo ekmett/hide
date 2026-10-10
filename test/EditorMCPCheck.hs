@@ -101,6 +101,15 @@ checks profile = do
   textAllocatedAfter<-getAllocationCounter
   check "MCP bounded text read does not flatten a complete oversized row"
     (boundedText && withinBudget profile (textAllocatedBefore-textAllocatedAfter) 2000000)
+  selectionAllocatedBefore<-getAllocationCounter
+  boundedSelection<-evaluate (case builtinTool (modifyActive (\w->w {selection=Selection maxBound 0}) longDocument) "read_selection" (object []) of
+    Right (Object fields)->case KM.lookup "text" fields of
+      Just (String body)->T.length body==pageLimit && KM.lookup "truncated" fields==Just (Bool True)
+      _->False
+    _->False)
+  selectionAllocatedAfter<-getAllocationCounter
+  check "MCP bounded selection does not materialize the complete selected text"
+    (boundedSelection && withinBudget profile (selectionAllocatedBefore-selectionAllocatedAfter) 2000000)
   let pageCases=["", "λ😀\r\nsecond\r\n", T.replicate pageLimit "λ",
         T.replicate pageLimit "λ"<>"\r\n", T.replicate (pageLimit-1) "λ"<>"\r\n",
         T.replicate (pageLimit-1) "λ"<>"\r\n😀", T.replicate (pageLimit-2) "λ"<>"\n\n"]
@@ -114,7 +123,20 @@ checks profile = do
           && KM.lookup "truncated" fields==Just (Bool (T.length expected>pageLimit))
           && KM.lookup "lineCount" fields==Just (toJSON (length rows))
           && KM.lookup "totalLines" fields==Just (toJSON (length rows))
+        _->False)
+    check "MCP selection preserves direction, raw line endings and character bounds"
+      (case builtinTool (modifyActive (\w->w {selection=Selection maxBound minBound}) pageDocument) "read_selection" (object []) of
+        Right (Object fields)->KM.lookup "text" fields==Just (String (T.take pageLimit source))
+          && KM.lookup "truncated" fields==Just (Bool (T.length source>pageLimit))
+          && KM.lookup "anchor" fields==Just (toJSON (maxBound::Int))
+          && KM.lookup "caret" fields==Just (toJSON (minBound::Int))
+          && KM.lookup "coordinateSpace" fields==Just (String "source")
         _->False)) pageCases
+  let partial=modifyActive (\w->w {selection=Selection 3 1}) (addDocument Nothing (newBuffer "λ😀\r\nsecond") (initialDesktop (80,25)))
+  check "MCP selection slices Unicode character offsets rather than bytes"
+    (case builtinTool partial "read_selection" (object []) of
+      Right (Object fields)->KM.lookup "text" fields==Just (String "😀\r") && KM.lookup "truncated" fields==Just (Bool False)
+      _->False)
   let privateReview=addReadOnly "Agent request" "private-review-token" (initialDesktop (80,25))
   check "MCP private approval buffers refuse content reads" (case builtinTool privateReview "read_buffer" (object []) of Left _->True; _->False)
   check "MCP still lists non-secret internal buffer identifiers" (case builtinTool privateReview "list_buffers" (object []) of Right value->"bufferId" `T.isInfixOf` text value && not ("private-review-token" `T.isInfixOf` text value); _->False)

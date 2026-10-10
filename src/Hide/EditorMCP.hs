@@ -244,13 +244,19 @@ builtinTool desktop=tool
         (\ident -> maybe (Left "Window not found") Right (findWindow ident)) wanted
       doc <- maybe (Left "Buffer not found") Right (windowDocument (buffers desktop) w)
       unless (not (protectedWindow desktop w)) (Left "Selections from private conversation or approval buffers are unavailable.")
-      (range,text,space)<-if bufferView w==MarkdownView then case windowMarkdown desktop w of
+      (range,content,space)<-if bufferView w==MarkdownView then case windowMarkdown desktop w of
         Nothing->Left "Markdown view is still preparing."
-        Just (_,content,_)->let range=selection (displayWindow w); (a,z)=ordered range
-          in Right (range,contentSlice content a (z-a),"rendered-markdown"::T.Text)
-        else Right (selection w,selectedText (selection w) (documentBuffer doc),"source")
+        Just (_,rendered,_)->Right (selection (displayWindow w),rendered,"rendered-markdown"::T.Text)
+        else Right (selection w,bufferContent (documentBuffer doc),"source")
+      -- Clamp and cap using cached measures before materializing the selection.
+      -- Truncation depends on its extent, never a full selected-text traversal.
+      let clip=max 0 . min (contentLength content)
+          (a,z)=ordered range
+          start=clip a
+          count=clip z-start
+          text=contentSlice content start (min 131072 count)
       Right (object ["windowId" .= windowId w,"bufferId" .= bufferId w,"anchor" .= anchor range,
-        "caret" .= caret range,"coordinateSpace" .= space,"text" .= T.take 131072 text,"truncated" .= (T.length text>131072)])
+        "caret" .= caret range,"coordinateSpace" .= space,"text" .= text,"truncated" .= (count>131072)])
     tool _ _=Left "Unknown editor tool"
     parseArgs :: (Value -> Parser a) -> Value -> Either T.Text a
     parseArgs parser=either (Left . T.pack) Right . parseEither parser
