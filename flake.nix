@@ -1,5 +1,5 @@
 # SPDX-FileCopyrightText: 2026 Edward Kmett
-# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+# SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
 {
   description = "hide — Haskell IDE";
 
