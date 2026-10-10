@@ -188,8 +188,10 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                 stack_count += 1
                 rows = [dict(id=11, name='entry λ', line=2, column=1,
                              source=dict(name='Generated.hs', sourceReference=9))]
-                if mode == 'assist':
+                if mode.startswith('assist'):
                     rows[0]['line'] = 2 + assistance_steps
+                if mode == 'assist-history':
+                    rows[0]['source']['path'] = sys.argv[1] + ('.hs' if assistance_steps == 0 else '')
                 if mode.startswith('source-') or mode in ('watches-private', 'watches-child-policy'):
                     rows[0]['source']['path'] = sys.argv[1] + ('.changed.hs' if mode == 'source-stamp' and stack_count > 1 else '.hs')
                 if mode == 'local-source':
@@ -329,7 +331,7 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                     pending_variables = None
                 # The resulting threads request proves the preceding events were consumed.
                 event('thread', dict(reason='started', threadId=7))
-                if mode == 'assist' and cmd != 'continue':
+                if mode.startswith('assist') and cmd != 'continue':
                     assistance_steps += 1
                     event('stopped', dict(reason='step', threadId=7, allThreadsStopped=True))
             elif cmd == 'pause':

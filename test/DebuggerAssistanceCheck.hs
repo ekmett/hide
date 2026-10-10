@@ -27,6 +27,7 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
+import System.Directory (canonicalizePath)
 import qualified Hide.DebugAssistance as A
 import Hide.Buffer (newBuffer,contentSlice,contentLength)
 import qualified Hide.Plugin.Window as W
@@ -37,7 +38,7 @@ import Hide.Plugin.SystemOne
 import Hide.SystemOne
 
 checks :: IO ()
-checks=projectionPrivacyCheck >> stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck
+checks=projectionPrivacyCheck >> stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck >> historyPrivacyCheck
 
 -- Crop boundaries must not turn a complete known credential into a leaked
 -- prefix or suffix. Test the actual buffer/value projections used by the worker.
@@ -273,11 +274,47 @@ callerRetirementCheck=withSystemOne $ \owner->do
     _<-tool runtime finished "debug_control" ["generation" .= generationOf value,"command" .= ("disconnect"::T.Text)]
     pure ()
 
+-- Historical evidence retains its original source authority. Marking source A
+-- private after stepping to B must prevent A's locals/location entering another
+-- supplier request, even though B itself remains public.
+historyPrivacyCheck :: IO ()
+historyPrivacyCheck=withSystemOne $ \owner->do
+  decisions<-newIORef (0::Int)
+  let provider=DecisionProvider description $ \_ use->use (DecisionDriver $ \input _->do
+        modifyIORef' decisions (+1)
+        pure (Right (choose "next" input)))
+  void (selectDecisionProvider owner (Just provider) >>= right)
+  sessionWithMode "assist-history" withDebugger (systemOneServices owner) $ \runtime path initial->do
+    privateSource<-canonicalizePath (path<>".hs")
+    before<-state runtime initial
+    (started,accepted)<-tool runtime initial "debug_assist"
+      ["command" .= ("start"::T.Text),"generation" .= generationOf before,
+       "goal" .= ("Inspect the next source."::T.Text),"maxSteps" .= (2::Int)]
+    run<-runIdOf accepted
+    (atSecond,_)<-awaitState "second public source stop" runtime
+      (\s->pure ((assistance s >>= field "steps")==Just (1::Int) &&
+        (field "frame" s >>= field "source" >>= field "path")==Just path)) started
+    (finished,value)<-awaitState "historical source privacy admission" runtime
+      (\s->pure (sameRun run s && (assistance s >>= field "phase")==Just ("finished"::T.Text)))
+      (atSecond {guestPrivatePaths=privateSource:guestPrivatePaths atSecond})
+    calls<-readIORef decisions
+    check "a newly private historical source cannot reach a second decision" (calls==1 &&
+      (assistance value >>= field "reason")==Just ("observation-expired-or-private"::T.Text))
+    let retained=maybe [] id (assistance value >>= field "observations" :: Maybe [Value])
+    check "public status omits the now-private prior observation" (null retained)
+    commands<-requests path
+    check "historical privacy retirement sends only the original step" (length (filter isStep commands)==1)
+    _<-tool runtime finished "debug_control" ["generation" .= generationOf value,"command" .= ("disconnect"::T.Text)]
+    pure ()
+
 session :: SystemOneServices -> (Debugger -> FilePath -> Desktop -> IO a) -> IO a
 session=sessionWith withDebugger
 
 sessionWith :: ((Debugger -> IO a) -> IO a) -> SystemOneServices -> (Debugger -> FilePath -> Desktop -> IO a) -> IO a
-sessionWith scope services use=bracket (Fixture.fixture "assist") Fixture.cleanup $ \(port,path,_)->scope $ \runtime->
+sessionWith=sessionWithMode "assist"
+
+sessionWithMode :: String -> ((Debugger -> IO a) -> IO a) -> SystemOneServices -> (Debugger -> FilePath -> Desktop -> IO a) -> IO a
+sessionWithMode mode scope services use=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,path,_)->scope $ \runtime->
   withDebuggerSystemOne services runtime $ do
     (connecting,_)<-tool runtime (initialDesktop (100,35)) "debug_attach" ["port" .= (read port::Int)]
     (ready,_)<-awaitState "ready paused DAP frame" runtime
