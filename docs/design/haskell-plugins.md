@@ -23,9 +23,9 @@ input and acknowledged commands through the public API. ACP autocomplete also
 uses a contributed provider and private tool declarations. The remaining
 first-party migration covers primary/child ACP provider composition. Generic build, debug,
 LSP and editor operations can remain explicit permission-controlled host services.
-The sections below distinguish implemented APIs from proposed contracts;
-proposed signatures are design sketches, not compilable SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
-navigation model.
+The sections below describe the current contracts and separate further
+extensions from this delivery. The [sidebar design](../plans/sidebar-navigation.md)
+supplies the navigation model.
 
 **Agents > Rename** and **Files > Rename** use single-input forms. **New Agent**
 uses named Name and Task inputs. **Tools > Resume session** uses a private
@@ -126,222 +126,153 @@ separate extension.
 
 ## Packaging and activation
 
-Start with ordinary Cabal packages linked into the editor executable.
-`hide-plugin-api` exposes the command, form, menu, tree and session types without
-SDL, Ghostty or private `Hide.Model` constructors. The executable chooses linked
-plugins; see the current composition below. The broader manifest and TOML
-activation design remains a proposed extension:
+Plugins are ordinary Cabal packages linked into the executable. `app/Main.hs`
+selects `Hide.AgentUI.plugin`; `Hide.Plugin.Session.Plugin` describes its scoped
+activation, tools, conversation presentation and input/provider contributions.
+`Session c r settings completion receipt` supplies the host capabilities. Its
+context, reply and receipt parameters keep the private desktop and operation
+owners out of the plugin package.
 
-```haskell
-data Plugin = Plugin
-  { manifest :: Manifest
-  , activate :: PluginM ()
-  }
+`withPlugins` nests `withPlugin` scopes in declaration order and releases them in
+reverse order. Failure during a later activation unwinds earlier scopes. Each
+activation owns its registrations and metadata workers, while shared agent,
+terminal and debugger services retain their separate session lifetimes. There is
+no manifest solver, `PluginM` task runtime or dynamic loader.
 
--- PluginM carries this plugin instance's registration/resource scope.
--- The host creates and closes that scope; plugins do not create their own root.
-data Manifest = Manifest
-  { pluginId         :: PluginId
-  , pluginVersion    :: Version
-  , dependencies     :: [PluginDependency]
-  , configuration    :: ConfigSchema
-  }
-
-main :: IO ()
-main = runHide [filesPlugin, debuggerPlugin, agentsPlugin, myPlugin]
-```
-
-Dependencies here order activation of already-linked packages; this is not a
-second package solver. Duplicate IDs, missing dependencies and cycles are startup
-errors with the affected plugin named. Activation failures withdraw partial
-registrations and release acquired resources.
-
-Do not begin with GHC runtime linking, `hint`, downloaded object code or hot code
-unloading. Cabal/GHC check the linked build. Change the source API and its consumers
-together while the design develops; do not add compatibility negotiation for
-hypothetical older plugins. Runtime replacement can come later if it earns its
-complexity.
+The public packages depend on typed capabilities rather than SDL, Ghostty or
+private `Hide.Model` constructors. Buffer/window implementations still use the
+main library's measured content and widget owners. The first-party packages
+`hide-agents` and `hide-acp` demonstrate the separate-package boundary.
 
 Native Haskell plugins are trusted code. `IO`, FFI and shared process memory mean
-this is not a sandbox, even if a convenience API hides `liftIO`. Host policy still
-matters for attributed agent operations and accidental authority escalation; it
-cannot restrain a malicious installed plugin. Untrusted plugins would require a
-separate process and a different, narrower protocol.
+this is not a sandbox. Host policy protects attributed operations and prevents
+accidental authority escalation; it cannot restrain a malicious installed plugin.
+Untrusted plugins would require a separate process and a narrower protocol.
+
+Change the source API and its consumers together. Cabal/GHC check the linked
+build; there is no compatibility layer for hypothetical older plugins. Runtime
+loading, package discovery and hot code unloading need a concrete installation
+workflow before adding their complexity.
 
 ## Commands, menus and bindings
 
-A named command is the common route from keys, menus, tree nodes and tools into
-an operation. Use namespaced IDs such as `hide.debug.add-watch` or
-`example.outline.rebuild`; labels and shortcuts are not identities.
+A command has a namespaced ID, typed arguments/results and explicit wire codecs.
+Labels and shortcuts are presentation, not identities. `Hide.Plugin.Command`
+provides the registry and its scoped handles:
 
 ```haskell
-data Command a b                 -- opaque typed registered handle
-data CallContext                 -- opaque, host-issued invocation context
-data PluginError
-
-data CommandDef a b = CommandDef
-  { commandId       :: CommandId
-  , title           :: Text
-  , description     :: Text
-  , arguments       :: Codec a
-  , result          :: Codec b
-  , availability    :: ContextPredicate
-  , execute         :: CallContext -> a -> PluginM (Either PluginError b)
+data CommandDef context a b = CommandDef
+  { commandName   :: Text
+  , commandTitle  :: Text
+  , commandInput  :: Codec a
+  , commandOutput :: Codec b
+  , commandRun    :: context -> a -> IO (Either CommandError b)
   }
 
-registerCommand :: CommandDef a b -> PluginM (Command a b)
-invoke :: CallContext -> Command a b -> a -> PluginM (Task b)
+withRegistry :: (Registry context -> IO a) -> IO a
+registerCommand :: Registry context -> CommandDef context a b
+                -> IO (Either CommandError (Command context a b))
+invoke :: Registry context -> Command context a b -> context -> a
+       -> IO (Either CommandError b)
 ```
 
-Handlers run outside the desktop lock. Host operations within a handler may submit
-a short checked state transition; awaiting another command, IO or an approval
-never holds that lock. Awaiting one's own serialized task is rejected instead of
-deadlocking the dispatcher.
+`Codec` supplies the schema, decoder and encoder. An arbitrary `FromJSON`
+instance is not a schema. The host supplies invocation context; arguments cannot
+manufacture an actor or human approval.
 
-`TaskError` distinguishes command rejection (`PluginError`), cancellation and
-worker failure; `awaitTask` returns these without treating a denial as success.
+Registration and admission take a short registry lock. Codecs and handlers run
+outside it on the caller's worker. Retiring a command rejects future admission;
+work already admitted may finish. Delayed actions retain the original
+`CommandRef`, including its registry and generation, rather than resolving a
+reused name. Hosts recheck currentness before adopting a delayed reply.
+`invokeJSON` validates and forces the wire result on its worker. Typed `invoke`
+leaves successful values lazy, so their caller owns evaluation before publication.
 
-`ContextPredicate` is a small host-interpreted predicate over prepared context:
-focused view kind, text/byte buffer, selection, stopped debugger, provider ready,
-and so on. It is not arbitrary plugin IO invoked every time a menu is painted.
-Plugins may publish namespaced prepared facts for their own availability tests.
-Enablement is a UI hint, not authorization: execution checks the current state.
+Menus use `Hide.Plugin.Menu.MenuDef` and the session's `MenuPublisher`.
+A definition names its slot, group, order, label, binding and typed `MenuAction`.
+Entries sort by group, order and ID. Duplicate IDs and unknown slots are rejected.
+`mapMenu` projects captured immutable context and adapts replies on the worker;
+it retains the original command registration. Availability is a prepared host
+fact, never plugin IO during painting, and it does not replace authorization.
 
-Typed arguments stay typed inside Haskell. The explicit codec supplies validation
-and the external schema for configured actions or tool calls. Do not assume that
-an arbitrary `FromJSON` instance supplies an accurate JSON Schema.
+The host queues menu publications and retirements in order. Closing the scope
+releases blocked publishers with `MenusClosed`, refuses later publications and
+prevents late ticks from restoring retired entries. Plugin teardown withdraws
+its exact references before closing the registry.
 
-The following plugin-level signatures remain proposed, including binding
-registration. Implemented host menu APIs are documented in `Hide.Plugin.Menu`.
-Menus contribute entries to named slots and groups:
+Context menus capture the clicked window, buffer/version, position and selected
+range before dispatch. A choice acts on that captured target, not whichever file
+is later focused. Expensive enrichment and command execution stay off the UI
+owner. Human-only commands remain human-only through keys, menus and agent input.
 
-```haskell
-contributeMenu :: MenuSlot -> MenuContribution -> PluginM Registration
-bindDefault   :: BindingContext -> KeyChord -> Action -> PluginM Registration
-
--- Examples of slots: Menu "tools" / Group "agents", SourceContext,
--- WindowContext, and a particular sidebar root's context menu.
--- Action existentially packages a Command a b with validated arguments a.
-```
-
-The host combines contributions deterministically by group, order and ID. A plugin
-can add a named top-level menu, but cannot replace another plugin's entries by
-returning an entire menu. Duplicate IDs are rejected. Missing optional anchors
-fall back to the declared group with a diagnostic, not a disappearing command.
-
-The session menu host queues prepared publications and retirements in order.
-Closing it releases blocked publishers with `MenusClosed`; retirement requests
-fail with an `IOError`. Late ticks cannot restore the closed host's contributions.
-
-A context-menu contribution receives a frozen, bounded hit context: window and
-buffer identities, source revision, clicked position and any selected range.
-Its action retains those identities. It must not rediscover whichever file is
-focused when the user eventually chooses the item. Expensive context enrichment
-runs separately; opening a menu does not start an HLS request synchronously.
-
-Runtime menu-contributed typed actions can be bound by their published IDs,
-alongside built-in commands. The proposed plugin `bindDefault` API is not yet
-implemented. Use the implemented
-[keybinding schema](../configuration.md#keybindings) for current platform/context
-tables and command IDs. Defaults are overridden by TOML; an empty binding list
-unbinds a named command.
-Menus, help/status hints and native macOS menus show the effective binding, using
-the frontend's notation. Native menu events use command IDs with a registry epoch,
-not positions in a compiled list. A stale event cannot invoke a newly reused item.
+Runtime menu commands can be bound by their published IDs alongside builtins.
+The [keybinding schema](../configuration.md#keybindings) supplies platform/context
+tables and user overrides; an empty binding list unbinds a command. Menus,
+help/status hints and native macOS menus show the effective binding in the
+frontend's notation. Native menu events include a registry epoch, so a stale
+event cannot invoke a newly reused item. There is no separate plugin binding
+registration API.
 
 ## Buffers and checked edits
 
-Expose buffer references and read snapshots, not `Buffer` constructors,
-`Desktop -> Desktop` functions or direct writes to an `IORef Desktop`.
+`Hide.Plugin.Buffer` exposes session-bound references, immutable reads and checked
+diffs. Plugins do not receive `Buffer` constructors, `Desktop -> Desktop`
+callbacks or a mutable desktop reference.
 
 ```haskell
-data BufferRef                   -- includes session/instance identity
-data BufferRead                  -- immutable content reference, no Eq or Show
-
-data ContentVersion              -- opaque host-issued identity, not just an Int
-newtype CharOffset = CharOffset Int
-newtype ByteOffset = ByteOffset Int
-newtype LineNumber = LineNumber Int   -- zero based
-
-data TextRange = TextRange CharOffset CharOffset  -- half open
-
-data BufferInfo = BufferInfo
-  { bufferRef      :: BufferRef
-  , contentVersion :: ContentVersion
-  , displayName    :: Text
-  , path           :: Maybe FilePath
-  , representation :: BufferRepresentation
-  , dirty          :: Bool
-  , lineCount      :: Int
-  , addedLines     :: Int
-  , deletedLines   :: Int
-  }
-
-listBuffers   :: CallContext -> PluginM [BufferInfo]
-captureBuffer :: CallContext -> BufferRef -> PluginM (Either PluginError BufferRead)
-readLines     :: BufferRead -> LineNumber -> Int -> Either RangeError Text
-readText      :: BufferRead -> TextRange -> Either RangeError Text
-readBytes     :: BufferRead -> ByteRange -> Either RangeError ByteString
-
-prepareEdits  :: BufferRead -> [TextEdit] -> Either EditError PreparedEdit
-commitEdits   :: CallContext -> UndoLabel -> NonEmpty PreparedEdit
-              -> PluginM (Either CommitError CommitReceipt)
+listBuffers :: BufferReader -> IO (Either Text [ListedBuffer])
+captureBuffer :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)
+readLines :: BufferRead -> LineNumber -> Int -> Either RangeError Text
+readText :: BufferRead -> TextRange -> Either RangeError Text
+readBytes :: BufferRead -> ByteRange -> Either RangeError ByteString
+applyBufferDiffs :: BufferEditor -> [BufferDiff]
+                 -> IO (Either Text [DiffResult])
 ```
 
-`ByteRange`, `TextEdit`, `BufferRepresentation` and the error types are ordinary
-validated data types, omitted from this sketch. A snapshot exposes its version
-and metadata through accessors. Text APIs reject byte buffers; byte APIs use byte
-offsets. Text offsets and line columns count Unicode characters, not UTF-8 bytes,
-UTF-16 units or display cells. Host helpers handle grapheme-aware movement and
-LSP conversion so plugins need not invent coordinate conversions.
+Listing returns shallow metadata and opaque references under the existing
+Permissions owner. It grants no content authority and retains no source image or
+Undo. A `CapturedRead` exposes its reference, exact `ContentVersion`, metadata,
+redaction state and immutable `BufferRead`. Capture retains measured tree content
+without flattening it or retaining separate saved/Undo roots. Deleted provenance
+leaves can remain in the tree but are invisible to live reads.
 
-Capturing `BufferRead` retains immutable tree content and its version without
-flattening it. It is **not** today's `Hide.Buffer.BufferSnapshot`, which is a
-recovery representation containing flattened saved text and histories. Capturing
-content should not implicitly retain Undo. Numeric edit revision alone is not
-sufficient: reload/replacement with the same number must invalidate an old edit.
+Offsets and line numbers are zero-based. Text offsets count Unicode characters,
+not UTF-8 bytes, UTF-16 units or display cells. `TextRange` and `ByteRange` are
+half-open; wrong representations and invalid ranges are errors. These APIs do
+not silently clamp. Immutable reads remain stable after later edits or closure;
+revocation cannot erase a snapshot already granted to trusted code. Agent-facing
+publication still rechecks privacy at its owning boundary.
 
-The implemented `Hide.Plugin.Buffer.listBuffers` discovers opaque session-bound
-references and shallow metadata through the existing reader and Permissions
-owner. It preserves the current `list_buffers` metadata mask, confers no capture
-authority and retains no source image or Undo. The actual MCP listing consumes
-that typed service on its reply worker. Linked callers submit atomic edits with
-`applyBufferDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])`.
-Each `BufferDiff` carries a session reference, exact captured version and strict
-unified diff. The batch is bounded to 1–16 distinct open text buffers and 1 MiB
-characters of patches. One permission ticket covers all targets; Prompt shows an
-editable diff for each. Every source and review version must still match before
-one atomic commit. Results follow input order, each changed buffer gets ordinary
-Undo, and nothing is saved. `applyBufferDiff` is its singleton case. Generic
-plugin activation/subscriptions and the arbitrary prepared-edit API sketched
-above remain proposed.
+Measured reads use cached tree summaries and splits. `lineRange` finds a row's
+absolute character range, excluding its trailing CR/LF, without flattening it.
+The `read_buffer` and `read_window` formatters use bounded `readText` slices to
+apply their 131072-character response cap before copying an oversized row.
+Large reads and their evaluation belong on a worker, never on the UI owner.
 
-Measured line/range reads share the existing finger-tree machinery. The public
-`lineRange` query locates a row's absolute character range from cached measures,
-excluding its trailing CR/LF, without flattening the row. The shared `read_buffer`
-and `read_window` text formatter uses those ranges and bounded `readText` slices
-to enforce its 131072-character response cap before copying oversized rows;
-page metadata still describes the requested available rows. Whole-buffer
-reads are explicit worker operations. Reads from a retained snapshot remain
-stable; they are not live views that change underneath a parser.
+Each `BufferDiff` contains a reference, exact captured version and strict unified
+diff. `applyBufferDiffs` accepts 1–16 distinct open text buffers and at most 1 MiB
+characters of patch text. One permission ticket covers the batch; Prompt shows
+an editable diff for each target. Every source and review version must still
+match before one atomic in-session commit. Equal numeric revisions from a
+replacement buffer do not match an old `ContentVersion`.
 
-Preparation validates nonoverlapping ranges and builds replacement trees on a
-worker. Commit checks every buffer's current version and authority, then installs
-all prepared changes atomically within **one editor session**. Failure identifies
-stale/closed/private targets and installs none. It is not an atomic filesystem
-transaction or a cross-session transaction. Each changed buffer gets one ordinary
-undo entry with common operation attribution; coordinated workspace undo would
-be a separate feature. Saving remains an explicit checked file operation.
+Failure installs nothing. Success returns results in input order, including the
+applied patch and `userModified`; each changed buffer gets ordinary Undo. Nothing
+is saved, fuzzily matched or silently rebased. `applyBufferDiff` is the singleton
+operation. Saving and cross-session transactions are separate operations.
+Selection movement does not invalidate a content-only edit; autocomplete also
+checks its originating caret and view.
 
-Return a stale result rather than silently rebasing an AI edit. A plugin can
-capture again and deliberately recompute. Selection-only movement should not
-invalidate a content-only operation, while a completion request can additionally
-guard its originating caret/view.
+The separate `hide-plugin-api` package exposes bounded tool-facing operations:
+`BufferReadServices` for listing and pages, `BufferDiffServices` for the exact
+admitted diff, and `WindowReadServices` for a captured prepared body. They travel
+through `RequestServices`; retaining a numeric window or buffer ID does not grant
+another capture or edit. `hide-agents` consumes these services without depending
+on the main library's buffer implementation.
 
-Subscriptions report buffer IDs, new versions and compact change ranges. They do
-not broadcast full text. Host services also expose open, save, close, decorations,
-selection and navigation with the same attribution and version rules. Decorations
-are scoped overlays, not edits, and carry a source version or host-managed anchor.
+These services do not provide arbitrary prepared edits, a general buffer event
+bus or mutable decorations. Add such operations for a concrete consumer, with the
+same authority and lifetime rules.
 
 ## Custom windows
 
@@ -476,75 +407,24 @@ input offscreen. Editing an answer does not rebuild Markdown history; submission
 and approval remain host-owned. Transient question coordinates and capabilities
 are excluded from recovery.
 
-### Broader proposed window contract
+### Further window types
 
-Separate a window's content from its chrome. The host supplies the title, number,
-frame, focus, drag/resize/docking, scrollbars and close negotiation. A content view
-need not have a fake source buffer merely to acquire a window ID.
+The current extension points are prepared text/Markdown, rows, semantic text,
+retained images and host-owned embedded editors. `withWindowScope`, `openWindow`
+and `refreshWindow` publish prepared content through the existing window owner.
+A refresh carries the exact window reference and generation. The host owns
+geometry, focus, scrolling, selection, close handling and widget drafts.
 
-```haskell
-data WindowType args
-data WindowRef
+A broader layout grammar or arbitrary plugin reducer is separate work. It should
+reuse these owners rather than put plugin callbacks in painting or adoption.
+Prepared output needs an explicit identity/revision; comparing a whole plugin
+state, desktop or buffer history is not a redraw strategy. Pure code can still
+be expensive and must be evaluated on its preparation worker.
 
-data WindowDef args state msg = WindowDef
-  { windowTypeId :: WindowTypeId
-  , openArgs     :: Codec args
-  , traits       :: WindowTraits
-  , initialise   :: CallContext -> args -> PluginM state
-  , update       :: WindowEvent msg -> state -> Transition state msg
-  , present      :: state -> View msg
-  , persist      :: Maybe (Persistence state)
-  }
-
-registerWindow :: WindowDef args state msg -> PluginM (WindowType args)
-openWindow :: CallContext -> WindowType args -> args -> OpenPlacement
-           -> PluginM (Either PluginError WindowRef)
-```
-
-`WindowTraits` declares minimum cell dimensions, allowed docking edges and the
-close behavior. Presentation supplies the current title and status actions; the
-host remains responsible for their geometry.
-
-A `Transition` contains new state and scoped task requests. Task completion
-produces another message. Neither `update` nor `present` performs IO, and no
-`Eq state` constraint is required. The owner explicitly marks its changed
-presentation revision. User-created windows normally focus; background plugin or
-agent work opens hidden unless presentation is explicitly requested.
-
-Run plugin reducers and presentation preparation in their instance worker, not
-under the desktop lock. Host standard widgets handle immediate cursor movement,
-selection, scrolling and text entry locally, then notify the plugin. The host
-adopts a prepared view with a matching instance/revision. While preparation runs,
-it can still move/resize the existing surface and paint the available viewport.
-Prepared views cannot overwrite newer host-widget typing, selections or scroll
-positions. Widget state belongs to stable `WidgetId`s with their own incarnation
-and revision, independently of plugin domain state. Adoption merges presentation;
-resetting an input or moving its caret requires an explicit checked operation.
-Purity alone does not make expensive plugin code cheap or enforce a time limit.
-
-`View msg` is a declarative composition of a small standard widget set: text,
-Markdown, buffer views, editors/inputs, trees, lists/tables, buttons, split layouts
-and scrolling regions. IDs are stable across view updates so focus and selection
-survive new data. Reuse the editor widget for real editing rather than requiring
-plugins to reimplement Unicode, Undo and clipboard behavior.
-
-A lower-level cell surface is useful for a memory viewer or profiler. It provides
-prepared viewport cells **and** semantic regions: selectable text, named actions,
-focus order, accessibility descriptions and sensitivity. Cells without semantics
-are display-only; they do not become unrestricted agent-click targets. Plugins do
-not receive raw SDL handles, DOM elements or Metal textures through this API.
-
-The same semantics feed mouse routing, text copying, accessibility, agent screen
-capture and input masks. Bubble corners or cell art are not copied as prose.
-Host-issued approval controls, secret inputs and human conversation composers
-carry protections that plugin layout cannot relax. A malicious trusted plugin
-could still leak data in arbitrary text; semantic metadata is not automatic
-information-flow security.
-
-Closing a conversation view closes its window scope, not necessarily its provider.
-That provider belongs to a session service scope. Unsaved plugin-owned documents
-must participate in host close/save negotiation; a hung plugin cannot indefinitely
-prevent the host from offering cancellation or forced shutdown.
+New surfaces also need semantics for selection, copying, named actions,
+accessibility and privacy. Raw cells alone do not grant agent-click authority.
+Approval controls, secret fields and human composers keep their host protections.
+Closing a conversation view does not stop its session-owned provider.
 
 ## Semantic tree and accessibility transport
 
@@ -687,32 +567,34 @@ retain a named image fallback with metadata and Open Externally.
 ## Sidebar contributions
 
 A root is a provider in the single shared tree, not a docked plugin window.
-Files, Agents, Sessions, Debug and Watches should use this same interface.
+Files, Agents, Sessions, Debug and Watches use this interface.
+
+`Hide.Plugin.Tree` registers the root and its asynchronous child loader through
+an ordinary typed command:
 
 ```haskell
-data TreeProvider = TreeProvider
-  { rootId   :: TreeRootId
-  , label    :: Text
-  , children :: CallContext -> NodeId -> Maybe PageToken
-             -> PluginM (Either PluginError NodePage)
-  }
-
-registerTree :: TreeProvider -> PluginM TreeRef
-invalidateChildren :: TreeRef -> NodeId -> PluginM ()
-revealNode :: CallContext -> TreeRef -> NodePath -> RevealPolicy -> PluginM ()
+registerTree :: Registry context -> Text -> NodeDef context reply
+             -> (context -> ChildRequest
+                 -> IO (Either CommandError (NodePage context reply)))
+             -> IO (Either CommandError (TreeProvider context reply))
 ```
 
-Nodes have provider-local stable IDs, parent identity, prepared styled labels,
-expandability, actions and optional context-menu contributions. IDs are scoped by
+The session's `Sidebar` publishes that provider and invalidates a captured
+`TreeRef`/`NodeId`. A page contains at most 128 prepared nodes and an optional
+bounded provider cursor. Node actions retain typed arguments and their exact
+command registration.
+
+Nodes have provider-local stable IDs, parent identity, prepared text labels/icons,
+expandability, actions and optional context-menu contributions. Styling is host-owned. IDs are scoped by
 plugin and provider instance. They are not overloaded filesystem paths. Agent
 nodes use agent IDs; debugger nodes additionally carry stop/frame epochs.
 
 The current sidebar host orders tree and form metadata publications through a
 bounded queue. Closing its scope releases blocked publishers with an explicit
 error; later publications are rejected and late ticks cannot restore providers.
-Single-node invalidation is nonblocking: a full queue leaves the request with its
-caller for a later tick. The host adopts at most four publication events per tick.
-No provider callback runs during adoption.
+Single-node invalidation shares that ordered queue and may block its publishing
+worker when the queue is full; it must not run on the UI owner. The host adopts
+at most four publication events per tick. No provider callback runs during adoption.
 
 Automatic child refresh reuses the admitted load’s origin and repeats its current
 privacy checks. It never turns an agent expansion into a human request. Fresh
@@ -732,11 +614,12 @@ arrive. Reveal scrolls once on an explicit action—later replies must not repea
 pull the viewport away from the user.
 
 The root provider uses the same API as child providers: Files is an actual root,
-not a title painted separately above the scrolled contents. A context-menu query captures a
-`NodeHit` with provider instance, stable node ID, typed target and relevant version;
-a menu choice never acts on whichever row later occupies that screen position.
+not a title painted separately above the scrolled contents. A context-menu query
+captures its `TreeHit` path: each hit contains the provider reference, stable node
+ID and publication generation. The node action retains its typed target separately.
+A menu choice never acts on whichever row later occupies that screen position.
 
-The concrete contributions should include:
+The concrete contributions include:
 
 - Agents root: New Agent. Agent rows: Rename (current name preselected) and
   provider-advertised model/effort choices. Include the persistent ACP autocomplete
@@ -753,48 +636,31 @@ DAP connections.
 
 ## Tasks, events and lifetime
 
-`PluginM` is an execution environment with host-owned scopes. Every registration,
-subscription, task, timer and process belongs to a plugin, service or window scope.
-A registration can be withdrawn early; it is always withdrawn at scope shutdown.
+Resource ownership follows the existing scopes. `withPlugin` owns registrations
+and metadata preparation; a window scope owns its publications; session services
+own agents, terminals and debuggers. A frontend detach does not close the session.
+There is no second plugin scheduler or general subscription runtime.
 
-```haskell
-spawnTask :: CallContext -> TaskKey -> PluginM a -> PluginM (Task a)
-cancelTask :: Task a -> PluginM ()
-awaitTask  :: Task a -> PluginM (Either TaskError a)
-subscribe  :: EventSelector e -> (CallContext -> e -> PluginM ())
-           -> PluginM Subscription
-startService :: ServiceId -> (CallContext -> PluginM ()) -> PluginM Registration
-```
+Workers prepare and force bounded results before publication. A lazy parse in a
+queue still puts parsing on its consumer. UI adoption checks small captured
+identities and revisions, then installs prepared references. It does not invoke
+plugin code, flatten text or compare desktops, buffers and Undo histories.
 
-Activation has no human call context. `startService` supplies a host-issued
-service context with the plugin's configured grants and service lifetime. Timers
-and subscriptions likewise carry service/observation provenance, not new human
-authority. An event caused by an agent does not upgrade it or resurrect an expired
-originating invocation. Existing attributed work can continue only through an
-explicit owned continuation.
+Use bounded queues with explicit overflow behavior. Replaceable metadata can
+coalesce; accepted command replies and ordered transcript events must retain
+their completion or explicit failure. The command registry's retirement prevents
+new admission but does not cancel already admitted work. Each supplying operation
+owns cancellation, pending replies and any side effects it has admitted.
 
-Callbacks execute on supervised workers. Short UI commits pass through the host;
-callbacks never run arbitrary plugin code while a desktop lock is held. Host
-process/terminal/download services provide the existing cleanup and progress
-machinery instead of every plugin inventing another subprocess supervisor.
+Teardown invalidates registrations and publication lifetimes, then cancels/joins
+owned workers outside the UI lock. Late work cannot reopen a retired view or
+register a command in a closed scope. Shared services must not be stopped merely
+because one plugin view closes. Human and agent origins remain attached to
+operations; a timer or refresh cannot invent human authority.
 
-Use bounded queues with explicit overflow behavior. Coalesce replaceable state
-such as the latest diagnostics/tree/view snapshot. Preserve accepted command
-replies and ordered transcript events; backpressure or explicit truncation is
-preferable to silently dropping them. Bulk preparation must be forced on its
-worker before publication—placing a lazy parse in a queue does not move the work.
-
-An orderly disable first negotiates unsaved content with the human; cancellation
-of that negotiation leaves the plugin enabled. Once teardown is accepted,
-shutdown stops accepting new calls and invalidates the owner generation,
-then signals tasks and closes resources outside the UI lock. Pending callers get
-a terminal error; late results cannot reopen a window or re-register a command.
-Cooperative Haskell cancellation cannot safely promise recovery from every hung
-FFI call or process corruption. Disabling an in-process plugin removes its active
-contributions; it does not unload Haskell machine code. Forced termination preserves the last
-completed checkpoint and host-buffer recovery state; it cannot promise to capture
-an unresponsive plugin's latest private state. Keep that limitation visible when
-offering force-close.
+In-process cancellation is not protection against arbitrary hung FFI calls or
+process corruption. Recovery preserves the last completed checkpoint. It cannot
+promise to capture an unresponsive plugin's latest private state.
 
 ## Agent tools and providers
 
@@ -847,8 +713,8 @@ child does not change the primary scope. Deferred reads reject after retirement;
 already admitted reads may finish with their captured metadata. This service has
 no configuration write operation.
 
-`PluginTool` distinguishes `EditorTool`, `RequestTool` and `CoordinationTool`
-by their service contexts. Request services own fresh admission on every
+`PluginTool` distinguishes editor, request, coordination and private completion
+tools by their service contexts. Request services own fresh admission on every
 invocation; ordinary editor services are supplied after admission. This is an
 explicit declaration, never inferred from tool names or read-only metadata.
 Child coordination receives neither kind of editor service.
@@ -912,23 +778,12 @@ adoption. Results follow input order and report the human-approved patches and
 `buffers` array request/reply codecs. Buffers, exact version grants and batch
 preparation remain host-internal.
 
-The broader registration shape below remains proposed:
-
-```haskell
-exposeTool :: ToolDef a b -> Command a b -> PluginM Registration
-
--- ToolDef declares a namespaced external name, description, policy key,
--- effects and result-size limits. Schemas come from the command codecs.
-registerAgentProvider :: ProviderId -> AgentProvider -> PluginM Registration
-```
-
-A `CallContext` contains host-authenticated actor, workspace/session identity,
-cancellation, invocation trace and approval state. The public API exposes safe
-inspection but no constructor for a human-origin context. Invocation descendants
-inherit authority; delayed commits recheck live policy and owner identity. Contexts
-expire with their invocation unless the host creates an explicitly owned task
-continuation. A plugin may not reuse a retained human call to service a later
-agent request.
+Tool declarations carry their typed service context through `PluginTool`.
+`EditorTool` receives permission-admitted `EditorServices`; `RequestTool` receives
+services that own fresh admission; `CoordinationTool` receives attributed
+`AgentServices`; `CompletionTool` is confined to the authenticated completion
+request. None can reconstruct a human capability from arguments or prompt text.
+A plugin must not reuse a captured human request to service a later agent call.
 
 The host maps tool policy into Agent Permissions and TOML. Unknown tools default
 to prompting until configured; first-party defaults can be shipped explicitly.
@@ -942,28 +797,13 @@ It cannot return an 'approved' widget event on behalf of the human. Agent origin
 remain attached to semantic key/click commands, including rebound commands.
 Read-only access to policy does not grant mutation of it or private session keys.
 
-The provider boundary can remain small:
-
-```haskell
-data AgentProvider = AgentProvider
-  { startAgent :: ProviderStart -> EventSink AgentEvent
-               -> PluginM (Either PluginError AgentDriver)
-  }
-
-data AgentDriver = AgentDriver
-  { sendPrompt :: AttributedPrompt -> PluginM PromptTicket
-  , steer      :: Maybe (AttributedPrompt -> PluginM PromptTicket)
-  , cancel     :: PromptTicket -> PluginM ()
-  , stop       :: PluginM ()
-  }
-```
-
-`ProviderStart` and `AttributedPrompt` come from the host hub with their scoped
-context; plugins cannot reconstruct caller authority from prompt text. The driver
-lives in the service scope. Its event sink carries replies, tool activity,
-capability/configuration updates and usage through the bounded event channel.
-A terminal delivery event resolves each accepted ticket. Cancellation is a
-request with an eventual outcome, not a claim that the model has already stopped.
+`Hide.Plugin.Agent` supplies the real `StartProvider`, `StartRequest`,
+`AgentDriver` and `DriverEvent` contract. The host binds actor/workspace identity,
+capabilities and private resume state at acquisition. The driver owns transport;
+its event sink publishes bounded public updates. A terminal delivery resolves
+its accepted ticket. Cancellation is a request with an eventual outcome, not a
+claim that the model has already stopped. The remaining primary/child composition
+work uses this boundary; it does not introduce another provider registry.
 
 Primary and child model/effort changes and human steering now use the same
 `AgentHub.configureAgentAt` and `steerAgentAt` control reservation. The primary
@@ -1069,7 +909,7 @@ used for agent access. These remain proposed extensions, not current SDK behavio
 
 ## Building our agent integration with this API
 
-The first-party proof should register these contributions:
+The first-party integration has these responsibilities:
 
 | Contribution | Uses |
 | --- | --- |
@@ -1082,27 +922,24 @@ The first-party proof should register these contributions:
 | Agent documentation | Registered docs/skills corpus through the host docs service |
 | Rename/model actions | Captured agent identity, hub rename and provider configuration; includes ACP completion worker |
 
-Conceptually the package's activation looks like this:
+The actual composition is selected in `app/Main.hs`:
 
 ```haskell
-agentsPlugin :: Plugin
-agentsPlugin = Plugin agentsManifest $ do
-  registerAgentProvider acpProviderId acpProvider
-  chat <- registerWindow conversationWindow
-  openChat <- registerCommand (openConversationCommand chat)
-  registerTree (agentDirectory openChat)
-  contributeMenu toolsAgentsSlot (conversationMenu openChat)
-  bindDefault Global newConversationKey (action openChat NewConversation)
-  exposeTool sendMessageTool =<< registerCommand sendMessageCommand
-  void (registerDocs agentDocs)
+main :: IO ()
+main = Hide.App.main [Hide.AgentUI.plugin]
 ```
 
-This is deliberately ordinary Haskell composition, not a generated global effect
-sum or a universal service locator. Shared typed services for buffers, terminals,
-builds, HLS, debugger, Git and agents are host APIs with discoverable capabilities.
-An optional service can be unavailable in a build. Plugin-specific collaborations
-can use a normal Haskell dependency and scoped handles; add a dynamic service bus
-only if a concrete need appears.
+`Hide.AgentUI.plugin` is an ordinary `Hide.Plugin.Session.Plugin` record. Its
+`withPlugin` nests conversation-menu, provider-choice and Agents-tree scopes.
+`pluginTools` declares the typed tool sets; the conversation/input/completion
+fields select their separate prepared presentation and worker entry points.
+The editor library supplies the capabilities without importing this first-party
+implementation. See that record for the complete current declaration rather than
+maintaining a second example activation path here.
+
+Optional contributions can be absent. Plugin-specific collaboration uses normal
+Haskell dependencies and scoped handles; a missing service is not an invitation
+to discover an unrestricted replacement through a universal service locator.
 
 `Hide.Plugin.AgentDirectory` supplies the Agents tree with typed names,
 ancestry, state and advertised settings. It lives in `hide-agent-api` alongside
@@ -1287,8 +1124,10 @@ worker before calling the captured service.
 
 ## Cabal navigation as a second example
 
-A Cabal plugin contributes a root named after the local package, with component
-targets as children and their source files beneath. Its semantic target includes
+The host's `Hide.PackageSidebar` uses the public tree interface for a root named
+after the local Cabal package, with component targets and their source files
+beneath. It is a second consumer of the tree API, not a separately extracted
+plugin or a general public build SDK. Its semantic target includes
 workspace, package, component kind/name and the selected build configuration—not
 just the row label or active filename. Menus capture that target before invoking
 the shared build/debug service with the currently selected THC or GHC toolchain.
@@ -1314,29 +1153,26 @@ navigation while discovery is in flight.
 
 ## Recovery and configuration
 
-Each plugin declares a versioned configuration schema under its ID. Merge global
-and project settings through the existing TOML layer, preserving unknown tables
-and comments. Schema validation happens before activation/reconfiguration. Do not
-execute arbitrary Haskell from project configuration. Loading a project does not
-automatically install or enable a new package.
+Persist bounded durable data, not closures, stable names, pointers, threads,
+protocol handles or in-flight queues. Prepared windows explicitly opt into
+recovery with a type/version; transient text is not checkpointed implicitly.
+Conversation recovery keeps its logical text and unsent drafts separate from
+private provider resume state.
 
-Persist versioned data, never closures, `Dynamic`, stable names, pointers, threads,
-protocol handles or in-flight task queues. Window checkpoints name plugin ID,
-window type, state schema version and bounded data. Keep durable document data
-separate from presentation state and private credentials. Providers restore inert
-until an explicit supported reconnect; restored UI does not replay agent tasks.
+A missing contribution leaves inert readable content. Restoring that content
+starts no provider, replays no task and grants no authority from saved IDs.
+Fresh session capabilities must be acquired through their current owners. The
+host owns unsaved buffers and ordinary save/Undo behavior.
 
-`Persistence state` saves a bounded durable projection and restores it into
-freshly initialized state. It is not a codec for all runtime `state`: task handles,
-service references and buffer handles must be reacquired. Serializing this
-projection runs on a worker and is invalidated by its explicit persistence
-revision, not by comparing or hashing all plugin state.
+Checkpoint preparation runs on a worker and uses explicit content identities and
+persistence revisions. It does not compare or hash an entire desktop to decide
+whether something changed. Recovery formats can change with the implementation;
+we do not maintain old schemas for hypothetical clients.
 
-A missing/disabled plugin leaves a placeholder with its type and recovery payload
-retained for a later compatible plugin. Preserve unsaved content with host-owned
-buffers wherever possible. Migration failure does not discard the original state.
-Buffer/window IDs are session handles; restore resolves durable references before
-handing fresh handles to plugins.
+Existing configuration uses the shared global/project TOML layer and its concrete
+settings owners. Project configuration does not install Haskell packages or
+execute Haskell. There is no general plugin schema registry or migration runner;
+introduce either only when an actual configuration workflow needs it.
 
 ## Delivery boundary
 
