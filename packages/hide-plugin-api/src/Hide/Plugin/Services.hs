@@ -13,10 +13,12 @@ module Hide.Plugin.Services
   ) where
 
 import Hide.Plugin.Documentation (DocsServices)
+import Hide.Plugin.Environment (EnvironmentServices)
 
 -- | Host-granted editor capabilities captured after permission admission.
 -- Each service retains its own scoped operation owner; keeping this product
 -- alive does not keep retired registrations or a replacement session alive.
 data EditorServices = EditorServices
   { editorDocumentation :: !DocsServices
+  , editorEnvironment :: !EnvironmentServices
   }

@@ -36,7 +36,7 @@ import Hide.ClipboardMCP
 import Hide.Links (followLink)
 import Hide.Environment
 import Hide.ControlMCP
-import Control.Exception (finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
+import Control.Exception (evaluate, finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
 import Control.Concurrent (threadDelay)
 #ifndef mingw32_HOST_OS
 import Control.Concurrent (myThreadId,throwTo)
@@ -295,11 +295,11 @@ runEditor plugins args = do
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
-          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++[screenTool]
+          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++[screenTool]
           let names definitions=[name | spec<-definitions,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]]
               declarations=concatMap Plugin.pluginTools plugins
           PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
-            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
+            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let agentTools=PluginTool.toolDefinitions agentToolset
                 editorSpecs=specs++PluginTool.toolDefinitions editorToolset
@@ -331,8 +331,10 @@ runEditor plugins args = do
                   inspectTool d name parameters
                     | PluginTool.hasTool editorToolset name = do
                         context<-captureDocsContext d
+                        directory<-evaluate (startingDirectory d)
                         pure (d,PluginTool.callTool editorToolset
-                          (PluginServices.EditorServices (docsServices docsCommands context)) name parameters)
+                          (PluginServices.EditorServices (docsServices docsCommands context)
+                            (environmentServices environmentCommands directory)) name parameters)
                     | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
                     | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
@@ -343,7 +345,6 @@ runEditor plugins args = do
                     | name `elem` runtimeToolNames = runtimeTool services d name parameters
                     | name `elem` gitToolNames = gitTool gitOperations d name parameters
                     | name=="clipboard_write" = clipboardTool d parameters
-                    | name `elem` environmentToolNames = pure (d,environmentTool (startingDirectory d) name parameters)
                     | name `elem` controlToolNames = controlTool guestCore d name parameters
                     | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
                         Left err -> pure (Left (T.pack err))

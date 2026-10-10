@@ -7,24 +7,24 @@
 -- variables are protected; agent inspection redacts sensitive values and agent
 -- mutation also rejects sensitive names. Existing children are unaffected.
 module Hide.Environment
-  ( environmentTools, environmentToolNames, environmentTool
-  , loadEnvironment, changeEnvironment, environmentAction
+  ( EnvironmentCommands, withEnvironmentCommands, environmentServices
+  , loadEnvironment, environmentAction
   ) where
 
 import Control.Exception (IOException, try)
 import Control.Monad (unless, forM_)
 import Data.Aeson
-import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
-import Data.Char (isAsciiLower,isAsciiUpper,isDigit)
 import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.Environment (getEnvironment,lookupEnv,setEnv,unsetEnv)
 import Hide.GuestAccess (sensitiveLabel)
 import Hide.MCPPermissions (permissionConfigPath,projectConfigPath,readEnvironmentAt,writeEnvironmentAt)
-import Hide.Model
+import Hide.Model hiding (Command)
+import Hide.Plugin.Command
+import qualified Hide.Plugin.Environment as E
 
 -- Paths locating authority/configuration and editor transport credentials are
 -- host-owned. Neither persisted project settings nor agent tools may replace them.
@@ -33,24 +33,16 @@ protected name=let n=T.toUpper name in
   any (`T.isPrefixOf` n) ["THC_EDIT_","CODEX_","XDG_","DYLD_","LD_","GHC_ENVIRONMENT"] ||
   n `elem` ["HOME","USERPROFILE","APPDATA","LOCALAPPDATA","TMPDIR","TMP","TEMP"]
 
+-- Syntax has one checked constructor for both saved overlays and plugin calls.
+-- Policy remains here: no linked tool can select the human validation path.
 validate :: Bool -> Value -> Either Text [(Text,Maybe Text)]
-validate agent=withEntries
-  where
-    withEntries (Object entries)=traverse entry (KM.toList entries)
-    withEntries _=Left "Environment must be an object of names with string values or null (unset)."
-    entry (key,value)=do
-      let name=K.toText key
-          letter c=isAsciiLower c || isAsciiUpper c || c=='_'
-      unless (not (T.null name) && letter (T.head name) && T.all (\c->letter c || isDigit c) name)
-        (Left "Use environment names containing ASCII letters, digits and underscores, beginning with a letter or underscore.")
-      unless (not (protected name) && not (agent && sensitiveLabel name))
-        (Left ("Protected environment variable: "<>name))
-      content<-case value of
-        String text | not (T.any (=='\0') text)->Right (Just text)
-        Null->Right Nothing
-        Bool False->Right Nothing -- TOML spelling of an explicit unset
-        _->Left "Use a string without NUL, or null/false to unset a variable."
-      pure (name,content)
+validate agent values=E.setArguments "session" values >>= validateEntries agent . E.setEntries
+
+validateEntries :: Bool -> [(Text,Maybe Text)] -> Either Text [(Text,Maybe Text)]
+validateEntries agent entries=do
+  forM_ entries $ \(name,_)->unless (not (protected name) && not (agent && sensitiveLabel name))
+    (Left ("Protected environment variable: "<>name))
+  pure entries
 
 savedEnvironment :: FilePath -> IO (Either Text Value)
 savedEnvironment directory=do
@@ -80,18 +72,23 @@ loadEnvironment directory=safeIO $ do
     Left err->pure (Left err)
     Right entries->apply entries >> pure (Right ())
 
--- | Validate and apply a scoped environment change for future children.
--- The agent flag imposes additional sensitive-name restrictions.
+-- Human dialogs and agent tools share the same overlay/mutation owner. Syntax
+-- and the complete policy check finish before any configuration or process write.
 changeEnvironment :: Bool -> FilePath -> Text -> Value -> IO (Either Text ())
-changeEnvironment agent directory scope values=safeIO $ case validate agent values of
+changeEnvironment agent directory scope values=case E.setArguments scope values of
   Left err->pure (Left err)
-  Right entries | scope=="session" -> apply entries >> pure (Right ())
-  Right entries | scope `elem` ["project","global"] -> do
+  Right arguments->changePreparedEnvironment agent directory arguments
+
+changePreparedEnvironment :: Bool -> FilePath -> E.SetArguments -> IO (Either Text ())
+changePreparedEnvironment agent directory arguments=safeIO $ case validateEntries agent (E.setEntries arguments) of
+  Left err->pure (Left err)
+  Right entries | E.setScope arguments==E.SessionEnvironment -> apply entries >> pure (Right ())
+  Right entries -> do
     loaded<-savedEnvironment directory
     case loaded >>= validate False of
       Left err->pure (Left err)
       Right _->do
-        path<-if scope=="global" then permissionConfigPath else projectConfigPath directory
+        path<-if E.setScope arguments==E.GlobalEnvironment then permissionConfigPath else projectConfigPath directory
         written<-writeEnvironmentAt path (object [K.fromText k .= maybe (Bool False) String v | (k,v)<-entries])
         case written of
           Left err->pure (Left err)
@@ -100,48 +97,46 @@ changeEnvironment agent directory scope values=safeIO $ case validate agent valu
             case merged >>= validate False of
               Left err->pure (Left err)
               Right effective->apply (filter (\(key,_)->key `elem` map fst entries) effective) >> pure (Right ())
-  _->pure (Left "Scope must be session, project or global.")
 
 redacted :: Text -> Bool
 redacted name=protected name || sensitiveLabel name
 
-environmentToolNames :: [Text]
-environmentToolNames=["environment_get","environment_set"]
-environmentTools :: [Value]
-environmentTools=
-  [tool "environment_get" True "Inspect the editor process environment used by newly launched builds, terminals, debuggers and agents. Optional names limits the result; absent names are null. Credential and editor authority values are always redacted. Use before prescribing shell exports or an editor restart." (object ["names" .= object ["type" .= ("array"::Text),"items" .= object ["type" .= ("string"::Text)]]]) [],
-   tool "environment_set" False "Set or unset variables for newly launched editor subprocesses. values maps names to strings or null (unset); scope is session (default), project (thc.toml), or global (thc/config.toml). Project overrides global. Existing processes retain their environment: restart only the affected terminal/provider/job. Credential and editor authority variables cannot be changed through this tool. Prefer a project build configuration fix when it makes the dependency discoverable for everyone." (object ["values" .= object ["type" .= ("object"::Text)],"scope" .= object ["type" .= ("string"::Text),"enum" .= (["session","project","global"]::[Text])]]) ["values"]]
-  where
-    tool name readonly description properties required=object
-      ["name" .= (name::Text),"description" .= (description::Text),"inputSchema" .= object
-        ["type" .= ("object"::Text),"properties" .= properties,"required" .= (required::[Text]),"additionalProperties" .= False],
-       "annotations" .= object ["readOnlyHint" .= readonly,"destructiveHint" .= not readonly,"openWorldHint" .= not readonly]]
+-- The command scope belongs to the editor session, not an individual plugin.
+-- A captured capability cannot reach a replacement session after retirement.
+data EnvironmentCommands = EnvironmentCommands (Registry FilePath)
+  (Command FilePath E.GetArguments Value) (Command FilePath E.SetArguments Value)
 
--- | Expose redacted environment inspection and restricted agent updates.
-environmentTool :: FilePath -> Text -> Value -> IO (Either Text Value)
-environmentTool directory name args=safeIO $ case parseEither parse args of
-  Left err->pure (Left (T.pack err))
-  Right (Left names)->do
-    allEntries<-getEnvironment
-    let keys=maybe (map (T.pack . fst) (sortOn fst allEntries)) id names
-    entries<-mapM (\key->do value<-lookupEnv (T.unpack key); pure (K.fromText key,if redacted key then String "[redacted]" else maybe Null (String . T.pack) value)) keys
-    pure (Right (object ["values" .= Object (KM.fromList entries),"appliesTo" .= ("new processes"::Text)]))
-  Right (Right (scope,values))->do
-    changed<-changeEnvironment True directory scope values
-    pure (object ["scope" .= scope,"appliesTo" .= ("new processes; existing processes unchanged"::Text)] <$ changed)
+-- | Scope typed environment operations. Calls already admitted may finish;
+-- deferred calls after retirement fail before reading or changing the environment.
+withEnvironmentCommands :: (EnvironmentCommands -> IO a) -> IO a
+withEnvironmentCommands use=withRegistry $ \registry->do
+  readRef<-registerCommand registry (CommandDef "hide.environment.get" "Read redacted environment"
+    E.getInput E.getOutput (\_ arguments->fmap (either (Left . CommandRejected) Right) (readEnvironment arguments))) >>= registered
+  setRef<-registerCommand registry (CommandDef "hide.environment.set" "Update environment for new processes"
+    E.setInput E.setOutput setEnvironment) >>= registered
+  use (EnvironmentCommands registry readRef setRef)
   where
-    parse=withObject "environment arguments" $ \o ->case name of
-      "environment_get"->do
-        unless (all (`elem` ["names"]) (KM.keys o)) (fail "Unknown argument")
-        names<-o .:? "names"
-        unless (maybe True (all (\n->not (T.null n) && not (T.any (`elem` ['\0','=']) n))) names) (fail "Invalid environment name")
-        pure (Left names)
-      "environment_set"->do
-        unless (all (`elem` ["values","scope"]) (KM.keys o)) (fail "Unknown argument")
-        scope<-o .:? "scope" .!= "session"
-        values<-o .: "values"
-        pure (Right (scope,values))
-      _->fail "Unknown environment tool"
+    registered=either (ioError . userError . show) pure
+    setEnvironment directory arguments=do
+      result<-changePreparedEnvironment True directory arguments
+      pure $ either (Left . CommandRejected) (const (Right (object
+        ["scope" .= E.scopeText (E.setScope arguments),"appliesTo" .= ("new processes; existing processes unchanged"::Text)]))) result
+
+-- | Grant the checked agent operations for a captured project directory. Invoke
+-- only on the admitted caller's worker. No Desktop or human validation switch is
+-- retained; the host owns redaction, protected names and overlay precedence.
+environmentServices :: EnvironmentCommands -> FilePath -> E.EnvironmentServices
+environmentServices (EnvironmentCommands registry readRef setRef) directory=E.EnvironmentServices
+  { E.environmentGet=invoke registry readRef directory
+  , E.environmentSet=invoke registry setRef directory
+  }
+
+readEnvironment :: E.GetArguments -> IO (Either Text Value)
+readEnvironment arguments=safeIO $ do
+  allEntries<-getEnvironment
+  let keys=maybe (map (T.pack . fst) (sortOn fst allEntries)) id (E.getNames arguments)
+  entries<-mapM (\key->do value<-lookupEnv (T.unpack key); pure (K.fromText key,if redacted key then String "[redacted]" else maybe Null (String . T.pack) value)) keys
+  pure (Right (object ["values" .= Object (KM.fromList entries),"appliesTo" .= ("new processes"::Text)]))
 
 -- | Dispatch the human environment-dialog actions. The list contains names only;
 -- the value editor participates in Streamer masking.

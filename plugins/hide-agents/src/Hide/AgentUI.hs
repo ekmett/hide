@@ -32,6 +32,7 @@ import Hide.Plugin.Command
 import Hide.Plugin.Session (Plugin(..),Session(..),PluginTool(..))
 import qualified Hide.AgentTools as AgentTools
 import qualified Hide.DocsTools as DocsTools
+import qualified Hide.EnvironmentTools as EnvironmentTools
 import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
@@ -44,7 +45,7 @@ data Snapshot completion = Snapshot !(M.Map A.AgentId A.AgentSummary) !(Maybe (C
 plugin :: Plugin
 plugin=Plugin
   { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
-  , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool DocsTools.tools
+  , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (DocsTools.tools++EnvironmentTools.tools)
   , pluginConversation=Just AgentTranscript.presentConversation
   }
 
