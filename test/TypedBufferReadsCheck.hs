@@ -96,7 +96,7 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
         captured<-wait worker >>= either (error . T.unpack) pure
         check "typed capture reads owner current state" (text captured==Right "current λ\n")
         check "granted snapshot retains measured source" (P.capturedRef captured==reference)
-      context<-evaluate (RequestServices (bufferReadServices reader (activeWindow base >>= bufferId) (nextId base)) Nothing Nothing Nothing)
+      context<-evaluate (RequestServices (bufferReadServices reader (activeWindow base >>= bufferId) (nextId base)) Nothing Nothing Nothing Nothing)
       let focusedElsewhere=addDocument Nothing (newBuffer "later source") base
       withAsync (Tool.callTool toolset context "read_buffer" (object [])) $ \worker->do
         queued worker
@@ -305,7 +305,7 @@ listingChecks toolset specs path=do
         check "listed refs cannot cross session namespaces" . rejected =<< wait capture
     let reply=Tool.callTool toolset (RequestServices (R.BufferReadServices
           (R.bufferList (bufferReadServices reader Nothing 0))
-          (error "listing evaluated read-only context")) Nothing Nothing Nothing) "list_buffers" (object [])
+          (error "listing evaluated read-only context")) Nothing Nothing Nothing Nothing) "list_buffers" (object [])
     withAsync reply $ \worker->do
       queued worker
       _<-ownerUntil owner current worker
@@ -344,7 +344,7 @@ listingChecks toolset specs path=do
       check "listing defers exceptional dirty comparison to consumer worker" (case outcome of Left _->True; _->False)
     retired<-Tool.withTools [] BufferTools.tools pure
     check "closed tool registry refuses listing before enqueue" . rejected =<<
-      Tool.callTool retired (RequestServices (bufferReadServices reader Nothing 0) Nothing Nothing Nothing) "list_buffers" (object [])
+      Tool.callTool retired (RequestServices (bufferReadServices reader Nothing 0) Nothing Nothing Nothing Nothing) "list_buffers" (object [])
 
 -- One actual prepared-window read workflow, sharing the existing admission pump.
 windowReadChecks :: Tool.Tools RequestServices -> [Value] -> FilePath -> IO ()

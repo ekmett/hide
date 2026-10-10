@@ -53,6 +53,7 @@ import Hide.TestsMCP
 import Hide.WorkspaceFilesMCP
 import Hide.HistoryMCP
 import Hide.RuntimeMCP
+import qualified Hide.Build as Build
 import Hide.WorkspaceMCP
 import Hide.ProjectBrowser
 import qualified Hide.AgentRuntime as AR
@@ -372,9 +373,11 @@ runEditor plugins args = do
                           | PluginTool.hasTool requestToolset name = do
                               context<-bufferRequestServices (bufferReader permissions currentCaller)
                                 (bufferEditor permissions currentCaller) (windowReader permissions currentCaller) current name parameters
+                              terminals<-terminalServices permissions (sessionConsoles services) currentCaller (Build.buildStartDirectory current)
                               pure (current,either (pure . Left)
                                 (\services'->PluginTool.callTool requestToolset
-                                  services' {PluginRequest.requestQuestions=fmap (\bound->questionServices conversation bound permissions currentCaller) questionBinding}
+                                  services' {PluginRequest.requestQuestions=fmap (\bound->questionServices conversation bound permissions currentCaller) questionBinding,
+                                    PluginRequest.requestTerminals=Just terminals}
                                   name parameters) context)
                           | name=="editor_input" = permissionBuildInputAs currentCaller permissions
                               (\admission admittedDesktop admittedTool admittedArgs->withBuildAdmission services admission (controlTool guestCore admittedDesktop admittedTool admittedArgs)) current name parameters

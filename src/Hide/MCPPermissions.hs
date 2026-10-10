@@ -17,6 +17,7 @@
 module Hide.MCPPermissions
   ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, requestPermission, AdmittedBuild, permissionBuildInputAs, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild, policyEffects, tickPermissions, awaitPermissionWork
   , ReadAdmission, permissionReadCall, bufferEditor, readReference, resolveReadReference, bufferReader, windowReader
+  , terminalServices
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
   , readEnvironmentAt, writeEnvironmentAt, readKeybindingsAt, readKeybindingsFor
@@ -61,6 +62,10 @@ import Hide.Plugin.BufferHost (BufferRef,BufferNamespace,newBufferNamespace,refe
 import Hide.WorkspaceFilesMCP (PatchSource,PreparedPatch,capturePatchSource,preparePatch,commitPatches)
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..), saveFile)
+import qualified Hide.Plugin.Terminal as Terminal
+import qualified Hide.Consoles as Consoles
+import qualified Hide.Terminal as NativeTerminal
+import qualified Hide.Build as Build
 import Hide.Model
 
 type Tool = Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
@@ -75,7 +80,7 @@ data DiffAttempt = DiffAttempt DiffReview (Async (Either Text [PreparedPatch]))
 data WaitingOperation = WireOperation Tool (MVar (IO (Either Text Value)))
   | BuildInputOperation (AdmittedBuild -> Tool) (MVar (IO (Either Text Value)))
   | BuildAdoptionOperation AdmittedBuild
-  | CaptureOperation CaptureSubmission | DiffOperation DiffSubmission
+  | CaptureOperation CaptureSubmission | DiffOperation DiffSubmission | TerminalOperation TerminalSubmission
 -- Minted only while the permission owner executes admitted editor input. The
 -- original wire ticket may finish; this separate one-shot intent keeps its
 -- approved policy and exact caller without retaining the original desktop.
@@ -86,15 +91,28 @@ data CaptureSubmission = CaptureSubmission BufferRef (IO (Either Text ())) (MVar
   | ListingSubmission (IO (Either Text ())) (MVar (Either Text [ListedBuffer])) (IORef Bool) (MVar ())
   | WindowCaptureSubmission Reads.WindowReadTarget (IO (Either Text ())) (MVar (Either Text Reads.CapturedWindowRead)) (IORef Bool) (MVar ())
 data DiffSubmission = DiffSubmission [BufferDiff] [Buffer] (IO (Either Text ())) (MVar (Either Text [DiffResult])) (IORef Bool) (MVar ()) (IORef (Maybe DiffAttempt))
+-- Fixed host operations, never a plugin callback or JSON authority. The ingress
+-- and Waiting owner share their claim and prepared resource from birth.
+data TerminalRequest = ListTerminals | StartTerminal !Terminal.TerminalLaunch
+  | OutputTerminal !Terminal.TerminalId !Int !Int
+  | InputTerminal !Terminal.TerminalId !Text | StopTerminalRequest !Terminal.TerminalId
+data TerminalResult = ListedTerminals !Terminal.TerminalListing | OpenedTerminal !Terminal.TerminalOpened
+  | OutputTerminalPage !Terminal.TerminalPage | AcceptedTerminal
+data PreparedTerminal = PreparedTerminalConsole !Consoles.PreparedConsole | PreparedTerminalReply !TerminalResult
+data TerminalSubmission = TerminalSubmission !Consoles.Consoles !FilePath !TerminalRequest
+  (IO (Either Text ())) (MVar (Either Text TerminalResult)) (IORef Bool) (MVar ())
+  (IORef (Maybe (Async (Either Text PreparedTerminal))))
 data RequestSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
+  | SubmitTerminal TerminalSubmission
   | WireSubmission !Text !Value Tool (IO (Either Text ())) (MVar (IO (Either Text Value))) (IORef Bool) (MVar ())
 data RequestIngress = RequestIngress (STM.TBQueue RequestSubmission) (STM.TVar Bool)
 -- A request retains its policy phase while worker IO is pending. The queue is
 -- transport only: Waiting remains the one request/cancellation owner.
 type Policies = Either Text (M.Map Text Mode)
-data PolicyUse = AdmitPolicy | BuildAdoptPolicy | AllowPolicy Value DiffReview
+data PolicyUse = AdmitPolicy | BuildAdoptPolicy | TerminalAdoptPolicy | AllowPolicy Value DiffReview
   | AdoptPolicy DiffReview (Either Text [PreparedPatch])
 data PolicyStage = PolicyReady | PolicyPending PolicyUse (Maybe (Int,STM.TMVar Policies))
+  | TerminalPreparing | TerminalPrepared
 data PolicyTask = LoadPolicy (STM.TMVar Policies)
   | SavePolicy Text Mode (STM.TMVar Policies)
 data SettingsUse = ListPolicies | EditPolicy Text Bool | SaveSetting Text Mode
@@ -205,6 +223,108 @@ finishWireSubmissionOwned promise enabled reason=mask_ $ do
   writeIORef enabled False
   _<-tryPutMVar promise (pure (Left reason))
   pure ()
+
+-- | Self-admitting terminal calls bound to a live host caller and session. The
+-- captured launch directory is forced here; project resolution and process IO
+-- run only on the admitted worker. No Desktop or reusable grant is retained.
+terminalServices :: Permissions -> Consoles.Consoles -> IO (Either Text ()) -> FilePath -> IO Terminal.TerminalServices
+terminalServices runtime consoles caller directory=do
+  _<-evaluate (foldl' (\n char->n+fromEnum char) (0::Int) directory)
+  pure Terminal.TerminalServices
+    { Terminal.terminalList=receive ListTerminals (\result->case result of ListedTerminals value->Right value; _->invalid)
+    , Terminal.terminalStart= \launch->receive (StartTerminal launch) (\result->case result of OpenedTerminal value->Right value; _->invalid)
+    , Terminal.terminalOutput= \ident offset limit->receive (OutputTerminal ident offset limit) (\result->case result of OutputTerminalPage value->Right value; _->invalid)
+    , Terminal.terminalInput= \ident text->receive (InputTerminal ident text) accepted
+    , Terminal.terminalStop= \ident->receive (StopTerminalRequest ident) accepted }
+  where
+    invalid=Left "Invalid terminal result"
+    accepted AcceptedTerminal=Right ()
+    accepted _=invalid
+    receive request project=do
+      result<-requestTerminal runtime consoles directory caller request
+      pure (result >>= project)
+
+-- Typed callers have the same bounds as wire callers. Argument count consumes
+-- budget even for empty strings; validation cannot traverse an unbounded argv.
+validateTerminalRequest :: TerminalRequest -> Either Text ()
+validateTerminalRequest request=case request of
+  ListTerminals->Right ()
+  StartTerminal launch
+    | T.null (Terminal.terminalCommand launch)->Left "Expected a terminal executable"
+    | Terminal.terminalOutputByteLimit launch<0 || Terminal.terminalOutputByteLimit launch>16777216->Left "Terminal output retention is limited to 0..16 MiB"
+    | otherwise->strings 1048576 (Terminal.terminalCommand launch:maybe [] (pure . T.pack . take 1048577) (Terminal.terminalDirectory launch)++Terminal.terminalArguments launch)
+  OutputTerminal ident offset limit->do
+    identifier ident
+    when (offset<0 || limit<1 || limit>131072) (Left "Use offset>=0 and limit 1..131072")
+  InputTerminal ident text->do
+    identifier ident
+    when (T.length text>65536 || BS.length (TE.encodeUtf8 text)>65536) (Left "Terminal input is limited to 64 KiB")
+  StopTerminalRequest ident->identifier ident
+  where
+    identifier (Terminal.TerminalId ident)=when (T.null ident || T.length ident>128 || T.any (=='\0') ident) (Left "Invalid terminal ID")
+    strings _ []=Right ()
+    strings remaining (value:rest)
+      | remaining<=0 || T.length value>=remaining=Left "Terminal launch exceeds 1 MiB"
+      | T.any (=='\0') value=Left "Terminal launch contains a NUL character"
+      | otherwise=let cost=BS.length (TE.encodeUtf8 value)+1
+          in if cost>remaining then Left "Terminal launch exceeds 1 MiB" else strings (remaining-cost) rest
+
+terminalArguments :: TerminalRequest -> (Text,Value)
+terminalArguments request=case request of
+  ListTerminals->("terminal_list",object [])
+  StartTerminal launch->("terminal_start",object (["command" .= Terminal.terminalCommand launch,
+    "args" .= Terminal.terminalArguments launch,"outputByteLimit" .= Terminal.terminalOutputByteLimit launch]++
+    ["cwd" .= directory | Just directory<-[Terminal.terminalDirectory launch]]))
+  OutputTerminal ident offset limit->("terminal_output",object ["terminalId" .= Terminal.terminalIdText ident,"offset" .= offset,"limit" .= limit])
+  InputTerminal ident text->("terminal_input",object ["terminalId" .= Terminal.terminalIdText ident,"text" .= text])
+  StopTerminalRequest ident->("terminal_stop",object ["terminalId" .= Terminal.terminalIdText ident])
+
+requestTerminal :: Permissions -> Consoles.Consoles -> FilePath -> IO (Either Text ()) -> TerminalRequest -> IO (Either Text TerminalResult)
+requestTerminal (Permissions _ _ _ _ retired (RequestIngress inbox closed) owner) consoles directory caller request=case validateTerminalRequest request of
+  Left err->pure (Left err)
+  Right ()->mask $ \restore->do
+    promise<-newEmptyMVar
+    enabled<-newIORef True
+    claim<-newMVar ()
+    attempt<-newIORef Nothing
+    let submission=TerminalSubmission consoles directory request caller promise enabled claim attempt
+    accepted<-STM.atomically $ do
+      stopped<-STM.readTVar closed
+      full<-STM.isFullTBQueue inbox
+      if stopped then pure (Left "Editor session closed before terminal admission")
+      else if full then pure (Left "Too many requests are awaiting admission")
+      else STM.writeTBQueue inbox (SubmitTerminal submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+    case accepted of
+      Left err->pure (Left err)
+      Right ()->restore (readMVar promise) `onException`
+        withMVar claim (\()->finishTerminalSubmissionOwned retired submission (Left "Terminal request cancelled"))
+
+terminalLifetime :: TerminalSubmission -> (IORef Bool,MVar (),IO (Either Text ()))
+terminalLifetime (TerminalSubmission _ _ _ caller _ enabled claim _)=(enabled,claim,caller)
+
+finishTerminalSubmissionOwned :: IORef [MVar ()] -> TerminalSubmission -> Either Text TerminalResult -> IO ()
+finishTerminalSubmissionOwned retired (TerminalSubmission _ _ _ _ promise enabled _ attempt) result=mask_ $ do
+  writeIORef enabled False
+  stopTerminalAttempt retired attempt
+  _<-tryPutMVar promise result
+  pure ()
+
+-- Retirement only schedules joining/cleanup. A completed, unadopted launch is
+-- still owned here, including cancellation after preparation but before policy.
+stopTerminalAttempt :: IORef [MVar ()] -> IORef (Maybe (Async (Either Text PreparedTerminal))) -> IO ()
+stopTerminalAttempt retired attempt=mask_ $ do
+  old<-atomicModifyIORef' attempt (\current->(Nothing,current))
+  case old of
+    Nothing->pure ()
+    Just worker->do
+      done<-newEmptyMVar
+      _<-forkIOWithUnmask (\unmask->unmask (do
+        cancel worker
+        result<-waitCatch worker
+        case result of
+          Right (Right (PreparedTerminalConsole console))->Consoles.closePreparedConsole console
+          _->pure ()) `finally` (tryPutMVar done () >> pure ()))
+      atomicModifyIORef' retired (\current->(done:current,()))
 
 -- | Reserve the admitted input once for a newly captured build intent.
 reserveAdmittedBuild :: AdmittedBuild -> IO Bool
@@ -442,13 +562,16 @@ finishRequestSubmission :: Permissions -> RequestSubmission -> Text -> IO ()
 finishRequestSubmission _ (ReadSubmission submission) err=let (_,claim,_)=captureLifetime submission
   in withMVar claim (\()->rejectCaptureOwned submission err)
 finishRequestSubmission (Permissions _ _ _ _ retired _ _) (EditSubmission submission) err=finishDiffSubmission retired submission (Left err)
+finishRequestSubmission (Permissions _ _ _ _ retired _ _) (SubmitTerminal submission) err=
+  let (_,claim,_)=terminalLifetime submission
+  in withMVar claim (\()->finishTerminalSubmissionOwned retired submission (Left err))
 finishRequestSubmission _ (WireSubmission _ _ _ _ promise enabled claim) err=
   withMVar claim (\()->finishWireSubmissionOwned promise enabled err)
 
 -- Fixed bounded transport only; PermissionState still has one serialized owner.
 -- An interrupted extracted batch resolves every accepted reply before unwinding.
 drainRequests :: Permissions -> Desktop -> IO Desktop
-drainRequests runtime@(Permissions _ _ state namespace _ (RequestIngress inbox _) _) desktop=mask_ $ do
+drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress inbox _) _) desktop=mask_ $ do
   incoming<-STM.atomically (STM.flushTBQueue inbox)
   foldM admitSafely desktop incoming `onException`
     mapM_ (\submission->finishRequestSubmission runtime submission "Request owner interrupted") incoming
@@ -461,9 +584,12 @@ drainRequests runtime@(Permissions _ _ state namespace _ (RequestIngress inbox _
       let (enabled,claim,caller)=case submission of
             ReadSubmission capture->captureLifetime capture
             EditSubmission (DiffSubmission _ _ c _ e k _)->(e,k,c)
+            SubmitTerminal terminal->terminalLifetime terminal
             WireSubmission _ _ _ c _ e k->(e,k,c)
           target=case submission of
             WireSubmission name args callback _ promise _ _->Right (name,args,WireOperation callback promise)
+            SubmitTerminal terminal@(TerminalSubmission _ _ request _ _ _ _ _)->
+              let (name,args)=terminalArguments request in Right (name,args,TerminalOperation terminal)
             ReadSubmission capture@ListingSubmission{}->Right ("list_buffers",object [],CaptureOperation capture)
             ReadSubmission capture@(CaptureSubmission reference _ _ _ _)->bufferTarget reference $ \ident->
               ("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
@@ -487,6 +613,7 @@ drainRequests runtime@(Permissions _ _ state namespace _ (RequestIngress inbox _
               captured<-case submission of
                 ReadSubmission _->pure (Right Nothing)
                 WireSubmission{}->pure (Right Nothing)
+                SubmitTerminal{}->pure (Right Nothing)
                 EditSubmission (DiffSubmission targets _ _ _ _ _ _)->do
                   matches<-diffTargetsCurrent namespace targets current
                   if not matches then pure (Left "Buffer identity or revision changed; read the buffer again") else
@@ -501,6 +628,7 @@ drainRequests runtime@(Permissions _ _ state namespace _ (RequestIngress inbox _
         pure current
     finishRequestSubmissionOwned (ReadSubmission submission) err=rejectCaptureOwned submission err
     finishRequestSubmissionOwned (EditSubmission submission) err=finishDiffSubmissionOwned submission (Left err)
+    finishRequestSubmissionOwned (SubmitTerminal submission) err=finishTerminalSubmissionOwned retired submission (Left err)
     finishRequestSubmissionOwned (WireSubmission _ _ _ _ promise enabled _) err=finishWireSubmissionOwned promise enabled err
 
 -- Caller holds the same short request claim used by cancellation. Only known
@@ -531,7 +659,7 @@ finish runtime request result=withMVar (requestClaim request) (\()->finishOwned 
 
 -- Caller holds requestClaim. Result publication and cancellation are linearized.
 finishOwned :: Permissions -> Waiting -> Either Text Value -> IO ()
-finishOwned runtime request result=mask_ $ do
+finishOwned runtime@(Permissions _ _ _ _ retired _ _) request result=mask_ $ do
   atomicModifyIORef' (active request) (const (False,()))
   stopDiffAttempt runtime request
   case operation request of
@@ -541,6 +669,7 @@ finishOwned runtime request result=mask_ $ do
       (if ownsBuildRequest request current then BuildRejected (either id (const "Invalid build admission result") result) else current,())
     CaptureOperation submission->rejectCaptureOwned submission (either id (const "Invalid capture reply") result)
     DiffOperation submission->finishDiffSubmissionOwned submission (case result of Left err->Left err; Right _->Left "Invalid diff reply")
+    TerminalOperation submission->finishTerminalSubmissionOwned retired submission (Left (either id (const "Invalid terminal reply") result))
 
 -- An attempt belongs to a ticket, but failure does not end that ticket. Retire
 -- joins run on their own thread; neither tick nor dialog submission waits for a
@@ -633,10 +762,105 @@ drainDiffAttempts runtime@(Permissions _ _ ref _ retired _ _) initial=do
                 writeIORef (policyStage request) (PolicyPending (AdoptPolicy review prepared) Nothing)
                 pure desktop
 
+startTerminalAttemptOwned :: Permissions -> Waiting -> TerminalSubmission -> Desktop -> IO Desktop
+startTerminalAttemptOwned runtime request (TerminalSubmission consoles directory terminal _ _ _ _ attempt) desktop=mask_ $ do
+  worker<-asyncWithUnmask (\_->mask_ (prepareTerminal consoles directory terminal `finally` signalPermissionWork runtime))
+  writeIORef attempt (Just worker)
+  writeIORef (policyStage request) TerminalPreparing
+  pure (closeReview request desktop)
+
+-- Preparation owns a launch until the masked Async publication hands it to the
+-- ticket's attempt cell. All process, directory and exact-ID IO stays here.
+prepareTerminal :: Consoles.Consoles -> FilePath -> TerminalRequest -> IO (Either Text PreparedTerminal)
+prepareTerminal consoles directory request=case request of
+  StartTerminal launch->do
+    root<-maybe (Build.resolveBuildRootFrom directory) canonicalizePath (Terminal.terminalDirectory launch)
+    let config=NativeTerminal.TerminalConfig (T.unpack (Terminal.terminalCommand launch))
+          (map T.unpack (Terminal.terminalArguments launch)) [] root 80 24
+    fmap PreparedTerminalConsole <$> Consoles.prepareConsole [] config (Terminal.terminalOutputByteLimit launch)
+  ListTerminals->do
+    entries<-Consoles.listConsoles consoles
+    summaries<-mapM (\(ident,bid,code)->do
+      _<-evaluate (T.length ident)
+      _<-traverse evaluate code
+      evaluate (Terminal.TerminalSummary (Terminal.TerminalId ident) bid code)) entries
+    reply<-evaluate (PreparedTerminalReply (ListedTerminals (Terminal.TerminalListing NativeTerminal.terminalAvailable summaries)))
+    pure (Right reply)
+  OutputTerminal ident offset limit->do
+    result<-Consoles.consoleOutput consoles (Terminal.terminalIdText ident)
+    case result of
+      Left err->pure (Left err)
+      Right (bytes,truncated,code)->do
+        _<-traverse evaluate code
+        reply<-evaluate (PreparedTerminalReply (OutputTerminalPage (Terminal.TerminalPage ident offset
+          (BS.length bytes) truncated code (BS.copy (BS.take limit (BS.drop offset bytes))))))
+        pure (Right reply)
+  InputTerminal ident text->fmap (const (PreparedTerminalReply AcceptedTerminal)) <$>
+    Consoles.inputConsole consoles (Terminal.terminalIdText ident) (TE.encodeUtf8 text)
+  StopTerminalRequest ident->fmap (const (PreparedTerminalReply AcceptedTerminal)) <$>
+    Consoles.killConsole consoles (Terminal.terminalIdText ident)
+
+-- A modal hold ends a fresh policy lifetime. Prepared resources remain with the
+-- same request, and only queue a new final check when that hold has ended.
+drainTerminalAttempts :: Permissions -> Desktop -> IO Desktop
+drainTerminalAttempts runtime@(Permissions _ _ ref _ _ _ _) desktop=do
+  requests<-readIORef ref >>= filterMActive . waiting
+  foldM step desktop requests
+  where
+    step current request=case operation request of
+      TerminalOperation (TerminalSubmission _ _ _ _ _ _ _ attempt)->do
+        stage<-readIORef (policyStage request)
+        case stage of
+          TerminalPreparing->do
+            worker<-readIORef attempt
+            result<-maybe (pure Nothing) poll worker
+            case result of
+              Nothing->pure current
+              Just (Left _)->finish runtime request (Left "Terminal preparation failed") >> pure current
+              Just (Right (Left err))->finish runtime request (Left err) >> pure current
+              Just (Right (Right _))->advance current request
+          TerminalPrepared->advance current request
+          _->pure current
+      _->pure current
+    advance current request=withMVar (requestClaim request) $ \()->do
+      live<-readIORef (active request)
+      when live (writeIORef (policyStage request) (if terminalWindowHeld request current
+        then TerminalPrepared else PolicyPending TerminalAdoptPolicy Nothing))
+      pure current
+
+-- Only launch adoption changes the visible desktop. Other terminal replies
+-- can finish beneath a modal while retaining the same final admission checks.
+terminalWindowHeld :: Waiting -> Desktop -> Bool
+terminalWindowHeld request desktop=case operation request of
+  TerminalOperation (TerminalSubmission _ _ StartTerminal{} _ _ _ _ _)->dialog desktop/=Nothing || questionActive desktop
+  _->False
+
+-- The owner holds the same claim as cancellation throughout transfer/reply.
+-- Removing the attempt after successful adoption prevents the retire reaper
+-- from closing the transferred process. Exception paths still retain ownership.
+adoptTerminalOwned :: Permissions -> Waiting -> Desktop -> IO Desktop
+adoptTerminalOwned runtime@(Permissions _ _ _ _ retired _ _) request desktop=case operation request of
+  TerminalOperation submission@(TerminalSubmission consoles _ _ _ _ _ _ attempt)->mask_ $ do
+    worker<-readIORef attempt
+    outcome<-maybe (pure Nothing) poll worker
+    case outcome of
+      Just (Right (Right prepared))->do
+        (updated,response)<-case prepared of
+          PreparedTerminalReply result->pure (desktop,result)
+          PreparedTerminalConsole console->do
+            let bid=nextId desktop
+            (ident,opened)<-Consoles.adoptConsole consoles console desktop
+            pure (opened,OpenedTerminal (Terminal.TerminalOpened (Terminal.TerminalId ident) bid))
+        writeIORef attempt Nothing
+        finishTerminalSubmissionOwned retired submission (Right response)
+        pure updated
+      _->finishOwned runtime request (Left "Terminal preparation is no longer available") >> pure desktop
+  _->finishOwned runtime request (Left "Invalid terminal admission operation") >> pure desktop
+
 -- | Display the oldest live approval and withdraw stale or cancelled prompts.
 tickPermissions :: Permissions -> Desktop -> IO Desktop
 tickPermissions runtime@(Permissions _ _ ref _ _ _ _) original=do
-  desktop<-drainSettings runtime original >>= drainRequests runtime >>= drainDiffAttempts runtime >>= drainPolicies runtime
+  desktop<-drainSettings runtime original >>= drainRequests runtime >>= drainDiffAttempts runtime >>= drainTerminalAttempts runtime >>= drainPolicies runtime
   s<-readIORef ref
   live<-filterMActive (waiting s)
   let staleApproval=case dialog desktop of
@@ -821,6 +1045,8 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
       writing<-policyWriting owner
       case stage of
         PolicyReady->pure desktop
+        TerminalPreparing->pure desktop
+        TerminalPrepared->pure desktop
         PolicyPending use pending | writing->pure desktop
                                   | otherwise->case pending of
           Nothing->do
@@ -870,6 +1096,10 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
             writeIORef state (BuildAllowed request epoch)
             pure desktop
       _->finishOwned runtime request (Left "Invalid build admission operation") >> pure desktop
+    applyPolicy desktop request TerminalAdoptPolicy mode
+      | mode==Prompt && not (approvalRequired request)=finishOwned runtime request (Left "This MCP tool now requires approval; submit again") >> pure desktop
+      | terminalWindowHeld request desktop=writeIORef (policyStage request) TerminalPrepared >> pure desktop
+      | otherwise=adoptTerminalOwned runtime request desktop
     applyPolicy desktop request (AllowPolicy edited review) _=do
       current<-reviewCurrent request review desktop
       let owns=case dialog desktop of Just dg->purpose dg==PermissionDialog (approvalAction request); _->False
@@ -895,6 +1125,7 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
     execute desktop request edited=case operation request of
       CaptureOperation submission->captureSubmissionOwned runtime submission desktop >> pure (closeReview request desktop)
       DiffOperation _->startDiffAttemptOwned runtime request edited desktop
+      TerminalOperation submission->startTerminalAttemptOwned runtime request submission desktop
       BuildAdoptionOperation _->finishOwned runtime request (Left "Invalid build admission phase") >> pure desktop
       BuildInputOperation callback promise->do
         state<-newIORef BuildUnused

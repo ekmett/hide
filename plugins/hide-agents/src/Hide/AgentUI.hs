@@ -30,7 +30,7 @@ import Hide.Plugin.AgentDirectory (AgentDirectory(..),DirectoryRequest(..),Compl
 import qualified Hide.Plugin.Form as Form
 import Hide.Plugin.Command
 import Hide.Plugin.Session (Plugin(..),Session(..),PluginTool(..))
-import Hide.Plugin.Request (requestQuestions)
+import Hide.Plugin.Request (requestQuestions,requestTerminals)
 import qualified Hide.QuestionTools as QuestionTools
 import qualified Hide.AgentSettingsTools as AgentSettingsTools
 import Hide.Plugin.Services (EditorServices(..))
@@ -45,6 +45,7 @@ import qualified Hide.ConversationInput as ConversationInput
 import qualified Hide.ConversationMenus as ConversationMenus
 import qualified Hide.ConversationChoices as ConversationChoices
 import Hide.AgentConfigurationForms (captureChoices,prepareAgentChoice,choiceSpec)
+import qualified Hide.TerminalTools as TerminalTools
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Sidebar as Sidebar
@@ -63,7 +64,8 @@ plugin=Plugin
   , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (map (mapToolContext editorDocumentation) DocsTools.tools
       ++map (mapToolContext editorEnvironment) EnvironmentTools.tools
       ++map (mapToolContext editorAgentSettings) AgentSettingsTools.tools)
-      ++map RequestTool (BufferTools.tools++map (mapToolContext requestQuestions) QuestionTools.tools)
+      ++map RequestTool (BufferTools.tools++map (mapToolContext requestQuestions) QuestionTools.tools
+        ++map (mapToolContext requestTerminals) TerminalTools.tools)
   , pluginConversation=Just AgentTranscript.presentConversation
   , pluginPrimaryInput=Just ConversationInput.primaryInput
   , pluginChildInput=Just ConversationInput.childInput
