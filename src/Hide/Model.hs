@@ -2076,7 +2076,9 @@ clearInline d=d {inlinePreview=Nothing,inlineEpoch=inlineEpoch d+1}
 inlineEligible :: Desktop -> Bool
 inlineEligible d=dialog d==Nothing && menu d==Nothing && contextMenu d==Nothing && not (problemsFocused d) &&
   not (maybe False treeFocused (sideTree d)) && case (activeWindow d,activeDocument d) of
-    (Just w,Just doc)->documentLabel doc==Nothing && textBuffer (documentBuffer doc) && bufferView w==CurrentView
+    -- Admission and later proposal matching share the current metadata policy.
+    (Just w,Just doc)->documentLabel doc==Nothing && not (privateDocument d doc) &&
+      textBuffer (documentBuffer doc) && bufferView w==CurrentView
     _->False
 
 inlineMatches :: Desktop -> InlineView -> Bool

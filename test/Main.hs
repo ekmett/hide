@@ -61,6 +61,7 @@ import qualified SystemOneCheck
 import qualified SystemOneEndpointCheck
 import qualified BindingsCheck
 import qualified HintComposerCheck
+import qualified CompletionContextCheck
 import qualified AutocompleteCheck
 import qualified InlineCheck
 import qualified InlineRenderCheck
@@ -169,6 +170,7 @@ tests = askOption $ \profile->withResource
   , testCase "FileDragHelper" FileDragHelperCheck.checks
   , testCase "Bindings" BindingsCheck.checks
   , testCase "HintComposer" HintComposerCheck.checks
+  , testCase "CompletionContext" CompletionContextCheck.checks
   , testCase "Autocomplete" AutocompleteCheck.checks
   , testCase "Inline" InlineCheck.checks
   , testCase "InlineRender" InlineRenderCheck.checks

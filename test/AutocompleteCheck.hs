@@ -75,7 +75,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       waitRetired runtime ident=awaitIO "completion retirement" $ do
         result<-autocompleteTool runtime "read_completion_context" (object ["requestId" .= ident])
         pure (case result of Left _->Just (); _->Nothing)
-      save runtime visible d=send runtime "save" ["0","acp","python3",T.pack (show [script]),"","","copilot-language-server","[\"--stdio\"]",if visible then "true" else "false"] d
+      save runtime visible d=send runtime "save" ["0","acp","python3",T.pack (show [script]),"","","copilot-language-server","[\"--stdio\"]","Off","1000",if visible then "true" else "false"] d
   writeFile script fixture
   writeFile logPath ""
   writeFile project (unlines ["[editor.autocomplete]","provider = \"acp\"","executable = \"python3\"","arguments = '"++show [script]++"'","debug = false",
@@ -84,7 +84,7 @@ checks=bracket temporary removePathForcibly $ \root->do
     withEnv "THC_EDIT_SESSION" Nothing $
     withEnv "LOG" (Just logPath) $
     withEnv "SECRET" (Just "runtime-autocomplete-secret") $ do
-    withAutocomplete Nothing [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin]
+    withAutocomplete Nothing Nothing [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin]
       (Plugin.pluginCompletionInput AgentUI.plugin) root $ \absent->
       withAutocompleteFixture "retained completion output" desktop $ \retained->do
         let draftState=setComposerInput (newBuffer "retained hint") (Selection 1 6) True retained
@@ -107,7 +107,7 @@ checks=bracket temporary removePathForcibly $ \root->do
         check "missing provider cannot acquire the configured executable" . null =<< logs
         unavailable<-autocompleteTool absent "read_completion_context" (object ["requestId" .= ("1"::T.Text)])
         check "missing provider has no callable snapshot service" (case unavailable of Left _->True; _->False)
-    withAutocomplete (Plugin.pluginCompletionProvider AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin] (observeHint acknowledged <$> Plugin.pluginCompletionInput AgentUI.plugin) root $ \runtime->do
+    withAutocomplete Nothing (Plugin.pluginCompletionProvider AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin] (observeHint acknowledged <$> Plugin.pluginCompletionInput AgentUI.plugin) root $ \runtime->do
       configured<-awaitDesktop runtime "project ACP configuration" autocompleteACPEnabled desktop
       check "completion chat is hidden by default" (not (hasTranscript configured))
       check "provider is lazy before any request" . null =<< logs
@@ -326,7 +326,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       let (closedHints,closeEffects)=runCommand Close fullHints
       _<-snd <$> autocompleteEffects runtime (\d _->pure (False,d)) closedHints closeEffects
       releaseHint blockedId
-  closed<-withAutocomplete (Plugin.pluginCompletionProvider AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin] (Plugin.pluginCompletionInput AgentUI.plugin) root pure
+  closed<-withAutocomplete Nothing (Plugin.pluginCompletionProvider AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin] (Plugin.pluginCompletionInput AgentUI.plugin) root pure
   closedChoices<-timeout 5000000 (completionChoices closed (CompletionTarget 0 Nothing) "model")
   check "choice requests refuse after owner shutdown" (case closedChoices of Just (Left _)->True; _->False)
   putStrLn "Autocomplete runtime checks passed"

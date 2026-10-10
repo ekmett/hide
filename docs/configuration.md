@@ -487,6 +487,8 @@ effort = ""
 copilotExecutable = "copilot-language-server"
 copilotArguments = '["--stdio"]'
 debug = false
+contextRanking = "off" # off, local, or selected; ACP only
+contextRankingBudgetMs = 6000
 ```
 
 An empty model or effort uses the ACP provider's default. Set `debug = true` to
@@ -496,6 +498,29 @@ updates the project table if it already exists, otherwise global settings. A
 project value in `thc.toml` takes precedence. Agents
 cannot change these settings or complete their own authentication.
 
+
+Optional **Context ranking (ACP)** uses the [System-1 supplier](#system-1-decisions)
+to choose up to two additional blocks from the same file. **Host only** (`local`)
+keeps ranking inside the editor process. **Selected supplier** (`selected`) also
+allows an endpoint or a connected browser selected through **Tools > System One supplier…**.
+The default is **Off**. Protected source files are ineligible for autocomplete.
+
+The ranker sees short descriptors of bounded blocks, not the whole file. Blocks
+containing known private values are excluded; private local context skips ranking.
+Current
+local context and recent edits stay intact, and additional snippets are read-only:
+the completion agent can still propose edits only within its ordinary nearby
+range. A busy, unavailable or late ranker falls back to that ordinary context.
+The budget defaults to 6,000 milliseconds, permits 1–10,000, and includes model
+acquisition. The first request loads the model; later requests reuse it. Set a
+shorter budget if prompt fallback matters more than waiting for a cold model.
+Ranking runs on the completion
+worker; moving or editing cancels the pending selection. A load that exceeds the
+budget is canceled too; increase the budget before retrying. A browser cold start
+may need more than the default.
+
+Copilot keeps its real document and cursor protocol. Its current interface has no
+additional-snippet field, so this setting affects ACP only.
 
 ## System-1 decisions
 

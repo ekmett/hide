@@ -26,12 +26,12 @@ import qualified Hide.Plugin.Provider as ACP
 -- | Provider, executable, argument, model/effort and transcript-view selections.
 data CompletionConfig = CompletionConfig
   { provider :: T.Text, acpLaunch :: ACP.ProviderLaunch, model :: Maybe T.Text, effort :: Maybe T.Text
-  , copilotLaunch :: ACP.ProviderLaunch, debug :: Bool } deriving (Eq,Show)
+  , copilotLaunch :: ACP.ProviderLaunch, debug :: Bool, contextRanking :: T.Text, contextRankingBudgetMs :: Int } deriving (Eq,Show)
 
 -- | Reject unknown settings, provider names and invalid bounded argument arrays.
 parseCompletionConfig :: Value -> Either T.Text CompletionConfig
 parseCompletionConfig = either (Left . T.pack) Right . parseEither (withObject "autocomplete" $ \o->do
-  unless (all (`elem` ["provider","executable","arguments","model","effort","copilotExecutable","copilotArguments","debug"]) (KM.keys o)) (fail "Unknown autocomplete setting")
+  unless (all (`elem` ["provider","executable","arguments","model","effort","copilotExecutable","copilotArguments","debug","contextRanking","contextRankingBudgetMs"]) (KM.keys o)) (fail "Unknown autocomplete setting")
   backend<-o .:? "provider" .!= "off"
   unless (backend `elem` ["off","acp","copilot"]) (fail "Autocomplete provider must be off, acp or copilot")
   exe<-o .:? "executable" .!= "codex-acp"
@@ -42,7 +42,11 @@ parseCompletionConfig = either (Left . T.pack) Right . parseEither (withObject "
   cpArgs<-o .:? "copilotArguments" .!= "[\"--stdio\"]" >>= argumentList
   unless (all (\x->not (null x) && not (any (<' ') x)) [exe,cpExe]) (fail "Invalid autocomplete executable")
   showDebug<-o .:? "debug" .!= False
-  pure (CompletionConfig backend (ACP.ProviderLaunch exe args []) (nonempty selected) (nonempty reasoning) (ACP.ProviderLaunch cpExe cpArgs []) showDebug))
+  ranking<-o .:? "contextRanking" .!= "off"
+  unless (ranking `elem` ["off","local","selected"]) (fail "Context ranking must be off, local or selected")
+  budget<-o .:? "contextRankingBudgetMs" .!= 6000
+  unless (budget>=1 && budget<=10000) (fail "Context ranking budget must be 1 to 10000 milliseconds")
+  pure (CompletionConfig backend (ACP.ProviderLaunch exe args []) (nonempty selected) (nonempty reasoning) (ACP.ProviderLaunch cpExe cpArgs []) showDebug ranking budget))
   where nonempty t=if T.null t then Nothing else Just t
         argumentList :: T.Text -> Parser [String]
         argumentList t=case eitherDecodeStrict' (TE.encodeUtf8 t) of

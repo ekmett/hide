@@ -12,12 +12,13 @@ module AutocompleteACPCheck (checks, fixture) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait, cancel)
-import Control.Exception (bracket)
+import Control.Exception (IOException,bracket,try)
 import Control.Monad (unless, forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
@@ -40,7 +41,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       secret="acp-autocomplete-secret-value"
       launch=ACP.ProviderLaunch "python3" [script] [("LOG",logPath),("SECRET",secret)]
       servers=[object ["name" .= ("completion-only"::T.Text),"command" .= ("/private/bridge"::T.Text),"env" .= [object ["name" .= ("THC_EDIT_MCP_TOKEN"::T.Text),"value" .= ("mcp-auth-secret"::T.Text)]]]]
-      input ident=CompletionInput ident "propose" "/source.hs" "private\r\na😀b\r\ntail\n" 7 11 1 ["a😀b","tail",""] [CompletionEdit 10 "" "typed b"]
+      input ident=CompletionInput ident "propose" "/source.hs" "private\r\na😀b\r\ntail\n" 7 11 1 ["a😀b","tail",""] [CompletionEdit 10 "" "typed b"] []
       check label ok=unless ok (error ("ACP autocomplete: "++label))
       args ident proposals=object ["requestId" .= (ident::T.Text),"proposals" .= (proposals::[Value])]
       proposal a z text=object ["startLine" .= (a::Int),"endLine" .= (z::Int),"text" .= (text::T.Text)]
@@ -113,8 +114,27 @@ checks=bracket temporary removePathForcibly $ \root ->
     forM_ [Shown,Accepted,Ignored,PartiallyAccepted 2] $ \action -> reportCompletion completion action (Proposal 9 14 "new😀\r\n" Nothing)
     beforeFeedback<-logs
     check "feedback never starts its own provider task" (length [() | entry<-beforeFeedback,field "method" entry==Just ("session/prompt"::T.Text)]==1)
-    withAsync (requestCompletion completion ((input "second") {inputIntent="alternate-next"})) $ \running -> do
+    let region=CompletionRegion 0 ["private"]
+        regionValue=object ["firstLine" .= (0::Int),"endLine" .= (1::Int),
+          "lines" .= [object ["line" .= (0::Int),"text" .= ("private"::T.Text)]]]
+    forM_ [ [CompletionRegion 0 ["invented"]], [region,region],
+      [CompletionRegion 1 ["a😀b"]], [CompletionRegion maxBound [""]] ] $ \regions->do
+      invalid<-try (requestCompletion completion ((input "invalid") {inputRegions=regions})) :: IO (Either IOException [Proposal])
+      check "optional regions reject malformed provenance, overlap and overflow" (isLeft invalid)
+    withAsync (requestCompletion completion ((input "second") {inputIntent="alternate-next",inputRegions=[region]})) $ \running -> do
       awaitPrompt "second"
+      snapshot<-call completion "read_completion_context" (object ["requestId" .= ("second"::T.Text)])
+      entries<-logs
+      let contexts=[value | entry<-entries,field "method" entry==Just ("session/prompt"::T.Text),
+            Just params<-[field "params" entry::Maybe Value],block<-maybe [] id (field "prompt" params),
+            Just text<-[field "text" block::Maybe T.Text],Just value<-[decodeStrict' (TE.encodeUtf8 text)::Maybe Value],
+            field "requestId" value==Just ("second"::T.Text)]
+      check "prompt and private tool expose the same exact read-only source region"
+        (case (snapshot,contexts) of
+          (Right value,[context])->field "regions" value==Just [regionValue] && field "regions" context==Just [regionValue]
+          _->False)
+      outside<-submitted completion "second" [proposal 0 1 "changed private\n"]
+      check "optional source regions do not authorize edits outside nearby context" (isLeft outside)
       accepted<-submitted completion "second" []
       check "empty submission is a valid abstention" (not (isLeft accepted))
       release "second"

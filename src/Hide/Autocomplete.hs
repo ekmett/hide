@@ -41,6 +41,9 @@ import Hide.Buffer
 import Hide.Model hiding (Settings, Save)
 import Hide.InlineState
 import Hide.Plugin.Completion
+import Hide.Plugin.SystemOne (SystemOneServices,DecisionLocality(..))
+import qualified Hide.CompletionContext as Context
+import Text.Read (readMaybe)
 import qualified Hide.AutocompleteConfig as C
 import qualified Hide.Plugin.Completion as A
 import qualified Hide.Plugin.Provider as Launch
@@ -62,7 +65,7 @@ import Hide.Plugin.Editor (withDraftRef)
 import Hide.PluginWindowHost (adoptWindowUpdate,adoptEditorWindowUpdate,installEditorDraft,applyEditorUpdate)
 
 -- Snapshot identity guards adoption even when undo returns an old revision.
-data Snapshot = Snapshot InlineView Buffer (StableName Buffer) FilePath
+data Snapshot = Snapshot InlineView Buffer (StableName Buffer) FilePath [Diagnostic]
 type CompletionChoices = (CompletionTarget,T.Text,[(T.Text,T.Text)],T.Text)
 data Job = Request Snapshot T.Text Int | Settings | Save Value | Feedback CompletionFeedback Proposal
   | SignIn | FinishSignIn | SignOut | Hint !CompletionTarget !Editor.DraftSubmission !(Editor.PreparedEditor HintServices Editor.EditorUpdate)
@@ -97,9 +100,9 @@ data Autocomplete = Autocomplete
 completionSummary :: Autocomplete -> IO (Maybe CompletionSummary)
 completionSummary=readIORef . summary
 
-withAutocomplete :: Maybe CompletionProvider -> [Tool.Tool (Maybe CompletionServices)]
+withAutocomplete :: Maybe SystemOneServices -> Maybe CompletionProvider -> [Tool.Tool (Maybe CompletionServices)]
   -> Maybe (InputDeclaration HintServices) -> FilePath -> (Autocomplete -> IO a) -> IO a
-withAutocomplete providerContribution tools declaration root use=Tool.withTools [] tools $ \toolset->Command.withRegistry $ \registry->withDraftRef $ \draft->W.withWindowScope $ \scope->do
+withAutocomplete decisions providerContribution tools declaration root use=Tool.withTools [] tools $ \toolset->Command.withRegistry $ \registry->withDraftRef $ \draft->W.withWindowScope $ \scope->do
   registered<-traverse (\input->Editor.registerDeclaredInput registry input id >>= either (ioError . userError . show) pure) declaration
   editor<-traverse (`Editor.attachDeclaredInput` draft) registered
   empty<-prepareTranscript ""
@@ -144,7 +147,7 @@ withAutocomplete providerContribution tools declaration root use=Tool.withTools 
                 Right ()->do
                   previous<-C.parseCompletionConfig <$> readIORef settings
                   case previous of
-                    Right old | selected {C.debug=C.debug old}==old->do
+                    Right old | selected {C.debug=C.debug old,C.contextRanking=C.contextRanking old,C.contextRankingBudgetMs=C.contextRankingBudgetMs old}==old->do
                       writeIORef settings updated
                       emit runtime (Configured (C.debug selected) (enabledACP selected))
                       pure True
@@ -156,9 +159,23 @@ withAutocomplete providerContribution tools declaration root use=Tool.withTools 
                 Nothing->emit runtime (Notice (if C.provider cfg=="acp" && not acpAvailable then "ACP autocomplete plugin is unavailable." else "Choose ACP or Copilot in Options > Autocomplete."))
                 Just p->do
                   result<-race (atomically (readTVar (generation runtime) >>= check . (/=serial))) $ try $ do
-                    input<-prepareInput snap intent serial
+                    baseline<-prepareInput snap intent serial
+                    currentSettings<-C.parseCompletionConfig <$> readIORef settings
+                    input<-case (decisions,currentSettings) of
+                      (Just service,Right selected) | C.provider selected=="acp",C.contextRanking selected/="off"->do
+                        let Snapshot _ source _ _ notices=snap
+                            position=bufferLineColumn source (inputOffset baseline)
+                            editRows=map (fst . bufferLineColumn source . editStartOffset) (inputHistory baseline)
+                            diagnosticRows=[diagnosticRow note-1 | note<-take 64 notices,
+                              diagnosticPath note==inputPath baseline,diagnosticVersion note==Just (inputVersion baseline)]
+                            candidates=Context.contextCandidates source baseline (take 3 diagnosticRows++editRows)
+                        environment<-getEnvironment
+                        let private=[T.pack value | (name,value)<-environment,sensitiveLabel (T.pack name),not (null value)]
+                        Context.selectContext service (if C.contextRanking selected=="local" then HostProcessOnly else SelectedSupplier)
+                          (C.contextRankingBudgetMs selected) private position baseline candidates
+                      _->pure baseline
                     options<-complete p input
-                    let Snapshot _ source _ _=snap
+                    let Snapshot _ source _ _ _=snap
                         prepared=mapMaybe (either (const Nothing) Just . prepareOption source) (take 8 options)
                     -- Evaluate all bounded preview rows on this worker.
                     _<-evaluate (length (show prepared))
@@ -374,21 +391,22 @@ snapshot d | inlineEligible d,Just w<-activeWindow d,Just doc<-activeDocument d,
       absolute=if isAbsolute path then path else startingDirectory d </> path
       view=InlineView (windowId w) bid (revision source) (selection w) (inlineEpoch d) [] 0
   identity<-makeStableName =<< evaluate source
-  pure (Just (Snapshot view source identity absolute))
+  notices<-evaluate (diagnostics d)
+  pure (Just (Snapshot view source identity absolute notices))
 snapshot _=pure Nothing
 
 snapshotCurrent :: Desktop -> Snapshot -> IO Bool
-snapshotCurrent d (Snapshot v _ identity _)
+snapshotCurrent d (Snapshot v _ identity _ _)
   | inlineMatches d v,Just doc<-activeDocument d=(==identity) <$> (makeStableName =<< evaluate (documentBuffer doc))
   | otherwise=pure False
 
 prepareInput :: Snapshot -> T.Text -> Int -> IO CompletionInput
-prepareInput (Snapshot v b _ path) intent serial=do
+prepareInput (Snapshot v b _ path _) intent serial=do
   let offset=caret (inlineSelection v)
       (row,_)=bufferLineColumn b offset
       (first,nearby)=context 40 row
       history=recent 3 b
-      input=CompletionInput (T.pack (show serial)) intent path (contents b) (revision b) offset first nearby history
+      input=CompletionInput (T.pack (show serial)) intent path (contents b) (revision b) offset first nearby history []
   _<-evaluate (T.length (inputText input)+sum (map T.length nearby)+length (show history))
   pure input
   where
@@ -441,8 +459,9 @@ autocompleteEffects runtime fallback d effects=foldM step (False,d) effects
         "alternate-previous"->request runtime action state
         "settings"->enqueue runtime Settings >> pure state
         "save"->case args of
-          button:backend:exe:arguments:model:effort:cp:cpArgs:debug:_ | button `elem` ["0","2","3"]->do
-            enqueue runtime (Save (object ["provider" .= T.toLower backend,"executable" .= exe,"arguments" .= arguments,"model" .= model,"effort" .= effort,"copilotExecutable" .= cp,"copilotArguments" .= cpArgs,"debug" .= (debug=="true")]))
+          button:backend:exe:arguments:model:effort:cp:cpArgs:ranking:budget:debug:_ | button `elem` ["0","2","3"]->do
+            let millis=maybe (String budget) (toJSON :: Int -> Value) (readMaybe (T.unpack budget))
+            enqueue runtime (Save (object ["provider" .= T.toLower backend,"executable" .= exe,"arguments" .= arguments,"model" .= model,"effort" .= effort,"copilotExecutable" .= cp,"copilotArguments" .= cpArgs,"debug" .= (debug=="true"),"contextRanking" .= (case ranking of "Host only"->"local"::T.Text;"Selected supplier"->"selected";_->"off"),"contextRankingBudgetMs" .= millis]))
             when (button=="2") (enqueue runtime SignIn)
             when (button=="3") (enqueue runtime SignOut)
             atomically (modifyTVar' (generation runtime) (+1))
@@ -514,7 +533,7 @@ tickAutocomplete runtime original=do
   where
     drain state=atomically (tryReadTQueue (replies runtime)) >>= maybe (pure state) (\reply->adopt state reply >>= drain)
     adopt state reply=case reply of
-      Ready snap@(Snapshot view _ _ _) options->do
+      Ready snap@(Snapshot view _ _ _ _) options->do
         valid<-snapshotCurrent state snap
         when valid (writeIORef (requested runtime) Nothing)
         if not valid then do
@@ -569,6 +588,8 @@ settingsDialog values d=d {dialog=Just (Dialog "Autocomplete" (AutocompleteDialo
     fields'=[ComboBox "Provider" ["Off","ACP","Copilot"] (case value "provider" "off" of "acp"->1; "copilot"->2; _->0) Nothing,input "executable" "ACP executable" "codex-acp",
       input "arguments" "ACP arguments (JSON)" "[]",input "model" "Model" "",input "effort" "Effort" "",
       input "copilotExecutable" "Copilot executable" "copilot-language-server",input "copilotArguments" "Copilot arguments (JSON)" "[\"--stdio\"]",
+      ComboBox "Context ranking (ACP)" ["Off","Host only","Selected supplier"] (case value "contextRanking" "off" of "local"->1;"selected"->2;_->0) Nothing,
+      let text=case values of Object o | Just (Number n)<-KM.lookup "contextRankingBudgetMs" o->T.pack (show (round n::Int));_->"6000" in Input "Ranking budget (ms)" text (T.length text),
       CheckBox "Show completion chat" visible]
 
 -- Preparation and bounded coalescing stay on the existing trace worker. The

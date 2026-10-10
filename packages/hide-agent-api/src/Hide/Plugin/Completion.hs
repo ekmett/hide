@@ -13,6 +13,7 @@ module Hide.Plugin.Completion
   ( CompletionInput(..)
   , CompletionEdit(..)
   , CompletionContext(..)
+  , CompletionRegion(..)
   , completionContextValue
   , completionEditsValue
   , Proposal(..)
@@ -38,6 +39,7 @@ data CompletionInput = CompletionInput
   { inputId :: !Text, inputIntent :: !Text, inputPath :: !FilePath, inputText :: !Text
   , inputVersion :: !Int, inputOffset :: !Int
   , inputFirstLine :: !Int, inputNearby :: ![Text], inputHistory :: ![CompletionEdit]
+  , inputRegions :: ![CompletionRegion]
   }
 
 -- | One bounded recent change, prepared from the source owner's history on its
@@ -46,12 +48,23 @@ data CompletionEdit = CompletionEdit
   { editStartOffset :: !Int, editOldText :: !Text, editNewText :: !Text }
   deriving (Eq,Show)
 
+-- | Complete source lines from the same immutable file as the local context.
+-- Rows use zero-based source coordinates with CRLF terminators removed, as in
+-- the nearby lines. At most two sorted, disjoint regions contain at most 256
+-- lines and 8192 characters in total. They do not overlap the nearby range.
+-- These snippets supply read-only context; adding a region never enlarges the
+-- line boundaries admitted by 'submitCompletion'.
+data CompletionRegion = CompletionRegion
+  { regionFirstLine :: !Int, regionLines :: ![Text] }
+  deriving (Eq,Show)
+
 -- | Local snapshot exposed by the private tool route. It contains no whole-file
 -- source; explicit file reads are separately limited to 8192 characters.
 data CompletionContext = CompletionContext
   { contextRequestId :: !Text, contextIntent :: !Text, contextPath :: !FilePath
   , contextRevision :: !Int, contextOffset :: !Int, contextLine :: !Int, contextColumn :: !Int
   , contextFirstLine :: !Int, contextLines :: ![Text], contextRecentEdits :: ![CompletionEdit]
+  , contextRegions :: ![CompletionRegion]
   } deriving (Eq,Show)
 
 -- | The same concrete snapshot encoding is used in the provider prompt and the
@@ -63,7 +76,11 @@ completionContextValue context=object
   ,"caret" .= object ["offset" .= contextOffset context,"line" .= contextLine context,"column" .= contextColumn context]
   ,"firstLine" .= contextFirstLine context,"endLine" .= (contextFirstLine context+length (contextLines context))
   ,"lines" .= [object ["line" .= number,"text" .= text] | (number,text)<-zip [contextFirstLine context..] (contextLines context)]
-  ,"recentEdits" .= completionEditsValue (contextRecentEdits context)]
+  ,"recentEdits" .= completionEditsValue (contextRecentEdits context)
+  ,"regions" .= [object
+      ["firstLine" .= regionFirstLine region,"endLine" .= (regionFirstLine region+length (regionLines region))
+      ,"lines" .= [object ["line" .= number,"text" .= text] | (number,text)<-zip [regionFirstLine region..] (regionLines region)]]
+    | region<-contextRegions context]]
 
 -- | Encode the concrete recent-edit payload for its existing 32 KiB wire limit.
 completionEditsValue :: [CompletionEdit] -> Value

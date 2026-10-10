@@ -287,20 +287,41 @@ prepareInput input=do
   unless (inputOffset input>=0 && inputOffset input<=size && inputVersion input>=0) (Left "Invalid completion caret or revision.")
   unless (BL.length (BL.take 32769 (encode (completionEditsValue (inputHistory input))))<=32768) (Left "Completion history exceeds its bound.")
   unless (length before==inputFirstLine input && length rows==length nearby && map (T.dropWhileEnd (=='\r')) rows==nearby) (Left "Completion context does not match its source snapshot.")
+  unless (length (take 3 (inputRegions input))<=2) (Left "At most two completion regions are allowed.")
+  _<-foldM validateRegion (0,0,0) (inputRegions input)
   let start=sum (map ((+1).T.length) before)
       offsets=scanl (\offset text -> min size (offset+T.length text+1)) start rows
       beforeCaret=T.take (inputOffset input) source
       row=T.count "\n" beforeCaret
       column=T.length (last (T.splitOn "\n" beforeCaret))
       context=CompletionContext (inputId input) (inputIntent input) (inputPath input) (inputVersion input)
-        (inputOffset input) row column (inputFirstLine input) nearby (inputHistory input)
+        (inputOffset input) row column (inputFirstLine input) nearby (inputHistory input) (inputRegions input)
   pure (Pending (inputId input) context source (zip [inputFirstLine input..] offsets) Nothing)
   where
     source=inputText input
     size=T.length source
     nearby=inputNearby input
-    (before,remaining)=splitAt (inputFirstLine input) (T.splitOn "\n" source)
+    sourceRows=T.splitOn "\n" source
+    (before,remaining)=splitAt (inputFirstLine input) sourceRows
     rows=take (length nearby) remaining
+    validateRegion (previousEnd,characters,lineCount) region=do
+      let first=regionFirstLine region
+          texts=regionLines region
+          count=length (take 257 texts)
+      unless (first>=previousEnd && count>=1 && count<=256-lineCount && first<=maxBound-count)
+        (Left "Invalid completion region bounds or order.")
+      let end=first+count
+          nearbyEnd=inputFirstLine input+length nearby
+      unless (end<=inputFirstLine input || first>=nearbyEnd)
+        (Left "Completion regions overlap nearby context.")
+      total<-foldM (\used text->do
+        let added=T.length text
+        unless (added<=8192-used) (Left "Completion regions exceed 8192 characters.")
+        pure (used+added)) characters texts
+      let actual=take count (drop first sourceRows)
+      unless (length actual==count && map (T.dropWhileEnd (=='\r')) actual==texts)
+        (Left "Completion region does not match its source snapshot.")
+      pure (end,total,lineCount+count)
 
 -- Typed services share the existing current-request slot. Wire codecs live in
 -- hide-agents; direct in-process calls still receive the same bounds and exact

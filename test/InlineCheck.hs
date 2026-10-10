@@ -12,10 +12,14 @@ module InlineCheck (checks) where
 
 import Control.Monad (forM_,unless)
 import Data.Aeson (Value(..))
+import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import Hide.Buffer
 import Hide.InlineState
+import Hide.Files (FileState(..))
+import qualified Hide.Model as Model
+import qualified Graphics.Vty as Vty
 import Hide.Plugin.Completion
 
 checks :: IO ()
@@ -76,6 +80,31 @@ checks=do
     check "invalid ranges, NUL, and no-op proposals are rejected" (case prepareOption (newBuffer "abc") p of Left _->True; _->False)
   let view=InlineView 1 1 0 (Selection 0 0) 1 [unicode] (-1)
   check "invalid alternative index has no selection" (selectedOption view==Nothing && selectedOption (view {inlineIndex=1})==Nothing)
+  let public=Model.addDocument Nothing b (Model.initialDesktop (80,25))
+      window=maybe (error "Missing inline source window") id (Model.activeWindow public)
+      bid=maybe (error "Missing inline source buffer") id (Model.bufferId window)
+      sourceBuffer=maybe (error "Missing inline source document") Model.documentBuffer (Model.activeDocument public)
+      captured=InlineView (Model.windowId window) bid (revision sourceBuffer) (Model.selection window) (Model.inlineEpoch public) [normalized] 0
+      withDocument change=public {Model.buffers=M.adjust change bid (Model.buffers public)}
+      propose=Vty.EvKey (Vty.KChar '\\') [Vty.MAlt]
+      noInline event desktop=case Model.inlineEvent event desktop of Nothing->True; _->False
+      privateSources=
+        [("explicit private drafts",withDocument (\doc->doc {Model.documentPrivate=True}))
+        ,("registered authority files",(withDocument (\doc->doc {Model.documentFile=Just (FileState "/authority/config.toml" Nothing)})) {Model.guestPrivatePaths=["/authority"]})
+        ,("protected source origins",(withDocument (\doc->doc {Model.documentOrigin=Just "/authority/source.hs"})) {Model.guestPrivatePaths=["/authority"]})
+        ,("project authority files",withDocument (\doc->doc {Model.documentFile=Just (FileState "/project/thc.toml" Nothing)}))]
+  check "ordinary public sources remain eligible for autocomplete"
+    (Model.inlineEligible public && Model.inlineMatches public captured && case Model.inlineEvent propose public of
+      Just (_,effects)->effects==[Model.AutocompleteAction "propose" []]
+      _->False)
+  forM_ privateSources $ \(label,private)->do
+    check (label++" refuse autocomplete requests") (not (Model.inlineEligible private) && noInline propose private)
+    -- Only privacy/path metadata changes: the original buffer, revision, caret
+    -- and view receipt are retained, so numeric source guards alone would pass.
+    check (label++" revoke an existing inline proposal")
+      (not (Model.inlineMatches private captured) && noInline (Vty.EvKey (Vty.KChar '\t') []) private {Model.inlinePreview=Just captured})
+    let hidden=private {Model.buffers=M.adjust (\doc->doc {Model.documentBuffer=error "Inline privacy forced protected source content"}) bid (Model.buffers private)}
+    check (label++" reject before inspecting protected source content") (not (Model.inlineEligible hidden) && not (Model.inlineMatches hidden captured))
   putStrLn "Inline checks passed"
 
 prepare :: Buffer -> Proposal -> IO InlineOption

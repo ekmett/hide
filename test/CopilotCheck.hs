@@ -37,7 +37,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   let server=root </> "fake-copilot.py"
       source=root </> "space λ.py"
       launch=ACP.ProviderLaunch "python3" ["-X","utf8",server,"--stdio"] []
-      input text version=CompletionInput "fixture" "propose" source text version (T.length text) 0 [] []
+      input text version=CompletionInput "fixture" "propose" source text version (T.length text) 0 [] [] []
   writeUtf8 server fakeServer
   withCopilot launch root $ \client->do
     check "process probe identifies the live provider" . (==Just True) =<< running (root </> "pid")
@@ -48,7 +48,7 @@ checks=bracket temporary removePathForcibly $ \root->do
     feedbackCopilot client (PartiallyAccepted 2) first
     feedbackCopilot client Accepted first
     feedbackCopilot client Ignored first
-    _<-completeCopilot client ((input "a😀" 1) {inputIntent="alternate-next"})
+    _<-completeCopilot client ((input "a😀" 1) {inputIntent="alternate-next",inputRegions=[CompletionRegion 0 ["a😀"]]})
     signin<-signInCopilot client
     check "device flow code and command are returned without signing in" (signInCode signin=="TEST-CODE")
     beforeFinish<-decode <$> BL.readFile (root </> "state.json")
@@ -168,6 +168,7 @@ fakeServer=unlines
   , "  state.setdefault('firstChangeEnd',change['range']['end']);document=change['text'];version=p['textDocument']['version']"
   , " elif method=='textDocument/didClose':state['closes']+=1"
   , " elif method=='textDocument/inlineCompletion':"
+  , "  assert 'regions' not in p and 'regions' not in p['context']"
   , "  assert p['textDocument']['version']==version;state['explicit']+=int(p['context']['triggerKind']==1)"
   , "  if document=='hold':"
   , "   open('held','w').close();continue"

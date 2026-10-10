@@ -210,8 +210,9 @@ history.
 ACP completion keeps a private conversation warm between requests. It receives
 nearby lines, the cursor position and short recent-edit excerpts, and can read
 more of the current file when needed. It receives acceptance feedback on later
-requests. Its tools can propose changes but cannot apply them, run programs or
-control the editor.
+requests. Optional [context ranking](configuration.md#autocomplete) can add two
+read-only source blocks without extending the range it may edit. Its tools can
+propose changes but cannot apply them, run programs or control the editor.
 
 The completion conversation is hidden by default. Enable **Show completion chat** to inspect it beside Messages and terminals. In ACP mode you
 can type hints there—such as “keep this allocation-free”—and discuss intent with
