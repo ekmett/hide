@@ -85,7 +85,8 @@ completionSummary=readIORef . summary
 
 withAutocomplete :: Maybe (InputDeclaration HintServices) -> FilePath -> (Autocomplete -> IO a) -> IO a
 withAutocomplete declaration root use=Command.withRegistry $ \registry->withDraftRef $ \draft->W.withWindowScope $ \scope->do
-  editor<-traverse (\input->Editor.prepareDeclaredEditor registry draft input id >>= either (ioError . userError . show) pure) declaration
+  registered<-traverse (\input->Editor.registerDeclaredInput registry input id >>= either (ioError . userError . show) pure) declaration
+  editor<-traverse (`Editor.attachDeclaredInput` draft) registered
   empty<-prepareTranscript ""
   token<-T.pack <$> randomIdentity
   runtime<-Autocomplete token <$> newTBQueueIO 64 <*> newTQueueIO <*> newTVarIO 0 <*> newIORef Nothing

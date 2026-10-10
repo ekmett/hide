@@ -21,6 +21,7 @@ import Hide.Plugin.AgentDirectory (AgentDirectory,DirectoryRequest)
 import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
 import Hide.Plugin.Completion (HintServices)
+import Hide.Plugin.ConversationInput (ChildInputServices)
 import Hide.Plugin.Input (InputDeclaration)
 import Hide.Plugin.Request (RequestServices)
 import Hide.Plugin.Tool (Tool)
@@ -66,6 +67,10 @@ data Plugin = Plugin
   , pluginConversation :: Maybe ConversationPresenter
     -- ^ Pure presentation selected at startup and evaluated only on the host
     -- preparation/checkpoint workers. This contribution owns no input lifetime.
+  , pluginChildInput :: Maybe (InputDeclaration ChildInputServices)
+    -- ^ One command registration shared by child draft attachments. The host
+    -- supplies only the captured human slot/target service on its existing
+    -- worker; missing input leaves child output read-only and preserves drafts.
   , pluginCompletionInput :: Maybe (InputDeclaration HintServices)
     -- ^ The host compiles this declaration before its event loop and invokes its
     -- command only on the admitted completion worker. Missing input preserves

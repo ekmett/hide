@@ -881,9 +881,11 @@ code-input behavior, a character bound, a typed command and its argument/reply
 adapters. The host checks cached length before reading submitted text on the
 worker and binds `KeepInput`, `ClearInput` or `ReplaceInput` to the original
 submission. Plugins receive no Buffer, Undo or content-version identity.
-`hide-agents` uses this for ACP completion's acknowledged **Send hint** action;
-provider selection, the bounded queue and exact-version adoption remain with the
-existing completion owner.
+`hide-agents` uses this for ACP completion's **Send hint** action and child
+conversation **Query/Steer**. Each uses its existing worker and captured provider
+or child receipt. The host registers a declaration once, then attaches it to
+each draft; command registration does not duplicate per-window input ownership.
+Acknowledged results pass through the same exact-version adoption path.
 
 The `Hide.Plugin.Editor` interpreter retains drafts, Undo and selection
 independently of body refreshes. `openEditorWindow` publishes an input attachment

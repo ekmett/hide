@@ -40,7 +40,10 @@ import System.IO (hClose,openTempFile)
 import Control.Concurrent.Async (Async,poll)
 import Data.IORef (newIORef,writeIORef,readIORef)
 import System.IO (hFlush)
-import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, isEmptyMVar)
+import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, isEmptyMVar, tryPutMVar)
+import qualified Hide.Plugin.Command as Command
+import Hide.Plugin.Input (InputDeclaration(..))
+import Hide.Plugin.ConversationInput (ChildInputServices(..))
 import System.Process (withCreateProcess, proc, CreateProcess(..), StdStream(..), waitForProcess)
 import System.Exit (ExitCode(..))
 import System.Posix.Files (createNamedPipe)
@@ -55,6 +58,7 @@ import Hide.Buffer
 import qualified Hide.App as App
 import Hide.GuestAccess (guestCommandAllowed, protectedBuffer, readableAt)
 import qualified Hide.AgentTranscript as AgentTranscript
+import qualified Hide.ConversationInput as ConversationInput
 import Hide.Conversation hiding (tickConversation)
 import Hide.SessionServices
 import qualified Hide.BuildJobs as Jobs
@@ -296,7 +300,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
     let base=(addDocument (Just (FileState source Nothing)) (newBuffer "main=1\n") (initialDesktop (100,35))) {sideTree=Just (emptySidebar root 20 False)}
     -- Submission identity is captured before the initial provider handshake.
     bracket (lookupEnv "THC_CONNECT_GATE" <* setEnv "THC_CONNECT_GATE" gate) (restoreDraftEnvironment "THC_CONNECT_GATE") $ \_->
-      C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \runtime->do
+      C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \runtime->do
         configured<-configure runtime base
         original<-evaluate (newBuffer "stream")
         createNamedPipe gate 0o600
@@ -326,7 +330,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
     writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
-    forM_ [(False,False,False),(False,True,False),(False,True,True),(True,False,False),(True,True,False)] $ \(steer,replaced,requeue)->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \runtime->do
+    forM_ [(False,False,False),(False,True,False),(False,True,True),(True,False,False),(True,True,False)] $ \(steer,replaced,requeue)->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \runtime->do
       let scenario=if steer then (if replaced then "steer replacement" else "steer unchanged") else if requeue then "query requeue" else if replaced then "query replacement" else "query unchanged"
       configured<-configure runtime base
       connected<-prompt runtime "stream" configured >>= primaryDone runtime (scenario++" connect")
@@ -368,7 +372,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
       check "acceptance preserves a replacement draft and clears only the submitted one"
         (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
     bracket (lookupEnv "THC_CANCEL_GATE" <* setEnv "THC_CANCEL_GATE" gate) (restoreDraftEnvironment "THC_CANCEL_GATE") $ \_->
-      C.withConsoles $ \consoles->withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \runtime->do
+      C.withConsoles $ \consoles->withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \runtime->do
         configured<-configure runtime base
         active<-prompt runtime "wait" configured >>= await runtime "cancellation active turn" (pure . (=="Agent is replying...") . status)
         before<-readMessages (root </> "messages.jsonl")
@@ -391,7 +395,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
         removeFile gate
     bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" (replicate 48 'c')) (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->
       bracket (lookupEnv "THC_STEER_GATE" <* setEnv "THC_STEER_GATE" gate) (restoreDraftEnvironment "THC_STEER_GATE") $ \_->
-        forM_ [False,True] $ \replaced->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \runtime->do
+        forM_ [False,True] $ \replaced->withObservedChild $ \acknowledged declaration->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just declaration) consoles root $ \runtime->do
           _<-configure runtime base
           let hub=AR.agentHub (conversationAgents runtime)
           ident<-AH.spawnAgent hub AH.Human (AH.SpawnSpec "Receipt child" "wait" root AH.Shared AH.Fresh Nothing Nothing) >>= either (error.T.unpack) pure
@@ -417,6 +421,10 @@ draftReceiptChecks=withTextPresentation $ \presentation->
             restored<-await runtime "child control completion" (pure . not . agentReplying) (selectConversationView target "Receipt child" settled)
             check "child acceptance preserves a replacement draft and clears only its submitted draft"
               (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
+            services<-timeout 3000000 (takeMVar acknowledged) >>= maybe (error "Child input command did not acknowledge") pure
+            expired<-timeout 1000000 (submitInput services "retained command must not send")
+            check "child input service rejects after its acknowledged command completes"
+              (case expired of Just (Left _)->True; _->False)
             when replaced $ do
               let (requested,effects)=runCommand AgentNew restored
               restarted<-snd <$> conversationEffects runtime (\value _->pure (False,value)) requested effects
@@ -427,7 +435,18 @@ draftReceiptChecks=withTextPresentation $ \presentation->
                  retained && composerSelection childAgain==composerSelection restored)
           removeFile gate
     putStrLn "draft receipt checks passed"
-  where restoreDraftEnvironment name=maybe (unsetEnv name) (setEnv name)
+  where
+    restoreDraftEnvironment name=maybe (unsetEnv name) (setEnv name)
+    withObservedChild action=do
+      acknowledged<-newEmptyMVar
+      action acknowledged (observeChild acknowledged ConversationInput.childInput)
+    -- Keep the real plugin validation, service call and reply adapter. Draft
+    -- adoption above proves the observed command has returned to its owner.
+    observeChild acknowledged (InputDeclaration spec limit definition arguments result)=
+      InputDeclaration spec limit (definition {Command.commandRun= \services input->do
+        reply<-Command.commandRun definition services input
+        case reply of Right _->tryPutMVar acknowledged services >> pure (); Left _->pure ()
+        pure reply}) arguments result
 #endif
 
 checks :: AllocationProfile -> IO ()
@@ -583,7 +602,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
               _->tickConversation runtime next
             else pure next
           _ -> error ("Missing inline action "++T.unpack action)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       let longReply=T.unwords (replicate 90 "window-width")
           rawShell="printf '%s\\n' 'literal λ'\n\tprintf 'tail  '  \n"
           question=longReply<>"\n\n```sh\n"<>rawShell<>"```"
@@ -615,7 +634,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           ("window-width" `T.isInfixOf` clipboard copied && not ("┌" `T.isInfixOf` clipboard copied) && not ("```" `T.isInfixOf` clipboard copied))
         stable<-tickConversation runtime reflowed
         check "timer tick keeps adopted body identity stable" (conversationBodySnapshot "" stable==Just prepared)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       let sourceText="# Alpha界Beta Gamma界Delta Epsilon Zeta Eta Theta\n\n"<>T.unwords (replicate 80 "following")
           base=(initialDesktop (32,18)) {wideSectionTitles=True}
           caretReady d=maybe False ((==Nothing).conversationCaretIntent) (M.lookup "" (conversationViews d))
@@ -663,7 +682,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       check "wide user bubbles anchor on the right and replies on the left"
         (styledLength (firstRow outgoing)==columns && maybe False (\(_,style)->case style of BubbleText _ False _->False; _->True) (listToMaybe incoming) &&
          maximum (map (styledLength . filter (\(_,style)->case style of BubbleText{}->True; _->False)) (splitStyled incoming))>columns-20)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       agents <- send runtime "directory" [] savedDraft
@@ -681,7 +700,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       shownDraft<-sameDraftRoot recovered shown
       check "opening a recovered conversation preserves its transcript and draft"
         (shownSources && shownDraft && conversationText shown=="Recovered user and agent transcript" && map windowId (windows shown)==map windowId (windows recovered) && composerSelection shown==composerSelection recovered && composerFocused shown)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (asked,reply)<-questionTool runtime savedDraft (object ["question" .= ("Question presentation identity"::T.Text),"choices" .= (["First","Second"]::[T.Text])])
@@ -763,13 +782,13 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
             (Nothing,Nothing)->True
             _->False
           _->False)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (_,anonymous)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Anonymous question"::T.Text)])
       refused<-timeout 100000 anonymous
       check "anonymous ask_user cannot acquire a private answer" (case refused of Just (Left _)->True; _->False)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (asked,answer)<-questionTool runtime savedDraft (object ["question" .= ("Pick a direction"::T.Text),"choices" .= (["Left","Right"]::[T.Text])])
@@ -865,7 +884,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           _->False)
       smallCancelled<-clickAction runtime "question-cancel" typedInput
       check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime->Permissions.withPermissionsAt (root </> "question-permissions.toml") chatTools $ \permissions->do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime->Permissions.withPermissionsAt (root </> "question-permissions.toml") chatTools $ \permissions->do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       bound<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
@@ -897,7 +916,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         refused<-approve revokedReview
         result<-wait request
         check "deferred approval cannot resurrect an ended question requester" (chatQuestion refused==Nothing && isLeft result)
-    (closedRuntime,closedId)<-C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime->do
+    (closedRuntime,closedId)<-C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime->do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (_,reply)<-questionTool runtime savedDraft (object ["question" .= ("Session closes"::T.Text)])
@@ -933,7 +952,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         pure ("shared captured output" `T.isInfixOf` out && either (const False) (\(bytes,_,_)->"shared terminal output" `BS.isInfixOf` bytes) terminal)) sharedDesktop
       before<-Jobs.buildJobStatus jobs warm
       jobId<-maybe (error "Missing shared job ID") pure (field "jobId" before :: Maybe T.Text)
-      (providerId,retired)<-withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \runtime->do
+      (providerId,retired)<-withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \runtime->do
         configured<-configure runtime ("yes"::T.Text) warm
         approval<-prompt runtime "terminal-hold" configured >>= modal runtime
         accepted<-actDialog runtime 0 approval
@@ -980,7 +999,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       pure ()
     -- A submitted answer resumes the original idle provider through its existing
     -- query owner. A replacement with the same provider session ID cannot replay it.
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       connected<-prompt runtime "stream" configured >>= done runtime
       let liveDraft=draftAt (newBuffer "newer independent draft") (Selection 6 6) connected
@@ -1018,7 +1037,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     -- made while its request was waiting behind that read.
     let pipe=root </> "slow-source"
     createNamedPipe pipe 0o600
-    withHeldRead server pipe "held read\n" $ \opened release writer -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    withHeldRead server pipe "held read\n" $ \opened release writer -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
         configured<-configure runtime ("yes"::T.Text) desktop
         started<-prompt runtime "slow-files" configured
         responsive<-await runtime "provider update behind held file read"
@@ -1043,7 +1062,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           (maybe False hasError writeResult && dialog completed==Nothing)
         check "stale asynchronous write leaves disk intact" . (=="disk original\n") =<< BS.readFile source
     forM_ ["slow-replaced","slow-private"] $ \scenario -> do
-      withHeldRead server pipe "held read\n" $ \held releaseCapture writer -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+      withHeldRead server pipe "held read\n" $ \held releaseCapture writer -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
           configured<-configure runtime ("yes"::T.Text) desktop
           started<-prompt runtime scenario configured
           waiting<-await runtime "prepared read behind FIFO head" (T.isInfixOf "guarded requests sent" . conversationText) started
@@ -1063,7 +1082,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \_ -> do
       putMVar cancelOpened ()
       takeMVar cancelRelease) $ \writer -> do
-        closed<-timeout 3000000 $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+        closed<-timeout 3000000 $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
           takeMVar cancelOpened
           configured<-configure runtime ("yes"::T.Text) desktop
           started<-prompt runtime "slow-cancel" configured
@@ -1104,7 +1123,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     removeFile runSettings
     -- Context reads happen before enqueueing a prompt. Holding one must leave
     -- the draft editable; human and Hub cancellation must retire unsent work.
-    forM_ [False,True] $ \hubOrigin -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    forM_ [False,True] $ \hubOrigin -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       connected<-prompt runtime "stream" configured >>= done runtime
       let contextPath=root </> "thc.toml"
@@ -1152,7 +1171,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           check "cancelled context result never sends a prompt"
             (not (any (T.isInfixOf "cancel before send" . json) entries) && contents (composerBuffer settled)=="newer human draft")
 #endif
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       check "configuration saved to isolated XDG directory" =<< doesFileExist (settings </> "agents.json")
       streamed<-prompt runtime "stream" configured >>= done runtime >>= await runtime "adopted streamed body" (\d->"[completed] Local tool" `T.isInfixOf` conversationText d && "Hello" `T.isInfixOf` conversationText d)
@@ -1488,7 +1507,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     createDirectoryIfMissing True (root </> "config/thc")
     writeFile (root </> "config/thc/config.toml") "[editor.agent]\ncontext = 'Global guidance marker'\n"
     writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Project guidance marker'\n"
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       guided<-prompt runtime "stream" configured >>= done runtime
       entries<-logged
@@ -1555,14 +1574,14 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       _<-prompt runtime "stream" failed >>= done runtime
       pure ()
     -- A new runtime reads the saved provider configuration, without reconfiguring it.
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       restored<-send runtime "new" [] desktop >>= await runtime "persisted provider configuration" ((=="Session fixture-session").status)
       _<-send runtime "resume" [] restored
       pure ()
     let editorSessions=[(replicate 48 'a',"resume-a"::T.Text,root),(replicate 48 'b',"resume-b",root </> "other-project")]
         withEditor ident action=bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" ident) (restoreEnvironment "THC_EDIT_SESSION") (const action)
         resumeId d=case [value | Just dg<-[dialog d],Input "Session ID" value _<-fields dg] of value:_->Just value; _->Nothing
-    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       offered<-send runtime "resume" [] desktop
       check "new editor session does not inherit another session resume ID" (resumeId offered==Just "")
       configured<-configure runtime ("yes"::T.Text) desktop {sideTree=fmap (\tree->tree {treeRoot=providerRoot}) (sideTree desktop)}
@@ -1571,11 +1590,11 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       saved<-decodeStrict' <$> BS.readFile sidecar
       check "provider resume record is saved beside its editor checkpoint"
         ((saved >>= field "sessionId")==Just providerId && (saved >>= field "cwd")==Just providerRoot)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       _<-send runtime "configure" ["0","not-the-saved-provider", "[]", "{}"] desktop
       pure ()
     beforeRecovery<-logged
-    forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       recovered<-recoveredBody "Retained conversation after a daemon crash" savedDraft
@@ -1587,7 +1606,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       check "reading resume metadata leaves recovered transcript and draft intact" (resumedSources && resumedDraft)
     afterRecovery<-logged
     check "recovery never starts a provider or sends a prompt automatically" (afterRecovery==beforeRecovery)
-    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       unrelated<-send runtime "load" ["0","unrelated-session-id"] desktop
       check "an unrelated resume ID does not select another saved provider"
         (maybe False ((=="Cannot start agent").dialogTitle) (dialog unrelated))
@@ -1602,7 +1621,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     globalProvider<-decodeStrict' <$> BS.readFile (settings </> "agents.json")
     check "resuming a saved provider does not rewrite global configuration"
       ((globalProvider >>= field "executable")==Just ("not-the-saved-provider"::T.Text))
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       answered<-prompt runtime ("wide\n"<>T.unwords (replicate 90 "user-width")) configured >>= done runtime >>= await runtime "adopted wide reply" (T.isInfixOf "live λ".conversationText)
       forM_ [150,36,120] $ \columns -> do

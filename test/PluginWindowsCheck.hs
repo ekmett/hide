@@ -304,10 +304,11 @@ declaredInputChecks=W.withWindowScope $ \scope->E.withDraftRef $ \draft->withDoc
       close desktop=let (closed,effects)=runCommand Close desktop in snd <$> applyEffects closed effects
       submit modifiers desktop=let (chosen,effects)=handleEvent (V.EvKey V.KEnter modifiers) desktop
         in snd <$> menuEffects host core chosen effects
-  badBound<-E.prepareDeclaredEditor registry draft (declaration spec 0) PreparedEditorUpdate
-  badLabel<-E.prepareDeclaredEditor registry draft (declaration (spec {E.editorDefaultLabel=""}) 16) PreparedEditorUpdate
+  badBound<-E.registerDeclaredInput registry (declaration spec 0) PreparedEditorUpdate
+  badLabel<-E.registerDeclaredInput registry (declaration (spec {E.editorDefaultLabel=""}) 16) PreparedEditorUpdate
   check "invalid input declarations reject at activation" (refused badBound && refused badLabel)
-  editor<-E.prepareDeclaredEditor registry draft (declaration spec 16) PreparedEditorUpdate >>= right
+  registeredInput<-E.registerDeclaredInput registry (declaration spec 16) PreparedEditorUpdate >>= right
+  editor<-E.attachDeclaredInput registeredInput draft
   nextEditor<-newIORef editor
   opening<-registerCommand registry (CommandDef "example.input.open" "Input" unit hidden (\_ ()->do
     next<-readIORef nextEditor

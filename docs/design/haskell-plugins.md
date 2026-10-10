@@ -10,14 +10,14 @@ frontends:
 | Package | Contents |
 | --- | --- |
 | `hide-plugin-api` | Scoped commands, tools, forms, input declarations, menus, trees and session composition |
-| `hide-agent-api` | Provider contracts, completion hint delivery, directory metadata and attributed orchestration services |
+| `hide-agent-api` | Provider contracts, conversation input delivery, directory metadata and attributed orchestration services |
 | `hide-acp` | ACP transport and provider adapter |
-| `hide-agents` | Agents sidebar/forms, conversation transcripts, completion hints and editor tools |
+| `hide-agents` | Agents sidebar/forms, conversation transcripts, child input, completion hints and editor tools |
 
 Buffer/window ownership and the multiline-editor interpreter still live in the
-main `hide` library. ACP completion declares its input and acknowledged command
-through the public API. Main and child conversation input bindings and the
-remaining editor tools are the next package boundaries. The sections below distinguish implemented APIs
+main `hide` library. ACP completion and child conversations declare their input
+and acknowledged commands through the public API. Primary conversation input
+and the remaining editor tools are the next package boundaries. The sections below distinguish implemented APIs
 from proposed contracts; proposed signatures are design sketches, not compilable
 SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
 navigation model.
@@ -355,10 +355,13 @@ to a window. It owns the draft, Undo history, caret, selection and focus separat
 from the prepared body. Prepared plugin windows and conversations use this same
 input path. Body refreshes preserve the draft. The following lower-level binding
 API remains in the host library; plugins use the public declaration above.
-An owner compiles a declaration with
-`prepareDeclaredEditor registry draft declaration reply`, where `reply` injects
-the exact `EditorUpdate` into its existing result type. It publishes the resulting
-attachment through the same window owner; there is no separate input dispatcher.
+An owner registers a declaration once with
+`registerDeclaredInput registry declaration reply`, where `reply` injects the
+exact `EditorUpdate` into its existing result type. `attachDeclaredInput` binds
+that registered declaration to each draft. Registration and draft attachment have
+separate lifetimes: multiple child windows share the command while each keeps its
+own input and mount. The resulting attachment uses the same window owner; there
+is no separate input dispatcher.
 
 Prepare a draft under `withDraftRef` and bind its default and alternate slots to
 ordinary typed commands with `editorAction`. `prepareEditor` supplies initial
@@ -947,10 +950,10 @@ requests, attributed messages, public capabilities/events and a driver lifetime.
 The adapter does not import the hub, Model, Render or Conversation. Capability
 decoding belongs to ACP; the hub decodes its own checkpoint representation.
 The linked `hide-agents` package supplies the Agents sidebar, primary and child
-transcripts, completion hint input, coordination, documentation and environment
-tools through `hide-plugin-api`. Main and child conversation input and the
-remaining editor tools still use host types; those consumers define the remaining
-public boundaries.
+transcripts, child Query/Steer input, completion hints, coordination, documentation
+and environment tools through `hide-plugin-api`. Primary conversation input and
+the remaining editor tools still use host types; those consumers define the
+remaining public boundaries.
 
 The hub remains the owner of agent IDs, ancestry, limits, workspaces, task tickets
 and message attribution. A provider plugin supplies a driver; a conversation
@@ -1104,6 +1107,31 @@ provider. Failure, a full queue or an expired mount leaves the draft intact.
 Successful delivery clears only the submitted version, including a hidden draft.
 Later typing survives. Configuration changes invalidate queued submissions rather
 than sending them to a replacement provider. Hints grant no agent input authority.
+
+### Child conversation input
+
+`Hide.ConversationInput` in `hide-agents` declares the child's **Query** and
+**Steer** actions. Its command calls `Hide.Plugin.ConversationInput`'s `submitInput`
+service and returns `ClearInput` only when that operation succeeds. The host binds
+the service to the captured child, configuration receipt and input slot; a plugin
+cannot choose a different child or turn a query into steering.
+
+Query acknowledgement means the Hub accepted the message into its queue. Steer
+acknowledgement means the active provider accepted the direction. Both use the
+existing child control worker. Its prepared update clears only the submitted
+draft version, even when another conversation is selected. Failure and newer
+typing preserve input. Retained service callbacks expire when the command ends;
+accepted calls drain before its worker retires.
+
+The raw-input bound is 327,680 characters. Composer Markdown removes at most four
+indentation characters per newline-bearing row, so this includes inputs that fit
+the Hub's existing 65,536-character limit after normalization. The normalized
+limit still applies at admission. Both checks run on the worker.
+
+A missing child-input contribution leaves the transcript readable and the unsent
+draft preserved, with no callable input attachment. Recovery restores content,
+not authority. Primary chat still owns its prepare/connect/queue path; moving its
+validation alone would not move the operation.
 
 ## Cabal navigation as a second example
 

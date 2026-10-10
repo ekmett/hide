@@ -20,7 +20,7 @@ module Hide.Plugin.EditorHost
   ( DraftRef, newDraftRef, draftRefCurrent, retireDraftRef
   , EditorMount, mountDraft, mountSpec, mountActions, mountCurrent, retireEditorMount
   , EditorSpec(..), EditorSlot(..), EditorAction, editorAction
-  , PreparedEditor, prepareEditorBuffer, prepareDeclaredEditor, remountEditor, editorMount, editorInitialBuffer
+  , PreparedEditor, prepareEditorBuffer, DeclaredInput, registerDeclaredInput, attachDeclaredInput, remountEditor, editorMount, editorInitialBuffer
   , installedEditor, editorCurrent, editorBindingCurrent, claimEditorMount
   , DraftSubmission, captureDraftSubmission, submissionDraft, submissionMount
   , submissionVersion, submissionContent, submissionAction, submissionSlot, sameDraftSubmission, submissionAccepted, abortEditorSubmission
@@ -102,47 +102,72 @@ data PreparedEditor c r = PreparedEditor !EditorMount !(Maybe Buffer) !(EditorAc
 -- | Validate and detach small labels on the calling preparation worker. The
 -- seed is transferred only if the host does not already own this DraftRef.
 prepareEditorBuffer :: DraftRef -> EditorSpec -> Buffer -> EditorAction c r -> EditorAction c r -> IO (Either CommandError (PreparedEditor c r))
-prepareEditorBuffer draft spec initial normal alternate
+prepareEditorBuffer draft spec initial normal alternate=do
+  checked<-prepareEditorSpec spec
+  case checked of
+    Left err->pure (Left err)
+    Right metadata->Right <$> attachEditor draft metadata initial normal alternate
+
+prepareEditorSpec :: EditorSpec -> IO (Either CommandError EditorSpec)
+prepareEditorSpec spec
   | any invalid [editorDefaultLabel spec,editorAlternateLabel spec]=pure (Left (InvalidArguments "Invalid editor action label."))
   | otherwise=do
-      _<-evaluate initial
       let metadata=spec {editorDefaultLabel=T.copy (editorDefaultLabel spec),editorAlternateLabel=T.copy (editorAlternateLabel spec)}
       _<-evaluate (T.length (editorDefaultLabel metadata)+T.length (editorAlternateLabel metadata))
-      mount<-EditorMount <$> newUnique <*> pure draft <*> pure metadata <*> pure (actionReference normal) <*> pure (actionReference alternate) <*> newTVarIO MountPending
-      pure (Right (PreparedEditor mount (Just initial) normal alternate))
+      pure (Right metadata)
   where invalid value=T.null value || T.length value>256 || T.any (\c->c<' ' || c=='\DEL') value
--- | Compile a public declaration once, before the event loop. Its command uses
--- the existing registry and submission claim; no plugin code runs at capture or
--- adoption. The worker checks cached length before materializing bounded input,
--- then binds the public result to this exact private submission, never a token
--- lookup or a plugin-selected version. Recovery seeds remain host-owned. The
--- injection embeds that exact update in the owner's ordinary reply type and is
--- evaluated on this worker, like every other editor reply adapter.
-prepareDeclaredEditor :: Registry c -> DraftRef -> InputDeclaration c -> (EditorUpdate -> r)
-  -> IO (Either CommandError (PreparedEditor c r))
-prepareDeclaredEditor registry draft (InputDeclaration spec limit definition arguments prepare) inject
+
+attachEditor :: DraftRef -> EditorSpec -> Buffer -> EditorAction c r -> EditorAction c r -> IO (PreparedEditor c r)
+attachEditor draft metadata initial normal alternate=do
+  _<-evaluate initial
+  mount<-EditorMount <$> newUnique <*> pure draft <*> pure metadata <*> pure (actionReference normal) <*> pure (actionReference alternate) <*> newTVarIO MountPending
+  pure (PreparedEditor mount (Just initial) normal alternate)
+
+-- | One validated declaration and command registration, independent of any
+-- draft or frame. Every attachment shares this registration's retirement while
+-- retaining its own DraftRef, mount, immutable submissions and result claims.
+data DeclaredInput c r = DeclaredInput !EditorSpec !(EditorAction c r) !(EditorAction c r)
+
+-- | Register a public declaration once, before the event loop. Metadata and
+-- bounds are validated before registration, so failure leaves its name reusable.
+-- No plugin adapter executes at attachment, capture or adoption. The worker
+-- checks cached length before materializing input and binds each result to its
+-- original private submission. The injection embeds that update in the owner's
+-- ordinary reply type and is evaluated on the command worker.
+registerDeclaredInput :: Registry c -> InputDeclaration c -> (EditorUpdate -> r)
+  -> IO (Either CommandError (DeclaredInput c r))
+registerDeclaredInput registry (InputDeclaration spec limit definition arguments prepare) inject
   | limit<=0=pure (Left (InvalidArguments "Input character limit must be positive."))
   | otherwise=do
-      registered<-registerCommand registry definition
-      case registered of
+      checked<-prepareEditorSpec spec
+      case checked of
         Left err->pure (Left err)
-        Right command->do
-          let capture slot submitted
-                | contentLength source>limit=Left (InvalidArguments ("Input exceeds "<>T.pack (show limit)<>" characters."))
-                | otherwise=let text=contentSlice source 0 (contentLength source)
-                            in T.length text `seq` arguments slot text
-                where source=submissionContent submitted
-              result submitted _ value=case prepare value of
-                KeepInput->pure (Right (EditorUpdate submitted Nothing))
-                ClearInput->pure (Right (clearEditorDraft submitted))
-                ReplaceInput text | T.length text>limit->pure (Left (InvalidArguments "Input replacement exceeds its character limit."))
-                                  | otherwise->Right <$> replacementEditorDraft submitted text
-              action slot=EditorAction registry command (capture slot) (\submitted context value->
-                fmap (fmap inject) (result submitted context value))
-          prepared<-prepareEditorBuffer draft spec (newBuffer "") (action DefaultEditor) (action AlternateEditor)
-          case prepared of
-            Left err->retireCommand registry (commandRef command) >> pure (Left err)
-            Right editor->pure (Right editor)
+        Right metadata->do
+          registered<-registerCommand registry definition
+          pure $ case registered of
+            Left err->Left err
+            Right command->
+              let capture slot submitted
+                    | contentLength source>limit=Left (InvalidArguments ("Input exceeds "<>T.pack (show limit)<>" characters."))
+                    | otherwise=let text=contentSlice source 0 (contentLength source)
+                                in T.length text `seq` arguments slot text
+                    where source=submissionContent submitted
+                  result submitted _ value=case prepare value of
+                    KeepInput->pure (Right (EditorUpdate submitted Nothing))
+                    ClearInput->pure (Right (clearEditorDraft submitted))
+                    ReplaceInput text | T.length text>limit->pure (Left (InvalidArguments "Input replacement exceeds its character limit."))
+                                      | otherwise->Right <$> replacementEditorDraft submitted text
+                  action slot=EditorAction registry command (capture slot) (\submitted context value->
+                    fmap (fmap inject) (result submitted context value))
+              in Right (DeclaredInput metadata (action DefaultEditor) (action AlternateEditor))
+
+-- | Attach an already registered declaration to an independent draft. This
+-- mints only its frame lifetime; it runs no plugin callback or registration.
+-- An empty preparation seed is transferred only for a new draft. Existing and
+-- recovered roots remain with the host and are never replaced by that seed.
+attachDeclaredInput :: DeclaredInput c r -> DraftRef -> IO (PreparedEditor c r)
+attachDeclaredInput (DeclaredInput metadata normal alternate) draft=
+  attachEditor draft metadata (newBuffer "") normal alternate
 
 -- | Mint a fresh pending frame for the same draft/actions, without copying or
 -- reseeding its editable state. A retired registration is refused at admission.
