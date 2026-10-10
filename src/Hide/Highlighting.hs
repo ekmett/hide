@@ -1,12 +1,12 @@
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, StrictData #-}
 -- |
 -- Module      : Hide.Highlighting
 -- Copyright   : (c) 2026 Edward Kmett
 -- License     : BSD-2-Clause OR Apache-2.0
 -- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
--- Portability : OverloadedStrings
+-- Portability : OverloadedStrings, StrictData
 --
 -- Bounded background source highlighting with identity-checked adoption.
 --
@@ -38,7 +38,11 @@ import Hide.Syntax (StyledText,SourceRow,sourceRowText,sourceRowRanges,sourceRan
 data Key = Key Int Int FilePath (StableName Buffer) deriving Eq
 data Request = Request Key Buffer
 type Result = Seq.Seq SourceRow
-data Work = Work [Request] (Maybe Key) (M.Map Int (Key,Maybe Result))
+-- Strict state and publication keep pruning/consumption from retaining retired
+-- buffers across idle ticks. Completed rows have already been forced by the
+-- tokenizer worker; forcing the Maybe here never tokenizes on the caller.
+data Completed = Completed Key (Maybe Result)
+data Work = Work [Request] (Maybe Key) (M.Map Int Completed)
 newtype Highlighting = Highlighting (TVar Work)
 
 -- | Own one worker for the session. Its cancellation/join happens outside the
@@ -71,7 +75,7 @@ withHighlightingUsing initialize tokenize action = do
         Work pending _ done<-readTVar state
         case pending of
           [] -> retry
-          request@(Request key _):rest -> writeTVar state (Work rest (Just key) done) >> pure request
+          request@(Request key _):rest -> (writeTVar state $! Work rest (Just key) done) >> pure request
       result<-case initialized of
         Nothing -> pure Nothing
         Just () -> bounded 2000000 $ do
@@ -82,7 +86,7 @@ withHighlightingUsing initialize tokenize action = do
           pure rows
       atomically $ do
         Work pending _ done<-readTVar state
-        writeTVar state (Work pending Nothing (M.insert ident (key,result) done))
+        writeTVar state $! Work pending Nothing (M.insert ident (Completed key result) done)
 
 -- Preserve session cancellation; only synchronous failures and the operation's
 -- own timeout become a plain-text result.
@@ -104,9 +108,9 @@ tickHighlighting (Highlighting state) desktop = do
     Work _ running done<-readTVar state
     let current=M.filterWithKey (\ident _->M.member ident (buffers desktop)) done
         pending=take 8 [r | r@(Request key@(Key ident _ _ _) _)<-requests,
-          Just key/=running,maybe True ((/=key).fst) (M.lookup ident current)]
-    let consumed=M.map (\(key,result)->(key,if any (\(Request requested _)->key==requested) requests then Nothing else result)) current
-    writeTVar state (Work pending running consumed)
+          Just key/=running,maybe True (\(Completed completed _)->key/=completed) (M.lookup ident current)]
+    let consumed=M.map (\(Completed key result)->Completed key (if any (\(Request requested _)->key==requested) requests then Nothing else result)) current
+    writeTVar state $! Work pending running consumed
     pure current
   pure desktop {buffers=foldl' (install ready) (buffers desktop) requests}
   where
@@ -118,9 +122,9 @@ tickHighlighting (Highlighting state) desktop = do
     request (ident,doc)=do
       buffer<-evaluate (documentBuffer doc)
       identity<-makeStableName $! buffer
-      pure (Request (Key ident (revision buffer) (documentSyntaxPath doc) identity) buffer)
+      pure $! Request (Key ident (revision buffer) (documentSyntaxPath doc) identity) buffer
     install ready docs (Request key@(Key ident _ _ _) _) = case M.lookup ident ready of
-      Just (completed,Just rows)
+      Just (Completed completed (Just rows))
         | key==completed, Just doc<-M.lookup ident docs ->
             M.insert ident doc {documentSourceRows=Just rows} docs
       _ -> docs

@@ -101,7 +101,7 @@ startClientWith executable arguments root = mask $ \restore -> do
     capabilitiesState <- newMVar Null
     errorTail <- newMVar ""
     writerThread <- newEmptyMVar
-    let emit event = modifyMVar_ inbox (pure . (Seq.|> event))
+    let emit event = modifyMVar_ inbox (evaluate . (Seq.|> event))
         send value = withMVar writeLock $ \_ -> do
           let body = encode value
           BC.hPutStr input (BC.pack ("Content-Length: " ++ show (BL.length body) ++ "\r\n\r\n"))
@@ -159,7 +159,9 @@ startClientWith executable arguments root = mask $ \restore -> do
             Nothing -> pure ()
     responder <- forkIO (forever (readChan replyQueue >>= send) `catch` failed)
     reader <- forkIO (forever (readFrame output >>= receive) `catch` failed)
-    drainer <- forkIO ((let drain = BS.hGetSome errors 4096 >>= \chunk -> unless (BS.null chunk) (modifyMVar_ errorTail (pure . T.takeEnd 4096 . (<> TE.decodeUtf8With lenientDecode chunk)) >> drain) in drain) `catch` (\(_ :: IOException) -> pure ()))
+    -- Enforce the retained tail on this reader, even when HLS stays healthy and
+    -- nobody asks for an error. A lazy MVar update keeps every old stderr chunk.
+    drainer <- forkIO ((let drain = BS.hGetSome errors 4096 >>= \chunk -> unless (BS.null chunk) (modifyMVar_ errorTail (evaluate . T.copy . T.takeEnd 4096 . (<> TE.decodeUtf8With lenientDecode chunk)) >> drain) in drain) `catch` (\(_ :: IOException) -> pure ()))
     writer <- forkIO $ (do
       call (0 :: Int) ("initialize" :: Text) (object
         [ "processId" .= Null, "rootUri" .= fileUri root, "workspaceFolders" .= folders
@@ -231,8 +233,9 @@ request :: Client -> Text -> Value -> IO Int
 request client method params = modifyMVar (nextId client) $ \ident -> do
   withMVar (unavailable client) $ \failure -> case failure of
     Nothing -> writeChan (commands client) (Request ident method params)
-    Just message -> modifyMVar_ (events client) (pure . (Seq.|> Response ident (object ["id" .= ident, "error" .= object ["code" .= (-32603 :: Int), "message" .= message]])))
-  pure (ident+1, ident)
+    Just message -> modifyMVar_ (events client) (evaluate . (Seq.|> Response ident (object ["id" .= ident, "error" .= object ["code" .= (-32603 :: Int), "message" .= message]])))
+  next<-evaluate (ident+1)
+  pure (next, ident)
 
 -- | Reserve exclusive command edit ownership before transmitting the request.
 executeCommand :: Client -> Text -> Value -> IO (Either Text Int)
@@ -245,7 +248,8 @@ executeCommand client name arguments = modifyMVar (nextId client) $ \ident -> do
         writeChan (commands client) (Request ident "workspace/executeCommand"
           (object ["command" .= name,"arguments" .= arguments]))
         pure (Just ident,Right ident)
-  pure (ident+1,outcome)
+  next<-evaluate (ident+1)
+  pure (next,outcome)
 
 -- | Cancel a request without releasing its ownership before the server replies.
 cancelRequest :: Client -> Int -> IO ()
@@ -256,7 +260,7 @@ cancelRequest client ident = writeChan (commands client)
 pollEvents :: Client -> IO [Event]
 -- Bound work per desktop tick while retaining FIFO request/response order.
 pollEvents client = modifyMVar (events client) $ \pending ->
-  let (ready,rest)=Seq.splitAt 32 pending in pure (rest,toList ready)
+  let (ready,rest)=Seq.splitAt 32 pending in rest `seq` pure (rest,toList ready)
 
 writeCommands :: (Text -> Value -> IO ()) -> (Int -> Text -> Value -> IO ()) -> (Value -> IO ()) -> Chan Command -> Map.Map FilePath (Int, Text) -> IO ()
 writeCommands notify call send queue previous = do

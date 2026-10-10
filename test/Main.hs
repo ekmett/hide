@@ -186,12 +186,14 @@ tests = askOption $ \profile->withResource
   , testCase "AutocompleteACP" AutocompleteACPCheck.checks
   , testCase "Copilot" CopilotCheck.checks
   , testCase "Highlighting" (HighlightingCheck.checks profile)
+  , testCase "Highlighting.collection" HighlightingCheck.collectionChecks
   , testCase "AgentSidebar" AgentSidebarCheck.checks
   , testCase "SessionSidebar" SessionSidebarCheck.checks
   , testCase "AgentIntegration" AgentIntegrationCheck.checks
   , testCase "AgentAccess" AgentAccessCheck.checks
   , testCase "AgentRuntime" AgentRuntimeCheck.checks
   , testCase "AgentHub" AgentHubCheck.checks
+  , testCase "AgentHub.collection" AgentHubCheck.collectionChecks
   , testCase "AgentACP" AgentACPCheck.checks
   , testCase "AgentMCP" AgentMCPCheck.checks
   , testCase "AgentWorkspace" AgentWorkspaceCheck.checks

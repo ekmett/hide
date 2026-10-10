@@ -62,6 +62,25 @@ Human input remains a pure model transition; screen permission hints run on the
 capture worker and do not replace admission checks.
 
 
+## State evaluation
+
+Laziness is an explicit choice. Use strict fields for retained state, counters,
+cache keys and container roots. Prefer `StrictData` for an owning module; mark an
+intentional exception with `~` and explain what work is deferred and who demands
+it. Source-text projections, unseen line widths and unvisited Markdown layouts
+must remain demand-driven.
+
+Use `modifyIORef'`, `atomicModifyIORef'` and `modifyTVar'` for updates. Evaluate
+replacement state before `writeIORef`, `writeTVar` or returning it from an MVar
+update. These operations only force the outer constructor: a strict record with a
+lazy pair or `Maybe` payload can still keep old state alive. Follow the actual
+retained fields through publication rather than relying on a later reader.
+
+Apply bounds when output enters a retained buffer, even if nobody reads it. Run
+parsing, shaping and whole-text preparation on the owning worker before publishing
+its result. Do not deep-force a Desktop, buffer or Undo history to make a cache
+safe; retain identities and measured metadata, and reuse an unchanged cache.
+
 ## Coverage and test results
 
 [CI](https://github.com/ekmett/hide/actions/workflows/ci.yml) builds the optimized
