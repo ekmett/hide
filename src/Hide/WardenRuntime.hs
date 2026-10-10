@@ -14,11 +14,16 @@
 -- desktop, buffer or transcript. A judgment cannot outlive its task, provider,
 -- settings or selected decision supplier. Checking these identities is cheap;
 -- serialization, configuration reads and inference belong to request workers.
+-- Actual host replies retain at most sixteen small outcome records for the
+-- current task/settings incarnation. Steering clears them, rather than granting
+-- old judgments or results a new task identity. No arguments or result text enter
+-- this ledger, and observing an outcome does not depend on model availability.
 module Hide.WardenRuntime
   ( WardenRuntime, WardenBinding, WardenReceipt, withWarden
   , wardenProviderFactory, wardenAgent, wardenProvider, wardenAnonymous
   , runWarden, checkWarden, captureWardenBinding, wardenBindingCurrent, wardenEnforces
   , getWardenSettings, setWardenSettings, WardenSettingsRef, captureWardenSettings, chooseWardenMode, wardenReceiptResult
+  , WardenOutcome(..), WardenObservation(..), recordWardenOutcome, wardenObservations
   ) where
 
 import Control.Concurrent.STM
@@ -26,6 +31,7 @@ import Control.Concurrent.Async (Async,asyncWithUnmask,cancel,poll,race)
 import Control.Concurrent.MVar (MVar,newMVar,tryTakeMVar,takeMVar,putMVar)
 import Control.Exception (bracket,finally,mask,onException)
 import Control.Monad (unless,void)
+import Data.Char (isControl)
 import Data.Aeson
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -44,7 +50,8 @@ import Hide.Warden
 data Entry = Entry
   { entryRevision :: !Unique, entryAdmitting :: !Bool, entryTurn :: !(Maybe ProviderTurnId)
   , entryTask :: !(Either Text Text), entryRules :: !(Either Text [Text])
-  , entrySecrets :: ![Text], entryReport :: !(Value -> IO ()) }
+  , entrySecrets :: ![Text], entryReport :: !(Value -> IO ())
+  , entryObservations :: ![WardenObservation] }
 data State = State
   { settings :: !WardenSettings, settingsRevision :: !Integer, closed :: !Bool
   , providers :: !(M.Map ProviderIdentity Entry), agents :: !(M.Map AgentId ProviderIdentity) }
@@ -59,6 +66,26 @@ data WardenBinding = WardenBinding !WardenRuntime !Target !(Maybe Snapshot)
 -- immutable arguments; this receipt does not retain their potentially large body.
 data WardenReceipt = WardenReceipt !WardenRuntime !Integer
   !(Maybe (ProviderIdentity,Unique)) !WardenSettings !WardenResult
+  !(Maybe Text) !(TVar Bool)
+
+-- | An actual host operation outcome, not a model assessment of its success.
+-- 'WardenExited' requires an explicit process exit receipt. 'WardenCaptured'
+-- means an immutable read handle was returned, not that its downstream page
+-- preparation or delivery completed.
+data WardenOutcome
+  = WardenReturned | WardenCaptured | WardenFailed | WardenChanged | WardenExited !Int | WardenDeclined
+  deriving (Eq,Show)
+
+-- | Small immutable evidence for later human-requested coaching. Distinct IDs
+-- remain distinct even for equal operation names; names do not imply equal
+-- arguments. Neither arguments nor output strings are retained. This is bounded
+-- evidence, not an exhaustive audit log: refusal before a receipt exists and
+-- cancellation before a deferred continuation starts can leave no observation.
+data WardenObservation = WardenObservation
+  { observationId :: !Text
+  , observationAction :: !Text
+  , observationOutcome :: !WardenOutcome
+  } deriving (Eq,Show)
 
 withWarden :: SystemOneServices -> WardenSettings
   -> (FilePath -> IO (Either Text [Text])) -> (WardenRuntime -> IO a) -> IO a
@@ -84,7 +111,8 @@ setWardenSettings (WardenRuntime _ _ cell _) config=case validateSettings config
   Right ()->atomically $ do
     s<-readTVar cell
     if closed s then pure (Left "Warden session is closed.") else do
-      writeTVar cell s {settings=config,settingsRevision=settingsRevision s+1}
+      writeTVar cell s {settings=config,settingsRevision=settingsRevision s+1,
+        providers=M.map (\e->e {entryObservations=[]}) (providers s)}
       pure (Right ())
 
 -- | Capture only the scalar settings epoch for a submitted human form.
@@ -97,7 +125,8 @@ chooseWardenMode :: WardenSettingsRef -> WardenMode -> IO (Either Text ())
 chooseWardenMode (WardenSettingsRef (WardenRuntime _ _ cell _) expected) mode=atomically $ do
   s<-readTVar cell
   if closed s || settingsRevision s/=expected then pure (Left "Warden settings changed; reopen the menu.") else do
-    writeTVar cell s {settings=(settings s) {wardenMode=mode},settingsRevision=expected+1}
+    writeTVar cell s {settings=(settings s) {wardenMode=mode},settingsRevision=expected+1,
+      providers=M.map (\e->e {entryObservations=[]}) (providers s)}
     pure (Right ())
 
 validateSettings :: WardenSettings -> Either Text ()
@@ -172,7 +201,7 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
       task=case kind of
         PrimaryProvider->Right ""
         ChildProvider->Right (attributed (startOwner request) (spawnTask (startSpec request)))
-      entry=Entry revision False Nothing task initialRules secrets report
+      entry=Entry revision False Nothing task initialRules secrets report []
       retire=atomically $ modifyTVar' cell $ \s->s
         {providers=M.delete identity (providers s),agents=case M.lookup ident (agents s) of
           Just owner | owner==identity->M.delete ident (agents s)
@@ -181,11 +210,11 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
         fresh<-newUnique
         atomically $ modifyTVar' cell $ \s->s {providers=M.adjust
           (\e->if maybe True (==entryRevision e) expected
-            then e {entryRevision=fresh,entryAdmitting=False} else e) identity (providers s)}
+            then e {entryRevision=fresh,entryAdmitting=False,entryObservations=[]} else e) identity (providers s)}
       invalidateTurn turn=do
         fresh<-newUnique
         atomically $ modifyTVar' cell $ \s->s {providers=M.adjust
-          (\e->if entryTurn e==Just turn then e {entryRevision=fresh,entryAdmitting=False} else e) identity (providers s)}
+          (\e->if entryTurn e==Just turn then e {entryRevision=fresh,entryAdmitting=False,entryObservations=[]} else e) identity (providers s)}
       revise readRules activeTurn message=do
         fresh<-newUnique
         -- Reserve before interruptible IO. Old grants expire immediately, and
@@ -195,7 +224,8 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
           case M.lookup identity (providers s) of
             Just e | not (closed s)->do
               writeTVar cell s {providers=M.insert identity
-                e {entryRevision=fresh,entryAdmitting=False,entryTurn=maybe (entryTurn e) Just activeTurn} (providers s)}
+                e {entryRevision=fresh,entryAdmitting=False,entryTurn=maybe (entryTurn e) Just activeTurn,
+                  entryObservations=[]} (providers s)}
               pure True
             _->pure False
         if not reserved then pure (Left "Warden provider retired before task delivery.") else do
@@ -265,20 +295,24 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
 -- Observe offers one judgment to the scoped observation slot and returns; busy
 -- observations are dropped rather than queued. Ordinary admission still belongs
 -- to the caller. A later switch to Enforce cannot reuse an observational receipt.
+-- The operation name must be host metadata: a validated registered MCP name or
+-- a fixed native operation label, never task/source/environment text. Outcome
+-- recording copies only bounded safe labels; it never scans action arguments.
 runWarden :: WardenBinding -> Text -> Value -> IO WardenReceipt
 runWarden binding name args=do
   frozen@(WardenBinding runtime _ _)<-captureWardenBinding binding
   Snapshot version config _ found<-bindingSnapshot frozen
   unique<-newUnique
+  recorded<-newTVarIO False
   let actionId="warden-"<>T.pack (show (hashUnique unique))
       stamp=(\(ident,e)->(ident,entryRevision e)) <$> found
       base=WardenResult actionId name False [] Nothing Nothing Nothing
-      receipt=WardenReceipt runtime version stamp config base
+      receipt=WardenReceipt runtime version stamp config base (outcomeLabel config found name) recorded
   case wardenMode config of
     WardenOff->pure receipt
-    WardenEnforce->judgeAction frozen actionId name args
+    WardenEnforce->judgeAction recorded frozen actionId name args
     WardenObserve->do
-      observe frozen (void (judgeAction frozen actionId name args))
+      observe frozen (void (judgeAction recorded frozen actionId name args))
       pure receipt
 
 -- One slot, no pending queue. Only a request worker can offer work; the UI never
@@ -298,8 +332,8 @@ observe binding@(WardenBinding (WardenRuntime _ _ cell slot) _ _) action=mask $ 
           (atomically (readTVar cell >>= check . not . (`snapshotCurrent` captured))) action
         putMVar slot (Just worker)) `onException` putMVar slot old
 
-judgeAction :: WardenBinding -> Text -> Text -> Value -> IO WardenReceipt
-judgeAction frozen@(WardenBinding runtime@(WardenRuntime service _ _ _) _ _) actionId name args=do
+judgeAction :: TVar Bool -> WardenBinding -> Text -> Text -> Value -> IO WardenReceipt
+judgeAction recorded frozen@(WardenBinding runtime@(WardenRuntime service _ _ _) _ _) actionId name args=do
   Snapshot version config stopped found<-bindingSnapshot frozen
   environmentValues<-getEnvironment
   current<-wardenBindingCurrent frozen
@@ -317,7 +351,7 @@ judgeAction frozen@(WardenBinding runtime@(WardenRuntime service _ _ _) _ _) act
   result<-case prepared of
     Right input->judgeWarden service config private input
     Left _->pure (WardenResult actionId name False [] Nothing (Just (DecisionInvalid "No complete trusted task/rules are available.")) Nothing)
-  let receipt=WardenReceipt runtime version stamp config result
+  let receipt=WardenReceipt runtime version stamp config result (outcomeLabel config found name) recorded
   reportReceipt found receipt
   pure receipt
 
@@ -336,7 +370,7 @@ actionSecrets "environment_set" (Object args)
 actionSecrets _ _=[]
 
 reportReceipt :: Maybe (ProviderIdentity,Entry) -> WardenReceipt -> IO ()
-reportReceipt found receipt@(WardenReceipt _ _ _ config result)=case found of
+reportReceipt found receipt@(WardenReceipt _ _ _ config result _ _)=case found of
   Just (_,entry)->do
     current<-receiptCurrent receipt
     -- Expandable activity records criteria/provenance, not task or argument
@@ -361,10 +395,56 @@ supplierEvidence supplier=object
   where description=decisionSupplierDescription supplier
 
 wardenReceiptResult :: WardenReceipt -> WardenResult
-wardenReceiptResult (WardenReceipt _ _ _ _ result)=result
+wardenReceiptResult (WardenReceipt _ _ _ _ result _ _)=result
+
+-- No process-environment scan is needed for these host metadata labels. Captured
+-- provider/session secrets still reject an accidentally supplied private name.
+outcomeLabel :: WardenSettings -> Maybe (ProviderIdentity,Entry) -> Text -> Maybe Text
+outcomeLabel config found name
+  | wardenMode config==WardenOff=Nothing
+  | T.null name || T.length (T.take 129 name)>128 || T.any isControl name=Nothing
+  | any (\secret->not (T.null secret) && secret `T.isInfixOf` name) (maybe [] (entrySecrets . snd) found)=Nothing
+  | otherwise=Just (T.copy name)
+
+-- | /O(16)/. Record only the first outcome for this exact receipt. Repeating a
+-- receipt cannot change or resurrect its row, even after eviction. Off, expired
+-- task/settings/provider, unsafe-label and closed receipts retain nothing.
+-- This short STM operation retains copied labels and the typed outcome only;
+-- model success and supplier availability do not determine actual host replies.
+recordWardenOutcome :: WardenReceipt -> WardenOutcome -> IO ()
+recordWardenOutcome (WardenReceipt (WardenRuntime _ _ cell _) version task config result label recorded) outcome=atomically $ do
+  seen<-readTVar recorded
+  unless seen $ do
+    writeTVar recorded True
+    s<-readTVar cell
+    case (task,label) of
+      (Just (ident,revision),Just name)
+        | not (closed s),settingsRevision s==version,wardenMode config/=WardenOff->
+          case M.lookup ident (providers s) of
+            Just entry | entryAdmitting entry,entryRevision entry==revision->do
+              let observation=WardenObservation (T.copy (wardenResultStateId result)) name outcome
+                  history=take 16 (observation:entryObservations entry)
+              length history `seq` observation `seq` writeTVar cell s {providers=M.insert ident
+                entry {entryObservations=history} (providers s)}
+            _->pure ()
+      _->pure ()
+
+-- | /O(16)/. Return oldest-to-newest immutable outcomes for this exact captured
+-- task/settings binding. Stale, canceled, closed and Off bindings yield @[]@.
+-- Every task revision (including steering) and settings change clears history;
+-- old outcomes are never silently attributed to the new task.
+wardenObservations :: WardenBinding -> IO [WardenObservation]
+wardenObservations binding@(WardenBinding (WardenRuntime _ _ cell _) _ _)=do
+  snapshot@(Snapshot _ config _ found)<-bindingSnapshot binding
+  atomically $ do
+    s<-readTVar cell
+    if wardenMode config==WardenOff || not (snapshotCurrent s snapshot) then pure [] else
+      case found >>= (\(ident,_)->M.lookup ident (providers s)) of
+        Nothing->pure []
+        Just entry->let history=reverse (entryObservations entry) in history `seq` pure history
 
 receiptCurrent :: WardenReceipt -> IO Bool
-receiptCurrent (WardenReceipt (WardenRuntime service _ cell _) version task _ result)=do
+receiptCurrent (WardenReceipt (WardenRuntime service _ cell _) version task _ result _ _)=do
   s<-readTVarIO cell
   let owns=not (closed s) && settingsRevision s==version && case task of
         Nothing->True
@@ -378,7 +458,7 @@ receiptCurrent (WardenReceipt (WardenRuntime service _ cell _) version task _ re
 -- | Short admission check under the original request's claim. No filesystem,
 -- inference, argument comparison or transcript scan occurs here.
 checkWarden :: WardenReceipt -> IO (Either Text ())
-checkWarden receipt@(WardenReceipt runtime _ _ config result)=do
+checkWarden receipt@(WardenReceipt runtime _ _ config result _ _)=do
   now<-getWardenSettings runtime
   if wardenMode now/=WardenEnforce then pure (Right ()) else do
     current<-receiptCurrent receipt

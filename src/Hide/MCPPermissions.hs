@@ -76,7 +76,7 @@ import qualified Hide.Consoles as Consoles
 import qualified Hide.Terminal as NativeTerminal
 import qualified Hide.Build as Build
 import Hide.Model
-import Hide.WardenRuntime (WardenBinding,WardenReceipt,captureWardenBinding,wardenEnforces,runWarden,checkWarden)
+import Hide.WardenRuntime (WardenBinding,WardenReceipt,WardenOutcome(..),captureWardenBinding,wardenEnforces,runWarden,checkWarden,recordWardenOutcome)
 
 type Tool = Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
@@ -113,9 +113,12 @@ data PreparedTerminal = PreparedTerminalConsole !Consoles.PreparedConsole | Prep
 data TerminalSubmission = TerminalSubmission !Consoles.Consoles !FilePath !TerminalRequest
   (IO (Either Text ())) (MVar (Either Text TerminalResult)) (IORef Bool) (MVar ())
   (IORef (Maybe (Async (Either Text PreparedTerminal))))
-data RequestSubmission = ReadSubmission !(Maybe WardenBinding) CaptureSubmission | EditSubmission !(Maybe WardenBinding) DiffSubmission
-  | SubmitTerminal !(Maybe WardenBinding) TerminalSubmission
-  | WireSubmission !(Maybe WardenBinding) !Text !Value Tool (IO (Either Text ())) (MVar (IO (Either Text Value))) (IORef Bool) (MVar ())
+-- The same result receipt cell belongs to ingress, Waiting and cancellation.
+-- No deferred completion needs to retain the request or its captured sources.
+data RequestSubmission = ReadSubmission !(Maybe WardenBinding) !(IORef (Maybe WardenReceipt)) CaptureSubmission
+  | EditSubmission !(Maybe WardenBinding) !(IORef (Maybe WardenReceipt)) DiffSubmission
+  | SubmitTerminal !(Maybe WardenBinding) !(IORef (Maybe WardenReceipt)) TerminalSubmission
+  | WireSubmission !(Maybe WardenBinding) !(IORef (Maybe WardenReceipt)) !Text !Value Tool (IO (Either Text ())) (MVar (IO (Either Text Value))) (IORef Bool) (MVar ())
 data RequestIngress = RequestIngress (STM.TBQueue RequestSubmission) (STM.TVar Bool)
 -- A request retains its policy phase while worker IO is pending. The queue is
 -- transport only: Waiting remains the one request/cancellation owner.
@@ -215,7 +218,7 @@ queueWirePermission caller runtime@(Permissions _ registry ref _ _ _ _ binding) 
         let request=Waiting (nextTicket s) name args (operationFor promise) enabled False caller attempt Nothing claim stage captured judgment
         writeIORef ref s {waiting=live++[request],nextTicket=nextTicket s+1}
         shown<-tickPermissions runtime desktop
-        pure (shown,(readMVar promise >>= id) `onException` finish runtime request (Left "MCP permission request cancelled"))
+        pure (shown,(readMVar promise >>= id) `onException` finishDeclined runtime request (Left "MCP permission request cancelled"))
   where denied reason=pure (desktop,pure (Left reason))
 
 -- | Worker entry to the same bounded permission ingress and Waiting owner.
@@ -228,7 +231,8 @@ requestPermission caller runtime@(Permissions _ _ _ _ _ (RequestIngress inbox cl
   promise<-newEmptyMVar
   enabled<-newIORef True
   claim<-newMVar ()
-  let submission=WireSubmission captured name args callback caller promise enabled claim
+  judgment<-newIORef Nothing
+  let submission=WireSubmission captured judgment name args callback caller promise enabled claim
   accepted<-STM.atomically $ do
     stopped<-STM.readTVar closed
     full<-STM.isFullTBQueue inbox
@@ -238,14 +242,48 @@ requestPermission caller runtime@(Permissions _ _ _ _ _ (RequestIngress inbox cl
   case accepted of
     Left err->pure (Left err)
     Right ()->restore (readMVar promise >>= id) `onException`
-      (withMVar claim (\()->finishWireSubmissionOwned promise enabled "MCP permission request cancelled")
+      (withMVar claim (\()->finishWireSubmissionOwned judgment WardenDeclined promise enabled "MCP permission request cancelled")
         `finally` signalPermissionWork runtime)
 
-finishWireSubmissionOwned :: MVar (IO (Either Text Value)) -> IORef Bool -> Text -> IO ()
-finishWireSubmissionOwned promise enabled reason=mask_ $ do
+finishWireSubmissionOwned :: IORef (Maybe WardenReceipt) -> WardenOutcome -> MVar (IO (Either Text Value)) -> IORef Bool -> Text -> IO ()
+finishWireSubmissionOwned receipt outcome promise enabled reason=mask_ $ do
   writeIORef enabled False
-  _<-tryPutMVar promise (pure (Left reason))
-  pure ()
+  publishWardenResult receipt outcome promise (pure (Left reason))
+
+-- Publish under the original claim before adding a bounded outcome. Losing to
+-- cancellation cannot report a second result or successful execution.
+publishWardenResult :: IORef (Maybe WardenReceipt) -> WardenOutcome -> MVar a -> a -> IO ()
+publishWardenResult receipt outcome promise result=mask_ $ do
+  won<-tryPutMVar promise result
+  when won (readIORef receipt >>= mapM_ (`recordWardenOutcome` outcome))
+
+returnedOutcome :: Either Text a -> WardenOutcome
+returnedOutcome=either (const WardenFailed) (const WardenReturned)
+
+terminalOutcome :: Either Text TerminalResult -> WardenOutcome
+terminalOutcome (Right (OutputTerminalPage page))=maybe WardenReturned WardenExited (Terminal.terminalExitCode page)
+terminalOutcome result=returnedOutcome result
+
+-- Only contracts with one identified completed process expose an exit result.
+-- A generic successful reply, launch or input acknowledgement proves no exit.
+wireOutcome :: Text -> Either Text Value -> WardenOutcome
+wireOutcome name result=case result of
+  Right value | name=="terminal_output" || name=="build_status" && field "active" value==Just False
+    ,Just code<-field "exitCode" value->WardenExited code
+  _->returnedOutcome result
+
+-- This closure keeps only the small receipt/name and the original worker work.
+-- Callback publication itself is not an outcome, and no text is serialized.
+observeWireResult :: Maybe WardenReceipt -> Text -> IO (Either Text Value) -> IO (Either Text Value)
+observeWireResult receipt name continuation=mask $ \restore->do
+  result<-restore continuation `catch` \(err::SomeException)->do
+    let outcome=case fromException err :: Maybe SomeAsyncException of
+          Just _->WardenDeclined
+          Nothing->WardenFailed
+    mapM_ (`recordWardenOutcome` outcome) receipt
+    throwIO err
+  mapM_ (\issued->recordWardenOutcome issued (wireOutcome name result)) receipt
+  pure result
 
 -- | Self-admitting terminal calls bound to a live host caller and session. The
 -- captured launch directory is forced here; project resolution and process IO
@@ -311,28 +349,28 @@ requestTerminal runtime@(Permissions _ _ _ _ retired (RequestIngress inbox close
     enabled<-newIORef True
     claim<-newMVar ()
     attempt<-newIORef Nothing
+    judgment<-newIORef Nothing
     let submission=TerminalSubmission consoles directory request caller promise enabled claim attempt
     accepted<-STM.atomically $ do
       stopped<-STM.readTVar closed
       full<-STM.isFullTBQueue inbox
       if stopped then pure (Left "Editor session closed before terminal admission")
       else if full then pure (Left "Too many requests are awaiting admission")
-      else STM.writeTBQueue inbox (SubmitTerminal captured submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+      else STM.writeTBQueue inbox (SubmitTerminal captured judgment submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
     case accepted of
       Left err->pure (Left err)
       Right ()->restore (readMVar promise) `onException`
-        (withMVar claim (\()->finishTerminalSubmissionOwned retired submission (Left "Terminal request cancelled"))
+        (withMVar claim (\()->finishTerminalSubmissionOwned judgment WardenDeclined retired submission (Left "Terminal request cancelled"))
           `finally` signalPermissionWork runtime)
 
 terminalLifetime :: TerminalSubmission -> (IORef Bool,MVar (),IO (Either Text ()))
 terminalLifetime (TerminalSubmission _ _ _ caller _ enabled claim _)=(enabled,claim,caller)
 
-finishTerminalSubmissionOwned :: IORef [MVar ()] -> TerminalSubmission -> Either Text TerminalResult -> IO ()
-finishTerminalSubmissionOwned retired (TerminalSubmission _ _ _ _ promise enabled _ attempt) result=mask_ $ do
+finishTerminalSubmissionOwned :: IORef (Maybe WardenReceipt) -> WardenOutcome -> IORef [MVar ()] -> TerminalSubmission -> Either Text TerminalResult -> IO ()
+finishTerminalSubmissionOwned receipt outcome retired (TerminalSubmission _ _ _ _ promise enabled _ attempt) result=mask_ $ do
   writeIORef enabled False
   stopTerminalAttempt retired attempt
-  _<-tryPutMVar promise result
-  pure ()
+  publishWardenResult receipt outcome promise result
 
 -- Retirement only schedules joining/cleanup. A completed, unadopted launch is
 -- still owned here, including cancellation after preparation but before policy.
@@ -493,35 +531,35 @@ queueCapture runtime binding (RequestIngress inbox closed) owner submissionFor=m
   promise<-newEmptyMVar
   enabled<-newIORef True
   claim<-newMVar ()
+  judgment<-newIORef Nothing
   accepted<-STM.atomically $ do
     stopped<-STM.readTVar closed
     full<-STM.isFullTBQueue inbox
     if stopped then pure (Left "Editor session closed before capture")
     else if full then pure (Left "Too many captures are awaiting admission")
-    else STM.writeTBQueue inbox (ReadSubmission captured (submissionFor promise enabled claim)) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+    else STM.writeTBQueue inbox (ReadSubmission captured judgment (submissionFor promise enabled claim)) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
   case accepted of
     Left err->pure (Left err)
     Right ()->restore (readMVar promise) `onException`
-      (finishCapture enabled claim promise (Left "Capture cancelled") `finally` signalPermissionWork runtime)
+      (finishCapture judgment WardenDeclined enabled claim promise (Left "Capture cancelled") `finally` signalPermissionWork runtime)
 
-finishCapture :: IORef Bool -> MVar () -> MVar (Either Text a) -> Either Text a -> IO ()
-finishCapture enabled claim promise result=withMVar claim (\()->finishCaptureOwned enabled promise result)
+finishCapture :: IORef (Maybe WardenReceipt) -> WardenOutcome -> IORef Bool -> MVar () -> MVar (Either Text a) -> Either Text a -> IO ()
+finishCapture receipt outcome enabled claim promise result=withMVar claim (\()->finishCaptureOwned receipt outcome enabled promise result)
 
-finishCaptureOwned :: IORef Bool -> MVar (Either Text a) -> Either Text a -> IO ()
-finishCaptureOwned enabled promise result=mask_ $ do
+finishCaptureOwned :: IORef (Maybe WardenReceipt) -> WardenOutcome -> IORef Bool -> MVar (Either Text a) -> Either Text a -> IO ()
+finishCaptureOwned receipt outcome enabled promise result=mask_ $ do
   writeIORef enabled False
-  _<-tryPutMVar promise result
-  pure ()
+  publishWardenResult receipt outcome promise result
 
 captureLifetime :: CaptureSubmission -> (IORef Bool,MVar (),IO (Either Text ()))
 captureLifetime (CaptureSubmission _ caller _ enabled claim)=(enabled,claim,caller)
 captureLifetime (ListingSubmission caller _ enabled claim)=(enabled,claim,caller)
 captureLifetime (WindowCaptureSubmission _ caller _ enabled claim)=(enabled,claim,caller)
 
-rejectCaptureOwned :: CaptureSubmission -> Text -> IO ()
-rejectCaptureOwned (CaptureSubmission _ _ promise enabled _) err=finishCaptureOwned enabled promise (Left err)
-rejectCaptureOwned (ListingSubmission _ promise enabled _) err=finishCaptureOwned enabled promise (Left err)
-rejectCaptureOwned (WindowCaptureSubmission _ _ promise enabled _) err=finishCaptureOwned enabled promise (Left err)
+rejectCaptureOwned :: IORef (Maybe WardenReceipt) -> WardenOutcome -> CaptureSubmission -> Text -> IO ()
+rejectCaptureOwned receipt outcome (CaptureSubmission _ _ promise enabled _) err=finishCaptureOwned receipt outcome enabled promise (Left err)
+rejectCaptureOwned receipt outcome (ListingSubmission _ promise enabled _) err=finishCaptureOwned receipt outcome enabled promise (Left err)
+rejectCaptureOwned receipt outcome (WindowCaptureSubmission _ _ promise enabled _) err=finishCaptureOwned receipt outcome enabled promise (Left err)
 
 -- | Host-only fixed actor binding. Public callers submit exact read versions;
 -- this transport grants neither Human authority nor reusable approval.
@@ -544,28 +582,28 @@ bufferEditor runtime@(Permissions _ _ _ namespace retired (RequestIngress inbox 
       let seed=newBuffer text
       _<-evaluate (prepareBuffer seed)
       pure seed) bounded
+    judgment<-newIORef Nothing
     let submission=DiffSubmission bounded seeds caller promise enabled claim attempt
     accepted<-STM.atomically $ do
       stopped<-STM.readTVar closed
       full<-STM.isFullTBQueue inbox
       if stopped then pure (Left "Editor session closed before diff admission")
       else if full then pure (Left "Too many buffer requests are awaiting admission")
-      else STM.writeTBQueue inbox (EditSubmission captured submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+      else STM.writeTBQueue inbox (EditSubmission captured judgment submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
     case accepted of
       Left err->pure (Left err)
       Right ()->restore (readMVar promise) `onException`
-        (finishDiffSubmission retired submission (Left "Buffer diff cancelled") `finally` signalPermissionWork runtime)
+        (finishDiffSubmission judgment WardenDeclined retired submission (Left "Buffer diff cancelled") `finally` signalPermissionWork runtime)
 
-finishDiffSubmission :: IORef [MVar ()] -> DiffSubmission -> Either Text [DiffResult] -> IO ()
-finishDiffSubmission retired submission@(DiffSubmission _ _ _ _ _ claim attempt) result=withMVar claim $ \()->do
+finishDiffSubmission :: IORef (Maybe WardenReceipt) -> WardenOutcome -> IORef [MVar ()] -> DiffSubmission -> Either Text [DiffResult] -> IO ()
+finishDiffSubmission receipt outcome retired submission@(DiffSubmission _ _ _ _ _ claim attempt) result=withMVar claim $ \()->do
   stopAttempt retired attempt
-  finishDiffSubmissionOwned submission result
+  finishDiffSubmissionOwned receipt outcome submission result
 
-finishDiffSubmissionOwned :: DiffSubmission -> Either Text [DiffResult] -> IO ()
-finishDiffSubmissionOwned (DiffSubmission _ _ _ promise enabled _ _) result=mask_ $ do
+finishDiffSubmissionOwned :: IORef (Maybe WardenReceipt) -> WardenOutcome -> DiffSubmission -> Either Text [DiffResult] -> IO ()
+finishDiffSubmissionOwned receipt outcome (DiffSubmission _ _ _ promise enabled _ _) result=mask_ $ do
   writeIORef enabled False
-  _<-tryPutMVar promise result
-  pure ()
+  publishWardenResult receipt outcome promise result
 
 -- A batch has the same policy and correction ticket as one strict diff. Its
 -- target list is host-owned: human edits can replace patches, never references.
@@ -589,14 +627,14 @@ diffTargetsCurrent namespace targets desktop=and <$> mapM current targets
           (referenceId namespace reference >>= (`M.lookup` buffers desktop))
 
 finishRequestSubmission :: Permissions -> RequestSubmission -> Text -> IO ()
-finishRequestSubmission _ (ReadSubmission _ submission) err=let (_,claim,_)=captureLifetime submission
-  in withMVar claim (\()->rejectCaptureOwned submission err)
-finishRequestSubmission (Permissions _ _ _ _ retired _ _ _) (EditSubmission _ submission) err=finishDiffSubmission retired submission (Left err)
-finishRequestSubmission (Permissions _ _ _ _ retired _ _ _) (SubmitTerminal _ submission) err=
+finishRequestSubmission _ (ReadSubmission _ receipt submission) err=let (_,claim,_)=captureLifetime submission
+  in withMVar claim (\()->rejectCaptureOwned receipt WardenFailed submission err)
+finishRequestSubmission (Permissions _ _ _ _ retired _ _ _) (EditSubmission _ receipt submission) err=finishDiffSubmission receipt WardenFailed retired submission (Left err)
+finishRequestSubmission (Permissions _ _ _ _ retired _ _ _) (SubmitTerminal _ receipt submission) err=
   let (_,claim,_)=terminalLifetime submission
-  in withMVar claim (\()->finishTerminalSubmissionOwned retired submission (Left err))
-finishRequestSubmission _ (WireSubmission _ _ _ _ _ promise enabled claim) err=
-  withMVar claim (\()->finishWireSubmissionOwned promise enabled err)
+  in withMVar claim (\()->finishTerminalSubmissionOwned receipt WardenFailed retired submission (Left err))
+finishRequestSubmission _ (WireSubmission _ receipt _ _ _ _ promise enabled claim) err=
+  withMVar claim (\()->finishWireSubmissionOwned receipt WardenFailed promise enabled err)
 
 -- Fixed bounded transport only; PermissionState still has one serialized owner.
 -- An interrupted extracted batch resolves every accepted reply before unwinding.
@@ -612,25 +650,30 @@ drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress i
         Nothing->finishRequestSubmission runtime submission "Request admission failed" >> pure current
     admit current submission=do
       let binding=case submission of
-            ReadSubmission captured _->captured
-            EditSubmission captured _->captured
-            SubmitTerminal captured _->captured
-            WireSubmission captured _ _ _ _ _ _ _->captured
+            ReadSubmission captured _ _->captured
+            EditSubmission captured _ _->captured
+            SubmitTerminal captured _ _->captured
+            WireSubmission captured _ _ _ _ _ _ _ _->captured
+          judgment=case submission of
+            ReadSubmission _ receipt _->receipt
+            EditSubmission _ receipt _->receipt
+            SubmitTerminal _ receipt _->receipt
+            WireSubmission _ receipt _ _ _ _ _ _ _->receipt
           (enabled,claim,caller)=case submission of
-            ReadSubmission _ capture->captureLifetime capture
-            EditSubmission _ (DiffSubmission _ _ c _ e k _)->(e,k,c)
-            SubmitTerminal _ terminal->terminalLifetime terminal
-            WireSubmission _ _ _ _ c _ e k->(e,k,c)
+            ReadSubmission _ _ capture->captureLifetime capture
+            EditSubmission _ _ (DiffSubmission _ _ c _ e k _)->(e,k,c)
+            SubmitTerminal _ _ terminal->terminalLifetime terminal
+            WireSubmission _ _ _ _ _ c _ e k->(e,k,c)
           target=case submission of
-            WireSubmission _ name args callback _ promise _ _->Right (name,args,WireOperation callback promise)
-            SubmitTerminal _ terminal@(TerminalSubmission _ _ request _ _ _ _ _)->
+            WireSubmission _ _ name args callback _ promise _ _->Right (name,args,WireOperation callback promise)
+            SubmitTerminal _ _ terminal@(TerminalSubmission _ _ request _ _ _ _ _)->
               let (name,args)=terminalArguments request in Right (name,args,TerminalOperation terminal)
-            ReadSubmission _ capture@ListingSubmission{}->Right ("list_buffers",object [],CaptureOperation capture)
-            ReadSubmission _ capture@(CaptureSubmission reference _ _ _ _)->bufferTarget reference $ \ident->
+            ReadSubmission _ _ capture@ListingSubmission{}->Right ("list_buffers",object [],CaptureOperation capture)
+            ReadSubmission _ _ capture@(CaptureSubmission reference _ _ _ _)->bufferTarget reference $ \ident->
               ("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
-            ReadSubmission _ capture@(WindowCaptureSubmission reference _ _ _ _)->Right
+            ReadSubmission _ _ capture@(WindowCaptureSubmission reference _ _ _ _)->Right
               ("read_window",object ["windowId" .= Reads.windowReadIdentifier reference],CaptureOperation capture)
-            EditSubmission _ diff@(DiffSubmission targets _ _ _ _ _ _)->do
+            EditSubmission _ _ diff@(DiffSubmission targets _ _ _ _ _ _)->do
               patches<-mapM (\(BufferDiff reference _ patch)->bufferTarget reference $ \ident->
                 let version=maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current))
                 in version `seq` object ["bufferId" .= ident,"revision" .= version,"diff" .= patch]) targets
@@ -644,13 +687,13 @@ drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress i
             original<-readIORef state
             liveRequests<-filterMActive runtime (waiting original)
             if length liveRequests>=32 then finishRequestSubmissionOwned submission "Too many MCP requests are awaiting permission" else do
-              attempt<-case submission of EditSubmission _ (DiffSubmission _ _ _ _ _ _ a)->pure a; _->newIORef Nothing
+              attempt<-case submission of EditSubmission _ _ (DiffSubmission _ _ _ _ _ _ a)->pure a; _->newIORef Nothing
               stage<-newIORef (PolicyPending AdmitPolicy Nothing)
               captured<-case submission of
-                ReadSubmission _ _->pure (Right Nothing)
+                ReadSubmission _ _ _->pure (Right Nothing)
                 WireSubmission{}->pure (Right Nothing)
                 SubmitTerminal{}->pure (Right Nothing)
-                EditSubmission _ (DiffSubmission targets _ _ _ _ _ _)->do
+                EditSubmission _ _ (DiffSubmission targets _ _ _ _ _ _)->do
                   matches<-diffTargetsCurrent namespace targets current
                   if not matches then pure (Left "Buffer identity or revision changed; read the buffer again") else
                     case mapM (capturePatchSource current) (diffArguments args) of
@@ -659,34 +702,33 @@ drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress i
               case captured of
                 Left err->finishRequestSubmissionOwned submission err
                 Right source->do
-                  judgment<-newIORef Nothing
                   let request=Waiting (nextTicket original) name args op enabled False caller attempt source claim stage binding judgment
                   writeIORef state original {waiting=liveRequests++[request],nextTicket=nextTicket original+1}
         pure current
-    finishRequestSubmissionOwned (ReadSubmission _ submission) err=rejectCaptureOwned submission err
-    finishRequestSubmissionOwned (EditSubmission _ submission) err=finishDiffSubmissionOwned submission (Left err)
-    finishRequestSubmissionOwned (SubmitTerminal _ submission) err=finishTerminalSubmissionOwned retired submission (Left err)
-    finishRequestSubmissionOwned (WireSubmission _ _ _ _ _ promise enabled _) err=finishWireSubmissionOwned promise enabled err
+    finishRequestSubmissionOwned (ReadSubmission _ receipt submission) err=rejectCaptureOwned receipt WardenFailed submission err
+    finishRequestSubmissionOwned (EditSubmission _ receipt submission) err=finishDiffSubmissionOwned receipt WardenFailed submission (Left err)
+    finishRequestSubmissionOwned (SubmitTerminal _ receipt submission) err=finishTerminalSubmissionOwned receipt WardenFailed retired submission (Left err)
+    finishRequestSubmissionOwned (WireSubmission _ receipt _ _ _ _ promise enabled _) err=finishWireSubmissionOwned receipt WardenFailed promise enabled err
 
 -- Caller holds the same short request claim used by cancellation. Only known
 -- host capture/actor operations run here; no extension handler or reply wait.
-captureSubmissionOwned :: Permissions -> CaptureSubmission -> Desktop -> IO ()
-captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _ _) submission desktop=do
+captureSubmissionOwned :: Permissions -> IORef (Maybe WardenReceipt) -> CaptureSubmission -> Desktop -> IO ()
+captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _ _) receipt submission desktop=do
   let (_,_,caller)=captureLifetime submission
   actor<-caller
   case actor of
-    Left err->rejectCaptureOwned submission err
+    Left err->rejectCaptureOwned receipt WardenFailed submission err
     Right ()->case submission of
       ListingSubmission _ promise enabled _->do
         outcome<-withReadAdmission namespace (sessionClosed runtime) (`Reads.listBuffers` desktop)
-        finishCaptureOwned enabled promise outcome
+        finishCaptureOwned receipt (returnedOutcome outcome) enabled promise outcome
       CaptureSubmission reference _ promise enabled _->do
-        outcome<-withReadAdmission namespace (sessionClosed runtime) (\receipt->Reads.captureBuffer receipt desktop reference)
-        finishCaptureOwned enabled promise outcome
+        outcome<-withReadAdmission namespace (sessionClosed runtime) (\admission->Reads.captureBuffer admission desktop reference)
+        finishCaptureOwned receipt (either (const WardenFailed) (const WardenCaptured) outcome) enabled promise outcome
       WindowCaptureSubmission target _ promise enabled _->do
         closed<-sessionClosed runtime
         outcome<-if closed then pure (Left "Editor session closed before capture") else Reads.captureWindow desktop target
-        finishCaptureOwned enabled promise outcome
+        finishCaptureOwned receipt (either (const WardenFailed) (const WardenCaptured) outcome) enabled promise outcome
 
 filterMActive :: Permissions -> [Waiting] -> IO [Waiting]
 filterMActive runtime requests=fmap concat $ mapM (\request->withMVar (requestClaim request) $ \()->do
@@ -695,6 +737,9 @@ filterMActive runtime requests=fmap concat $ mapM (\request->withMVar (requestCl
 
 finish :: Permissions -> Waiting -> Either Text Value -> IO ()
 finish runtime request result=withMVar (requestClaim request) (\()->finishOwned runtime request result)
+
+finishDeclined :: Permissions -> Waiting -> Either Text Value -> IO ()
+finishDeclined runtime request result=withMVar (requestClaim request) (\()->finishOwnedWith WardenDeclined runtime request result)
 
 -- A typed wait retires active through its original shared claim. Filtering
 -- claims that same cell and retires its worker before removing the ticket.
@@ -713,18 +758,21 @@ stopWardenAttempt (Permissions _ _ _ _ retired _ _ _) request=mask_ $ do
 
 -- Caller holds requestClaim. Result publication and cancellation are linearized.
 finishOwned :: Permissions -> Waiting -> Either Text Value -> IO ()
-finishOwned runtime@(Permissions _ _ _ _ retired _ _ _) request result=mask_ $ do
+finishOwned=finishOwnedWith WardenFailed
+
+finishOwnedWith :: WardenOutcome -> Permissions -> Waiting -> Either Text Value -> IO ()
+finishOwnedWith outcome runtime@(Permissions _ _ _ _ retired _ _ _) request result=mask_ $ do
   atomicModifyIORef' (active request) (const (False,()))
   stopWardenAttempt runtime request
   stopDiffAttempt runtime request
   case operation request of
-    WireOperation _ promise->tryPutMVar promise (pure result) >> pure ()
-    BuildInputOperation _ promise->tryPutMVar promise (pure result) >> pure ()
+    WireOperation _ promise->publishWardenResult (wardenReceipt request) outcome promise (pure result)
+    BuildInputOperation _ promise->publishWardenResult (wardenReceipt request) outcome promise (pure result)
     BuildAdoptionOperation (AdmittedBuild _ _ _ _ _ state)->atomicModifyIORef' state $ \current->
       (if ownsBuildRequest request current then BuildRejected (either id (const "Invalid build admission result") result) else current,())
-    CaptureOperation submission->rejectCaptureOwned submission (either id (const "Invalid capture reply") result)
-    DiffOperation submission->finishDiffSubmissionOwned submission (case result of Left err->Left err; Right _->Left "Invalid diff reply")
-    TerminalOperation submission->finishTerminalSubmissionOwned retired submission (Left (either id (const "Invalid terminal reply") result))
+    CaptureOperation submission->rejectCaptureOwned (wardenReceipt request) outcome submission (either id (const "Invalid capture reply") result)
+    DiffOperation submission->finishDiffSubmissionOwned (wardenReceipt request) outcome submission (case result of Left err->Left err; Right _->Left "Invalid diff reply")
+    TerminalOperation submission->finishTerminalSubmissionOwned (wardenReceipt request) outcome retired submission (Left (either id (const "Invalid terminal reply") result))
 
 -- An attempt belongs to a ticket, but failure does not end that ticket. Retire
 -- joins run on their own thread; neither tick nor dialog submission waits for a
@@ -918,7 +966,7 @@ adoptTerminalOwned runtime@(Permissions _ _ _ _ retired _ _ _) request desktop=c
             (ident,opened)<-Consoles.adoptConsole consoles console desktop
             pure (opened,OpenedTerminal (Terminal.TerminalOpened (Terminal.TerminalId ident) bid))
         writeIORef attempt Nothing
-        finishTerminalSubmissionOwned retired submission (Right response)
+        finishTerminalSubmissionOwned (wardenReceipt request) (terminalOutcome (Right response)) retired submission (Right response)
         pure updated
       _->finishOwned runtime request (Left "Terminal preparation is no longer available") >> pure desktop
   _->finishOwned runtime request (Left "Invalid terminal admission operation") >> pure desktop
@@ -1008,7 +1056,7 @@ permissionAction runtime@(Permissions _ registry ref _ _ _ owner _) action value
           _->queueSettings ListPolicies desktop
         _ | "approve:" `T.isPrefixOf` action ->case find ((==action).approvalAction) (waiting s) of
           Nothing->close
-          Just request | take 1 values/=["0"]->finish runtime request (Left "MCP request denied") >> tickPermissions runtime (closeReview request desktop)
+          Just request | take 1 values/=["0"]->finishDeclined runtime request (Left "MCP request denied") >> tickPermissions runtime (closeReview request desktop)
           Just request->case reviewArguments request (drop 1 values) of
             Nothing->pure desktop {status="Diff review changed; approve the current target list."}
             Just edited->do
@@ -1199,7 +1247,7 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner _) origina
             Right (updated,response)->do
               stopDiffAttempt runtime request
               case operation request of
-                DiffOperation submission->finishDiffSubmissionOwned submission (Right response)
+                DiffOperation submission->finishDiffSubmissionOwned (wardenReceipt request) WardenChanged submission (Right response)
                 _->finishOwned runtime request (Left "Invalid diff operation")
               pure (closeReview request updated) {status="Applied exact buffer diff."}
     execute desktop request use edited=case wardenBinding request of
@@ -1235,7 +1283,7 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner _) origina
         Left err->finishOwned runtime request (Left err) >> pure (closeReview request desktop)
         Right ()->action
     executeOwned desktop request edited=case operation request of
-      CaptureOperation submission->captureSubmissionOwned runtime submission desktop >> pure (closeReview request desktop)
+      CaptureOperation submission->captureSubmissionOwned runtime (wardenReceipt request) submission desktop >> pure (closeReview request desktop)
       DiffOperation _->startDiffAttemptOwned runtime request edited desktop
       TerminalOperation submission->startTerminalAttemptOwned runtime request submission desktop
       BuildAdoptionOperation _->finishOwned runtime request (Left "Invalid build admission phase") >> pure desktop
@@ -1257,8 +1305,10 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner _) origina
     completeWire desktop request promise result=case result of
       Left (_::IOException)->finishOwned runtime request (Left "MCP tool failed after policy admission") >> pure (closeReview request desktop)
       Right (updated,continuation)->do
+        receipt<-readIORef (wardenReceipt request)
+        name<-evaluate (T.copy (toolName request))
         writeIORef (active request) False
-        _<-tryPutMVar promise continuation
+        _<-tryPutMVar promise (observeWireResult receipt name continuation)
         pure updated
     replaceRequest request=modifyIORef' ref (\state->state {waiting=map (\old->if ticket old==ticket request then request else old) (waiting state)})
 

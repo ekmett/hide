@@ -1182,6 +1182,10 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
                 readReply<-nativeResponse "read-1"
                 check "observe retains the ordinary captured source read"
                   ((readReply >>= field "result" >>= field "content")==Just ("unsaved Warden source\n"::T.Text))
+                observations<-WardenRuntime.wardenObservations (WardenRuntime.wardenAgent warden (AR.primaryAgent (conversationAgents runtime)))
+                check "native observation records the delivered read, not the still-pending write"
+                  ([(WardenRuntime.observationAction item,WardenRuntime.observationOutcome item) | item<-observations]
+                    ==[("fs/read_text_file",WardenRuntime.WardenReturned)])
                 _<-WardenRuntime.setWardenSettings warden config {Warden.wardenMode=Warden.WardenEnforce} >>= either (error . T.unpack) pure
                 _<-actDialog runtime 0 approval >>= done runtime
                 writeReply<-nativeResponse "write-1"

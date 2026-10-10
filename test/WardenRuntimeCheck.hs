@@ -29,6 +29,7 @@ checks :: IO ()
 checks=do
   blockedRulesCheck
   closedAcquisitionCheck
+  outcomeChecks
   received<-newIORef []
   let provider=DecisionProvider description $ \_ use->use (DecisionDriver $ \input _->do
         modifyIORef' received (input:)
@@ -165,6 +166,98 @@ closedAcquisitionCheck=withSystemOne $ \system->do
       host=ProviderHost (const (pure (finished (Right Nothing)))) Nothing Nothing Nothing
   result<-retained PrimaryProvider identity (ProviderLaunch "owned-provider" [] []) [] "" host request (const (pure ()))
   check "retained closed runtime refuses provider acquisition" (isLeft result)
+
+-- Actual host replies own the ledger; inference availability and Observe's
+-- sampled worker do not decide whether those bounded metadata facts exist.
+outcomeChecks :: IO ()
+outcomeChecks=withSystemOne $ \system->do
+  let config=defaultWardenSettings {wardenMode=WardenObserve}
+      request=StartRequest (AgentId "outcome-owner") Human
+        (SpawnSpec "Outcomes" "Task" "/" Shared Fresh Nothing Nothing) Nothing Nothing
+      host=ProviderHost (const (pure (finished (Right Nothing)))) Nothing Nothing Nothing
+  (closedBinding,closedReceipt)<-withWarden (systemOneServices system) config
+    (const (pure (Right ["Keep the source file."]))) $ \owner->do
+      identity<-newProviderIdentity
+      driver<-wardenProviderFactory owner fakeProvider PrimaryProvider identity
+        (ProviderLaunch "owned-provider" [] []) [] "" host request (const (pure ())) >>= require
+      (do
+        turn<-deliverOutcome driver
+        binding<-captureWardenBinding (wardenProvider owner identity)
+        first<-runWarden binding "read_buffer" (object ["text" .= ("private-session-reference"::T.Text)])
+        recordWardenOutcome first WardenReturned
+        recordWardenOutcome first WardenFailed
+        one<-wardenObservations binding
+        check "an exact receipt retains its first actual outcome once"
+          (map observationOutcome one==[WardenReturned] && map observationAction one==["read_buffer"])
+        check "outcome metadata omits private argument text"
+          (all (not . T.isInfixOf "private-session-reference" . observationAction) one)
+        forM_ [("terminal_start",WardenFailed),("buffer_apply_diff",WardenChanged)
+              ,("terminal_output",WardenExited 7),("ask_user",WardenDeclined)] $ \(name,outcome)->do
+          receipt<-runWarden binding name (object [])
+          recordWardenOutcome receipt outcome
+        rows<-wardenObservations binding
+        check "typed host outcomes preserve operation distinctions"
+          (map observationOutcome rows==[WardenReturned,WardenFailed,WardenChanged,WardenExited 7,WardenDeclined])
+        forM_ [1..17::Int] $ \code->do
+          receipt<-runWarden binding "terminal_output" (object ["offset" .= code])
+          recordWardenOutcome receipt (WardenExited code)
+        bounded<-wardenObservations binding
+        check "the ledger retains only the latest sixteen actual replies"
+          (map observationOutcome bounded==map WardenExited [2..17])
+        check "same-named replies retain distinct exact action identities"
+          (length (unique (map observationId bounded))==16)
+        -- A repeated receipt cannot reappear after its earlier row was evicted.
+        recordWardenOutcome first WardenChanged
+        forM_ ["private-session-reference",T.replicate 129 "x","terminal\noutput"] $ \name->do
+          receipt<-runWarden binding name (object [])
+          recordWardenOutcome receipt WardenReturned
+        unchanged<-wardenObservations binding
+        check "evicted receipts and unsafe labels cannot add result metadata" (unchanged==bounded)
+        pending<-runWarden binding "terminal_stop" (object [])
+        submission<-newProviderSubmission
+        void (driverSteer driver (HubMessage 0 Human "Continue safely." False) [] submission >>= require)
+        recordWardenOutcome pending WardenReturned
+        stale<-wardenObservations binding
+        fresh<-captureWardenBinding (wardenProvider owner identity)
+        afterSteer<-wardenObservations fresh
+        check "steering clears history without retagging stale replies" (null stale && null afterSteer)
+        canceled<-runWarden fresh "terminal_stop" (object [])
+        recordWardenOutcome canceled WardenReturned
+        lateCancel<-runWarden fresh "terminal_output" (object [])
+        cancelProviderTurn turn
+        recordWardenOutcome lateCancel (WardenExited 0)
+        afterCancel<-wardenObservations (wardenProvider owner identity)
+        check "cancellation clears results and rejects late outcomes" (null afterCancel)
+        void (deliverOutcome driver)
+        settingsBinding<-captureWardenBinding (wardenProvider owner identity)
+        oldSettings<-runWarden settingsBinding "read_buffer" (object [])
+        recordWardenOutcome oldSettings WardenReturned
+        lateSettings<-runWarden settingsBinding "terminal_start" (object [])
+        void (setWardenSettings owner config >>= require)
+        recordWardenOutcome lateSettings WardenReturned
+        settingsRows<-wardenObservations settingsBinding
+        currentRows<-wardenObservations (wardenProvider owner identity)
+        check "a settings epoch cannot inherit prior result history" (null settingsRows && null currentRows)
+        void (setWardenSettings owner config {wardenMode=WardenOff} >>= require)
+        off<-runWarden (wardenProvider owner identity) "read_buffer" (error "Off inspected result arguments")
+        recordWardenOutcome off WardenReturned
+        void (setWardenSettings owner config >>= require)
+        recordWardenOutcome off WardenFailed
+        offRows<-wardenObservations (wardenProvider owner identity)
+        check "Off cannot later acquire result history" (null offRows)
+        retained<-captureWardenBinding (wardenProvider owner identity)
+        late<-runWarden retained "read_buffer" (object [])
+        pure (retained,late)) `finally` driverStop driver
+  recordWardenOutcome closedReceipt WardenReturned
+  closedRows<-wardenObservations closedBinding
+  check "provider and runtime close cannot resurrect retained outcomes" (null closedRows)
+  where
+    deliverOutcome driver=do
+      turn<-newProviderTurnId
+      submission<-newProviderSubmission
+      driverDeliver driver turn (HubMessage 0 Human "Explain the parser." True) [] submission >>= require
+    unique []=[]
+    unique (x:xs)=x:unique (filter (/=x) xs)
 
 barrier :: String -> IO a -> IO a
 barrier label action=timeout 2000000 action >>= maybe (ioError (userError label)) pure

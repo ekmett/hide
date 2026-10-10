@@ -372,6 +372,9 @@ wardenChecks=bracket temporary removePathForcibly $ \directory->do
   activities<-STM.newTVarIO (M.empty :: M.Map T.Text Value)
   judged<-newIORef (0::Int)
   executed<-newIORef []
+  deferFirst<-newIORef True
+  continuationEntered<-STM.newEmptyTMVarIO
+  continuationResult<-STM.newEmptyTMVarIO
   let description=Decision.SupplierDescription "MCP Warden check" Decision.InProcess (Decision.ReportedModel "permission-check") Nothing 0
       supplier=Decision.DecisionProvider description $ \_ use->use (Decision.DecisionDriver $ \input stopped->do
         modifyIORef' judged (+1)
@@ -388,7 +391,14 @@ wardenChecks=bracket temporary removePathForcibly $ \directory->do
       base=addDocument Nothing (newBuffer "source") (initialDesktop (80,25))
       specs=[object ["name" .= ("read"::T.Text),"annotations" .= object ["readOnlyHint" .= True]]]
       proposal=object ["operation" .= ("inspect"::T.Text)]
-      execute desktop name args=modifyIORef' executed (++[(name,args)]) >> pure (desktop,pure (Right Null))
+      execute desktop name args=do
+        modifyIORef' executed (++[(name,args)])
+        deferred<-atomicModifyIORef' deferFirst (\first->(False,first))
+        -- The callback publishes work, not a completed tool result. This gate
+        -- belongs to that exact continuation and never blocks the UI callback.
+        let result=if deferred then STM.atomically (STM.putTMVar continuationEntered ()) >> STM.atomically (STM.takeTMVar continuationResult)
+              else pure (Left "Owned tool result failed")
+        pure (desktop,result)
   SystemOne.withSystemOne $ \system->do
     _<-SystemOne.selectDecisionProvider system (Just supplier) >>= require
     WardenRuntime.withWarden (SystemOne.systemOneServices system) Warden.defaultWardenSettings {Warden.wardenMode=Warden.WardenEnforce}
@@ -411,7 +421,17 @@ wardenChecks=bracket temporary removePathForcibly $ \directory->do
                 responsive<-timeout 3000000 (tickPermissions owner paused)
                 current<-maybe (error "permission tick waited for inference") pure responsive
                 STM.atomically (STM.putTMVar release ())
-                (after,result)<-awaitOwned "Enforce action completion" owner (wait worker) current
+                (published,())<-awaitOwned "Enforce continuation publication" owner (STM.atomically (STM.readTMVar continuationEntered)) current
+                pending<-WardenRuntime.wardenObservations (WardenRuntime.wardenAgent warden agent)
+                check "publishing a callback continuation does not report tool completion" (null pending)
+                STM.atomically (STM.putTMVar continuationResult (Right Null))
+                (after,result)<-awaitOwned "Enforce action completion" owner (wait worker) published
+                outcomes<-WardenRuntime.wardenObservations (WardenRuntime.wardenAgent warden agent)
+                check "the eventual result records its original action receipt"
+                  (case outcomes of
+                    [outcome]->WardenRuntime.observationId outcome==Decision.decisionStateId input &&
+                      WardenRuntime.observationAction outcome=="read" && WardenRuntime.observationOutcome outcome==WardenRuntime.WardenReturned
+                    _->False)
                 check "successful exact Warden judgment admits ordinary permission" (result==Right Null)
                 check "admitted callback receives the judged proposal once" . (==[("read",proposal)]) =<< readIORef executed
                 pure after
@@ -421,7 +441,7 @@ wardenChecks=bracket temporary removePathForcibly $ \directory->do
                 _<-STM.atomically (STM.takeTMVar entered)
                 (after,result)<-awaitOwned "Observe action completion" owner (wait worker) paused
                 held<-STM.atomically (STM.isEmptyTMVar release)
-                check "Observe completes the original action while supplier inference is held" (result==Right Null && held)
+                check "Observe completes the original action while supplier inference is held" (result==Left "Owned tool result failed" && held)
                 check "Observe preserves ordinary callback execution" . (==replicate 2 ("read",proposal)) =<< readIORef executed
                 STM.atomically (STM.putTMVar release ())
                 -- This exact transcript result follows terminal supplier
@@ -429,6 +449,10 @@ wardenChecks=bracket temporary removePathForcibly $ \directory->do
                 (settled,_)<-awaitOwned "Observe activity result" owner (STM.atomically $ do
                   reports<-STM.readTVar activities
                   maybe STM.retry pure (M.lookup (Decision.decisionStateId input) reports)) after
+                outcomes<-WardenRuntime.wardenObservations (WardenRuntime.wardenAgent warden agent)
+                check "a failed eventual result remains failure after its Observe judgment"
+                  (any (\outcome->WardenRuntime.observationId outcome==Decision.decisionStateId input &&
+                    WardenRuntime.observationOutcome outcome==WardenRuntime.WardenFailed) outcomes)
                 pure settled
               _<-WardenRuntime.setWardenSettings warden Warden.defaultWardenSettings {Warden.wardenMode=Warden.WardenEnforce} >>= require
               -- Observe this call's actual queue wait before replacing its task;

@@ -91,7 +91,7 @@ import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import System.Environment (lookupEnv)
 import Hide.Syntax (Style(..),styledText)
-import Hide.WardenRuntime (WardenRuntime,WardenBinding,WardenReceipt,wardenProvider,captureWardenBinding,wardenEnforces,runWarden,checkWarden)
+import Hide.WardenRuntime (WardenRuntime,WardenBinding,WardenReceipt,wardenProvider,captureWardenBinding,wardenEnforces,runWarden,checkWarden,WardenOutcome(..),recordWardenOutcome)
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Prompting | CancellingPrompt deriving Eq
@@ -186,6 +186,26 @@ checkNative=maybe (pure (Right ())) checkWarden
 
 admitNative :: Maybe WardenReceipt -> IO (Either Text a) -> IO (Either Text a)
 admitNative receipt action=checkNative receipt >>= either (pure . Left) (const action)
+
+-- Record the winning original reply, not worker readiness or request acceptance.
+-- Only a small typed outcome crosses into the Warden owner; text, source snapshots
+-- and terminal output remain with their existing operation. Publication is masked
+-- through observation so a cancelled waiter cannot leave a successful phantom.
+replyNative :: Maybe WardenReceipt -> (a -> WardenOutcome) -> MVar (Either Text a) -> Either Text a -> IO ()
+replyNative receipt completed reply result=mask_ $ do
+  delivered<-tryPutMVar reply result
+  when delivered $ forM_ receipt $ \grant->
+    recordWardenOutcome grant (either (const WardenFailed) completed result)
+
+refuseNative :: Maybe WardenReceipt -> MVar (Either Text a) -> Text -> IO ()
+refuseNative receipt reply reason=mask_ $ do
+  delivered<-tryPutMVar reply (Left reason)
+  when delivered $ forM_ receipt $ \grant->recordWardenOutcome grant WardenDeclined
+
+finishNativeFile :: Maybe WardenReceipt -> Text -> FileRequest -> IO ()
+finishNativeFile receipt reason request=case request of
+  ReadFile _ _ reply->replyNative receipt (const WardenReturned) reply (Left reason)
+  WriteFile _ reply->replyNative receipt (const WardenChanged) reply (Left reason)
 
 fileJudgment :: Maybe WardenBinding -> FilePath -> FileRequest -> IO (Maybe WardenReceipt)
 fileJudgment binding path request=case request of
@@ -1437,13 +1457,13 @@ pollFileCaptures runtime@(ConversationState _ ref consoles _) original=do
                 case checked of
                   Right snap | alive owner waiting->do
                     current<-sourceIdentity (snapshotPath snap) d
-                    if current/=expected || not (filePublic (snapshotPath snap) d) then finishFile (Left "File changed in the editor during capture; request a fresh read.") request
+                    if current/=expected || not (filePublic (snapshotPath snap) d) then finishNativeFile receipt "File changed in the editor during capture; request a fresh read." request
                     else case request of
                       ReadFile line limit reply->do
                         worker'<-async (admitNative receipt (sliceFile snap line limit))
                         replace (SlicingFile owner reply receipt snap expected worker':rest)
                       WriteFile text reply->enqueueApproval runtime (Write owner reply (M.findWithDefault snap (snapshotPath snap) (reads s)) text receipt)
-                  result->finishFile (either Left (const (Left "File request expired.")) result) request
+                  result->finishNativeFile receipt (either id (const "File request expired.") result) request
                 drain (either (\err->d {status=err}) (const d) checked)
             SlicingFile owner reply receipt snap expected worker->poll worker >>= \ready->case ready of
               Nothing->pure d
@@ -1453,7 +1473,7 @@ pollFileCaptures runtime@(ConversationState _ ref consoles _) original=do
                 current<-sourceIdentity (snapshotPath snap) d
                 let admitted=alive owner waiting && current==expected && filePublic (snapshotPath snap) d
                 result<-admitNative receipt (pure (if admitted then failed outcome else Left "File changed during read preparation; request a fresh read."))
-                void (tryPutMVar reply result)
+                replyNative receipt (const WardenReturned) reply result
                 case result of Right _->modifyIORef' ref (\state->state {reads=M.insert (snapshotPath snap) snap (reads state)}); _->pure ()
                 drain (either (\err->d {status=err}) (const d) result)
             CheckingTerminal owner reply limit worker->poll worker >>= \ready->case ready of
@@ -1477,15 +1497,15 @@ pollFileCaptures runtime@(ConversationState _ ref consoles _) original=do
                     replace rest
                     (tid,next)<-C.adoptConsole consoles prepared d `onException` C.closePreparedConsole prepared
                     modifyIORef' ref (\state->state {ownedTerminals=S.insert tid (ownedTerminals state)})
-                    void (tryPutMVar reply (Right tid))
+                    replyNative receipt (const WardenReturned) reply (Right tid)
                     drain next
                   (Right prepared,result)->do
                     replace rest
                     C.closePreparedConsole prepared
                     let err=either id (const "Terminal request expired.") result
-                    void (tryPutMVar reply (Left err))
+                    replyNative receipt (const WardenReturned) reply (Left err)
                     drain d {status=err}
-                  (Left err,_)->replace rest >> void (tryPutMVar reply (Left err)) >> drain d {status=err}
+                  (Left err,_)->replace rest >> replyNative receipt (const WardenReturned) reply (Left err) >> drain d {status=err}
             JudgingTerminal owner tid operation reply worker->poll worker >>= \ready->case ready of
               Nothing->pure d
               Just outcome->do
@@ -1507,7 +1527,7 @@ pollFileCaptures runtime@(ConversationState _ ref consoles _) original=do
                 replace rest
                 waiting<-isEmptyMVar reply
                 result<-admitNative receipt (pure (if alive owner waiting then failed outcome else Left "Native request expired."))
-                void (tryPutMVar reply result)
+                replyNative receipt (const WardenReturned) reply result
                 drain (either (\err->d {status=err}) (const d) result)
             ReleasingTerminal owner tid reply receipt worker->poll worker >>= \ready->case ready of
               Nothing->pure d
@@ -1522,7 +1542,7 @@ pollFileCaptures runtime@(ConversationState _ ref consoles _) original=do
                   _->pure ()
                 waiting<-isEmptyMVar reply
                 result<-admitNative receipt (pure (if alive owner waiting then failed outcome else Left "Native request expired."))
-                void (tryPutMVar reply result)
+                replyNative receipt (const WardenReturned) reply result
                 drain (either (\err->d {status=err}) (const d) result)
 
 -- Only metadata for this path participates in final immutable source admission.
@@ -1593,9 +1613,9 @@ decide (ConversationState _ ref _ _) token values d=do
           Write _ reply snap text receipt | take 1 values==["0"]->do
             result<-admitNative receipt (acceptWrite snap text d)
             case result of
-              Left err->void (tryPutMVar reply (Left err)) >> pure (message "Agent edit rejected" (wrapMessage err) d)
+              Left err->replyNative receipt (const WardenChanged) reply (Left err) >> pure (message "Agent edit rejected" (wrapMessage err) d)
               Right changed->do
-                void (tryPutMVar reply (Right ()))
+                replyNative receipt (const WardenChanged) reply (Right ())
                 modifyIORef' ref (\state->state {reads=maybe (reads state) (\fresh->M.insert (snapshotPath fresh) fresh (reads state)) (M.lookup (snapshotPath snap) (sourceSnapshots changed))})
                 pure changed
           Execute owner reply config limit receipt | take 1 values==["0"]->mask_ $ do
@@ -1620,8 +1640,8 @@ cancelApproval :: Approval -> IO ()
 cancelApproval approval=case approval of
   ChildPermission _ _ reply->void (tryPutMVar reply (Right Nothing))
   Permission _ _ reply->void (tryPutMVar reply (Right Nothing))
-  Execute _ reply _ _ _->void (tryPutMVar reply (Left "User rejected the command."))
-  Write _ reply _ _ _->void (tryPutMVar reply (Left "User rejected the edit."))
+  Execute _ reply _ _ receipt->refuseNative receipt reply "User rejected the command."
+  Write _ reply _ _ receipt->refuseNative receipt reply "User rejected the edit."
 
 isApprovalDialog :: Int -> Desktop -> Bool
 isApprovalDialog token d = case dialog d of Just dg -> purpose dg==AgentDialog ("approval:"<>T.pack (show token)); _ -> False
@@ -1738,7 +1758,7 @@ flushTerminalWaiters (ConversationState _ ref consoles _)=do
           forM_ completed $ \reply->do
             forM_ (M.findWithDefault [] tid (terminalWaiters current)) $ \(receipt,cell)->do
               checked<-admitNative receipt (pure reply)
-              void (tryPutMVar cell checked)
+              replyNative receipt WardenExited cell checked
             modifyIORef' ref (\state->state {terminalWaiters=M.delete tid (terminalWaiters state)})
     _->pure ()
 
