@@ -267,13 +267,14 @@ checks=bracket temporary removePathForcibly $ \root -> do
   changed<-startChild launch {A.environment=[("RESUME","load"),("CHANGED","yes")]++A.environment launch} [] "" denyPermission resumed emit
   check "load rejects a replacement session identity" (case changed of Left _->True; _->False)
   stubborn<-startChild launch {A.environment=("IGNORE_CANCEL","yes"):A.environment launch} [] "" denyPermission request emit >>= right "unresponsive provider"
-  bracket (pure stubborn) driverStop $ \running -> withAsync (deliver running (prompt "stall")) $ \pending -> do
-    let awaitPrompt=do
-          entries<-logs
-          if any (T.isInfixOf "stall" . T.pack . show) entries then pure () else threadDelay 1000 >> awaitPrompt
-    _<-timeout 2000000 awaitPrompt >>= maybe (error "unresponsive fixture prompt missing") pure
+  bracket (pure stubborn) driverStop $ \running -> bracket newProviderSubmission retireProviderSubmission $ \submission -> do
+    -- Cancellation must follow this turn's send admission; shared logs can still
+    -- contain an earlier provider's stalled prompt.
+    turn<-newProviderTurnId
+    pending<-timeout 2000000 (driverDeliver running turn (prompt "stall") [] submission)
+      >>= maybe (error "unresponsive fixture prompt missing") (right "unresponsive prompt admission")
     driverCancel running
-    stopped<-timeout 4000000 (wait pending)
+    stopped<-timeout 4000000 (awaitProviderReply (providerTurnReply pending))
     check "unresponsive cancellation closes driver within bound" (case stopped of Just (Left _)->True; _->False)
     closed<-deliver running (prompt "ordinary")
     check "unresponsive provider cannot receive subsequent prompts" (case closed of Left _->True; _->False)
