@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Agent input and display settings through the ordinary model input path.
+-- |
+-- Module      : Hide.ControlMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Agent input and display settings through the ordinary model input path.
 --
 -- The host attributes input to the agent and brackets a batch with an isolated
 -- clipboard. Events apply sequentially, not transactionally; refusal stops the

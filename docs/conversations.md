@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Conversations
 
 Keep a conversation beside the source you are working on. Ask about selected

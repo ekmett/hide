@@ -1,4 +1,13 @@
--- | Pure launch-option selection and the shared native event encoding.
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+-- |
+-- Module      : Hide.Frontend
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Pure launch-option selection and the shared native event encoding.
 --
 -- Explicit options override environment values. Native key codes and modifier bits
 -- map to the editor input model, including selected macOS Command bindings. SSH

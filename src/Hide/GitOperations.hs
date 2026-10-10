@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Serialize UI and MCP Git work through one owned background worker.
+-- |
+-- Module      : Hide.GitOperations
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Serialize UI and MCP Git work through one owned background worker.
 --
 -- Both entry paths reserve the same worker under desktop serialization. Mutations
 -- interlock with conflicting saves/commands and ordinary quit waits. Agent pull

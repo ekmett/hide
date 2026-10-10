@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: BSD-3-Clause */
+/* SPDX-FileCopyrightText: 2026 Edward Kmett
+ * SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 */
 /* The SDL window stays hidden and never becomes key or ordered. */
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>

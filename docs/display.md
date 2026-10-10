@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Display and frontends
 
 Use the same files, windows and commands in a terminal, a native window or the
@@ -188,8 +191,8 @@ Right-click a saved file in **Files** and choose **Export saved copy…** to cop
 its disk contents into another application. Unsaved edits stay in the editor;
 use **File > Download** in the browser when you want the current buffer instead.
 
-On macOS, drag that Files row after choosing export. A click without dragging
-cancels the offer. Scrolling, changing the sidebar, resizing or leaving the
+On macOS and Windows, drag that Files row after choosing export. A click without
+dragging cancels the offer. Scrolling, changing the sidebar, resizing or leaving the
 frontend also cancels an armed row, so the gesture cannot silently export a
 different file. The destination receives a copy, including over SSH; the source
 is neither moved nor marked saved. Native Linux and terminal frontends use the

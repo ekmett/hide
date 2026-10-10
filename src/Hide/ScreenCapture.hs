@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Logical framebuffer capture for agent tools, not an OS screenshot.
+-- |
+-- Module      : Hide.ScreenCapture
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Logical framebuffer capture for agent tools, not an OS screenshot.
 --
 -- Text, PNG and cell permissions derive from one grapheme-aware picture. A cluster
 -- is redacted wholly if any occupied cell is unreadable, preserving coordinates.

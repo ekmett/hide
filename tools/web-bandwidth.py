@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Compare identical rendered screens; stdlib-only, including receiver checks.
 Usage: python3 tools/web-bandwidth.py .deps/bandwidth-trial/frames.jsonl
 Counts server WebSocket payload + frame header, excluding TCP/TLS and input.

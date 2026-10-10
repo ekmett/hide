@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Sessions
 
 Leave the desktop where it is and return to the same buffers, windows and

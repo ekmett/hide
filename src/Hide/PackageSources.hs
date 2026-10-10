@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Source declarations from Cabal's package parser, without configuring a build.
+-- |
+-- Module      : Hide.PackageSources
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Source declarations from Cabal's package parser, without configuring a build.
 --
 -- Each conditional node contains declarations added by that branch. Keep the
 -- condition tree: flattening it would mix mutually exclusive source directories

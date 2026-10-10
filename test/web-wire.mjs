@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 // Run against packets from tools/web-wire-trial.hs. Exercises the production
 // decoder with actual Haskell packets, both encodings, resets, and >32 KiB screens.
 import fs from 'node:fs';

@@ -1,7 +1,7 @@
--- SPDX-License-Identifier: BSD-3-Clause
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 -- | Module      : Hide.Plugin.Agent
 -- Copyright   : (c) Edward Kmett 2026
--- License     : BSD-3-Clause
+-- License     : BSD-2-Clause OR Apache-2.0
 -- Maintainer  : Edward Kmett
 -- Stability   : experimental
 -- Portability : Haskell2010

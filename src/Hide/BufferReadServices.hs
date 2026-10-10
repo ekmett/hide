@@ -1,5 +1,13 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Bounded buffer services and exact prepared-window reads. Every buffer
+-- | Module      : Hide.BufferReadServices
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Bounded buffer services and exact prepared-window reads. Every buffer
 -- operation uses the session's actor-bound admission queue; paging and metadata
 -- evaluation stay on its invoking worker. Only bounded values cross the public
 -- plugin API. Prepared windows retain their separate exact-body capture rule.

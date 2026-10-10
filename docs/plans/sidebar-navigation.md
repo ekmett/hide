@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Unified sidebar navigation
 
 Status: the shared indexed provider tree is implemented for Files, Agents,

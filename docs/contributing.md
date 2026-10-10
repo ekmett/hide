@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Development
 
 Build the editor, run the checks and exercise the frontend affected by a change.
@@ -487,6 +490,15 @@ that supports GPU presentation; a headless Wayland compositor works, while Xvfb
 alone lacks the required DRI3 support. Select the hardware ICD when checking a
 headless machine so a software Vulkan driver cannot stand in for the GPU.
 
+On Windows, run it from an MSYS2 UCRT64 shell with SDL3, Pango, utf8proc and
+pkg-config installed. Set `CC` to the compiler if it is not named `cc`; GHC ships
+Clang in `mingw/bin`. With that Clang, retain the pkg-config system flags as in
+the [Windows build setup](install.md#native-window).
+The check also reads a Unicode-named binary export through the
+Windows Shell data object and checks cancellation of an armed Files row. This
+runs without dragging the desktop pointer or opening a visible window; acceptance
+by a particular destination application still needs an interactive check.
+
 On macOS the script also checks an unshown application menu for duplicate
 enablement and retained old menu-item stamps. These checks do not start an editor
 session. To also verify restoring a minimized window, set
@@ -725,7 +737,7 @@ perform it.
 
 Bundled font terms and provenance are in [assets/fonts](../assets/fonts/README.md).
 Skylighting and its bundled grammar set are GPL-2 licensed; skylighting-core is
-BSD-3-Clause. These are editor dependencies. The
+BSD-2-Clause OR Apache-2.0. These are editor dependencies. The
 [Turbo Pascal UI museum](https://ilyabirman.net/meanwhile/all/ui-museum-turbo-pascal-7-1/)
 records the interface reference.
 

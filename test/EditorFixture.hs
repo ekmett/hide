@@ -1,6 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Scoped real host editor ownership for model checks. The registry, body and
+-- |
+-- Module      : EditorFixture
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Scoped real host editor ownership for model checks. The registry, body and
 -- draft live for the callback; joint preparation/admission uses production APIs.
 module EditorFixture (withEditorFixture, withEditorTextFixture, withEditorBodyFixture, withAutocompleteFixture, sameBufferVersions, agentSettingsReply, questionReply) where
 

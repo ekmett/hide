@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Repository inspection, exact review snapshots and checked commits.
+-- |
+-- Module      : Hide.Git
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Repository inspection, exact review snapshots and checked commits.
 --
 -- Git receives literal paths with routing environment overrides removed; external
 -- diff/textconv helpers are disabled. Privacy filtering classifies rename/copy

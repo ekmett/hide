@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Command-line entry point and composition root for editor sessions.
+-- |
+-- Module      : Hide.App
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- Command-line entry point and composition root for editor sessions.
 --
 -- Interactive frontends attach to a persistent session; snapshots and the MCP
 -- bridge take separate startup paths. Nested resource scopes own language tools,

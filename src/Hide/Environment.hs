@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Editor environment overlays for future subprocesses.
+-- |
+-- Module      : Hide.Environment
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Editor environment overlays for future subprocesses.
 --
 -- Project entries override global entries; session overrides need no persistence.
 -- An entire request validates before mutation, and persisted changes reread merged

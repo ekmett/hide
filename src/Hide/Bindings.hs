@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Prepared shortcut lookup, independent of the desktop and command payloads.
+-- |
+-- Module      : Hide.Bindings
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Prepared shortcut lookup, independent of the desktop and command payloads.
 --
 -- Configuration replaces all chords for one command; an empty list removes them.
 -- Compilation rejects ambiguous chords before publishing a table. Lookup touches

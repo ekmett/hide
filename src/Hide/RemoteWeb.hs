@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Local browser bridge for a persistent remote peer.
+-- |
+-- Module      : Hide.RemoteWeb
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- Local browser bridge for a persistent remote peer.
 --
 -- The peer remains attached while browsers disconnect. Reconstructed rows and
 -- metadata provide a reset frame on the next browser connection; clipboard and

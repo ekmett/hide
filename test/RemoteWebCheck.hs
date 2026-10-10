@@ -1,4 +1,13 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
+-- |
+-- Module      : RemoteWebCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module RemoteWebCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait, waitCatch)

@@ -1,6 +1,15 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
 -- Capture actual editor commands over this checkout through the Metal frontend.
 -- Run from the repository root; see docs/contributing.md#documentation-screenshots.
+-- |
+-- Module      : Main
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 import Control.Concurrent.Async (withAsync)
 import Control.Monad (forM_, unless, when, (>=>))
 import qualified Data.Map.Strict as M

@@ -1,10 +1,14 @@
 cabal-version: 3.0
+-- SPDX-FileCopyrightText: 2026 Edward Kmett
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 name: hide
 version: 0.1.0.0
 synopsis: Haskell IDE for terminal, native window and browser
 build-type: Simple
+license: BSD-2-Clause OR Apache-2.0
+license-files: LICENSES/BSD-2-Clause.txt, LICENSES/Apache-2.0.txt
 data-files: docs/site/screenshots/*.png, docs/*.md, docs/design/*.md, docs/plans/*.md, skills/debug-editor/SKILL.md, assets/web/*.html, assets/web/*.js, README.md, assets/fonts/*.hex, assets/fonts/*.txt, assets/fonts/README.md
-extra-source-files: assets/examples/*.png, assets/examples/*.md, cbits/shaders/*.h, cbits/shaders/*.hlsl, tools/build-cell-shaders.sh, tools/check-web-gpu.mjs, test/launchers.sh, bin/thc-edit, bin/th, bin/thc-edit.cmd, bin/th.cmd, tools/pkgconfig/pkg-config, docs/*.md, docs/design/*.md, docs/plans/*.md, cbits/remote.h, test/editor-session.py, test/daemon-session.py, test/interrupt-session.py, test/session-recovery.py, test/remote-browser.py, test/remote-session.py, tools/web-wire-trial.hs, test/web-wire.mjs, test/web-text-style.mjs, test/web-links.mjs, test/web-canvas.mjs, test/web-file-export.mjs, test/web-sidebar.mjs, test/web-keybindings.mjs, tools/web-bandwidth.hs, tools/web-bandwidth.py, assets/icons/*.svg, tools/convert-material-icons.py, cbits/window.h, cbits/accessibility.h, cbits/unicode.h, tools/convert-font.py, tools/check-native.sh, test/native-canvas.c, test/native-input.c, test/native-atlas.c, test/native-menu.m, test/native-accessibility.m, cbits/terminal.h, test/native-terminal.c, test/native-terminal.hs, test/HighlightBench.hs, test/HLSLive.hs, test/EditorLive.hs, test/dap-session.py
+extra-source-files: assets/examples/*.png, assets/examples/*.md, cbits/shaders/*.h, cbits/shaders/*.hlsl, tools/build-cell-shaders.sh, tools/check-web-gpu.mjs, test/launchers.sh, bin/thc-edit, bin/th, bin/thc-edit.cmd, bin/th.cmd, tools/pkgconfig/pkg-config, docs/*.md, docs/design/*.md, docs/plans/*.md, cbits/remote.h, test/editor-session.py, test/daemon-session.py, test/interrupt-session.py, test/session-recovery.py, test/remote-browser.py, test/remote-session.py, tools/web-wire-trial.hs, test/web-wire.mjs, test/web-text-style.mjs, test/web-links.mjs, test/web-canvas.mjs, test/web-file-export.mjs, test/web-sidebar.mjs, test/web-keybindings.mjs, tools/web-bandwidth.hs, tools/web-bandwidth.py, assets/icons/*.svg, tools/convert-material-icons.py, cbits/window.h, cbits/file-drag-windows.h, test/native-file-drag-windows.c, cbits/accessibility.h, cbits/unicode.h, tools/convert-font.py, tools/check-native.sh, test/native-canvas.c, test/native-input.c, test/native-atlas.c, test/native-menu.m, test/native-accessibility.m, cbits/terminal.h, test/native-terminal.c, test/native-terminal.hs, test/HighlightBench.hs, test/HLSLive.hs, test/EditorLive.hs, test/dap-session.py
   , test/power-mode.c, test/compiler-discovery-fixture.hs, tools/coverage.py
 
 flag window
@@ -67,6 +71,9 @@ library
     c-sources: cbits/window.c, cbits/unicode-window.c
     include-dirs: cbits
     pkgconfig-depends: sdl3 >=3.4
+    if os(windows)
+      c-sources: cbits/file-drag-windows.c
+      extra-libraries: ole32, shell32, uuid
     if os(osx)
       c-sources: cbits/menu.m, cbits/accessibility.m
       cc-options: -fobjc-arc

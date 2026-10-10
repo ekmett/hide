@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 # Deterministic DAP peers. Replies are released by requests, never by timers.
 import json, os, socket, sys, time
 

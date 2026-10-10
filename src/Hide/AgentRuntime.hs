@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
--- | Connect the agent hub to editor sessions, bridge capabilities and recovery.
+-- |
+-- Module      : Hide.AgentRuntime
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings, ScopedTypeVariables
+--
+-- Connect the agent hub to editor sessions, bridge capabilities and recovery.
 --
 -- The runtime owns child launch/reconnect workers and the primary conversation
 -- mailbox. Private checkpoints are separate from public agent descriptions and

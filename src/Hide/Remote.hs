@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
--- | Persistent editor sessions with local and SSH frontend attachments.
+-- |
+-- Module      : Hide.Remote
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings, ScopedTypeVariables
+--
+-- Persistent editor sessions with local and SSH frontend attachments.
 --
 -- The daemon owns the desktop and tools independently of display connections.
 -- A serialized command worker commits state and sequence numbers before replies.

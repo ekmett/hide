@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Persistent ACP side-chat restricted to structured completion proposals.
+-- |
+-- Module      : Hide.AutocompleteACP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Persistent ACP side-chat restricted to structured completion proposals.
 --
 -- A serialized prompt owner shares an immutable current-file snapshot through a
 -- separate authenticated MCP submission slot. Only a matching structured proposal

@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 #include "cell.h"
 #include "power-mode.h"
 Texture2D<float4> glyphAtlas : register(t0, space2);

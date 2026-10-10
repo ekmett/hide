@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: 2026 Edward Kmett
+ * SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 */
 #ifndef THC_UNICODE_H
 #define THC_UNICODE_H
 #include <stdint.h>

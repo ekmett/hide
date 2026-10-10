@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Convert the bundled Material Design SVGs to two-cell VGA bitmap tiles.
 Requires rsvg-convert and ImageMagick only when regenerating the asset.
 """

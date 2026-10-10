@@ -1,6 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Frontend-owned saved-file snapshots. Receiver workers stage bounded bytes;
+-- |
+-- Module      : Hide.FileExport
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- Frontend-owned saved-file snapshots. Receiver workers stage bounded bytes;
 -- native UI work receives only the resulting local path. One managed helper runs
 -- without blocking reception. Its cleanup precedes removal of this private root.
 module Hide.FileExport

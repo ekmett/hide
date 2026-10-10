@@ -1,5 +1,13 @@
--- SPDX-License-Identifier: BSD-3-Clause
--- | Canonical authority-path policy shared by UI projections and service workers.
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+-- |
+-- Module      : Hide.Privacy
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Canonical authority-path policy shared by UI projections and service workers.
 -- Callers resolve filesystem paths before admission; pure rendering never does IO.
 module Hide.Privacy (protectedFilePath, protectedFilePathParent, pathContains) where
 

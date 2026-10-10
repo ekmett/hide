@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Shared input schema, cell-frame compression and transport packet framing.
+-- |
+-- Module      : Hide.Protocol
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- Shared input schema, cell-frame compression and transport packet framing.
 --
 -- Input origin is assigned by the host. Frame compression uses the reconstructed
 -- previous screen as its dictionary, regardless of the preceding packet encoding;

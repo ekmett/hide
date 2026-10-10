@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Check the stdio relay, detached daemon, reconnect replay, and clean shutdown.
 
 Usage: python3 test/remote-session.py /absolute/path/to/hide

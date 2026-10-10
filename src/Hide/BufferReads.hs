@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Capture immutable reads during an owning session's admitted callback.
+-- |
+-- Module      : Hide.BufferReads
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Capture immutable reads during an owning session's admitted callback.
 -- No plugin callbacks run here. The caller holds the existing session lock;
 -- formatting and any conversation masking are evaluated by its reply worker.
 module Hide.BufferReads

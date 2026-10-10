@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Convert this run's HPC data; retain only repository library source coverage.
 
 hpc-codecov owns the HPC format. This wrapper scopes its result to Hide modules,

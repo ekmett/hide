@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | HLS transport, full-document synchronization and UTF-16 position conversion.
+-- |
+-- Module      : Hide.LSP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- HLS transport, full-document synchronization and UTF-16 position conversion.
 --
 -- Initialization and encoding/writes run off the UI thread. Callers queue immutable
 -- buffer references and coalesce unchanged identities; the writer performs any

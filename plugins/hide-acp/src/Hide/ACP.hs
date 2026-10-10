@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Bounded newline-delimited JSON-RPC transport for an ACP subprocess.
+-- |
+-- Module      : Hide.ACP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Bounded newline-delimited JSON-RPC transport for an ACP subprocess.
 --
 -- Reader/writer workers publish protocol events and failures through a queue;
 -- stderr retains a bounded diagnostic tail. A separate supervisor owns process-tree

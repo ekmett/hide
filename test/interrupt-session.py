@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Ctrl-C stops a browser session daemon, retaining unsaved work for resume.
 Usage: python3 test/interrupt-session.py /absolute/path/to/hide
 Only creates, interrupts and closes its own temporary session.

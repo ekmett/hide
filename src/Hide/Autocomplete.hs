@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
--- | Background ownership of persistent completion providers and preview adoption.
+-- |
+-- Module      : Hide.Autocomplete
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings, ScopedTypeVariables
+--
+-- Background ownership of persistent completion providers and preview adoption.
 --
 -- Requests capture immutable source context. A worker forces input/history and
 -- prepares bounded previews; the tick checks generation, caret/view state and

@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Byte-grid layout shared by drawing and hit testing.
+-- |
+-- Module      : Hide.Hex
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Byte-grid layout shared by drawing and hit testing.
 --
 -- The grid chooses sixteen bytes per row only when the entire layout fits,
 -- otherwise eight. Both hexadecimal digits and the printable view carry the same

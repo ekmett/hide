@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
--- | Session owner for scoped sidebar providers. Pages, projections and prepared
+-- |
+-- Module      : Hide.SidebarCommands
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : ExistentialQuantification, OverloadedStrings
+--
+-- Session owner for scoped sidebar providers. Pages, projections and prepared
 -- file opens run on workers. Owner ticks adopt only exact current requests; the
 -- cached viewport never evaluates a provider or inspects buffer payloads.
 module Hide.SidebarCommands

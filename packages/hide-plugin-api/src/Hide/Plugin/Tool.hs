@@ -1,8 +1,8 @@
 {-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 -- | Module      : Hide.Plugin.Tool
 -- Copyright   : (c) Edward Kmett 2026
--- License     : BSD-3-Clause
+-- License     : BSD-2-Clause OR Apache-2.0
 -- Maintainer  : Edward Kmett
 -- Stability   : experimental
 -- Portability : ExistentialQuantification

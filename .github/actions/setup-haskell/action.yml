@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 name: Haskell build dependencies
 description: Pinned compiler and matching utf8proc for CI and coverage.
 outputs:

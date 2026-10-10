@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE DeriveGeneric, OverloadedStrings, ScopedTypeVariables #-}
--- | Private discovery records for live, recoverable and remote desktops.
+-- |
+-- Module      : Hide.Session
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : DeriveGeneric, OverloadedStrings, ScopedTypeVariables
+--
+-- Private discovery records for live, recoverable and remote desktops.
 --
 -- Catalog metadata is separate from endpoint ownership and checkpoint payloads.
 -- Local status combines a bounded connection probe with recovery-file presence;

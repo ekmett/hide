@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables, BangPatterns #-}
--- | Native SDL frontend for remotely owned editor sessions.
+-- |
+-- Module      : Hide.RemoteWindow
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings, ScopedTypeVariables, BangPatterns
+--
+-- Native SDL frontend for remotely owned editor sessions.
 --
 -- A receiver worker validates/decodes frames and downloads; SDL events and drawing
 -- stay on the window thread. Draining pending messages allows one presentation of
@@ -587,7 +596,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
         Just (name,receipt) -> do
           (case receipt of
             Nothing->saveDownload name bytes
-            Just (row,view) | os=="darwin"->do
+            Just (row,view) | os `elem` ["darwin","mingw32"]->do
               staged<-stageFileExport exports name bytes
               either (hPutStrLn stderr . T.unpack) (\path->emit (ExportCopy path row view)) staged
             Just _->do

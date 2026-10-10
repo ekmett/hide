@@ -3,6 +3,9 @@ name: debug-editor
 description: Debug a running program through the Turbo Haskell editor MCP server. Use for source breakpoints, stepping, stack traces and variable inspection with THC or another DAP adapter.
 ---
 
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Debugging in the editor
 
 The `editor` MCP server controls the live editor session. Its tools share the user's buffers and debugger. Discover `tools/list` first; this skill is also available as the `hide://debugging` resource.

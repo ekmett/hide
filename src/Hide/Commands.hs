@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Stable public identities for built-in actions, independent of menu placement.
+-- |
+-- Module      : Hide.Commands
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Stable public identities for built-in actions, independent of menu placement.
 --
 -- Canonical names are intended for bindings and extension routing. Never derive
 -- public names from Show or parse arbitrary constructor expressions. This catalog

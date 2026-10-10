@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Human approval policy and bounded, layered TOML configuration.
+-- |
+-- Module      : Hide.MCPPermissions
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Human approval policy and bounded, layered TOML configuration.
 --
 -- Calls read fresh policy bytes on a bounded worker; admission stays serialized.
 -- The owner never waits for policy IO. Fresh bytes may reuse a parsed decision
