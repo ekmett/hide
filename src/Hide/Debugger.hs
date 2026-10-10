@@ -276,7 +276,7 @@ data Assistance=Assistance
   { assistanceId :: !Text, assistanceGoal :: !Text, assistancePhase :: !Text, assistanceReason :: !(Maybe Text)
   , assistanceSession :: !Int, assistanceSteps :: !Int, assistanceMaxSteps :: !Int, assistanceDeadline :: !Integer
   , assistanceStalls :: !Int, assistanceLocation :: !(Maybe (Text,Int,Int)), assistanceDecisions :: !Int
-  , assistanceEvidence :: ![Value], assistanceReport :: Text
+  , assistanceEvidence :: ![Value], assistanceReport :: Text, assistanceRevealPending :: !Bool
   , assistanceCaller :: IO (Either Text ()), assistanceCancelled :: !(TVar Bool), assistanceTicket :: !(TVar (Maybe DecisionTicket))
   , assistanceWorker :: !(Maybe (AssistanceReceipt,Async (Either Text A.AssistanceResult)))
   , assistanceFlight :: !(Maybe AssistanceFlight)
@@ -1247,7 +1247,7 @@ assistOperation caller runtime@(Debugger ref clock _ _ _) command goal steps bud
             cancelled<-newTVarIO False
             ticket<-newTVarIO Nothing
             let run=Assistance ("debug-assist-"<>ident) target "observing" Nothing (sidebarSession state) 0 steps
-                  (now+toInteger budget*1000000) 0 Nothing 0 [] "" caller cancelled ticket Nothing Nothing
+                  (now+toInteger budget*1000000) 0 Nothing 0 [] "" False caller cancelled ticket Nothing Nothing
             modifyIORef' ref (\s->s {assistance=Just run})
             -- Starting admits a run; its first observation and supplier result
             -- remain asynchronous and are visible through this exact run ID.
@@ -1256,8 +1256,8 @@ assistOperation caller runtime@(Debugger ref clock _ _ _) command goal steps bud
     "pause"->revokeAssistance runtime "paused" "requested-pause" >> pauseAssistance runtime desktop
     "stop"->revokeAssistance runtime "finished" "requested-stop" >> pauseAssistance runtime desktop
     "reveal"->do
-      modifyIORef' ref (\s->s {sidebarVisible=True,followSource=True})
-      forM_ (assistance state) $ \run->queueOutput runtime True (Just (assistanceReport run)) (output state)
+      modifyIORef' ref (\s->s {sidebarVisible=True,followSource=True,
+        assistance=fmap (\run->run {assistanceRevealPending=True}) (assistance s)})
       shown<-revealOutput runtime desktop
       maybe (pure shown) (openFrame runtime True (Just (privateFilePaths desktop)) shown) (frame state)
     _->pure desktop
@@ -1275,6 +1275,11 @@ tickAssistance :: Debugger -> Desktop -> IO Desktop
 tickAssistance runtime@(Debugger ref clock _ _ _) desktop=do
   state<-readIORef ref
   now<-clock
+  -- A reveal waits for any already-owned output batch's real publication. It
+  -- cannot supersede that batch with an older accepted program-output value.
+  forM_ (assistance state) $ \run->when (assistanceRevealPending run && not (outputPending state)) $ do
+    modifyIORef' ref (\s->s {assistance=fmap (\a->a {assistanceRevealPending=False}) (assistance s)})
+    queueOutput runtime True (Just (assistanceReport run)) (output state)
   case assistance state of
     Just run | assistancePhase run `elem` ["observing","deciding","running"]->do
       caller<-assistanceCaller run
