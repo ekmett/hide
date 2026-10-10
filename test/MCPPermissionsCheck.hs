@@ -4,11 +4,10 @@ module MCPPermissionsCheck (checks,policyResponsivenessChecks,policyWakeChecks,s
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import qualified Control.Concurrent.STM as STM
-import Control.Concurrent.MVar
 import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
 import Control.Concurrent.Async (concurrently, withAsync, poll, wait, async, cancel)
 import qualified Control.Concurrent.Async
-import Control.Exception (bracket, onException, catch, IOException, SomeAsyncException,fromException,throwIO)
+import Control.Exception (bracket, onException, SomeAsyncException,fromException,throwIO)
 import Control.Monad (foldM, unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -24,6 +23,8 @@ import System.FilePath ((</>))
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.IO (hClose,openTempFile)
 #ifndef mingw32_HOST_OS
+import Control.Concurrent.MVar
+import Control.Exception (catch,IOException)
 import System.Posix.Files (createNamedPipe)
 import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),OpenFileFlags(nonBlock),defaultFileFlags)
 #endif
@@ -491,7 +492,7 @@ projectConfigChecks=bracket temporary removePathForcibly $ \directory -> do
       projectPath=root </> "thc.toml"
       localPath=nested </> "thc.toml"
       globalDirectory=directory </> "global"
-      globalPath=globalDirectory </> "thc/config.toml"
+      globalPath=globalDirectory </> "thc" </> "config.toml"
       absentPath=directory </> "absent.toml"
       isLeft (Left _)=True
       isLeft _=False
@@ -598,7 +599,7 @@ agentLimitChecks :: IO ()
 agentLimitChecks=bracket temporary removePathForcibly $ \directory -> do
   let root=directory </> "project"
       globalDirectory=directory </> "global"
-      globalPath=globalDirectory </> "thc/config.toml"
+      globalPath=globalDirectory </> "thc" </> "config.toml"
       projectPath=root </> "thc.toml"
       expect label expected=readAgentLimitsFor root >>= check label . (==Right expected)
       rejected label=readAgentLimitsFor root >>= check label . either (const True) (const False)

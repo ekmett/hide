@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 module BrowserCheck (checks) where
 
@@ -54,11 +55,14 @@ checks = do
     check "missing directory returns an error" (isLeft missing)
     file <- readDirectory (dir </> "a.hs") "*"
     check "file is not a directory" (isLeft file)
+#ifndef mingw32_HOST_OS
+    -- Windows permissions do not expose a directory read-denial bit.
     permissions <- getPermissions (dir </> "nested")
     bracket (setPermissions (dir </> "nested") (permissions { readable = False }))
             (const (setPermissions (dir </> "nested") permissions)) $ \_ -> do
       denied <- readDirectory (dir </> "nested") "*"
       check "unreadable directory returns an error" (isLeft denied)
+#endif
     let package=canonical </> "sample.cabal"
     BS.writeFile package "cabal-version: 3.0\nname: sample\nversion: 0.1\n"
     chosenPackage<-packageFile dir

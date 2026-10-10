@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module EditorMCPCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless)
 import Data.IORef
@@ -27,8 +28,8 @@ import Hide.Files (FileState(..))
 import Hide.Buffer
 import Hide.Model
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   let check name ok=unless ok (error name)
       original=addDocument Nothing (newBuffer "old\nsecond") (initialDesktop (80,25))
       win=fromJust (activeWindow original)
@@ -85,7 +86,7 @@ checks = do
     Right value->BL.length (encode value)
     Left err->error (T.unpack err))
   allocatedAfter<-getAllocationCounter
-  check "MCP bounded byte read does not flatten or encode the whole buffer" (localBytes>0 && allocatedBefore-allocatedAfter<2000000)
+  check "MCP bounded byte read does not flatten or encode the whole buffer" (localBytes>0 && withinBudget profile (allocatedBefore-allocatedAfter) 2000000)
   let pageLimit=131072
       -- A fragmented long row cannot borrow one already-flat source Text.
       longText=replaceSelection (Selection 1 2) "y" (newBuffer (T.replicate (8*1024*1024) "x"))
@@ -99,7 +100,7 @@ checks = do
     _->False)
   textAllocatedAfter<-getAllocationCounter
   check "MCP bounded text read does not flatten a complete oversized row"
-    (boundedText && textAllocatedBefore-textAllocatedAfter<2000000)
+    (boundedText && withinBudget profile (textAllocatedBefore-textAllocatedAfter) 2000000)
   let pageCases=["", "λ😀\r\nsecond\r\n", T.replicate pageLimit "λ",
         T.replicate pageLimit "λ"<>"\r\n", T.replicate (pageLimit-1) "λ"<>"\r\n",
         T.replicate (pageLimit-1) "λ"<>"\r\n😀", T.replicate (pageLimit-2) "λ"<>"\n\n"]
@@ -150,7 +151,7 @@ checks = do
   check "built-in descriptors registered for permissions are not duplicated" (case listed of
     Just (Object fields) -> KM.lookup "result" fields==Just (object ["tools" .= builtinTools])
     _ -> False)
-  let agentSpec=object ["name" .= ("agents_list"::T.Text),"inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object []]]
+  let agentSpec=object ["name" .= ("agents_list"::T.Text),"inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object []],"outputSchema" .= object ["type" .= ("object"::T.Text)]]
       strict specs req=editorResponseOnly specs execute edited req >>= snd
   emptyList<-strict [] (rpc "tools/list" (object []))
   check "strict empty server lists no built-in tools" (case emptyList of
@@ -166,6 +167,13 @@ checks = do
   allowed<-strict [agentSpec] (request "agents_list" (object []))
   check "strict registered tool reaches controller" (maybe False (T.isInfixOf "ready" . text) allowed)
   check "strict registered tool dispatched once" . (==3) =<< readIORef invoked
+  check "advertised object output has matching structured and text results" (case allowed >>= parseMaybe (withObject "reply" (.: "result")) of
+    Just (Object result)->case (KM.lookup "structuredContent" result,KM.lookup "content" result) of
+      (Just value@(Object _),Just (Array blocks))->case V.toList blocks of
+        [Object entry]->case KM.lookup "text" entry of Just (String encoded)->eitherDecodeStrict' (TE.encodeUtf8 encoded)==Right value; _->False
+        _->False
+      _->False
+    _->False)
   (_,readSkill)<-editorResponseWith debugTools execute edited (rpc "resources/read" (object ["uri" .= ("hide://debugging"::T.Text)]))
   skill<-readSkill
   check "MCP packaged skill readable" (maybe False (T.isInfixOf "name: debug-editor" . text) skill)

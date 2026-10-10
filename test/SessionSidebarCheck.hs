@@ -2,7 +2,9 @@
 module SessionSidebarCheck (checks) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket,evaluate)
+import Control.Concurrent.Async (withAsync)
+import qualified Control.Concurrent.Async as Async
+import Control.Exception (bracket,evaluate,finally,try,IOException)
 import Control.Monad (foldM,unless)
 import Data.Aeson (encode)
 import qualified Data.ByteString as BS
@@ -17,11 +19,15 @@ import System.Environment (lookupEnv,setEnv,unsetEnv)
 import System.FilePath ((</>),takeFileName)
 import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
-import Hide.Buffer (newBuffer)
-import Hide.GuestAccess (guestEffectsAllowed)
+import Hide.Buffer (newBuffer,contents)
+import Hide.GuestAccess (guestEffectsAllowed,guestKeyboardAllowed)
 import Hide.Model
 import Hide.Files (loadFile)
 import Hide.Session
+import qualified Hide.Recovery as Recovery
+import Hide.RemoteEndpoint (sessionEndpoint,withEndpointListener,socketToEndpoint)
+import qualified Network.Socket as N
+import qualified Graphics.Vty as V
 import Hide.SessionSidebar
 import Hide.SessionSidebarTypes
 import Hide.Sidebar
@@ -36,8 +42,8 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
   environment "XDG_DATA_HOME" (Just (root </> "data")) $ do
     firstRecord<-newSessionRecord Nothing ["--private-startup-secret"]
     otherRecord<-newSessionRecord (Just "remote.example") ["--other-private-secret"]
-    let current=firstRecord {sessionId=replicate 48 'a',sessionDirectory=root}
-        other=otherRecord {sessionId=replicate 48 'b',sessionDirectory=root}
+    let current=firstRecord {sessionDirectory=root}
+        other=otherRecord {sessionDirectory=root}
     rememberSession current
     rememberSession other
     checkpointPath (sessionId current) >>= \path->writeFile path "recoverable fixture"
@@ -66,6 +72,17 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
               i:_->let (requested,effects)=activateTree True i d in snd <$> sidebarEffects host core requested effects
               _->fail "Missing Sessions row"
             ready d=maybe False (\tree->treeProjectionRevision tree==treeRevision tree) (sideTree d)
+            act (d,effects)=snd <$> sidebarEffects host core d effects
+            popup node d=case [(i,row) | (i,row)<-maybe [] (visibleRows 0 32768) (sideTree d),P.nodeIdText (P.infoId (rowInfo row))==node] of
+              (i,_):_->let scroll=maybe 0 treeScroll (sideTree d)
+                       in fst (handleEvent (V.EvMouseDown 5 (2+i-scroll) V.BRight []) d)
+              _->error "Missing context-menu target"
+            menuLabels d=maybe [] (const (map fst (contextItemsFor d))) (contextMenu d)
+            choose node title d=do
+              let opened=popup node d
+              case [i | (i,(name,_))<-zip [0..] (contextItemsFor opened),name==title] of
+                i:_->act (handleEvent (V.EvKey V.KEnter []) opened {contextMenu=fmap (\(rect,_)->(rect,i)) (contextMenu opened)})
+                _->fail "Missing session action"
             currentNode="session:"<>T.pack (sessionId current)
         started<-initializeSidebar host initial
         mounted<-wait "Sessions root" (has "Sessions") started
@@ -106,10 +123,77 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
         let poison=views {buffers=M.map (\doc->doc {documentBuffer=error "Sessions forced a Buffer",documentHighlight=error "Sessions forced highlights"}) (buffers views)}
         cheap<-timeout 1000000 (foldM (\d _->tickSessionSidebar service host d) poison [1..32::Int] >>= evaluate . length . windows)
         unless (cheap==Just (length (windows views))) (fail "Session metadata blocks the UI owner")
-        pure (service,selected)
+        -- Use the real sidebar context menu and host confirmation lifecycle.
+        savedRecord<-newSessionRecord Nothing []
+        let saved=savedRecord {sessionDirectory=root}
+        rememberSession saved
+        savedPath<-checkpointPath (sessionId saved)
+        Recovery.writeCheckpoint savedPath (addDocument Nothing (newBuffer "saved unsaved work") (initialDesktop (80,25))) >>= either (fail . T.unpack) pure
+        savedBytes<-BS.readFile savedPath
+        elsewhereRecord<-newSessionRecord Nothing []
+        let elsewhere=elsewhereRecord {sessionDirectory=root </> "another-project"}
+            elsewhereNode="session:"<>T.pack (sessionId elsewhere)
+        createDirectory (sessionDirectory elsewhere)
+        rememberSession elsewhere
+        checkpointPath (sessionId elsewhere) >>= \path->writeFile path "another project's checkpoint"
+        let savedNode="session:"<>T.pack (sessionId saved)
+            confirmation d=maybe False (T.isPrefixOf "Delete session ".dialogTitle) (dialog d)
+            openDelete d=choose savedNode "Delete..." d >>= wait "delete confirmation" confirmation
+        createDirectory (root </> "src")
+        writeFile (root </> "src" </> "Nested.hs") "module Nested where\n"
+        (nestedFile,nestedBuffer)<-loadFile (root </> "src" </> "Nested.hs") >>= either fail pure
+        let nested=addDocument (Just nestedFile) nestedBuffer selected
+        catalogued<-wait "saved session" (\d->hasId savedNode d && hasId elsewhereNode d && ready d) nested
+        unless ("Delete..." `elem` menuLabels (popup savedNode catalogued) &&
+                "Recover buffers here" `elem` menuLabels (popup savedNode catalogued) &&
+                "Recover buffers here" `notElem` menuLabels (popup elsewhereNode catalogued) &&
+                null (menuLabels (popup currentNode catalogued)) &&
+                null (menuLabels (popup ("session:"<>T.pack (sessionId other)) catalogued)))
+          (fail "Session deletion menu does not distinguish stopped local/current/remote targets")
+        -- Replies belong to the clicked display/project. Dispatch first;
+        -- then change the owner before
+        -- any tick can consume its worker result.
+        let expireRecovery changed d=do
+              requested<-choose savedNode "Recover buffers here" d
+              refused<-wait "expired buffer recovery" (T.isInfixOf "expired" . status) (changed requested)
+              unless (M.keys (buffers refused)==M.keys (buffers d) && nextId refused==nextId d)
+                (fail "Expired buffer recovery added windows")
+              pure refused {sessionAttachment=sessionAttachment d,sideTree=fmap (\tree->tree {treeRoot=maybe root treeRoot (sideTree d)}) (sideTree refused),dialog=Nothing,status="Ready"}
+        epochRefused<-expireRecovery (\d->d {sessionAttachment=sessionAttachment d+1}) catalogued
+        directoryRefused<-expireRecovery (\d->d {sideTree=fmap (\tree->tree {treeRoot=sessionDirectory elsewhere}) (sideTree d)}) epochRefused
+        imported<-choose savedNode "Recover buffers here" directoryRefused >>= wait "buffer recovery menu action"
+          (\d->M.size (buffers d)==M.size (buffers directoryRefused)+1)
+        unchanged<-BS.readFile savedPath
+        unless (maybe False ((=="saved unsaved work").contents.documentBuffer) (activeDocument imported) &&
+                maybe True (not.treeFocused) (sideTree imported) && pendingSessionSwitch imported==Nothing && unchanged==savedBytes)
+          (fail "Buffer recovery failed to focus its copy or changed the saved session")
+        switching<-choose savedNode "Recover" imported >>= wait "captured session recovery"
+          ((==Just (T.pack (sessionId saved))).pendingSessionSwitch)
+        unless ((windowId <$> activeWindow switching)==(windowId <$> activeWindow imported))
+          (fail "Session request changed the old desktop before attachment")
+        let request=SessionSidebarAction (SwitchSession (T.pack (sessionId saved)) (sessionAttachment catalogued))
+        (_,expiredSwitch)<-core catalogued {sessionAttachment=sessionAttachment catalogued+1} [request]
+        (_,modalSwitch)<-core modal [request]
+        unless (pendingSessionSwitch expiredSwitch==Nothing && pendingSessionSwitch modalSwitch==Nothing && not (guestEffectsAllowed [request]))
+          (fail "Session request crossed display lifetime, modal or input authority")
+        opened<-openDelete switching {pendingSessionSwitch=Nothing}
+        unless (not (guestKeyboardAllowed opened) && maybe False (\dg->null (fields dg) && buttons dg==["Delete","Cancel"]) (dialog opened))
+          (fail "Deletion is not a human-only button confirmation")
+        cancelled<-act (handleEvent (V.EvKey V.KEsc []) opened)
+        retained<-doesFileExist savedPath
+        unless retained (fail "Cancel deleted the saved session")
+        reopened<-openDelete cancelled
+        submitted<-act (handleEvent (V.EvKey V.KEnter []) reopened)
+        deleted<-wait "saved-session deletion" ((=="Saved session deleted.").status) submitted
+        checkpointRemains<-doesFileExist savedPath
+        recordRemains<-loadSession (sessionId saved)
+        unless (not checkpointRemains && recordRemains==Nothing) (fail "Confirmed deletion left saved session data")
+        hidden<-wait "deleted-session row removal" (not . hasId savedNode) deleted
+        pure (service,hidden)
       (_,expired)<-sessionSidebarEffects service (\d _->pure (False,d)) after
         [SessionSidebarAction (SelectSessionWindow (T.pack (sessionId current)) firstId)]
       unless (status expired=="Session window expired or is unavailable.") (fail "Retired Sessions registration accepted a selection")
+    deletionChecks
     putStrLn "session sidebar checks passed"
   where
     temporary=do
@@ -121,3 +205,44 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
       canonicalizePath path
     environment key value action=bracket (lookupEnv key <* set value) set (const action)
       where set=maybe (unsetEnv key) (setEnv key)
+
+-- Exercise the operation independently of the confirmation UI. A real listener
+-- also proves that an endpoint with a different/missing lifetime lock is refused.
+deletionChecks :: IO ()
+deletionChecks=do
+  captured<-newSessionRecord Nothing ["saved-session-argument"]
+  let ident=sessionId captured
+  endpoint<-sessionEndpoint ident
+  checkpoint<-checkpointPath ident
+  directory<-sessionStoreDirectory
+  let metadata=directory </> ident++".json"
+      artifacts=[metadata,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json"]
+      check label ok=unless ok (fail label)
+      refused label current record=do
+        before<-mapM BS.readFile artifacts
+        result<-try (deleteStoppedSession current record) :: IO (Either IOException ())
+        after<-mapM BS.readFile artifacts
+        check label (case result of Left _->before==after;Right _->False)
+  flip finally (forgetSession ident) $ do
+    rememberSession captured
+    mapM_ (\path->BS.writeFile path "saved private payload") (drop 1 artifacts)
+    refused "Current-session deletion preserves every saved artifact" (Just ident) captured
+    check "Current-session refusal never opens its lifetime lock" . not =<< doesFileExist (checkpoint++".lock")
+    let remote=captured {sessionHost=Just "remote.example"}
+    rememberSession remote
+    refused "Remote-session deletion preserves every saved artifact" Nothing remote
+    rememberSession captured {sessionArguments=["replacement-session-argument"]}
+    refused "Captured-session deletion refuses changed records without deleting data" Nothing captured
+    rememberSession captured
+    withEndpointListener endpoint $ \listener authenticate->
+      withAsync (do
+        (socket,_)<-N.accept listener
+        bracket (socketToEndpoint socket) (\(handle,shutdown,_)->shutdown `finally` hClose handle)
+          (\(handle,_,_)->authenticate handle)) $ \worker->do
+        refused "Live endpoint deletion is refused even without its daemon lock" Nothing captured
+        completed<-timeout 3000000 (Async.wait worker)
+        check "Live endpoint probe reached the real listener" (completed==Just ())
+    deleteStoppedSession Nothing captured
+    absent<-mapM doesFileExist artifacts
+    check "Stopped-session deletion removes record, checkpoint and sidecars" (not (or absent))
+    check "Stopped-session deletion retains the lifetime lock file" =<< doesFileExist (checkpoint++".lock")

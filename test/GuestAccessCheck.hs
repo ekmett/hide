@@ -50,7 +50,7 @@ checksWithBody conversation=do
       hidden=(newDocument poison Nothing) {documentLabel=Just "Agent request",documentHighlight=error "guest guard forced highlighting",documentSourceRows=error "guest guard forced source rows"}
       q=ChatQuestion 42 "Human question" ["Yes"] Nothing poison (Selection 0 0) False
       conflict=Conflict 1 0 (FileState "/public/source.hs" (Just (error "guest guard forced disk baseline"))) (Just (error "guest guard forced disk conflict"))
-      retained=(setComposerInput poison (Selection 0 0) False conversation) {windows=windows base,buffers=M.insert 99 hidden (buffers conversation),autocompleteDraft=poison,chatQuestion=Just q,
+      retained=(setComposerInput poison (Selection 0 0) False conversation) {windows=windows base,buffers=M.insert 99 hidden (buffers conversation),chatQuestion=Just q,
         dialog=Just (Dialog "Conflict" (DiskConflict conflict) [Input "Name" "source.hs" 0] 0 ["OK"] [])}
   (_,reply)<-controlTool (\d _->pure (False,d)) retained "editor_input"
     (object ["events" .= [object ["type" .= ("blur"::T.Text)]]])
@@ -61,7 +61,6 @@ checksWithBody conversation=do
          retained {buffers=M.adjust (\doc->doc {documentLabel=Just "Public"}) 99 (buffers retained)},
          retained {buffers=M.delete 99 (buffers retained)},
          setComposerInput (newBuffer "replacement") (Selection 0 0) False retained,
-         retained {autocompleteDraft=newBuffer "replacement"},
          retained {chatQuestion=Just q {questionBuffer=newBuffer "replacement"}},
          retained {editorDrafts=M.map (\draftState->draftState {editorDraftSelection=Selection 1 1}) (editorDrafts retained)},
          retained {editorDrafts=M.map (\draftState->draftState {editorDraftFocused=True}) (editorDrafts retained)},
@@ -246,7 +245,7 @@ checksWithBody conversation=do
       browserDialog=maybe (error "missing browser") id (dialog browser)
       fileRect=case fieldRects browser browserDialog of _:r:_->r; _->error "missing browser list"
   check "private browser names and selected details share guest and Streamer masks"
-    (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+12)) && readableAt browser (left fileRect+2) (top fileRect+3))
+    (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+height fileRect-1)) && readableAt browser (left fileRect+2) (top fileRect+3))
   forM_ [Opening "/authority" "*" [],ChangingDirectory "/authority" []] $ \browserPurpose ->
     forM_ [Input "Name" "/authority/secret.hs" 0,SelectedInput "Name" "/authority/secret.hs" (Selection 0 20)] $ \nameField -> do
       let protectedNameDialog=Dialog "Browser" browserPurpose [nameField] 0 ["OK"] []

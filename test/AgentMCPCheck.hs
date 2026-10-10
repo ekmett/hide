@@ -12,10 +12,14 @@ import Data.IORef
 import qualified Data.Text as T
 import System.Directory (getTemporaryDirectory, canonicalizePath)
 import Hide.AgentHub
-import Hide.AgentMCP
+import qualified Hide.AgentUI
+import Hide.AgentServicesHost (agentServices)
+import Hide.Plugin.AgentServices (AgentServices(..))
+import qualified Hide.Plugin.Session as Plugin
+import qualified Hide.Plugin.Tool as Tool
 
 checks :: IO ()
-checks=do
+checks=Tool.withTools [] (Plugin.pluginAgentTools Hide.AgentUI.plugin) $ \tools->do
   directory<-getTemporaryDirectory >>= canonicalizePath
   launched<-newIORef []
   configured<-newIORef []
@@ -37,7 +41,12 @@ checks=do
       target ident=object ["agentId" .= agentIdText ident]
   bracket (newAgentHub (HubLimits 5 2) launcher) closeAgentHub $ \hub->do
     owner<-registerAgent hub "Main" directory (driver (AgentId "primary")) >>= right
-    let call actor name args=agentTool hub actor directory name args
+    let captured=agentServices hub (Agent owner) directory
+        call actor name args=Tool.callTool tools (agentServices hub actor directory) name args
+    outside<-serviceSpawn captured (SpawnSpec "Outside" "Work" (directory++"/elsewhere") Shared Fresh Nothing Nothing)
+    ensure "captured services reject workspace substitution before provider startup" (isLeft outside)
+    beforeServices<-readIORef launched
+    ensure "rejected workspace acquires no provider" (null beforeServices)
     listing<-call (Agent owner) "agent_directory" (object []) >>= right
     ensure "directory exposes actual provider model/effort options" (all (`BS.isInfixOf` BL.toStrict (encode listing)) ["model-id","large","effort-id"])
     ensure "directory omits private provider keys" (not ("private-test-key" `BS.isInfixOf` BL.toStrict (encode listing)))
@@ -112,12 +121,13 @@ checks=do
       ("agent_history",object ["agentId" .= agentIdText child,"limit" .= (101::Int)]),
       ("agent_search",object ["agentId" .= agentIdText child,"query" .= (""::T.Text)]),
       ("agent_unknown",object [])] $ \(name,args)->call (Agent owner) name args >>= ensure "invalid types/ranges/unknown tools fail explicitly" . isLeft
+    let childServices=agentServices hub (Agent child) directory
     _<-call (Agent owner) "agent_end" (target child) >>= right
     ended<-statusAgent hub Human (identOf forked) >>= right
     ensure "end dispatch terminates the descendant subtree" (field "status" ended==Just ("ended"::T.Text))
-    inactive<-call (Agent child) "agent_directory" (object [])
+    inactive<-Tool.callTool tools childServices "agent_directory" (object [])
     ensure "ended authenticated callers lose authority" (isLeft inactive)
-  ensure "all public tool schemas are strict objects with annotations" (length agentTools==9 && length agentToolNames==9 && all strict agentTools)
+  ensure "all public tool schemas are strict objects with annotations" (length (Tool.toolDefinitions tools)==9 && all strict (Tool.toolDefinitions tools))
   putStrLn "Agent MCP checks passed"
   where
     strict value=case (field "inputSchema" value,field "annotations" value::Maybe Value) of

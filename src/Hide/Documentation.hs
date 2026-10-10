@@ -9,6 +9,8 @@ module Hide.Documentation
   , readCommand, readInput, readOutput, prepareDocs
   ) where
 
+import Hide.FileIO (withFileRead)
+
 import Control.Monad (unless, when)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither)
@@ -20,7 +22,6 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.FilePath
-import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.IO.Error (tryIOError)
 import System.Timeout (timeout)
 #ifndef mingw32_HOST_OS
@@ -209,7 +210,7 @@ readDocument root path=do
 #endif
     size<-getFileSize absolute
     when (size>fromIntegral maxFileBytes) (ioError (userError "Document exceeds the 1 MiB file limit."))
-    bytes<-timeout 5000000 (withBinaryFile absolute ReadMode (\handle->BS.hGet handle (maxFileBytes+1)))
+    bytes<-timeout 5000000 (withFileRead absolute (\handle->BS.hGet handle (maxFileBytes+1)))
     case bytes of
       Nothing -> ioError (userError "Document read timed out.")
       Just content | BS.length content>maxFileBytes -> ioError (userError "Document exceeds the 1 MiB file limit.")

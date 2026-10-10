@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 module HighlightingCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
-import EditorFixture (withEditorFixture,withEditorTextFixture,installAutocompleteFixture)
+import EditorFixture (withEditorFixture,withEditorTextFixture,withAutocompleteFixture)
 import Control.Concurrent
 import Control.Exception (evaluate,finally)
 import Control.Monad (unless,foldM,forM_)
@@ -24,12 +25,11 @@ import Hide.Model
 import Hide.Render (snapshot,snapshotHtml,renderCellRows)
 import Hide.Unicode (CellSpan(..))
 import Hide.Syntax
-import qualified Hide.Plugin.Window as W
 
-checks :: IO ()
-checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase->W.withWindowScope $ \scope->do
-  sourceLineChecks
-  composerWidthChecks
+checks :: AllocationProfile -> IO ()
+checks profile = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase->do
+  sourceLineChecks profile
+  composerWidthChecks profile
   plainSourceRowChecks
   let exact="aé𝄞\t─\x301\r"
       row=prepareSourceRow exact (zip (map T.singleton (T.unpack exact)) (cycle [Keyword,Keyword,Plain]))
@@ -90,12 +90,12 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   viewCount<-evaluate (T.length (snapshot (modifyActive (\w->w {scrollColumn=1}) longView)))
   viewAfter<-getAllocationCounter
   check "a long source row prepares only the horizontally visible glyphs"
-    (viewCount>0 && viewBefore-viewAfter<4000000)
+    (viewCount>0 && withinBudget profile (viewBefore-viewAfter) (4000000))
   deepBefore<-getAllocationCounter
   deepCount<-evaluate (T.length (snapshot (modifyActive (\w->w {scrollColumn=50000}) longView)))
   deepAfter<-getAllocationCounter
   check "far horizontal source scrolling skips prefix fragments without allocating them"
-    (deepCount>0 && deepBefore-deepAfter<4000000)
+    (deepCount>0 && withinBudget profile (deepBefore-deepAfter) (4000000))
   let viewportText=T.replicate 200 (T.replicate 20 "Haskell λ ⌘ "<>"\n")
       viewportSource=addDocument Nothing (newBuffer viewportText) (initialDesktop (180,55))
       preparedViewport=viewportSource {sideTree=Nothing,blinkCursor=False,buffers=M.map (\d->d
@@ -109,19 +109,19 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   viewportCount<-evaluate (occupied (renderCellRows (modifyActive (\w->w {scrollRow=1,scrollColumn=1,selection=Selection 243 417}) preparedViewport)))
   viewportAfter<-getAllocationCounter
   check "ordinary source viewport avoids rebuilding prepared Unicode image rows"
-    (viewportCount>0 && viewportBefore-viewportAfter<6000000)
+    (viewportCount>0 && withinBudget profile (viewportBefore-viewportAfter) (6000000))
   -- Chat and autocomplete share the visible-row renderer. Keep long draft
   -- lines borrowed even when moving the selection without changing their text.
-  forM_ [False,True] $ \hint->do
-    base<-if hint then installAutocompleteFixture scope "reply" (closeActive chatBase) else pure chatBase
-    let draft=newBuffer (T.intercalate "\n" (replicate 12 (T.replicate 100 "words 界 e\x301 👩🏽\x200d\&💻 ")))
-        chat=(setComposerInput draft (Selection 0 0) True base) {sideTree=Nothing,blinkCursor=False,appearance=LightMode,
-          autocompleteACPEnabled=True,autocompleteDraft=draft,autocompleteSelection=Selection 0 0,autocompleteFocused=True}
-    _<-evaluate (occupied (renderCellRows chat))
-    before<-getAllocationCounter
-    count<-evaluate (occupied (renderCellRows (setComposerInput draft (Selection 1 1) True chat {autocompleteSelection=Selection 1 1})))
-    after<-getAllocationCounter
-    check "draft viewport avoids rebuilding offscreen character/style pairs" (count>0 && before-after<12000000)
+  let viewportCheck base=do
+        let draft=newBuffer (T.intercalate "\n" (replicate 12 (T.replicate 100 "words 界 e\x301 👩🏽\x200d\&💻 ")))
+            chat=(setComposerInput draft (Selection 0 0) True base) {sideTree=Nothing,blinkCursor=False,appearance=LightMode}
+        _<-evaluate (occupied (renderCellRows chat))
+        before<-getAllocationCounter
+        count<-evaluate (occupied (renderCellRows (setComposerInput draft (Selection 1 1) True chat)))
+        after<-getAllocationCounter
+        check "draft viewport avoids rebuilding offscreen character/style pairs" (count>0 && withinBudget profile (before-after) (12000000))
+  viewportCheck chatBase
+  withAutocompleteFixture "reply" (closeActive chatBase) viewportCheck
   let mixedText="a界e\x301\t👩🏽\x200d\&💻z"
       mixedSource=addDocument (Just (FileState "Mixed.hs" Nothing)) (newBuffer mixedText) (initialDesktop (30,12))
       styledMixed=mixedSource {sideTree=Nothing,buffers=M.map (\d->d {documentLabel=Just "Source Mixed",documentSourceRows=Just
@@ -184,12 +184,12 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
      map sourceRowText (toList undoRows)==T.splitOn "\n" (contents before))
   forM_ ["\r\n","\r\nmid\r\n","\r","\n"] $ \text->do
     let input=newBuffer "xy"
-        edited=replaceSelection (Selection 1 1) text input
-        rows=rebaseSourceRows input edited (sourceHighlightRows "xy" [("xy",Keyword)])
+        lineEdit=replaceSelection (Selection 1 1) text input
+        rebasedRows=rebaseSourceRows input lineEdit (sourceHighlightRows "xy" [("xy",Keyword)])
     check "rebased ranges preserve exact CRLF source coverage and byte endpoints"
-      (all (\row->let ranges=V.toList (sourceRowRanges row)
-                  in T.concat (map (sourceRangeText row) ranges)==sourceRowText row &&
-                     (null ranges || sourceRangeByteEnd (last ranges)==TU.lengthWord8 (sourceRowText row))) rows)
+      (all (\rebasedRow->let ranges=V.toList (sourceRowRanges rebasedRow)
+                  in T.concat (map (sourceRangeText rebasedRow) ranges)==sourceRowText rebasedRow &&
+                     (null ranges || sourceRangeByteEnd (last ranges)==TU.lengthWord8 (sourceRowText rebasedRow))) rebasedRows)
   let long=newBuffer (T.replicate (1024*1024) "x")
       longRows=sourceHighlightRows (contents long) [(contents long,Comment)]
       changed=replaceSelection (Selection 10 10) "é" long
@@ -200,7 +200,7 @@ checks = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase-
   shown<-evaluate (T.length (sigilsText paint))
   allocationAfter<-getAllocationCounter
   check "typing in a long highlighted line does not scan or copy the line to repaint"
-    (shown==80 && allocationBefore-allocationAfter<256*1024)
+    (shown==80 && withinBudget profile (allocationBefore-allocationAfter) (256*1024))
   initializing<-newEmptyMVar
   releaseInitialization<-newEmptyMVar
   initializedCalls<-newIORef ([]::[T.Text])
@@ -282,12 +282,13 @@ check :: String -> Bool -> IO ()
 check label ok=unless ok (error label)
 
 -- Bubble sizing stops at the available width, before rendering its visible rows.
-composerWidthChecks :: IO ()
-composerWidthChecks=withEditorFixture "" (initialDesktop (100,35)) $ \chatBase->do
+composerWidthChecks :: AllocationProfile -> IO ()
+composerWidthChecks profile=withEditorFixture "" (initialDesktop (100,35)) $ \chatBase->
+  withAutocompleteFixture "" (closeActive chatBase) $ \hintBase->do
   let size hint b columns=
-        let d=(setComposerInput b (Selection 0 0) True chatBase) {autocompleteDraft=b}
+        let d=setComposerInput b (Selection 0 0) True (if hint then hintBase else chatBase)
             w=(fromJust (activeWindow d)) {bounds=Rect 0 1 (columns+6) 30}
-        in width ((if hint then autocompleteComposerRect else composerRect) d w)
+        in width (composerRect d w)
   forM_ [False,True] $ \hint->do
     let draft=(newBuffer (T.replicate 100000 "界"<>"\nshort"))
           {undoStack=error "composer width forced undo",saved=error "composer width forced baseline"}
@@ -295,14 +296,14 @@ composerWidthChecks=withEditorFixture "" (initialDesktop (100,35)) $ \chatBase->
     before<-getAllocationCounter
     columns<-evaluate (size hint draft 94)
     after<-getAllocationCounter
-    check "bubble width stops measuring when its window is full" (columns==94 && before-after<100000)
+    check "bubble width stops measuring when its window is full" (columns==94 && withinBudget profile (before-after) (100000))
     -- Avoid repeated root seeks when none of the short rows reaches the cap.
     let short=newBuffer (T.replicate 10000 "x\n")
     _<-evaluate (prepareBuffer short)
     shortBefore<-getAllocationCounter
     shortColumns<-evaluate (size hint short 94)
     shortAfter<-getAllocationCounter
-    check ("bubble width visits short rows sequentially "++show (hint,shortColumns,shortBefore-shortAfter)) (shortColumns==12 && shortBefore-shortAfter<4000000)
+    check ("bubble width visits short rows sequentially "++show (hint,shortColumns,shortBefore-shortAfter)) (shortColumns==12 && withinBudget profile (shortBefore-shortAfter) (4000000))
     check "DEL placeholder occupies one source cell" (size hint (newBuffer "abcdefghijkl\DEL") 94==14)
     forM_ [0,8,12,13,20,94] $ \limit->
       forM_ ["","short","    x = 1\n","    "<>T.replicate 65 "\x301"<>"abcdefghijkl\n","    \x301"<>T.replicate 20 "界"<>"\n","\r\n","a\r","\t","👩🏽\x200d\&💻","a界e\x301\txyz\r\n","\x301","x\NULz",T.replicate 50 "界 e\x301 "] $ \text->do
@@ -339,8 +340,8 @@ plainSourceRowChecks=forM_ ["","abc","éδ─","a界e\x301\t👩🏽\x200d\&💻
 
 -- The live source row consumes borrowed storage groups, preserving the same
 -- complete-item paint/selection coordinates as its explicit flat projection.
-sourceLineChecks :: IO ()
-sourceLineChecks=do
+sourceLineChecks :: AllocationProfile -> IO ()
+sourceLineChecks profile=do
   let samples=[T.replicate 1050 "a",T.replicate 260 "界a\t",T.replicate 540 "🇦",
         T.replicate 17 ("z"<>T.replicate 80 "\x301"),
         T.replicate 511 "a"<>"界"<>T.replicate 70 "\x301"<>"tail\r\n"]
@@ -381,11 +382,11 @@ sourceLineChecks=do
   check "first far viewport prepares exact complete source glyphs and coordinates"
     (firstCount==750270 && window 500000 180 row==(250000,500000,replicate 90 ("界",Plain,2,"界")))
   check "first far viewport keeps preparation proportional to span receipts"
-    (firstBefore-firstAfter<20*1024*1024)
+    (withinBudget profile (firstBefore-firstAfter) (20*1024*1024))
   before<-getAllocationCounter
   count<-evaluate (forceWindow 500001)
   after<-getAllocationCounter
   check "live source viewport seeks borrowed long-row leaves without a flat projection"
-    (count>0 && before-after<128*1024)
+    (count>0 && withinBudget profile (before-after) (128*1024))
   check "prepared nearby viewport retains clipped wide source glyphs"
     (window 500001 180 row==(250000,500000,replicate 91 ("界",Plain,2,"界")))

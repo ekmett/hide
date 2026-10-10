@@ -1,11 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Strict MCP schemas and dispatch for agent orchestration.
+-- SPDX-License-Identifier: BSD-3-Clause
+-- | Module      : Hide.AgentTools
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-3-Clause
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : OverloadedStrings
 --
--- The host supplies the actor and working directory; tool arguments cannot replace
--- either. Creation combines hub reservation with explicit first-message enqueueing,
--- and failed/interrupted post-creation work ends the new child. Authority remains
--- with the hub rather than being inferred from JSON schema hints.
-module Hide.AgentMCP (agentTools, agentToolNames, agentTool) where
+-- The linked agent plugin's strict orchestration tools. Parsing produces typed
+-- requests; execution uses only public capabilities bound to the authenticated
+-- caller and workspace by the host. Private hub/provider handles are absent.
+module Hide.AgentTools (tools) where
 
 import Control.Monad (unless)
 import Data.Aeson
@@ -14,16 +19,23 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (Parser, parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Hide.AgentHub
+import Hide.Plugin.Agent
+import Hide.Plugin.AgentServices
+import Hide.Plugin.Command
+import Hide.Plugin.Tool (Tool(..))
 
-agentToolNames :: [Text]
-agentToolNames=[name | (name,_,_,_,_)<-specs]
-
--- | Published orchestration schemas; human-only configuration/steering hooks are omitted.
-agentTools :: [Value]
-agentTools=[object ["name" .= name,"description" .= description,"inputSchema" .= schema required properties,
-  "annotations" .= object ["readOnlyHint" .= readonly,"destructiveHint" .= not readonly,"openWorldHint" .= not readonly]]
+-- | Explicit schemas, policy metadata and codecs for the existing workflow.
+-- No human-only configuration, steering or permission operation is registered.
+tools :: [Tool AgentServices]
+tools=[Tool name readonly (CommandDef ("hide.agents."<>T.drop 6 name) description
+  (Codec (schema required properties) (decodeRequest name (map fst properties)) requestArguments)
+  (Codec (object ["type" .= ("object"::Text)]) Right id)
+  (\services request->fmap (either (Left . CommandRejected) Right) (perform services request)))
   | (name,description,readonly,required,properties)<-specs]
+
+data Request = Directory | Spawn Text Text Context (Maybe Text) (Maybe Text) Workspace
+  | Rename AgentId Text | Message AgentId Text | Wait AgentId Int Int
+  | Cancel AgentId | End AgentId | History AgentId Int Int | Search AgentId Text Int Int
 
 specs :: [(Text,Text,Bool,[Text],[(Text,Value)])]
 specs=
@@ -52,16 +64,12 @@ integer lower upper=object ["type" .= ("integer"::Text),"minimum" .= lower,"maxi
 enum :: [Text] -> Value
 enum values=object ["type" .= ("string"::Text),"enum" .= values]
 
--- | Validate names, fields and bounds, then dispatch as the host-supplied actor.
-agentTool :: AgentHub -> Actor -> FilePath -> Text -> Value -> IO (Either Text Value)
-agentTool hub actor directory name args=case [properties | (key,_,_,_,properties)<-specs,key==name] of
-  []->pure (Left "Unknown agent tool.")
-  properties:_->case parseEither (strictObject (map fst properties) $ \o -> dispatch o) args of
-    Left err->pure (Left (T.pack err))
-    Right action->action
+-- Parsing cannot capture an actor, working directory or provider handle.
+decodeRequest :: Text -> [Text] -> Value -> Either Text Request
+decodeRequest name allowed value=either (Left . T.pack) Right (parseEither (strictObject allowed parse) value)
   where
-    dispatch o=case name of
-      "agent_directory"->pure (listAgents hub actor)
+    parse o=case name of
+      "agent_directory"->pure Directory
       "agent_spawn"->do
         childName<-text o "name" 80
         task<-text o "task" 65536
@@ -76,38 +84,17 @@ agentTool hub actor directory name args=case [properties | (key,_,_,_,properties
         effort<-optionalText o "effort" 4096
         workspace<-case KM.lookup "workspace" o of
           Nothing->pure (Worktree Nothing Nothing Nothing)
-          Just value->strictObject ["mode","ref","branch","name"] parseWorkspace value
-        let spec=SpawnSpec childName task directory workspace origin model effort
-        pure $ do
-          created<-spawnAgentWithTask hub actor spec
-          case created of
-            Left err->pure (Left err)
-            Right (ident,ticket)->fmap (\agent->object ["agent" .= agent,"ticket" .= ticket]) <$> statusAgent hub actor ident
-      "agent_rename"->do
-        ident<-agentId o
-        newName<-text o "name" 80
-        pure (accepted ident (renameAgent hub actor ident newName))
-      "agent_message"->do
-        ident<-agentId o
-        body<-text o "text" 65536
-        pure (fmap (\ticket->object ["agentId" .= agentIdText ident,"ticket" .= ticket]) <$> sendAgent hub actor ident body)
-      "agent_wait"->do
-        ident<-agentId o
-        ticket<-number o "ticket" Nothing 1 2147483647
-        milliseconds<-number o "timeoutMs" (Just 30000) 0 60000
-        pure (waitAgent hub actor ident ticket milliseconds)
-      "agent_cancel"->do ident<-agentId o; pure (accepted ident (cancelAgent hub actor ident))
-      "agent_end"->do ident<-agentId o; pure (accepted ident (endAgent hub actor ident))
-      "agent_history"->do
-        (ident,after,count)<-history o
-        pure (fmap toJSON <$> historyAgent hub actor ident after count)
-      "agent_search"->do
-        (ident,after,count)<-history o
-        query<-text o "query" 4096
-        pure (fmap toJSON <$> searchAgentHistory hub actor ident query after count)
+          Just entry->strictObject ["mode","ref","branch","name"] parseWorkspace entry
+        pure (Spawn childName task origin model effort workspace)
+      "agent_rename"->Rename <$> agentId o <*> text o "name" 80
+      "agent_message"->Message <$> agentId o <*> text o "text" 65536
+      "agent_wait"->Wait <$> agentId o <*> number o "ticket" Nothing 1 2147483647 <*> number o "timeoutMs" (Just 30000) 0 60000
+      "agent_cancel"->Cancel <$> agentId o
+      "agent_end"->End <$> agentId o
+      "agent_history"->do (ident,after,count)<-history o; pure (History ident after count)
+      "agent_search"->do (ident,after,count)<-history o; query<-text o "query" 4096; pure (Search ident query after count)
       _->fail "Unknown agent tool."
     agentId o=AgentId <$> text o "agentId" 128
-    accepted ident action=fmap (const (object ["agentId" .= agentIdText ident,"accepted" .= True])) <$> action
     history o=(,,) <$> agentId o <*> number o "after" (Just 0) 0 2147483647 <*> number o "limit" (Just 50) 1 100
     parseWorkspace o=do
       mode<-text o "mode" 8
@@ -118,6 +105,44 @@ agentTool hub actor directory name args=case [properties | (key,_,_,_,properties
         "shared" | all (==Nothing) [ref,branch,feature]->pure Shared
         "worktree"->pure (Worktree ref branch feature)
         _->fail "Use shared without worktree options, or worktree with optional ref, branch and name."
+
+perform :: AgentServices -> Request -> IO (Either Text Value)
+perform services request=case request of
+  Directory->serviceAgents services
+  Spawn name task origin model effort workspace->do
+    created<-serviceSpawn services (SpawnSpec name task (serviceWorkspace services) workspace origin model effort)
+    case created of
+      Left err->pure (Left err)
+      Right (ident,ticket)->fmap (\agent->object ["agent" .= agent,"ticket" .= ticket]) <$> serviceStatus services ident
+  Rename ident name->accepted ident (serviceRename services ident name)
+  Message ident body->fmap (\ticket->object ["agentId" .= agentIdText ident,"ticket" .= ticket]) <$> serviceMessage services ident body
+  Wait ident ticket milliseconds->serviceWait services ident ticket milliseconds
+  Cancel ident->accepted ident (serviceCancel services ident)
+  End ident->accepted ident (serviceEnd services ident)
+  History ident after count->fmap toJSON <$> serviceHistory services ident after count
+  Search ident query after count->fmap toJSON <$> serviceSearch services ident query after count
+  where accepted ident action=fmap (const (object ["agentId" .= agentIdText ident,"accepted" .= True])) <$> action
+
+requestArguments :: Request -> Value
+requestArguments request=object $ case request of
+  Directory->[]
+  Spawn name task origin model effort workspace->
+    ["name" .= name,"task" .= task,"workspace" .= workspaceValue workspace]++
+    ["model" .= value | Just value<-[model]]++["effort" .= value | Just value<-[effort]]++
+    case origin of Fresh->["context" .= ("fresh"::Text)]; Fork ident->["context" .= ("fork"::Text),"sourceAgentId" .= agentIdText ident]
+  Rename ident name->target ident++["name" .= name]
+  Message ident body->target ident++["text" .= body]
+  Wait ident ticket milliseconds->target ident++["ticket" .= ticket,"timeoutMs" .= milliseconds]
+  Cancel ident->target ident
+  End ident->target ident
+  History ident after count->page ident after count
+  Search ident query after count->page ident after count++["query" .= query]
+  where
+    target ident=["agentId" .= agentIdText ident]
+    page ident after count=target ident++["after" .= after,"limit" .= count]
+    workspaceValue Shared=object ["mode" .= ("shared"::Text)]
+    workspaceValue (Worktree ref branch feature)=object (["mode" .= ("worktree"::Text)]++
+      ["ref" .= value | Just value<-[ref]]++["branch" .= value | Just value<-[branch]]++["name" .= value | Just value<-[feature]])
 
 strictObject :: [Text] -> (Object -> Parser a) -> Value -> Parser a
 strictObject allowed parse=withObject "agent arguments" $ \o->do

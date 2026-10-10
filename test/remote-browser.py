@@ -6,6 +6,7 @@ import base64, hashlib, json, os, pathlib, re, select, socket, struct, subproces
 
 class WebSocket:
     def __init__(self, url):
+        self.attachment=0
         parsed=urllib.parse.urlsplit(url)
         self.sock=socket.create_connection((parsed.hostname,parsed.port),timeout=10)
         self.sock.settimeout(15)
@@ -24,7 +25,7 @@ class WebSocket:
             result+=chunk
         return result
     def send(self,payload,kind=1):
-        if not isinstance(payload,bytes): payload=json.dumps(payload).encode()
+        if not isinstance(payload,bytes): payload=json.dumps(dict(payload,attachment=self.attachment)).encode()
         n=len(payload);mask=os.urandom(4)
         header=bytes([0x80|kind,0x80|(n if n<126 else 126 if n<65536 else 127)])
         if n>=126: header+=struct.pack('!H' if n<65536 else '!Q',n)
@@ -51,7 +52,11 @@ class Display:
     def __init__(self,ws): self.ws=ws;self.rows=[];self.meta={}
     def read(self):
         kind,payload=self.ws.read()
-        if kind==1: return json.loads(payload)
+        if kind==1:
+            message=json.loads(payload)
+            if "attachment" in message: self.ws.attachment=message["attachment"]
+            if message.get("type")=="session": self.rows=[];self.meta={}
+            return message
         tag=payload[0]
         dictionary=json.dumps(self.rows,ensure_ascii=False,separators=(',',':')).encode()[-32768:] if tag else b''
         decoder=zlib.decompressobj(wbits=-15,**({'zdict':dictionary} if dictionary else {}))

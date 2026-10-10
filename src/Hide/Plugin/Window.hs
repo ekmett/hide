@@ -29,7 +29,7 @@ import Control.Concurrent.STM
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
-import Hide.Plugin.Canvas (PreparedImage, preparePNG, imageWidth, imageHeight)
+import Hide.Plugin.Canvas (PreparedImage, prepareImage, imageFormat, imageWidth, imageHeight)
 import Data.Unique (Unique, newUnique, hashUnique)
 import qualified Data.Vector as V
 import qualified Data.Map.Strict as M
@@ -158,22 +158,23 @@ messageIntervals rows=V.fromList (reverse (L.foldl' merge [] (reverse pieces)))
 preparedWindowDisclosure :: PreparedWindow -> WindowDisclosure
 preparedWindowDisclosure=maybe PrivateWindow textDisclosure . preparedWindowSemantics
 
--- | Worker-only bounded PNG preparation. The returned window is read-only,
--- transient and independently disclosed; opening it uses the existing scoped
--- publication operation. Decode work never runs during adoption or rendering.
+-- | Worker-only bounded PNG/JPEG preparation. The returned window is read-only
+-- and independently disclosed; opening uses the existing scoped publication.
+-- Recovery keeps only its inert description, never source bytes or pixels.
+-- Decode work never runs during adoption or rendering.
 prepareImageWindow :: Text -> WindowDisclosure -> Maybe FilePath -> BS.ByteString -> IO (Either Text PreparedWindow)
-prepareImageWindow title disclosure origin png=do
-  decoded<-preparePNG png
+prepareImageWindow title disclosure origin encoded=do
+  decoded<-prepareImage encoded
   case decoded of
     Left err->pure (Left err)
     Right image->do
-      let prefix=safeTitle title<>"\nPNG "<>T.pack (show (imageWidth image))<>" × "<>T.pack (show (imageHeight image))<>
+      let prefix=safeTitle title<>"\n"<>imageFormat image<>" "<>T.pack (show (imageWidth image))<>" × "<>T.pack (show (imageHeight image))<>
             "\nF: Fit   1: 100%   +/− or wheel: zoom\nArrows or drag: pan\n"
           fallback=prefix<>"Open externally"
           links=case origin of Nothing->V.empty; Just _->V.singleton (T.length prefix,T.length fallback,"")
-      PreparedWindow ident caption text rows width recovery sections scripts _ _<-prepareTextWindow title fallback
+      PreparedWindow ident caption text rows width _ sections scripts _ _<-prepareTextWindow title fallback
       let semantics=TextSemantics CopyText origin links V.empty disclosure V.empty V.empty V.empty
-      pure (Right (PreparedWindow ident caption text rows width recovery sections scripts (Just (semantics,V.empty)) (Just image)))
+      pure (Right (PreparedWindow ident caption text rows width (Just ("hide.image",1)) sections scripts (Just (semantics,V.empty)) (Just image)))
 
 -- | O(1). The immutable resource, absent for text or retired image windows.
 preparedWindowImage :: PreparedWindow -> Maybe PreparedImage

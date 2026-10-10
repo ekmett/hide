@@ -1,5 +1,6 @@
 {-# LANGUAGE MagicHash, OverloadedStrings #-}
 module BufferTreeCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import EditorFixture (withEditorTextFixture)
 import Control.Monad (foldM, forM_, unless)
@@ -97,14 +98,14 @@ storageChecks=do
   let bad=base {storageCurrent=[StoredLine AddedLine ["replacement"]]}
   check "raw storage rejects forged provenance" (case restoreBufferStorage bad of Left _->True; _->False)
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   storageChecks
-  lazyLineChecks
-  longLineChecks
-  wordChecks
-  batchChecks
-  lineChangesChecks
+  lazyLineChecks profile
+  longLineChecks profile
+  wordChecks profile
+  batchChecks profile
+  lineChangesChecks profile
   let clipped = replaceSelection (Selection (-3) 99) "界" (newBuffer "abc")
   check "change offsets describe the actual clipped edit"
     (contents clipped == "界" && lastChange clipped == Just (0,3,1))
@@ -160,8 +161,8 @@ checks = do
       pure (next,if changed then expected:history else history)
 
 
-lineChangesChecks :: IO ()
-lineChangesChecks=do
+lineChangesChecks :: AllocationProfile -> IO ()
+lineChangesChecks profile=do
   let original=newBuffer "one\ntwo\nthree\n"
       changed=replaceSelection (Selection 4 7) "TWO" original
       reedited=replaceSelection (Selection 4 7) "again" changed
@@ -236,7 +237,7 @@ lineChangesChecks=do
   _<-evaluate (bufferLineCount clean+fst (bufferLineChanges clean)+snd (bufferLineChanges clean))
   _<-evaluate (dirty smallEdit)
   after<-getAllocationCounter
-  check "save skips unchanged finger-tree subtrees and dirty does not flatten contents" (before-after<1024*1024)
+  check "save skips unchanged finger-tree subtrees and dirty does not flatten contents" (withinBudget profile (before-after) (1024*1024))
   count "sparse save has zero changes" (0,0) clean
   count "sparse undo across save touches only the inverse edit" (1,1) (undo clean)
 
@@ -246,7 +247,7 @@ lineChangesChecks=do
   let typing=replaceSelection (Selection 0 0) "a" manyDeleted
   _<-evaluate (fst (bufferLineChanges typing)+snd (bufferLineChanges typing))
   afterKey<-getAllocationCounter
-  check "typing beside deleted lines skips the tombstone subtree" (firstKey-afterKey<1024*1024)
+  check "typing beside deleted lines skips the tombstone subtree" (withinBudget profile (firstKey-afterKey) (1024*1024))
 
   let replacements=replaceSelection (Selection 4 7) "TWO" (replaceSelection (Selection 0 3) "ONE" original)
   check "adjacent replacements put deletions before insertions" (map (\(kind,_,_)->kind) (bufferChangeRows replacements 0 4)==[DeletedLine,DeletedLine,AddedLine,AddedLine])
@@ -310,8 +311,8 @@ checkReview b=do
   check "context projection merges overlaps and makes omitted gaps unselectable" (actualContext==expectedContext)
 
 -- A flat oracle deliberately applies original-offset edits from right to left.
-batchChecks :: IO ()
-batchChecks = do
+batchChecks :: AllocationProfile -> IO ()
+batchChecks profile = do
   forM_ ["ab", "a\r\nb", "😀\nxλ"] $ \source -> do
     let original=newBuffer source
         size=T.length source
@@ -347,13 +348,13 @@ batchChecks = do
   sparse<-either (error . T.unpack) pure (replaceRanges [(0,1,"X"),(1799991,1799992,"Y")] large)
   _<-evaluate (prepareBuffer sparse)
   after<-getAllocationCounter
-  check "preparing sparse batch shares unchanged tree and does not flatten text" (before-after<2*1024*1024)
+  check "preparing sparse batch shares unchanged tree and does not flatten text" (withinBudget profile (before-after) (2*1024*1024))
   check "sparse batch counts only changed lines" (bufferLineChanges sparse==(2,2))
 
 -- Check the existing Text policy independently at every scalar position, including
 -- inside combining/ZWJ sequences. Word motion intentionally is not grapheme motion.
-wordChecks :: IO ()
-wordChecks=withEditorTextFixture "" "trace" (Model.initialDesktop (80,25)) $ \chatBase->do
+wordChecks :: AllocationProfile -> IO ()
+wordChecks profile=withEditorTextFixture "" "trace" (Model.initialDesktop (80,25)) $ \chatBase->do
   let fixtures=["", "alpha beta\n gamma", "a\r\n\r\n b", "a!! ???b\n", "界e\x301\x200d😀  \n_z'\t+", "  \n \n", "one\n two\n"]
       verify b=let text=contents b in forM_ [0..T.length text] $ \p->
         check "measured scalar word motion matches Text"
@@ -398,15 +399,15 @@ wordChecks=withEditorTextFixture "" "trace" (Model.initialDesktop (80,25)) $ \ch
   position<-evaluate (right desktop)
   after<-getAllocationCounter
   check "cold local word motion does not flatten unrelated rows"
-    (position==p+3 && before-after<524288)
+    (position==p+3 && withinBudget profile (before-after) (524288))
 
 -- Edits in a long physical row share the unchanged storage. Whole-text reads
 -- below are explicit oracle checks, outside the measured preparation boundary.
 -- Loaded source receipts are memoized by the immutable line, not by a UI cache.
 -- These budgets reject full indexing at load/left viewport and repeated decoding
 -- of a demanded prefix. Exact width is intentionally a separate first-use scan.
-lazyLineChecks :: IO ()
-lazyLineChecks=do
+lazyLineChecks :: AllocationProfile -> IO ()
+lazyLineChecks profile=do
   let text=T.replicate (1024*1024) "a"
       loaded=newBuffer text
   _<-evaluate (T.length text)
@@ -415,19 +416,19 @@ lazyLineChecks=do
   _<-evaluate (T.length (contents loaded))
   _<-evaluate (T.length (bufferLineAt loaded 0))
   after<-getAllocationCounter
-  check "loaded long-row metadata and export do not dice receipts" (before-after<64*1024)
+  check "loaded long-row metadata and export do not dice receipts" (withinBudget profile (before-after) (64*1024))
   let line=contentSourceLineAt (bufferContent loaded) 0
   leftBefore<-getAllocationCounter
   let (left,_,groups)=sourceLineWindow line 0
   _<-evaluate (left+sum [TU.lengthWord8 source | (source,_)<-take 2 groups])
   leftAfter<-getAllocationCounter
-  check "left viewport forces only bounded receipt prefix" (leftBefore-leftAfter<64*1024)
+  check "left viewport forces only bounded receipt prefix" (withinBudget profile (leftBefore-leftAfter) (64*1024))
   _<-evaluate (sourceLineDisplayColumn line 50000)
   repeatBefore<-getAllocationCounter
   let positions=[49960..50000]
   _<-evaluate (sum [sourceLineDisplayColumn line p | p<-positions])
   repeatAfter<-getAllocationCounter
-  check "repeated coordinates reuse prepared receipt prefix" (repeatBefore-repeatAfter<128*1024)
+  check "repeated coordinates reuse prepared receipt prefix" (withinBudget profile (repeatBefore-repeatAfter) (128*1024))
   forM_ [0,4095,50000,49963,1024*1024,1024*1024+5] $ \position->do
     let expected=min (T.length text) position
         (hit,column,_)=sourceLineWindow line position
@@ -463,8 +464,8 @@ lazyLineChecks=do
     check "first-edit promotion preserves physical rows and one Undo"
       (contents edited==T.take 128 source<>"X"<>T.drop 129 source && contents (undo edited)==source && length (undoStack edited)==1)
 
-longLineChecks :: IO ()
-longLineChecks=do
+longLineChecks :: AllocationProfile -> IO ()
+longLineChecks profile=do
   let text=T.replicate (1024*1024) "a"
       original=newBuffer text
       middle=bufferLength original `div` 2
@@ -475,7 +476,7 @@ longLineChecks=do
   -- Retained span measures cost more than a flat Text carrier. This bound
   -- detects temporary records per scalar instead of records per stored span.
   check "long-row construction keeps numeric state between span receipts"
-    (constructionBefore-constructionAfter<20*1024*1024)
+    (withinBudget profile (constructionBefore-constructionAfter) (20*1024*1024))
   -- First prefix editing must leave the untouched display suffix lazy. The
   -- source viewport, hit and extent are real first-paint demands, not raw export.
   promotionBefore<-getAllocationCounter
@@ -494,7 +495,7 @@ longLineChecks=do
       check "edited source link hover uses its bounded column"
         (case Model.linkAt (Model.left rect+61) (Model.top rect+1) linked of Just (Model.OpenLink _ "target")->True; _->False)
   promotionAfter<-getAllocationCounter
-  check "first prefix edit and source viewport leave the suffix unprepared" (promotionBefore-promotionAfter<512*1024)
+  check "first prefix edit and source viewport leave the suffix unprepared" (withinBudget profile (promotionBefore-promotionAfter) (512*1024))
   check "first promotion preserves exact source and one Undo" (contents promoted==indexedText && contents (undo promoted)==text && length (undoStack promoted)==1)
   let indexed=markSaved promoted
   _<-evaluate (prepareBuffer indexed)
@@ -505,7 +506,7 @@ longLineChecks=do
   let changed=replaceSelection (Selection middle middle) "X" indexed
   _<-evaluate (prepareBuffer changed)
   after<-getAllocationCounter
-  check "local long-row edit reuses the immutable suffix" (before-after<512*1024)
+  check "local long-row edit reuses the immutable suffix" (withinBudget profile (before-after) (512*1024))
   check "long-row edit agrees with exact source splice"
     (contents changed==T.take middle indexedText<>"X"<>T.drop middle indexedText)
   check "long-row edit is one provenance change and Undo step"

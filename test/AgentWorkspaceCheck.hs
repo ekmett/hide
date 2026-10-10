@@ -29,6 +29,7 @@ checks=bracket temporary removePathForcibly $ \root -> do
       right=either (error . T.unpack) pure
       rejected result=check "invalid worktree request is rejected" (case result of Left _->True; _->False)
   createDirectory repository
+  canonicalRepository<-canonicalizePath repository
   void (git ["init","-b","main"])
   void (git ["config","core.hooksPath",repository </> ".git/hooks"])
   writeFile (repository </> tracked) "committed\n"
@@ -42,15 +43,16 @@ checks=bracket temporary removePathForcibly $ \root -> do
       detached<-createAgentWorktree repository Nothing Nothing "feature / spaces λ" >>= right
       let path=workspacePath detached
       canonical<-canonicalizePath path
+      expectedStore<-canonicalizePath (store </> "thc-edit" </> "workspaces")
       check "detached metadata identifies canonical path and exact committed base"
-        (path==canonical && workspaceSourceRepo detached==Just repository && workspaceBaseCommit detached==Just base &&
+        (path==canonical && workspaceSourceRepo detached==Just canonicalRepository && workspaceBaseCommit detached==Just base &&
          workspaceBranch detached==Nothing && workspaceMode detached=="worktree" &&
-         takeDirectory path==store </> "thc-edit/workspaces")
+         takeDirectory path==expectedStore)
       contents<-readFile (path </> tracked)
       copied<-doesFileExist (path </> "untracked.txt")
       check "worktree excludes uncommitted and untracked parent contents" (contents=="committed\n" && not copied)
-      childCwd<-gitAt path ["rev-parse","--show-toplevel"]
-      check "commands run in the child checkout" (T.unpack childCwd==path)
+      childCwd<-gitAt path ["rev-parse","--show-toplevel"] >>= canonicalizePath . T.unpack
+      check "commands run in the child checkout" (childCwd==path)
       writeFile (path </> tracked) "child edit\n"
       writeFile (path </> "build-output") "isolated build\n"
       parentContents<-readFile (repository </> tracked)
@@ -62,7 +64,7 @@ checks=bracket temporary removePathForcibly $ \root -> do
       check "workspace metadata survives JSON roundtrip" (eitherDecode (encode named)==Right named)
       shared<-sharedAgentWorkspace repository >>= right
       check "shared workspace keeps the parent path and reports committed metadata"
-        (workspacePath shared==repository && workspaceMode shared=="shared" && workspaceBaseCommit shared==Just base && workspaceBranch shared==Just "main")
+        (workspacePath shared==canonicalRepository && workspaceMode shared=="shared" && workspaceBaseCommit shared==Just base && workspaceBranch shared==Just "main")
       plain<-sharedAgentWorkspace root >>= right
       check "shared directories need not be Git repositories" (workspacePath plain==root && workspaceSourceRepo plain==Nothing)
       before<-listDirectory (takeDirectory path)

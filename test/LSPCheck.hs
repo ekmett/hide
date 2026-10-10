@@ -1,15 +1,17 @@
 {-# LANGUAGE OverloadedStrings #-}
 module LSPCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, evaluate)
 import GHC.Conc (getAllocationCounter)
 import Control.Monad (forM_, unless)
 import Data.Aeson
+import qualified Data.ByteString as BS
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Directory
-import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Info (os)
@@ -17,8 +19,8 @@ import System.Timeout (timeout)
 import qualified Hide.Buffer as Buffer
 import Hide.LSP
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   forM_ ["", "a😀b\r\nxλ", "\n\n", "a\r\r\nlast\r", "e\x0301\n界\0"] $ \source -> do
     let original=Buffer.newBuffer source
         edited=Buffer.replaceSelection (Buffer.Selection 0 0) "😀\n" original
@@ -46,7 +48,7 @@ checks = do
     actual<-evaluate (bufferPositionOffset long (1,column))
     check "edited long-row UTF16 prefix matches independent short source" (actual==5+positionOffset "ax😀ba😀ba😀ba😀b" (0,column))
   afterPrefix<-getAllocationCounter
-  check "UTF16 prefix lookup does not flatten the selected edited row" (beforePrefix-afterPrefix<1024*1024)
+  check "UTF16 prefix lookup does not flatten the selected edited row" (withinBudget profile (beforePrefix-afterPrefix) (1024*1024))
   let large=Buffer.newBuffer (T.replicate 200000 "a😀b\r\n")
   _<-evaluate (Buffer.prepareBuffer large)
   allocationBefore<-getAllocationCounter
@@ -55,9 +57,11 @@ checks = do
     check "deep UTF16 position seeks directly to measured line" (offset==row*5+2)
     check "deep UTF16 offset seeks directly to measured line" (bufferOffsetPosition large offset==(row,3))
   allocationAfter<-getAllocationCounter
-  check "UTF16 endpoints do not traverse or split preceding document text" (allocationBefore-allocationAfter<1024*1024)
+  check "UTF16 endpoints do not traverse or split preceding document text" (withinBudget profile (allocationBefore-allocationAfter) (1024*1024))
+  temporaryRoot<-getTemporaryDirectory
   let sample = "a😀b\r\nxλ"
-      path = "/tmp/λ space/#%?.hs"
+      path = temporaryRoot </> "λ space" </> "#%?.hs"
+  check "native absolute URI has an empty authority" ("file:///" `T.isPrefixOf` fileUri path)
   check "URI Unicode and reserved characters round trip" (uriFilePath (fileUri path) == Just path)
   check "reject nonlocal and malformed URI" (all ((== Nothing) . uriFilePath) ["https://host/x", "file://host/x", "file:///tmp/%xz", "file:///tmp/%ff", "file:///tmp/#x"])
   check "localhost URI" (uriFilePath "file://localhost/tmp/a" == Just "/tmp/a")
@@ -68,72 +72,68 @@ checks = do
   bracket temporary removePathForcibly $ \root -> do
     let server = root </> "fake-hls"
         source = root </> "space λ.hs"
-    writeFile (root </> "diagnostic-source.hs") "module X where\n"
-    if os=="mingw32" then writeFile source "module X where\n"
+    writeUtf8 (root </> "diagnostic-source.hs") "module X where\n"
+    if os=="mingw32" then writeUtf8 source "module X where\n"
       else createFileLink (root </> "diagnostic-source.hs") source
     canonicalSource<-canonicalizePath source
-    writeFile server fakeServer
-    permissions <- getPermissions server
-    setPermissions server (permissions { executable = True })
-    bracket (lookupEnv "THC_EDIT_HLS") (maybe (unsetEnv "THC_EDIT_HLS") (setEnv "THC_EDIT_HLS")) $ \_ -> do
-      setEnv "THC_EDIT_HLS" server
-      bracket (startClient root) stopClient $ \client -> do
-        syncDocuments client [(source,0,"module X where\nx = \"😀\"\n")]
-        notifySaved client source
-        first <- request client "test/state" Null
-        pending <- waitResponse client first
-        check "initialize then open queued document" (result pending == Just (object ["opens" .= (1 :: Int), "changes" .= (0 :: Int), "closes" .= (0 :: Int), "text" .= ("module X where\nx = \"😀\"\n" :: T.Text)]))
-        check "diagnostics resolve source aliases on the transport worker" (any (\event -> case event of Diagnostics file version _ -> file == canonicalSource && version == Just 0; _ -> False) pending)
-        syncDocuments client [(source,0,"module X where\nx = \"😀\"\n")]
-        syncDocuments client [(source,1,"x = 2\n")]
-        second <- request client "test/state" Null
-        updated <- waitResponse client second
-        check "unchanged sync skipped and changed full text sent" (result updated == Just (object ["opens" .= (1 :: Int), "changes" .= (1 :: Int), "closes" .= (0 :: Int), "text" .= ("x = 2\n" :: T.Text)]))
-        syncDocuments client []
-        third <- request client "test/state" Null
-        closed <- waitResponse client third
-        check "removed document closes" (result closed == Just (object ["opens" .= (1 :: Int), "changes" .= (1 :: Int), "closes" .= (1 :: Int), "text" .= ("x = 2\n" :: T.Text)]))
-        execution<-executeCommand client "fixture" (toJSON ([]::[Value])) >>= either (error . T.unpack) pure
-        concurrent<-executeCommand client "fixture" (toJSON ([]::[Value]))
-        check "command ownership is exclusive until response" (case concurrent of Left _->True; _->False)
-        let awaitEdit=do
-              batch<-pollEvents client
-              case [(owner,ident) | ApplyEdit owner ident _<-batch] of
-                value:_->pure value
-                _->threadDelay 1000 >> awaitEdit
-        owned<-timeout 3000000 awaitEdit >>= maybe (error "Missing owned applyEdit") pure
-        check "server request carries receipt-time execution owner" (fst owned==execution)
-        replyEdit client (snd owned) True Nothing
-        _<-waitResponse client execution
-        barrier<-request client "test/state" Null
-        after<-waitResponse client barrier
-        check "post-response applyEdit never acquires completed owner" (not (any (\event->case event of ApplyEdit{}->True; _->False) after))
-      lifecycle <- readFile (root </> "lifecycle")
-      check "shutdown response then exit" (lifecycle == "shutdown\nexit\n")
-      -- Initialization is deliberately held: document projection/equality must
-      -- belong to the writer, never to the caller holding the desktop lock.
-      writeFile server "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
-      bracket (startClient root) stopClient $ \client -> do
-        let delayed = [(source,0,error "syncDocuments forced source text on caller")]
-        syncDocuments client delayed
-        syncDocuments client delayed
-      writeFile server "#!/usr/bin/env python3\nimport sys,time\nsys.stderr.write('x'*10000 + '\\ncompiler-version-unavailable\\n'); sys.stderr.flush()\ntime.sleep(0.1)\nsys.exit(1)\n"
-      bracket (startClient root) stopClient $ \client -> do
-        failure <- timeout 3000000 (waitFailure client)
-        check "failed server retains bounded stderr tail" (maybe False (\message -> "compiler-version-unavailable" `T.isInfixOf` message && T.length message < 4500) failure)
-        syncDocuments client [(source,0,"x = 1")]
-        syncDocuments client [(source,0,"x = 1")]
-        ident <- request client "textDocument/hover" Null
-        replies <- pollEvents client
-        check "request after failure receives error response" (any (\event -> case event of Response actual value -> actual == ident && parseMaybe (withObject "response" (.: "error")) value /= (Nothing :: Maybe Value); _ -> False) replies)
-        burst <- mapM (\_ -> request client "textDocument/hover" Null) [1..200::Int]
-        batch <- pollEvents client
-        check "HLS flood gives the UI a bounded batch" (length batch <= 32)
-        rest <- waitResponse client (last burst)
-        check "bounded HLS batches retain FIFO responses"
-          ([actual | Response actual _ <- batch ++ rest] == burst)
-        stopped <- timeout 2000000 (stopClient client)
-        check "failed server stops promptly and idempotently" (stopped == Just ())
+    writeUtf8 server fakeServer
+    bracket (startClientWith "python3" ["-X", "utf8", server, "--lsp"] root) stopClient $ \client -> do
+      syncDocuments client [(source,0,"module X where\nx = \"😀\"\n")]
+      notifySaved client source
+      first <- request client "test/state" Null
+      pending <- waitResponse client first
+      check "initialize then open queued document" (result pending == Just (object ["opens" .= (1 :: Int), "changes" .= (0 :: Int), "closes" .= (0 :: Int), "text" .= ("module X where\nx = \"😀\"\n" :: T.Text)]))
+      check "diagnostics resolve source aliases on the transport worker" (any (\event -> case event of Diagnostics file version _ -> file == canonicalSource && version == Just 0; _ -> False) pending)
+      syncDocuments client [(source,0,"module X where\nx = \"😀\"\n")]
+      syncDocuments client [(source,1,"x = 2\n")]
+      second <- request client "test/state" Null
+      updated <- waitResponse client second
+      check "unchanged sync skipped and changed full text sent" (result updated == Just (object ["opens" .= (1 :: Int), "changes" .= (1 :: Int), "closes" .= (0 :: Int), "text" .= ("x = 2\n" :: T.Text)]))
+      syncDocuments client []
+      third <- request client "test/state" Null
+      closed <- waitResponse client third
+      check "removed document closes" (result closed == Just (object ["opens" .= (1 :: Int), "changes" .= (1 :: Int), "closes" .= (1 :: Int), "text" .= ("x = 2\n" :: T.Text)]))
+      execution<-executeCommand client "fixture" (toJSON ([]::[Value])) >>= either (error . T.unpack) pure
+      concurrent<-executeCommand client "fixture" (toJSON ([]::[Value]))
+      check "command ownership is exclusive until response" (case concurrent of Left _->True; _->False)
+      let awaitEdit=do
+            batch<-pollEvents client
+            case [(owner,ident) | ApplyEdit owner ident _<-batch] of
+              value:_->pure value
+              _->threadDelay 1000 >> awaitEdit
+      owned<-timeout 3000000 awaitEdit >>= maybe (error "Missing owned applyEdit") pure
+      check "server request carries receipt-time execution owner" (fst owned==execution)
+      replyEdit client (snd owned) True Nothing
+      _<-waitResponse client execution
+      barrier<-request client "test/state" Null
+      after<-waitResponse client barrier
+      check "post-response applyEdit never acquires completed owner" (not (any (\event->case event of ApplyEdit{}->True; _->False) after))
+    lifecycle <- readFile (root </> "lifecycle")
+    check "shutdown response then exit" (lifecycle == "shutdown\nexit\n")
+    -- Initialization is deliberately held: document projection/equality must
+    -- belong to the writer, never to the caller holding the desktop lock.
+    writeUtf8 server "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"
+    bracket (startClientWith "python3" ["-X", "utf8", server, "--lsp"] root) stopClient $ \client -> do
+      let delayed = [(source,0,error "syncDocuments forced source text on caller")]
+      syncDocuments client delayed
+      syncDocuments client delayed
+    writeUtf8 server "#!/usr/bin/env python3\nimport sys,time\nsys.stderr.write('x'*10000 + '\\ncompiler-version-unavailable\\n'); sys.stderr.flush()\ntime.sleep(0.1)\nsys.exit(1)\n"
+    bracket (startClientWith "python3" ["-X", "utf8", server, "--lsp"] root) stopClient $ \client -> do
+      failure <- timeout 3000000 (waitFailure client)
+      check "failed server retains bounded stderr tail" (maybe False (\message -> "compiler-version-unavailable" `T.isInfixOf` message && T.length message < 4500) failure)
+      syncDocuments client [(source,0,"x = 1")]
+      syncDocuments client [(source,0,"x = 1")]
+      ident <- request client "textDocument/hover" Null
+      replies <- pollEvents client
+      check "request after failure receives error response" (any (\event -> case event of Response actual value -> actual == ident && parseMaybe (withObject "response" (.: "error")) value /= (Nothing :: Maybe Value); _ -> False) replies)
+      burst <- mapM (\_ -> request client "textDocument/hover" Null) [1..200::Int]
+      batch <- pollEvents client
+      check "HLS flood gives the UI a bounded batch" (length batch <= 32)
+      rest <- waitResponse client (last burst)
+      check "bounded HLS batches retain FIFO responses"
+        ([actual | Response actual _ <- batch ++ rest] == burst)
+      stopped <- timeout 2000000 (stopClient client)
+      check "failed server stops promptly and idempotently" (stopped == Just ())
   putStrLn "LSP checks passed"
   where
     check label ok = unless ok (error label)
@@ -223,3 +223,6 @@ fakeServer = unlines
   , "        open('lifecycle', 'a').write('exit\\n'); break"
   , "    else: raise RuntimeError(method)"
   ]
+
+writeUtf8 :: FilePath -> String -> IO ()
+writeUtf8 path = BS.writeFile path . TE.encodeUtf8 . T.pack

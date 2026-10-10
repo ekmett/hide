@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module SidebarCheck (checks) where
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync,wait,poll,waitCatch,asyncThreadId)
+import Control.Concurrent.Async (Async,withAsync,wait,waitCatch,asyncThreadId)
 import Data.IORef
 import Data.List (findIndex)
 import Data.Aeson (object,(.=),withObject,(.:))
@@ -24,7 +24,6 @@ import Control.Monad (unless,forM,forM_,void,replicateM_)
 import qualified Data.Map.Strict as M
 import qualified Data.Sequence as S
 import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath ((</>))
@@ -81,6 +80,47 @@ select :: Int -> Desktop -> Desktop
 select index d=d {sideTree=Just (treeOf d) {treeSelected=index,treeFocused=True}}
 
 -- One real Files popup/form workflow, including its filesystem refusal paths.
+bufferExportChecks :: IO ()
+bufferExportChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
+  let original=dir </> "Main.hs"
+      doc d=maybe (error "export source missing") id (activeDocument d)
+  BS.writeFile original "main = 1\n"
+  (file,buffer)<-loadFile original >>= either error pure
+  let dirtySource=insertText "local " (addDocument (Just file) buffer (initialDesktop (100,30)))
+  -- The editor action captures current bytes instead of borrowing Files' disk
+  -- export. Exercise the source popup as well as the File menu command.
+  let currentSource=dirtySource
+      selectBufferExport d=case activeWindow d of
+        Nothing->error "Missing export source window"
+        Just window->
+          let r=bounds window
+              popup=fst (handleEvent (V.EvMouseDown (left r+2) (top r+2) V.BRight []) d)
+          in case findIndex ((=="Export buffer copy…").fst) (contextItemsFor popup) of
+            Nothing->error "Source popup has no buffer export"
+            Just index->handleEvent (V.EvKey V.KEnter []) (iterate (fst . handleEvent (V.EvKey V.KDown [])) popup!!index)
+      copyReady next=case snd (pendingFileExport next) of Just _->True;_->False
+  sourceVersion<-captureVersion (documentBuffer (doc currentSource))
+  bufferOffer<-act host (selectBufferExport currentSource) >>= await (tickSidebar host applyEffects) copyReady
+  unchangedBuffer<-versionCurrent sourceVersion (documentBuffer (doc bufferOffer))
+  unchangedFile<-BS.readFile original
+  check "source export copies live dirty bytes and preserves buffer identity, disk and save state"
+    (unchangedBuffer && unchangedFile=="main = 1\n" && dirty (documentBuffer (doc bufferOffer)) &&
+      case (snd (pendingFileExport bufferOffer),activeWindow bufferOffer) of
+        (Just (ExportFileCopy name bytes row receipt),Just window)->name=="Main.hs" && bytes=="local main = 1\n" &&
+          top row==top (bounds window) && receipt==fileExportView bufferOffer
+        _->False)
+  let unnamed=addDocument Nothing (newByteBuffer (BS.pack [0,255,13,10])) currentSource
+  hexOffer<-act host (runCommand ExportBuffer unnamed) >>= await (tickSidebar host applyEffects) copyReady
+  check "unnamed hex export preserves binary bytes and is available in the File menu"
+    (any (\(MenuItem _ _ command)->command==ExportBuffer) (menuItemsFor unnamed 0) &&
+      case snd (pendingFileExport hexOffer) of Just (ExportFileCopy name bytes _ _)->name=="NONAME.bin" && bytes==BS.pack [0,255,13,10];_->False)
+  queuedBuffer<-act host (runCommand ExportBuffer currentSource)
+  expiredBuffer<-await (tickSidebar host applyEffects) (\next->"expired" `T.isInfixOf` status next) (insertText "newer " queuedBuffer)
+  check "buffer edits invalidate a pending export and agents cannot manufacture exports"
+    (snd (pendingFileExport expiredBuffer)==Nothing && not (guestCommandAllowed ExportBuffer) &&
+      not (guestEffectsAllowed [ExportBufferDocument 1 1]))
+
+
 fileRenameChecks :: IO ()
 fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host->do
   let original=dir </> "Main.hs"
@@ -100,7 +140,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
       sourceCommand command d=fst (runCommand command d {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)})
       ids d=map (\w->(windowId w,bufferId w,selection w,scrollRow w,scrollColumn w)) (windows d)
   createDirectory (dir </> "archive")
-  TIO.writeFile original "main = 1\n"
+  BS.writeFile original "main = 1\n"
   BS.writeFile (dir </> "bytes.bin") (BS.pack [0,255,13,10])
   (file,buffer)<-loadFile original >>= either error pure
   -- A clean buffer with retained redo proves path adoption does not replace Undo.
@@ -139,7 +179,7 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
     (same && ids result==ids mounted && not oldExists && bytes=="main = 1\n" && not (dirty (documentBuffer (doc result))))
   check "Files Rename preserves Undo and Redo history" (activeText (sourceCommand Redo result)=="xmain = 1\n")
   collision<-open "Renamedλ.hs" result
-  TIO.writeFile (dir </> "Taken.hs") "keep me"
+  BS.writeFile (dir </> "Taken.hs") "keep me"
   refusedCollision<-submit "Taken.hs" collision >>= refused
   untouched<-BS.readFile (dir </> "Taken.hs")
   check "Rename refuses an occupied destination" (path refusedCollision==Just renamed && untouched=="keep me")
@@ -153,11 +193,11 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   check "Rename refuses a source edited after its form opened" (not dirtyTarget && path refusedDirty==Just renamed && dirty (documentBuffer (doc refusedDirty)))
   clean<-pure (sourceCommand Undo refusedDirty)
   staleForm<-open "Renamedλ.hs" clean
-  TIO.writeFile renamed "external replacement\n"
+  BS.writeFile renamed "external replacement\n"
   refusedStale<-submit "Stale.hs" staleForm >>= refused
   staleTarget<-doesPathExist (dir </> "Stale.hs")
   check "Rename refuses a changed filesystem source" (not staleTarget && path refusedStale==Just renamed)
-  TIO.writeFile renamed "main = 1\n"
+  BS.writeFile renamed "main = 1\n"
   let oldPopup=popupFor "Renamedλ.hs" refusedStale
       (captured,effects)=chooseRename oldPopup
       collapsed=captured {sideTree=Just (collapseAt 0 (treeOf captured))}
@@ -174,13 +214,13 @@ fileRenameChecks=bracket temporary removePathForcibly $ \dir->withSidebarCommand
   check "Files Rename preserves byte-mode files" (byteMode (documentBuffer (doc binaryResult)) && binaryBytes==BS.pack [0,255,13,10])
   cachedDestination<-act host (activateTree True (atLabel "archive" binaryResult) binaryResult) >>= settle host
   (moved,answer)<-fileTool (sidebarEffects host applyEffects) cachedDestination "workspace_files"
-    (object ["operation" .= ("rename"::T.Text),"path" .= (dir </> "bytes.dat"),"to" .= (dir </> "archive/bytes.dat")])
+    (object ["operation" .= ("rename"::T.Text),"path" .= (dir </> "bytes.dat"),"to" .= (dir </> "archive" </> "bytes.dat")])
   _<-answer >>= right
   refreshedMove<-settle host moved
   check "Cross-directory MCP rename refreshes both cached parent listings"
-    (path refreshedMove==Just (dir </> "archive/bytes.dat") &&
+    (path refreshedMove==Just (dir </> "archive" </> "bytes.dat") &&
       length [() | (_,row)<-visibleRows 0 32768 (treeOf refreshedMove),P.infoLabel (rowInfo row)=="bytes.dat"]==1 &&
-      any (\(_,row)->P.infoResource (rowInfo row)==Just (dir </> "archive/bytes.dat")) (visibleRows 0 32768 (treeOf refreshedMove)))
+      any (\(_,row)->P.infoResource (rowInfo row)==Just (dir </> "archive" </> "bytes.dat")) (visibleRows 0 32768 (treeOf refreshedMove)))
   lateForm<-open "Renamedλ.hs" refreshedMove
   late<-submit "Late.hs" lateForm
   let newer=sourceCommand Find (focusWindow (windowId (case windows mounted of window:_->window; []->error "rename source window missing")) late)
@@ -196,10 +236,11 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   imageOpeningChecks
   publicationLifetimeChecks
   fileRenameChecks
+  bufferExportChecks
   createDirectory (dir </> "src")
-  TIO.writeFile (dir </> "Main.hs") "main = 1\n"
-  TIO.writeFile (dir </> "Readme.md") "# Documentation\n"
-  TIO.writeFile (dir </> "thc.toml") "private = true\n"
+  BS.writeFile (dir </> "Main.hs") "main = 1\n"
+  BS.writeFile (dir </> "Readme.md") "# Documentation\n"
+  BS.writeFile (dir </> "thc.toml") "private = true\n"
   initial<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) (initialDesktop (100,30)))
   check "Files is an ordinary first root in the shared tree" (P.infoLabel (rowInfo (maybe (error "root") id (rowAt 0 (treeOf initial))))=="Files")
   collapsed<-act host (handleEvent (V.EvKey V.KEnter []) initial)
@@ -221,7 +262,7 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
     >>= await (tickSidebar host applyEffects) (\d->not (treeFocused (treeOf d)) || "failed" `T.isInfixOf` status d)
   check "Opening an existing dirty file survives an unreadable disk replacement and preserves its live content" (activeText reopened=="local main = 1\n" && not (treeFocused (treeOf reopened)))
   removeDirectory (dir </> "Main.hs")
-  TIO.writeFile (dir </> "Main.hs") "main = 1\n"
+  BS.writeFile (dir </> "Main.hs") "main = 1\n"
   let privateIndex=atLabel "thc.toml" reopened
       privateTree=select privateIndex reopened
   (agentState,agentEffects)<-right =<< Wire.applyGuestInput (Wire.Key "Enter" []) privateTree
@@ -243,10 +284,12 @@ checks=bracket temporary removePathForcibly $ \dir->withSidebarCommands $ \host-
   budgetChecks dir
   putStrLn "shared sidebar checks passed"
 
--- Ordinary file presentation exercises the actual owner, not the PNG factory.
+-- Ordinary file presentation exercises the actual owner, not just decoder factories.
 imageOpeningChecks :: IO ()
 imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
   let png=BL.toStrict (Picture.encodePng (Picture.generateImage (\_ _->Picture.PixelRGBA8 40 160 220 127) 3 2))
+      jpeg=BL.toStrict (Picture.encodeJpegAtQuality 95 (Picture.generateImage (\_ _->Picture.PixelYCbCr8 140 90 210) 5 3))
+      jpegPath=dir </> "photograph.data"
       first=dir </> "landscape.data"
       second=dir </> "second.png"
       source=dir </> "Main.hs"
@@ -256,6 +299,7 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
       body d=maybe (error "missing image window") id (activePluginWindow d)
   BS.writeFile first png
   BS.writeFile second png
+  BS.writeFile jpegPath jpeg
   BS.writeFile source "main = 1\n"
   (_,raw)<-loadFile first >>= right
   check "raw buffer reads preserve image bytes" (byteMode raw && bufferBytes raw==png)
@@ -263,7 +307,7 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
     -- CLI uses this same awaited path; a burst uses the one ordered worker.
     pair<-open host initial [OpenFile Menu.HumanMenu first,OpenFile Menu.HumanMenu second]
     check "ordinary two-image burst opens both in order without a byte buffer"
-      (length (pictures pair)==2 && M.null (buffers pair) && all (\image->Canvas.imageWidth image==3 && Canvas.imageHeight image==2 && Canvas.imagePNG image==png) (pictures pair) &&
+      (length (pictures pair)==2 && M.null (buffers pair) && all (\image->Canvas.imageWidth image==3 && Canvas.imageHeight image==2 && Canvas.imageEncoded image==png) (pictures pair) &&
        (Window.preparedWindowSemantics (body pair) >>= Window.textLinkBase)==Just second)
     mixed<-open host initial [OpenFile Menu.HumanMenu source,OpenFile Menu.HumanMenu first]
     check "named image opening keeps its file directory for ordinary navigation"
@@ -282,10 +326,32 @@ imageOpeningChecks=bracket temporary removePathForcibly $ \dir->do
       (length (pictures displayed)==1 && any ((==png).bufferBytes.documentBuffer) (M.elems (buffers displayed)))
     uploaded<-uncurry (sidebarEffects host applyEffects) (Wire.applyInput (Wire.UploadFile "unusual.bin" png) initial) >>= awaitFileOpening host . snd
     check "uploaded image keeps exact bytes and name without a server path"
-      (map Canvas.imagePNG (pictures uploaded)==[png] && M.null (buffers uploaded) && Window.preparedWindowTitle (body uploaded)=="unusual.bin" &&
+      (map Canvas.imageEncoded (pictures uploaded)==[png] && M.null (buffers uploaded) && Window.preparedWindowTitle (body uploaded)=="unusual.bin" &&
        (Window.preparedWindowSemantics (body uploaded) >>= Window.textLinkBase)==Nothing)
     check "uploaded image keeps the existing navigation directory without inventing a path"
       (startingDirectory uploaded==dir && startingDirectory uploaded {defaultDirectory=Nothing}==".")
+    photograph<-open host initial [OpenFile Menu.HumanMenu jpegPath]
+    check "ordinary JPEG opening uses signature and retains exact source"
+      (M.null (buffers photograph) && case pictures photograph of
+        [image]->Canvas.imageFormat image=="JPEG" && Canvas.imageWidth image==5 && Canvas.imageHeight image==3 && Canvas.imageEncoded image==jpeg
+        _->False)
+    check "canvas descriptions retain each image's detected format and dimensions"
+      (all (\(desktop,description)->case Canvas.canvasSurfaces (snd (renderCellRowsAndCanvas desktop)) of
+        [surface]->description `T.isPrefixOf` Canvas.canvasDescription surface
+        _->False) [(uploaded,"PNG 3 × 2."),(photograph,"JPEG 5 × 3.")])
+    uploadedJPEG<-open host initial [OpenFileBytes "upload.jpg" jpeg]
+    check "uploaded JPEG uses the same canvas without a server path"
+      (map Canvas.imageEncoded (pictures uploadedJPEG)==[jpeg] && (Window.preparedWindowSemantics (body uploadedJPEG) >>= Window.textLinkBase)==Nothing)
+    let checkpoint=dir </> "image.checkpoint"
+    writeCheckpoint checkpoint photograph >>= right
+    removeFile jpegPath
+    recoveredImage<-readCheckpoint checkpoint initial >>= right
+    check "image recovery keeps an inert description without reading the removed file"
+      (length (windows recoveredImage)==1 && null (pictures recoveredImage) && M.null (buffers recoveredImage) &&
+       "JPEG 5 × 3" `T.isInfixOf` contentSlice (Window.preparedWindowText (body recoveredImage)) 0 1024 &&
+       case Window.preparedWindowSemantics (body recoveredImage) of
+         Just semantics->Window.textDisclosure semantics==Window.PrivateWindow && Window.textLinkBase semantics==Nothing && null (Window.textLinks semantics)
+         Nothing->False)
     let invalid=BS.take 8 png<>"broken PNG"
     fallback<-open host initial [OpenFileBytes "broken.png" invalid]
     check "undecodable image bytes remain lossless and editable"
@@ -333,44 +399,48 @@ publicationLifetimeChecks=withRegistry $ \registry->do
   check "publication fixture opens its exact form" admitted
   update<-Form.refreshForm (Form.formReference prepared) (Form.InputFormSpec "Refresh" "Name" "Ignored" "Rename") >>= right >>= maybe (error "missing refresh") pure
   hostReady<-newEmptyMVar
+  let invalidate host=PluginSidebar.invalidateTree (sidebarCapabilities host) (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
   withAsync (readMVar hostReady >>= \host->publishTreeFromHost host provider) $ \treeWriter->
-    withAsync (readMVar hostReady >>= \host->publishFormRefreshFromHost host update) $ \formWriter->do
-      escaped<-withSidebarCommands $ \host->do
-        let capabilities=sidebarCapabilities host
-        replicateM_ 32 (PluginSidebar.publishTree capabilities provider)
-        accepted<-PluginSidebar.tryInvalidateTree capabilities (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider)))
-        check "full shared queue refuses invalidation without blocking the owner" (not accepted)
-        putMVar hostReady host
-        mapM_ blocked [treeWriter,formWriter]
-        pure host
-      mapM_ rejected [treeWriter,formWriter]
-      treeLate<-tryIOError (publishTreeFromHost escaped provider)
-      formLate<-tryIOError (PluginSidebar.publishFormRefresh (sidebarCapabilities escaped) update)
-      invalidationLate<-tryIOError (() <$ PluginSidebar.tryInvalidateTree (sidebarCapabilities escaped) (P.treeReference provider) (P.infoId (P.nodeInfo (P.treeRoot provider))))
-      check "closed host explicitly rejects late tree form and invalidation publications"
-        (closedError treeLate && closedError formLate && closedError invalidationLate)
-      let initial=installSidebar (emptySidebar "/" 24 True) (initialDesktop (100,30))
-      effectsLate<-tryIOError (sidebarEffects escaped (\_ _->error "closed host dispatched effects") initial [])
-      check "closed host rejects effect dispatch before mounting" (case effectsLate of Left err->closedError (Left err); Right _->False)
-      next<-tickSidebar escaped (\_ _->error "closed tick dispatched effects") initial
-      check "late tick cannot mount or resurrect queued providers" (null (treeRoots (treeOf next)) && M.null (treeNodes (treeOf next)))
+    withAsync (readMVar hostReady >>= \host->publishFormRefreshFromHost host update) $ \formWriter->
+      withAsync (readMVar hostReady >>= invalidate) $ \invalidationWriter->do
+        escaped<-withSidebarCommands $ \host->do
+          let capabilities=sidebarCapabilities host
+          replicateM_ 32 (PluginSidebar.publishTree capabilities provider)
+          putMVar hostReady host
+          mapM_ awaitPublicationBlock [treeWriter,formWriter,invalidationWriter]
+          pure host
+        mapM_ rejected [treeWriter,formWriter,invalidationWriter]
+        treeLate<-tryIOError (publishTreeFromHost escaped provider)
+        formLate<-tryIOError (PluginSidebar.publishFormRefresh (sidebarCapabilities escaped) update)
+        invalidationLate<-tryIOError (invalidate escaped)
+        check "closed host explicitly rejects late tree form and invalidation publications"
+          (closedError treeLate && closedError formLate && closedError invalidationLate)
+        let initial=installSidebar (emptySidebar "/" 24 True) (initialDesktop (100,30))
+        effectsLate<-tryIOError (sidebarEffects escaped (\_ _->error "closed host dispatched effects") initial [])
+        check "closed host rejects effect dispatch before mounting" (case effectsLate of Left err->closedError (Left err); Right _->False)
+        next<-tickSidebar escaped (\_ _->error "closed tick dispatched effects") initial
+        check "late tick cannot mount or resurrect queued providers" (null (treeRoots (treeOf next)) && M.null (treeNodes (treeOf next)))
   where
-    blocked worker=do
-      ready<-timeout 1000000 (awaitBlocked worker)
-      check "full publication queue blocks each producer in STM" (ready==Just ())
-    awaitBlocked worker=do
-      state<-threadStatus (asyncThreadId worker)
-      case state of
-        ThreadBlocked BlockedOnSTM->pure ()
-        ThreadFinished->error "publisher finished before host close"
-        ThreadDied->error "publisher failed before host close"
-        _->threadDelay 1000 >> awaitBlocked worker
     rejected worker=do
       result<-timeout 1000000 (waitCatch worker)
       check "host close resolves a saturated publisher with an explicit failure" (case result of Just (Left err)->maybe False (closedError . Left) (fromException err); _->False)
     closedError result=case result of
       Left err->isUserError err
       Right ()->False
+
+-- Observe the real producer's blocking state, not an elapsed scheduling delay.
+awaitPublicationBlock :: Async a -> IO ()
+awaitPublicationBlock worker=do
+  ready<-timeout 1000000 loop
+  check "full publication queue blocks each producer in STM" (ready==Just ())
+  where
+    loop=do
+      state<-threadStatus (asyncThreadId worker)
+      case state of
+        ThreadBlocked BlockedOnSTM->pure ()
+        ThreadFinished->error "publisher finished before queue drain"
+        ThreadDied->error "publisher failed before queue drain"
+        _->threadDelay 1000 >> loop
 
 independent :: SidebarHost -> Desktop -> IO ()
 independent host d=withRegistry $ \registry->do
@@ -433,7 +503,7 @@ refresh :: SidebarHost -> FilePath -> Desktop -> IO ()
 refresh host dir d=withReconciliation $ \watcher->do
   let nested=dir </> "src"
       tick value=tickReconciliation watcher (sidebarEffects host applyEffects) value >>= tickSidebar host applyEffects
-  TIO.writeFile (nested </> "a.hs") "a"
+  BS.writeFile (nested </> "a.hs") "a"
   let src=select (atLabel "src" d) d
   guestExpansion<-Wire.applyGuestInput (Wire.Key "ArrowRight" []) src >>= right
   check "agent directory expansion carries its actual load origin"
@@ -442,7 +512,7 @@ refresh host dir d=withReconciliation $ \watcher->do
   let selected=select (atLabel "a.hs" opened) opened
       focused=selected {sideTree=Just (treeOf selected) {treeFocused=False}}
   subscribed<-tick focused
-  TIO.writeFile (nested </> "b.hs") "b"
+  BS.writeFile (nested </> "b.hs") "b"
   refreshed<-await tick (T.isInfixOf "b.hs" . snapshot) subscribed
   check "directory refresh preserves expansion selection and input owner" (not (treeFocused (treeOf refreshed)) && P.infoLabel (rowInfo (maybe (error "selected") id (rowAt (treeSelected (treeOf refreshed)) (treeOf refreshed))))=="a.hs")
   let branch=maybe (error "src row") id (rowAt (atLabel "src" refreshed) (treeOf refreshed))
@@ -516,9 +586,7 @@ edgeChecks dir=withSidebarCommands $ \host->do
     -- Only registration workers backpressure; owner ticks drain four deltas.
     replicateM_ 32 (publishTreeFromHost host provider)
     advanced<-withAsync (publishTreeFromHost host provider) $ \writer->do
-      threadDelay 20000
-      blocked<-poll writer
-      check "publication queue backpressures only its producer" (case blocked of Nothing->True; _->False)
+      awaitPublicationBlock writer
       next<-tickSidebar host applyEffects reshown
       resumed<-timeout 1000000 (wait writer)
       check "bounded owner drain releases publication producer" (case resumed of Just ()->True; _->False)
@@ -568,7 +636,7 @@ recoveryPagingChecks=bracket temporary removePathForcibly $ \base->do
   createDirectory dir
   forM_ [0..129::Int] $ \n->createDirectory (dir </> name n)
   createDirectory (dir </> "d129" </> "inner")
-  writeFile target "main = pure ()\n"
+  BS.writeFile target "main = pure ()\n"
   recovered<-withSidebarCommands $ \host->do
     initial<-initializeSidebar host (installSidebar (emptySidebar dir 24 True) blank)
     paged<-act host (activateTree False (atLabel "More…" initial) initial) >>= settle host

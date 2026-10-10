@@ -5,7 +5,7 @@ synopsis: Haskell IDE for terminal, native window and browser
 build-type: Simple
 data-files: docs/site/screenshots/*.png, docs/*.md, docs/design/*.md, docs/plans/*.md, skills/debug-editor/SKILL.md, assets/web/*.html, assets/web/*.js, README.md, assets/fonts/*.hex, assets/fonts/*.txt, assets/fonts/README.md
 extra-source-files: assets/examples/*.png, assets/examples/*.md, cbits/shaders/*.h, cbits/shaders/*.hlsl, tools/build-cell-shaders.sh, tools/check-web-gpu.mjs, test/launchers.sh, bin/thc-edit, bin/th, bin/thc-edit.cmd, bin/th.cmd, tools/pkgconfig/pkg-config, docs/*.md, docs/design/*.md, docs/plans/*.md, cbits/remote.h, test/editor-session.py, test/daemon-session.py, test/interrupt-session.py, test/session-recovery.py, test/remote-browser.py, test/remote-session.py, tools/web-wire-trial.hs, test/web-wire.mjs, test/web-text-style.mjs, test/web-links.mjs, test/web-canvas.mjs, test/web-file-export.mjs, test/web-sidebar.mjs, test/web-keybindings.mjs, tools/web-bandwidth.hs, tools/web-bandwidth.py, assets/icons/*.svg, tools/convert-material-icons.py, cbits/window.h, cbits/accessibility.h, cbits/unicode.h, tools/convert-font.py, tools/check-native.sh, test/native-canvas.c, test/native-input.c, test/native-atlas.c, test/native-menu.m, test/native-accessibility.m, cbits/terminal.h, test/native-terminal.c, test/native-terminal.hs, test/HighlightBench.hs, test/HLSLive.hs, test/EditorLive.hs, test/dap-session.py
-  , test/power-mode.c
+  , test/power-mode.c, test/compiler-discovery-fixture.hs, tools/coverage.py
 
 flag window
   description: Build the optional SDL3 Metal/Vulkan frontend
@@ -34,14 +34,14 @@ common settings
 
 library
   import: settings
-  build-depends: Cabal-syntax >=3.16 && <3.17, deepseq, network-uri, toml-parser >=2.0 && <2.1, JuicyPixels, base64-bytestring, blaze-builder, network, async, stm, skylighting >=0.15 && <0.16, aeson, vector, fingertree >=0.1.5 && <0.2, commonmark >=0.3 && <0.4, commonmark-extensions >=0.2 && <0.3
+  build-depends: hide-plugin-api ==0.1.0.0, hide-agent-api ==0.1.0.0, hide-acp ==0.1.0.0, Cabal-syntax >=3.16 && <3.17, deepseq, network-uri, toml-parser >=2.0 && <2.1, JuicyPixels, base64-bytestring, blaze-builder, network, async, stm, skylighting >=0.15 && <0.16, aeson, vector, fingertree >=0.1.5 && <0.2, commonmark >=0.3 && <0.4, commonmark-extensions >=0.2 && <0.3
   c-sources: cbits/unicode.c, cbits/files.c
   include-dirs: cbits
   pkgconfig-depends: libutf8proc >=2.10
   hs-source-dirs: src
   other-modules: Hide.ConversationBody, Hide.Plugin.EditorHost, Hide.WorkspaceRename, Hide.LineChunks, Paths_hide, Hide.DownloadsWindow, Hide.DownloadsWindowTypes
   autogen-modules: Paths_hide
-  exposed-modules: Hide.Accessibility, Hide.RequestedPaste, Hide.SessionSidebar, Hide.SessionSidebarTypes, Hide.AgentSidebar, Hide.AgentSidebarTypes, Hide.BufferEdits, Hide.BufferReadAdmission, Hide.BufferReadCommand, Hide.BufferDiffCommand, Hide.BufferReads, Hide.Plugin.Sidebar, Hide.Plugin.Editor, Hide.Plugin.Form, Hide.Plugin.Window, Hide.Plugin.Canvas, Hide.PluginWindowHost, Hide.Plugin.Buffer, Hide.Plugin.BufferHost, Hide.Plugin.Command, Hide.Plugin.Tree, Hide.Sidebar, Hide.SidebarCommands, Hide.Plugin.Menu, Hide.Documentation, Hide.Commands, Hide.Bindings, Hide.Keybindings, Hide.InlineTypes, Hide.InlineState, Hide.AutocompleteConfig, Hide.Autocomplete, Hide.AutocompleteACP, Hide.Copilot, Hide.AgentAccess, Hide.AgentRuntime, Hide.AgentHub, Hide.AgentACP, Hide.AgentMCP, Hide.AgentWorkspace, Hide.FileExport, Hide.FileDragHelper, Hide.Process, Hide.Completion, Hide.Build, Hide.Compilers, Hide.Downloads, Hide.HdbAcquisition, Hide.CabalPlan, Hide.PackageSources, Hide.PackagePaths, Hide.PackageSidebar, Hide.ProjectBrowser, Hide.BuildJobs, Hide.TextPresentation, Hide.TextLayout, Hide.TextStyle, Hide.Protocol, Hide.Remote, Hide.RemoteWeb, Hide.FrameTiming, Hide.RemoteWindow, Hide.Web, Hide.Unicode, Hide.Buffer, Hide.BufferView, Hide.Syntax, Hide.Highlighting, Hide.Model, Hide.Render, Hide.Files, Hide.App, Hide.Frontend, Hide.Window, Hide.Browser, Hide.Help, Hide.Git, Hide.GitOperations, Hide.LSP, Hide.Tooling, Hide.External, Hide.Reconcile, Hide.ACP, Hide.AgentFiles, Hide.Conversation, Hide.SessionServices, Hide.Markdown, Hide.Terminal, Hide.Consoles, Hide.DAP, Hide.Debugger, Hide.DebuggerSidebar, Hide.DebuggerSidebarTypes, Hide.Hex
+  exposed-modules: Hide.Accessibility, Hide.RequestedPaste, Hide.SessionSidebar, Hide.SessionSidebarTypes, Hide.AgentSidebarTypes, Hide.AgentDirectoryHost, Hide.AgentServicesHost, Hide.BufferEdits, Hide.BufferReadAdmission, Hide.BufferReadCommand, Hide.BufferDiffCommand, Hide.BufferReads, Hide.Plugin.Editor, Hide.Plugin.Window, Hide.Plugin.Canvas, Hide.PluginWindowHost, Hide.Plugin.Buffer, Hide.Plugin.BufferHost, Hide.Sidebar, Hide.SidebarCommands, Hide.Documentation, Hide.Commands, Hide.Bindings, Hide.Keybindings, Hide.InlineTypes, Hide.InlineState, Hide.AutocompleteConfig, Hide.Autocomplete, Hide.AutocompleteACP, Hide.Copilot, Hide.AgentAccess, Hide.AgentRuntime, Hide.AgentHub, Hide.AgentWorkspace, Hide.FileExport, Hide.FileDragHelper, Hide.Process, Hide.Completion, Hide.Build, Hide.Compilers, Hide.Downloads, Hide.HdbAcquisition, Hide.CabalPlan, Hide.PackageSources, Hide.PackagePaths, Hide.PackageSidebar, Hide.ProjectBrowser, Hide.BuildJobs, Hide.TextPresentation, Hide.TextLayout, Hide.TextStyle, Hide.Protocol, Hide.Remote, Hide.RemoteWeb, Hide.FrameTiming, Hide.RemoteWindow, Hide.Web, Hide.Unicode, Hide.Buffer, Hide.BufferView, Hide.Syntax, Hide.Highlighting, Hide.Model, Hide.Render, Hide.FileIO, Hide.Files, Hide.App, Hide.Frontend, Hide.Window, Hide.Browser, Hide.Help, Hide.Git, Hide.GitOperations, Hide.LSP, Hide.Tooling, Hide.External, Hide.Reconcile, Hide.AgentFiles, Hide.Conversation, Hide.SessionServices, Hide.Markdown, Hide.Terminal, Hide.Consoles, Hide.DAP, Hide.Debugger, Hide.DebuggerSidebar, Hide.DebuggerSidebarTypes, Hide.Hex
   if flag(web)
     cpp-options: -DWITH_WEB
     other-modules: Hide.BrowserServer
@@ -50,6 +50,7 @@ library
   exposed-modules: Hide.Links, Hide.Environment, Hide.GuestAccess, Hide.Privacy, Hide.ClipboardMCP, Hide.DocsMCP, Hide.MenuCommands, Hide.Defaults, Hide.ControlMCP, Hide.MCPPermissions, Hide.RemoteEndpoint, Hide.EditorMCP, Hide.WorkspaceFilesMCP, Hide.TestsMCP, Hide.HistoryMCP, Hide.RuntimeMCP, Hide.ScreenCapture, Hide.WorkspaceMCP, Hide.Session, Hide.Recovery, Hide.Font, Hide.RemoteTerminal
   build-depends: zlib
   if os(windows)
+    build-depends: Win32
     c-sources: cbits/remote.c
     extra-libraries: advapi32, ws2_32
   else
@@ -63,8 +64,7 @@ library
       extra-libraries: util
   if flag(window)
     cpp-options: -DWITH_WINDOW
-    cc-options: -DWITH_WINDOW
-    c-sources: cbits/window.c
+    c-sources: cbits/window.c, cbits/unicode-window.c
     include-dirs: cbits
     pkgconfig-depends: sdl3 >=3.4
     if os(osx)
@@ -79,12 +79,12 @@ executable hide
   import: settings
   hs-source-dirs: app
   main-is: Main.hs
-  build-depends: hide
+  build-depends: hide, hide-agents ==0.1.0.0
   ghc-options: -threaded -rtsopts
 
 test-suite editor-tests
   import: settings
-  build-depends: Cabal-syntax >=3.16 && <3.17
+  build-depends: hide-agents ==0.1.0.0, hide-plugin-api ==0.1.0.0, hide-agent-api ==0.1.0.0, hide-acp ==0.1.0.0, Cabal-syntax >=3.16 && <3.17
   other-modules: PackageSourcesCheck, PackagePathsCheck, PackageSidebarCheck
   if flag(web)
     cpp-options: -DWITH_WEB
@@ -95,8 +95,8 @@ test-suite editor-tests
   build-depends: zlib
   if !os(windows)
     build-depends: unix
-  ghc-options: -threaded
-  other-modules: EditorFixture, PluginFormCheck, FormExtension, MarkdownViewCheck, SessionSidebarCheck, WideTextCheck, TextStyleCheck, PluginWindowsCheck, SourceWindowFixture, WindowExtension, AgentSidebarCheck, TypedBufferDiffsCheck, TypedBufferReadsCheck, WorkerDiffCheck, BufferEditsCheck, BufferReadsCheck, PluginBufferCheck, PluginCommandCheck, PluginTreeCheck, AccessibilityCheck, SidebarCheck, SidebarFixture, TreeExtension, PluginMenuCheck, MenuExtension, MenuCommandsCheck, MenuContextCheck, BindingsCheck, HintComposerCheck, AutocompleteCheck, InlineCheck, InlineRenderCheck, AutocompleteACPCheck, CopilotCheck, HighlightingCheck, AgentIntegrationCheck, AgentAccessCheck, AgentRuntimeCheck, AgentHubCheck, AgentACPCheck, AgentMCPCheck, AgentWorkspaceCheck, CompletionCheck, CompilersCheck, DownloadsCheck, HdbAcquisitionCheck, DebuggerAcquisitionCheck, BuildCheck, ProjectBrowserCheck, UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, DebuggerSidebarCheck, DebuggerWatchesCheck, DebuggerSourcePolicyCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FileExportCheck, FileDragHelperCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferViewCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
+  ghc-options: -threaded -rtsopts
+  other-modules: AllocationProfile, EditorFixture, PluginFormCheck, FormExtension, MarkdownViewCheck, SessionSidebarCheck, WideTextCheck, TextStyleCheck, PluginWindowsCheck, SourceWindowFixture, WindowExtension, AgentSidebarCheck, TypedBufferDiffsCheck, TypedBufferReadsCheck, WorkerDiffCheck, BufferEditsCheck, BufferReadsCheck, PluginBufferCheck, PluginCommandCheck, PluginTreeCheck, AccessibilityCheck, SidebarCheck, SidebarFixture, TreeExtension, PluginMenuCheck, MenuExtension, MenuCommandsCheck, MenuContextCheck, BindingsCheck, HintComposerCheck, AutocompleteCheck, InlineCheck, InlineRenderCheck, AutocompleteACPCheck, CopilotCheck, HighlightingCheck, AgentIntegrationCheck, AgentAccessCheck, AgentRuntimeCheck, AgentHubCheck, AgentACPCheck, AgentMCPCheck, AgentWorkspaceCheck, CompletionCheck, CompilersCheck, DownloadsCheck, HdbAcquisitionCheck, DebuggerAcquisitionCheck, BuildCheck, ProjectBrowserCheck, UnicodeCheck, HexCheck, DAPCheck, DebuggerCheck, DebuggerSidebarCheck, DebuggerWatchesCheck, DebuggerSourcePolicyCheck, RunCheck, ConversationCheck, AgentFilesCheck, TerminalCheck, ConsolesCheck, FileExportCheck, FileDragHelperCheck, FilesCheck, WindowCheck, BrowserCheck, HelpCheck, GitCheck, GitOperationsCheck, LSPCheck, ToolingCheck, DialogMouseCheck, BufferViewCheck, BufferTreeCheck, ExternalCheck, ReconcileCheck, ACPCheck, MarkdownCheck
   if flag(window)
     cpp-options: -DWITH_WINDOW
   if flag(terminal)
@@ -105,3 +105,15 @@ test-suite editor-tests
   hs-source-dirs: test
   main-is: Main.hs
   build-depends: JuicyPixels, base64-bytestring, blaze-builder, deepseq, hide, aeson, vector, network, async, stm
+    , tasty >=1.5.4 && <1.6, tasty-hunit >=0.10.2 && <0.11, tasty-ant-xml >=1.1.9 && <1.2
+
+-- Keep the HPC driver independent of the correctness/performance fixture graph.
+test-suite coverage-smoke
+  import: settings
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test/coverage, test
+  other-modules: BufferViewCheck, BrowserCheck, DefaultsCheck, FilesCheck, HexCheck, MarkdownCheck, WindowCheck, PluginCommandCheck, PluginFormCheck, PluginMenuCheck, PluginTreeCheck, GuestAccessCheck, LinksCheck, HelpCheck, CompletionCheck, BufferEditsCheck, AgentHubCheck, TextStyleCheck, MarkdownViewCheck, SourceWindowFixture, FormExtension, EditorFixture, SidebarFixture
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts
+  build-depends: hide, hide-plugin-api ==0.1.0.0, aeson, async, stm, vector, JuicyPixels, base64-bytestring
+    , tasty >=1.5.4 && <1.6, tasty-hunit >=0.10.2 && <0.11, tasty-ant-xml >=1.1.9 && <1.2

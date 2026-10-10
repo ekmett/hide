@@ -35,8 +35,26 @@ from the tree.
 Expand the current session to see its live editor windows. Selecting a window
 uses its captured ID and the ordinary window-selection owner. Removed windows,
 retired actions and modal controls refuse the selection; background refresh
-keeps the current focus. Other-session attachment from the sidebar remains in
-[#7](https://github.com/ekmett/hide/issues/7); use `hide --resume ID` below for now.
+keeps the current focus.
+
+Right-click another session and choose **Switch to session** to open its running
+desktop, or **Recover** to restore its saved desktop. The current session stays
+running, and the same native window, terminal display or browser page shows the
+new one. A busy or unavailable target leaves you in the current session. These
+controls apply to sessions on the same host; while editing over SSH, that means
+the remote host. Use `hide --resume ID` to choose a different host or frontend.
+
+Choose **Recover buffers here** on a stopped session in the same project to bring
+its text, hex and ended terminal windows into the current desktop. Split views
+keep their shared buffer and undo history. A file already open here arrives as a
+separate copy; Save asks for a new path. The saved session remains available.
+Conversations, running tools and preferences stay with their own session.
+
+Right-click a stopped local session marked **recoverable** and choose **Delete...**
+to remove its saved windows, unsaved edits and conversation checkpoints. The
+confirmation offers **Delete** and **Cancel**. Files saved in the project are
+untouched. Current, running and remote sessions cannot be deleted here; if a
+session starts running while the confirmation is open, deletion is refused.
 
 The sidebar retains at most 1024 sessions/windows and pages 128 rows at a time.
 A discovery attempt has a ten-second limit and retains its last successful

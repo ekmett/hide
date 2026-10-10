@@ -19,8 +19,11 @@ files stay selected.
 **File > Open** (Ctrl+O or F3; ⌘O on Mac) opens the file dialog. Enter a
 name or wildcard filter, select a file and choose Open. **File > New**
 (Ctrl+N; ⌘N on Mac) starts an unnamed buffer. Double-click a directory to
-browse into it, or a file to open it.
-The list shows the file's size and local modification time.
+browse into it, or a file to open it, including in a mouse-enabled terminal.
+The file list grows with the display, giving long names more room and showing
+more entries at once. Arrow keys select entries; Left/Right change columns and
+Page Up/Down change pages. The footer shows the path, size and local modification
+time. **Change dir** uses the same picker.
 
 **Ctrl+B** (⌃B in the Mac window), or **Tools > File tree**, toggles the
 Files pane. Expand directories to browse their contents and open files from the
@@ -41,6 +44,32 @@ files within the same directory; directory moves remain a separate operation.
 **File > Change dir** changes the working directory and refreshes Files without
 closing open buffers. Enter browses into the selected directory, Browse opens
 a typed path, and OK accepts the displayed directory.
+
+## Export a buffer copy
+
+Choose **File > Export buffer copy…**, or right-click in a source editor and
+choose **Export buffer copy…**, to export the current buffer. The copy includes
+unsaved edits, preserves text line endings and exports binary buffers byte for
+byte. Unnamed buffers use their suggested filename or a default name. Exporting
+does not save the buffer, clear its unsaved state or change the file on disk.
+
+In a browser, use the **Download** link above the editor. Click it to download
+the snapshot, or drag it to another application in Chromium where supported.
+The link remains available when the destination cannot receive the drag.
+**File > Download** also downloads the current buffer directly.
+
+In the native macOS window, wait for the snapshot to become ready, then drag the
+source window's title to the desktop, Finder or another application. This exports
+a copy. Editing, moving, resizing or changing the source window invalidates the
+prepared gesture; choose Export buffer copy again. Other native frontends and
+text terminals use an optional [file drag helper](configuration.md#terminal-file-drag-helper),
+which opens a separate window to drag from. The export is prepared on the
+connected frontend, including when the editor runs over SSH.
+
+Snapshots are limited to 16 MiB. Native and helper frontends retain at most four
+copies until the frontend closes, allowing the receiving application to finish
+reading them. Right-clicking a file in Files and choosing **Export saved copy…**
+continues to export its saved disk contents.
 
 ## Cabal packages
 
@@ -80,16 +109,16 @@ Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
 ![An alpine lake open in an image window.](site/screenshots/png-view.png)
 
 Open an image from Files, the file dialog or the command line, or drop it into
-the editor. PNG files open in an image window, fitted to its size. Press **F**
-to fit again, **1** for actual size, or **+** / **−** to zoom. The wheel zooms; arrow keys and dragging
-pan. Resize or tile it like a source window.
+the editor. PNG and JPEG files open in an image window, fitted to its size.
+JPEGs follow their EXIF orientation. Press **F** to fit again, **1** for actual
+size, or **+** / **−** to zoom. The wheel zooms; arrow keys and dragging pan. Resize or tile it like a source window.
 
 Metal, Vulkan and browser frontends keep the image crisp over the optional CRT
 filter. Other windows, menus and dialogs cover it normally. In a text terminal,
 the window shows its name, dimensions and an **Open externally** link. That link
 opens through the connected frontend, including when the editor runs over SSH.
 
-The viewer reads the saved PNG without changing an open buffer. It accepts files
+The viewer reads the saved image without changing an open buffer. It accepts files
 up to 16 MiB, 4096 pixels per side and four megapixels. Image windows share a
 64 MiB decoded-pixel budget. Private images follow the same streamer and agent
 visibility rules as other protected content. Session recovery retains a short
@@ -298,6 +327,12 @@ last view of a changed file, or exiting with changed files,
 asks what to save. **File > Exit** ends the editor session. To leave the desktop
 running, detach and use `hide --resume` later; **Ctrl+]** detaches from the
 terminal frontend. See [sessions](sessions.md) for the other frontends.
+
+Saving replaces the file atomically. Background file reads can finish against the
+previous version while new opens see the saved version, including on Windows. The
+save still checks its disk baseline before replacement and refuses a detected
+conflict. Windows saves also support long directory paths; the temporary file
+stays beside the destination so replacement remains atomic.
 
 A title star means the buffer has unsaved edits. The branch badge's star means
 saved changes in Git; saving a buffer can clear one while setting the other.

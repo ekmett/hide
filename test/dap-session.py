@@ -23,6 +23,7 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
         stream = conn.makefile('rb')
     seq = 0
     pending_attach = pending_variables = pending_source = pending_scopes = pending_evaluate = None
+    sidebar_scopes, sidebar_variables = {}, {}
     configured, breakpoint_requests = [], []
     scope_count = 0
     source_count = 0
@@ -49,6 +50,23 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
 
     def event(name, body=None):
         send(dict(type='event', event=name, body=body or {}))
+
+    def sidebar_pair(pending, req, argument, body):
+        # Arrival order is an input, never a prerequisite: hold both requests
+        # and release the later one first using each original request sequence.
+        target = req['arguments'][argument]
+        assert target not in pending, req
+        pending[target] = req
+        if len(pending) == 2:
+            released = list(reversed(list(pending.values())))
+            for request in released:
+                reply(request, body(request['arguments'][argument]))
+            with open(sys.argv[1], 'a') as log:
+                log.write(json.dumps(dict(session=session, sidebarRelease=dict(
+                    command=req['command'],
+                    targets=[request['arguments'][argument] for request in released],
+                    requestSeqs=[request['seq'] for request in released]))) + '\n')
+            pending.clear()
 
     def breakpoints(req, actual=None):
         reply(req, dict(breakpoints=[dict(id=41+i, verified=True,
@@ -208,13 +226,15 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                         thread_exited = True
                         event('thread', dict(reason='exited', threadId=8))
                         reply(req, dict(scopes=[dict(name='STALE exited scope', variablesReference=221)]))
-                    elif fid == 11:
-                        pending_scopes = req
+                    elif mode == 'sidebar' and fid in (11, 12):
+                        def scopes(frame):
+                            rows = [dict(name='Locals %d' % frame, variablesReference=200+frame, expensive=False)]
+                            if frame == 11:
+                                rows.append(dict(name='Alias', variablesReference=900, expensive=False))
+                            return dict(scopes=rows)
+                        sidebar_pair(sidebar_scopes, req, 'frameId', scopes)
                     else:
                         reply(req, dict(scopes=[dict(name='Locals %d' % fid, variablesReference=200+fid, expensive=False)]))
-                        if pending_scopes:
-                            reply(pending_scopes, dict(scopes=[dict(name='Locals 11', variablesReference=211, expensive=False), dict(name='Alias', variablesReference=900, expensive=False)]))
-                            pending_scopes = None
                 elif mode == 'frame':
                     assert args['frameId'] == 11
                     pending_scopes = req
@@ -266,13 +286,10 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                             rows.extend(dict(name='local%d_%d' % (parent, i), value=str(i), variablesReference=0) for i in range(3, 260))
                             rows[129] = dict(name='local%d_129' % parent, value='expand', variablesReference=1000+parent)
                         return rows
-                    if mode == 'sidebar' and reference == 211:
-                        pending_variables = req
+                    if mode == 'sidebar' and reference in (211, 212):
+                        sidebar_pair(sidebar_variables, req, 'variablesReference', lambda parent: dict(variables=locals_rows(parent)))
                     else:
                         reply(req, dict(variables=locals_rows(reference)))
-                        if mode == 'sidebar' and pending_variables:
-                            reply(pending_variables, dict(variables=locals_rows(211)))
-                            pending_variables = None
                 elif mode == 'sidebar' and reference in (1211, 1212):
                     reply(req, dict(variables=[dict(name='child%d' % (reference-1000), value='later page', variablesReference=0)]))
                 elif mode in ('sidebar', 'sidebar-exit') and reference == 900:

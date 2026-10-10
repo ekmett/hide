@@ -26,7 +26,8 @@ import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO.Error (ioeGetErrorString, tryIOError)
-import System.Process (proc, readCreateProcessWithExitCode, cwd, env)
+import System.Process (proc, cwd, env)
+import Hide.Process (readProcessUtf8)
 import Text.Read (readMaybe)
 
 data RepoStatus = RepoStatus
@@ -354,10 +355,9 @@ runGitInput dir args input = do
   inherited <- getEnvironment
   let environment = ("GIT_OPTIONAL_LOCKS", "0") : filter (\(name, _) -> name `notElem`
         ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OPTIONAL_LOCKS"]) inherited
-  (code, out, err) <- readCreateProcessWithExitCode
+  readProcessUtf8
     ((proc "git" (["--no-pager", "--literal-pathspecs", "-c", "core.fsmonitor=false"] ++ args))
-      { cwd = Just dir, env = Just environment }) input
-  pure (code, T.pack out, T.pack err)
+      { cwd = Just dir, env = Just environment }) (T.pack input)
 
 git :: FilePath -> [String] -> IO Text
 git root args = do

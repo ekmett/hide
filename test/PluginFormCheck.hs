@@ -76,6 +76,17 @@ checks=do
     namedShape<-withRegistry $ \other->prepareInputsForm other (InputFormSpec "Single" "Name" "" "Apply") (\() submitted->pure (Right submitted))
     check "form preparation rejects spec action shape mismatches" (case (scalarShape,namedShape) of (Left InvalidArguments{},Left InvalidArguments{})->True; _->False)
     retireForm (formReference prepared)
+  withRegistry $ \registry->do
+    prepared<-prepareForm registry (ConfirmationFormSpec "Delete session?" "Saved edits will be removed." "Delete") (\() value->pure (Right value)) >>= right
+    _<-admitForm False prepared
+    invalid<-invokeFormAction prepared () (TextValue "unexpected input")
+    check "confirmation cannot acquire editable input" (rejected invalid)
+    claimed<-claimFormSubmission prepared
+    reply<-invokeFormAction prepared () (TextValue "")
+    check "confirmation delivers one empty submission" (claimed && reply==Right "")
+    _<-finishFormSubmission (formReference prepared)
+    replay<-claimFormSubmission prepared
+    check "confirmation cannot be replayed" (not replay)
   escaped<-withRegistry $ \registry->do
     unconsumed<-prepareForm registry (InputFormSpec "Live" "Name" "Still live" "Submit") (\() text->pure (Right text)) >>= right
     opened<-admitForm False unconsumed

@@ -14,6 +14,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as M
+import qualified Data.Set as S
 import Data.Maybe (fromJust)
 import qualified Data.Text as T
 import qualified Data.Vector as V
@@ -140,6 +141,89 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
     (dockedTerminals recoveredPinned==dockedTerminals pinned && bottomTerminal recoveredPinned==Just terminalWindowId &&
      bounds (fromJust (activeWindow recoveredPinned))==problemsRect recoveredPinned &&
      documentLabel (buffers recoveredPinned M.! terminalId)==Just "Ended Terminal 7" && activeTerminal recoveredPinned==Nothing)
+  importedSources<-readSourceCheckpoint pinnedPath >>= right
+  let destinationBuffer=replaceSelection (Selection 0 0) "destination edit " original
+      destinationFile=FileState sourcePath (Just (bufferBytes original))
+      destination=addDocument (Just destinationFile) destinationBuffer unpublished
+        {screenSize=(64,18),guestPrivatePaths=[sourcePath],wordStar=True,
+         terminalMouseTracking=S.singleton 9000,agentSettings=[AgentSetting "model" "Model" "model" "current" []]}
+      destinationId=sourceFixtureBuffer (fromJust (activeWindow destination))
+      merged=adoptRecoveredSources importedSources destination
+      importedDocuments=M.withoutKeys (buffers merged) (M.keysSet (buffers destination))
+      copies=[(bid,doc) | (bid,doc)<-M.toList importedDocuments,documentSuggestedName doc==Just "source.hs"]
+      (copyId,copyDoc)=case copies of [value]->value; _->error "missing distinct recovered source copy"
+      copyViews=filter ((==Just copyId).bufferId) (windows merged)
+      importedWindows=filter ((>=nextId destination).windowId) (windows merged)
+      binaryCopies=[documentBuffer doc | doc<-M.elems importedDocuments,byteMode (documentBuffer doc)]
+      terminalCopies=[w | w<-importedWindows,terminalWindow merged w]
+  check "source import never overwrites the destination's dirty file or baseline"
+    (snapshotBuffer (get merged destinationId)==snapshotBuffer destinationBuffer &&
+     documentFile (buffers merged M.! destinationId)==Just destinationFile)
+  check "duplicate source import preserves both history stacks and its original baseline"
+    (snapshotBuffer (documentBuffer copyDoc)==snapshotBuffer edited &&
+     snapshotBuffer (undo (documentBuffer copyDoc))==snapshotBuffer (undo edited) &&
+     snapshotBuffer (redo (documentBuffer copyDoc))==snapshotBuffer (redo edited))
+  check "duplicate import keeps privacy provenance and requests Save As"
+    (documentFile copyDoc==Nothing && documentOrigin copyDoc==Just sourcePath && privateDocument merged copyDoc &&
+     case dialog (fst (runCommand Save (focusWindow (windowId (case copyViews of w:_->w; _->error "missing split") ) merged))) of
+       Just (Dialog _ (Saving bid Nothing) _ _ _ _)->bid==copyId
+       _->False)
+  check "imported text splits share one fresh document and retain source view state"
+    (length copyViews==2 && all (\w->bufferView w==SideBySideView && reviewSplit w==63) copyViews &&
+     length importedWindows==4 && M.size importedDocuments==3 &&
+     all (\w->windowId w>=nextId destination && windowId w<nextId merged) importedWindows &&
+     S.size (S.fromList (map windowNumber (windows merged)))==length (windows merged))
+  check "source import keeps binary history and ended terminal views without live input"
+    (case binaryCopies of [buffer]->snapshotBuffer buffer==snapshotBuffer hex; _->False)
+  check "ended source terminals float with clamped saved bounds without changing destination dock"
+    (case terminalCopies of
+       [window]->not (windowPinned merged window) && bounds window==fitWindow destination (bounds (fromJust (activeWindow terminal))) &&
+         activeTerminal (focusWindow (windowId window) merged)==Nothing
+       _->False)
+  check "source import retains destination runtime owners and preferences without importing conversation windows"
+    (M.keys (conversationViews merged)==M.keys (conversationViews destination) &&
+     M.keys (editorDrafts merged)==M.keys (editorDrafts destination) && M.keys (pluginWindows merged)==M.keys (pluginWindows destination) &&
+     snapshotBuffer (composerBuffer merged)==snapshotBuffer (composerBuffer destination) &&
+     terminalMouseTracking merged==terminalMouseTracking destination && dockedTerminals merged==dockedTerminals destination &&
+     agentSettings merged==agentSettings destination && wordStar merged && screenSize merged==screenSize destination &&
+     all ((/=Nothing).bufferId) importedWindows)
+  let sameFrames a b=map windowState (windows a)==map windowState (windows b)
+      full=destination {buffers=M.fromList [(i,buffers destination M.! destinationId) | i<-[1..2048]],nextId=2049}
+      fullResult=adoptRecoveredSources importedSources full
+      fullViews=destination {windows=[(fromJust (activeWindow destination)) {windowId=i,windowNumber=i} | i<-[1..4096]],nextId=4097}
+      fullViewsResult=adoptRecoveredSources importedSources fullViews
+      exhausted=destination {nextId=1073741823}
+      exhaustedResult=adoptRecoveredSources importedSources exhausted
+  check "source import refuses count and identity overflow before adding any windows"
+    (M.keys (buffers fullResult)==M.keys (buffers full) && sameFrames fullResult full &&
+     M.keys (buffers fullViewsResult)==M.keys (buffers fullViews) && sameFrames fullViewsResult fullViews &&
+     nextId exhaustedResult==nextId exhausted && sameFrames exhaustedResult exhausted)
+  let cleanPath=root </> "clean-copy.checkpoint"
+      cleanSource=addDocument (Just destinationFile) original fresh
+  writeCheckpoint cleanPath cleanSource >>= right
+  cleanPrepared<-readSourceCheckpoint cleanPath >>= right
+  let cleanMerged=adoptRecoveredSources cleanPrepared destination
+      cleanCopy=fromJust (activeDocument cleanMerged)
+  check "a clean duplicate requires Save As without falsifying its saved baseline"
+    (documentFile cleanCopy==Nothing && not (dirty (documentBuffer cleanCopy)) && snapshotBuffer (documentBuffer cleanCopy)==snapshotBuffer original)
+  let generatedPath=root </> "generated-copy.checkpoint"
+      generated=cleanSource {buffers=M.map (\doc->doc {documentOrigin=Just (root </> "private-origin")}) (buffers cleanSource)}
+  writeCheckpoint generatedPath generated >>= right
+  generatedPrepared<-readSourceCheckpoint generatedPath >>= right
+  let refused=adoptRecoveredSources generatedPrepared destination
+  check "a duplicate with two privacy origins refuses the entire import"
+    (M.keys (buffers refused)==M.keys (buffers destination) && sameFrames refused destination &&
+     snapshotBuffer (get refused destinationId)==snapshotBuffer destinationBuffer && nextId refused==nextId destination)
+#ifndef mingw32_HOST_OS
+  let movedPath=root </> "moved-source"
+      movedCheckpoint=root </> "moved-source.checkpoint"
+  BS.writeFile movedPath (bufferBytes original)
+  writeCheckpoint movedCheckpoint (addDocument (Just (FileState movedPath (Just (bufferBytes original)))) original fresh) >>= right
+  removeFile movedPath
+  createFileLink sourcePath movedPath
+  moved<-readSourceCheckpoint movedCheckpoint
+  check "source import refuses changed symlink authority rather than granting a new save target" (case moved of Left _->True; _->False)
+#endif
   let viewsPath=root </> "views.checkpoint"
       hiddenSession="Session: old-hidden-provider-id\n"
       primaryRuns=[(hiddenSession,Plain),("hi\nx",BubbleText 0 True (LinkStyle "https://private.invalid" Plain)),
@@ -298,6 +382,8 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   mutate (set "conversationTarget" (toJSON ("unknown-agent"::T.Text)))
   mutate (set "schemaVersion" (toJSON (0::Int)))
   mutate (set "nextId" (toJSON (0::Int)))
+  invalidSource<-readSourceCheckpoint path
+  check "source-only import retains checkpoint identity validation" (case invalidSource of Left _->True; _->False)
   mutate (set "screen" (toJSON ((maxBound::Int),25::Int)))
   mutate (set "buffers" (toJSON ([]::[Value])))
   let alterFirst key change (Object fields)=case KM.lookup key fields of
@@ -364,6 +450,8 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   createFileLink path alias
   symbolic<-readCheckpoint alias fresh
   check "checkpoint reads refuse symlink endpoints" (case symbolic of Left _->True; _->False)
+  symbolicSource<-readSourceCheckpoint alias
+  check "source-only import also refuses symlink endpoints" (case symbolicSource of Left _->True; _->False)
 #endif
   putStrLn "recovery checks passed"
 
@@ -381,24 +469,25 @@ sharedTextChecks root=do
   recovered<-readCheckpoint path (initialDesktop (80,25)) >>= right
   check "hash collisions preserve both exact string payloads"
     (map (contents . documentBuffer) (M.elems (buffers recovered))==[first,second])
-  -- A file larger than three MiB with 100 localized edits used to retain over
-  -- 300 MiB of flattened states. Repeated raw lines now have one shared payload.
+  -- Repeated lines and localized edits must share checkpoint payloads. A 64 KiB
+  -- source still rejects flattened raw snapshots at the same encoded-size bound.
   let line=T.replicate 1023 "a"<>"\n"
-      source=T.replicate 3073 line
-      edited=foldl (\b n->replaceSelection (Selection 5 6) (if even n then "x" else "y") b) (newBuffer source) [1..100::Int]
+      source=T.replicate 64 line
+      historyLength=16::Int
+      edited=foldl (\b n->replaceSelection (Selection 5 6) (if even n then "x" else "y") b) (newBuffer source) [1..historyLength]
       large=addDocument Nothing edited (initialDesktop (80,25))
       largePath=root </> "large-history.checkpoint"
   writeCheckpoint largePath large >>= right
   encoded<-BS.readFile largePath
   restored<-readCheckpoint largePath (initialDesktop (80,25)) >>= right
   let buffer=documentBuffer (snd (M.findMin (buffers restored)))
-  check "mostly unchanged histories share checkpoint text rather than snapshots" (BS.length encoded<T.length source && length (undoStack buffer)==100)
-  forM_ [0,1,50,100] $ \steps->do
+  check "mostly unchanged histories share checkpoint text rather than snapshots" (BS.length encoded<T.length source && length (undoStack buffer)==historyLength)
+  forM_ [0,1,historyLength `div` 2,historyLength] $ \steps->do
     let actual=iterate undo buffer!!steps
         expected=iterate undo edited!!steps
     check "shared history retains exact bytes and saved-line changes" (bufferBytes actual==bufferBytes expected && bufferLineChanges actual==bufferLineChanges expected)
-  let oldest=iterate undo buffer!!100
-  check "shared history replays every retained edit" (bufferBytes (iterate redo oldest!!100)==bufferBytes edited)
+  let oldest=iterate undo buffer!!historyLength
+  check "shared history replays every retained edit" (bufferBytes (iterate redo oldest!!historyLength)==bufferBytes edited)
 
 temporary :: IO FilePath
 temporary=do

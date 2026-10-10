@@ -22,7 +22,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
-import Hide.Accessibility (SemanticAudience(GuestSemantics), sidebarSemantics, dialogSemantics)
+import Hide.Accessibility (SemanticAudience(GuestSemantics), sidebarSemantics, dialogSemantics, sourceSemantics)
 import Hide.Font
 import Hide.Frontend (modeHeight)
 import Hide.Commands (commandIdentifier)
@@ -110,6 +110,7 @@ capture font desktop includeImage
       "commandPermissions" .= commands,
       "semanticSidebar" .= sidebarSemantics GuestSemantics desktop,
       "semanticDialog" .= dialogSemantics GuestSemantics desktop,
+      "semanticSource" .= sourceSemantics GuestSemantics desktop,
       "semanticCanvas" .= [object ["id" .= canvasId surface,"role" .= ("image"::Text),
         "name" .= canvasName surface,"description" .= canvasDescription surface,"bounds" .= canvasRect surface]
         | dialog desktop==Nothing,surface<-canvasSurfaces canvas,IS.member (canvasSlot surface) visibleImageSlots],

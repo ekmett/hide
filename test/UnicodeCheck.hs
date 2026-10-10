@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings, UnboxedTuples #-}
 module UnicodeCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 import Control.Monad (unless, forM_)
 import Control.Exception (evaluate)
 import GHC.Conc (getAllocationCounter)
@@ -18,8 +19,8 @@ import Hide.Buffer
 import Hide.Model
 import Hide.Unicode
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   let check name ok=unless ok (error name)
       clusters=["👩🏽\x200d\&💻","👨\x200d\&👩\x200d\&👧\x200d\&👦","🏳️\x200d\&🌈","🇯🇵","❤️","1️⃣","e\x301","क्\x200d\&ष"]
       wide=take 6 clusters
@@ -146,14 +147,14 @@ checks = do
   firstLength<-evaluate (sum (map (T.length . itemSourceText) (take 1 (displayItems longOverflow))))
   firstAfter<-getAllocationCounter
   check "the first overflow fragment does not prepare its unconsumed tail"
-    (firstLength==32 && firstBefore-firstAfter<262144)
+    (firstLength==32 && withinBudget profile (firstBefore-firstAfter) (262144))
   let longPrefix=T.replicate 100000 "é"
   _<-evaluate (T.length longPrefix)
   prefixBefore<-getAllocationCounter
   prefixCount<-evaluate (sum (map T.length (take 3 (graphemes longPrefix))))
   prefixAfter<-getAllocationCounter
   check "a grapheme prefix does not prepare the unconsumed UTF8 tail"
-    (prefixCount==3 && prefixBefore-prefixAfter<262144)
+    (prefixCount==3 && withinBudget profile (prefixBefore-prefixAfter) (262144))
   let sourceReference goal text=go 0 0 0 (displayItems text)
         where
           go char byte col []=(char,byte,col,[])
@@ -177,7 +178,7 @@ checks = do
                        in char+byte+col+sum (map (T.length . itemSourceText) (take 3 suffix)))
   afterSeek<-getAllocationCounter
   check "numeric source seek does not allocate discarded prefix fragments"
-    (seekCount==200003 && beforeSeek-afterSeek<262144)
+    (seekCount==200003 && withinBudget profile (beforeSeek-afterSeek) (262144))
   forM_ clusters $ \g -> do
     check "platform segments a complete grapheme" (graphemes g==[g])
     check "cursor crosses a complete grapheme" (nextCharacter (g<>"x") 0==T.length g && previousCharacter ("x"<>g) (1+T.length g)==1)
@@ -241,7 +242,7 @@ checks = do
     CellScript{}->error "unexpected script cell in border fixture") n row) 0 packed)
   after<-getAllocationCounter
   check "prepared border and padding grid stays within 1.5 MB allocation"
-    (occupied==9900 && before-after<1500000)
+    (occupied==9900 && withinBudget profile (before-after) (1500000))
   let mixed=textImage V.defAttr "Aéδ░│𝄞Z"
   check "compact single-cell Unicode runs preserve UTF8 bytes"
     ([text | row<-toList (cellRowsForPic (V.picForImage mixed) (7,1)),CellText _ text<-toList row]==["Aéδ░│𝄞Z"])

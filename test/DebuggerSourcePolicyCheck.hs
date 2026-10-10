@@ -4,7 +4,7 @@ module DebuggerSourcePolicyCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,poll,wait)
 import Control.Exception (bracket,finally)
-import Control.Monad (unless,void)
+import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe,Parser)
 import qualified Data.Text as T
@@ -17,11 +17,16 @@ import Hide.Model
 import qualified Data.Map.Strict as M
 import System.Directory (getTemporaryDirectory,removeFile,canonicalizePath)
 import System.IO (openTempFile,hClose)
+import System.FilePath ((</>),takeDirectory)
 import qualified Data.Text.IO as TIO
-import Hide.Files (FileState(..),loadFile)
-#ifndef mingw32_HOST_OS
-import System.Posix.Files (createNamedPipe)
+import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
+import Hide.Files (loadFile)
+#ifndef mingw32_HOST_OS
+import Data.IORef
+import Control.Monad (void)
+import Hide.Files (FileState(..))
+import System.Posix.Files (createNamedPipe)
 import qualified System.Posix.IO.ByteString as PosixBytes
 import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock)
 import System.IO.Error (tryIOError,isFullError)
@@ -39,7 +44,7 @@ localSourceCheck :: IO ()
 localSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(port,path,_)->do
   canonical<-canonicalizePath (path<>".hs")
   let text="disk\nα界🐈Z\n"
-  TIO.writeFile canonical text
+  BS.writeFile canonical (TE.encodeUtf8 text)
   Right (file,_)<-loadFile canonical
   withDebugger $ \runtime->do
     let core d [ReadPath target]=do
@@ -88,7 +93,7 @@ localSourceCheck=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(po
       humanShown<-await "human private source did not navigate" ((=="Stopped in private debugger source.").status) humanQueued
       unless (fmap (caret.selection) (activeWindow humanShown)==Just 10 && maybe False (privateDocument humanShown) (activeDocument humanShown))
         (fail "Human local source must retain ordinary document privacy"))
-      `finally` TIO.writeFile canonical text
+      `finally` BS.writeFile canonical (TE.encodeUtf8 text)
   putStrLn "local debugger source owner checks passed"
 
 -- Missing local paths are unavailable, unlike the normal new-file owner. A
@@ -133,7 +138,19 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
               value<-reply >>= either (fail . T.unpack) pure
               pure (parseMaybe (withObject "status" (\o->o .: "frame" >>= withObject "frame" (.:"id"))) value==Just (11::Int))
             awaitFrame d=do next<-tick d; ready<-frameReady next; if ready then pure next else threadDelay 1000 >> awaitFrame next
-            awaitSource d=do next<-tick d; if T.isPrefixOf "Stopped in " (status next) then pure next else threadDelay 1000 >> awaitSource next
+            awaitPreparation expected d=do
+              observed<-newIORef ("not polled"::T.Text,""::T.Text)
+              let loop current=do
+                    next<-tick current
+                    (_,reply)<-debuggerTool runtime next "debug_status" (object [])
+                    value<-reply >>= either (fail . T.unpack) pure
+                    phase<-maybe (fail "Missing source preparation phase") pure
+                      (parseMaybe (withObject "status" (.:"sourcePreparation")) value :: Maybe T.Text)
+                    writeIORef observed (phase,status next)
+                    if phase==expected then pure next else threadDelay 1000 >> loop next
+              timeout 5000000 (loop d) >>= maybe (do
+                actual<-readIORef observed
+                fail ("Source preparation did not reach "++T.unpack expected++": "++show actual)) pure
             base=addDocument Nothing (newBuffer "foreground") (initialDesktop (80,25))
         (_,attached)<-debuggerEffects runtime core base [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
         withAsync (awaitFrame attached) $ \owner->do
@@ -157,44 +174,39 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
             interruption<-case queued of
               Nothing->pure Nothing
               Just current->do
-                interrupted<-if action=="close" then pure (fst (runCommand Close current))
-                  else if action=="opened" then pure (insertText "!" (addDocument (Just (FileState source (Just "disk"))) (newBuffer "new open") current))
-                  else if action=="modal" || action=="modal-continue" then pure current {dialog=Just (Dialog "Human draft" (Searching False "draft") [Input "Query" "draft" 5] 0 ["OK"] [])}
-                  else snd <$> debuggerEffects runtime core current [DebugAction action []]
-                responsive<-timeout 1000000 (tick interrupted)
-                unless (maybe False (const True) responsive) (fail "Debugger source retirement blocked the UI owner")
-                pure (Just interrupted)
+                loading<-awaitPreparation "preparing" current
+                interrupted<-if action=="close" then pure (fst (runCommand Close loading))
+                  else if action=="opened" then pure (insertText "!" (addDocument (Just (FileState source (Just "disk"))) (newBuffer "new open") loading))
+                  else if action=="modal" || action=="modal-continue" then pure loading {dialog=Just (Dialog "Human draft" (Searching False "draft") [Input "Query" "draft" 5] 0 ["OK"] [])}
+                  else snd <$> debuggerEffects runtime core loading [DebugAction action []]
+                responsive<-timeout 1000000 (tick interrupted) >>= maybe
+                  (fail "Debugger source retirement blocked the UI owner") pure
+                pure (Just responsive)
             pure interruption
           _<-timeout 1000000 (wait owner)
           case returned of
             Nothing->fail "Debugger UI owner blocked on local source read"
             Just interrupted->do
-              settled<-foldTicks 30 tick interrupted
+              settled<-awaitPreparation (if action=="modal" || action=="modal-continue" then "ready" else "idle") interrupted
               let modalHeld=maybe False (\modal->dialogTitle modal=="Human draft" && focus modal==0 &&
                     case fields modal of [Input "Query" "draft" 5]->True; _->False) (dialog settled) &&
                     activeText settled=="foreground" && length (windows settled)==1
               unless (action/="modal" && action/="modal-continue" || modalHeld)
                 (fail "Prepared source replaced a human modal")
               if action=="modal" then do
-                resumed<-timeout 5000000 (awaitSource settled {dialog=Nothing}) >>= maybe (fail "Valid prepared local source was lost while modal") pure
-                unless (activeText resumed=="xy" && (activeDocument resumed >>= documentFile)/=Nothing)
+                resumed<-awaitPreparation "idle" settled {dialog=Nothing}
+                unless (activeText resumed=="xy" && (activeDocument resumed >>= fmap filePath.documentFile)==Just source)
                   (fail "Dismissed modal did not adopt its prepared file source")
               else do
                 cancelled<-if action=="modal-continue" then snd <$> debuggerEffects runtime core settled [DebugAction "continue" []] else pure settled
-                released<-foldTicks 30 tick cancelled {dialog=Nothing}
+                released<-awaitPreparation "idle" cancelled {dialog=Nothing}
                 if action=="opened" then do
-                  let rejected current=do
-                        next<-tick current
-                        if T.isInfixOf "target changed" (status next) then pure next else threadDelay 1000 >> rejected next
-                  refused<-timeout 5000000 (rejected released) >>= maybe (fail "Newly opened source was not refused") pure
-                  unless (activeText refused=="!new open" && fmap (caret.selection) (activeWindow refused)==Just 1)
+                  unless (T.isInfixOf "target changed" (status released) && activeText released=="!new open" && fmap (caret.selection) (activeWindow released)==Just 1)
                     (fail "Late source read changed a newly opened dirty target")
                 else unless (not (any ((==Just source).fmap filePath.documentFile) (M.elems (buffers released))) &&
                   (action=="close" || activeText released=="foreground"))
                   (fail "Released stale local source read reopened or jumped")
         putStrLn ("delayed local source "++T.unpack action++" checks passed")
-    foldTicks :: Int -> (Desktop -> IO Desktop) -> Desktop -> IO Desktop
-    foldTicks n tick d=if n<=0 then pure d else threadDelay 1000 >> tick d >>= foldTicks (n-1) tick
 #endif
 
 sourceHandleCheck :: IO ()
@@ -226,8 +238,9 @@ sourceHandleCheck=bracket (Fixture.fixture "mcp") Fixture.cleanup $ \(port,_,_)-
 
 originCheck :: IO ()
 originCheck=bracket temporary removeFile $ \path->do
-  let origin="/tmp/hide-authority/thc.toml"
-      base=(addReadOnly "Source private [9]" "unique private source" (initialDesktop (80,25))) {guestPrivatePaths=["/tmp/hide-authority"]}
+  let authority=takeDirectory path </> "hide-authority"
+      origin=authority </> "thc.toml"
+      base=(addReadOnly "Source private [9]" "unique private source" (initialDesktop (80,25))) {guestPrivatePaths=[authority]}
       guarded=base {buffers=M.map (\doc->doc {documentOrigin=Just origin}) (buffers base)}
       bid=maybe (error "missing source buffer") id (activeWindow guarded >>= bufferId)
       check label valid=unless valid (fail label)
@@ -238,7 +251,7 @@ originCheck=bracket temporary removeFile $ \path->do
   check "origin does not grant file/save authority" ((activeDocument guarded >>= documentFile)==Nothing)
   saved<-writeCheckpoint path guarded
   either (fail . show) pure saved
-  restored<-readCheckpoint path (initialDesktop (80,25)) {guestPrivatePaths=["/tmp/hide-authority"]} >>= either (fail . show) pure
+  restored<-readCheckpoint path (initialDesktop (80,25)) {guestPrivatePaths=[authority]} >>= either (fail . show) pure
   check "recovery preserves generated-source privacy association" ((activeDocument restored >>= documentOrigin)==Just origin && protectedBuffer restored bid && sanitizedBuffer restored bid==Nothing)
   putStrLn "generated source origin and recovery checks passed"
   where temporary=do root<-getTemporaryDirectory; (path,h)<-openTempFile root "hide-debug-origin"; hClose h; pure path

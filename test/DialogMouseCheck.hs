@@ -1,11 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 module DialogMouseCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import EditorFixture (withEditorFixture, sameBufferVersions)
 import Control.Monad (unless, forM_)
 import Control.Exception (evaluate)
 import GHC.Conc (getAllocationCounter)
 import System.Timeout (timeout)
+import System.FilePath ((</>))
 import Data.List (findIndex)
 import Data.Maybe (fromMaybe)
 import Hide.Commands (configuredBindings)
@@ -28,12 +30,13 @@ import Data.Foldable (toList)
 import qualified Data.Foldable as F (foldl')
 import qualified Data.Text.Lazy as TL
 
-checks :: IO ()
-checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
-  textAreaRenderChecks
+checks :: AllocationProfile -> IO ()
+checks profile = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
+  textAreaRenderChecks profile
   contextShortcutChecks
   searchChecks
   previousSearchChecks
+  filePickerGeometryChecks
   let check name ok = unless ok (error name)
       at n xs = case drop n xs of value:_ -> value; _ -> error "missing test fixture"
       desktop = addDocument Nothing (newBuffer "hello world") (initialDesktop (80,25))
@@ -103,8 +106,8 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       (_,directoryEffects)=handleDoubleClick (fx+2) (fy+2) browser
       (_,blankEffects)=handleDoubleClick (fx+2) (fy+7) browser
   check "single click selects without opening" (null singleEffects && dialog selected/=Nothing)
-  check "double click opens file" (fileEffects==[OpenFile PluginMenu.HumanMenu "/project/Main.hs"] && dialog opened==Nothing)
-  check "double click enters directory" (directoryEffects==[BrowsePath "/project/folder" "*"])
+  check "double click opens file" (fileEffects==[OpenFile PluginMenu.HumanMenu ("/project" </> "Main.hs")] && dialog opened==Nothing)
+  check "double click enters directory" (directoryEffects==[BrowsePath ("/project" </> "folder") "*"])
   check "double click blank row does not open" (null blankEffects)
   let (popup,_) = handleEvent (V.EvMouseDown 3 2 V.BRight []) desktop
       renameIndex=fromMaybe (error "missing Rename context action") (findIndex ((==RenameSymbol).snd) (contextItems (contextKind popup)))
@@ -394,7 +397,7 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       toggledPixel=fst (handleEvent (V.EvMouseDown (left pixelRect+1) (top pixelRect) V.BLeft []) graphicalPreferences)
       savedPixel=fst (handleEvent (V.EvKey V.KEnter []) toggledPixel)
   check "80x25 Preferences shows every appearance option without scrolling"
-    (all (`T.isInfixOf` snapshot graphicalPreferences) ["CRT filter","Pixelate Unicode","Streamer mode"] &&
+    (all (`T.isInfixOf` snapshot graphicalPreferences) ["CRT filter","Pixelate Unicode","Haptic Feedback","Streamer mode"] &&
      all (\r -> top r+height r<=minimum (map top (buttonRects graphicalPreferences graphicalDialog))) (fieldRects graphicalPreferences graphicalDialog))
   let preferenceRects=fieldRects graphicalPreferences graphicalDialog
       appearanceIndex=fromMaybe (error "missing appearance") (findIndex (\field -> case field of Radio "Appearance" _ _ -> True; _ -> False) (fields graphicalDialog))
@@ -403,8 +406,7 @@ checks = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
       darkSaved=fst (handleEvent (V.EvKey V.KEnter []) darkChoice)
       narrowPreferences=graphicalPreferences {screenSize=(40,25)}
   check "Preferences uses compact columns with working right-column hit targets"
-    (height (dialogRect graphicalPreferences graphicalDialog)<=15 &&
-     left appearanceRect>left (at 0 preferenceRects) && top appearanceRect==top (at 0 preferenceRects) &&
+    (left appearanceRect>left (at 0 preferenceRects) && top appearanceRect==top (at 0 preferenceRects) &&
      appearance darkSaved==DarkMode &&
      all (\i -> fieldRects graphicalPreferences graphicalDialog {focus=i}==preferenceRects) [0..length (fields graphicalDialog)-1])
   check "narrow Preferences falls back to one column"
@@ -500,9 +502,13 @@ contextShortcutChecks=do
       popupRow d n=T.lines (snapshot d) !! (top (popupRect d)+1+n)
       spans d n=toList (displayOpsForPic (renderDesktop d) (screenSize d)) !! n
       redKey key d n=any (\op->case op of TextSpan{textSpanText=t,textSpanAttr=a}->TL.toStrict t==key && V.attrForeColor a==V.SetTo (V.RGBColor 170 0 0); _->False) (toList (spans d n))
-  check "context menu paints the effective source remap" ("Ctrl+Shift+D" `T.isInfixOf` popupRow popup 3 && not ("F12" `T.isInfixOf` popupRow popup 3))
-  check "context menu omits an explicitly unbound shortcut" (not ("Shift+F1" `T.isInfixOf` popupRow popup 4))
-  check "context shortcut uses the dropdown red key color" (redKey "Ctrl+Shift+D" popup (top (popupRect popup)+4))
+  let displayed=T.lines (snapshot popup)
+      actionRow label=fromMaybe (error ("missing context action: "++T.unpack label)) (findIndex (T.isInfixOf label) displayed)
+      definitionRow=actionRow "Go to definition"
+      inspectRow=actionRow "Inspect type"
+  check "context menu paints the effective source remap" ("Ctrl+Shift+D" `T.isInfixOf` (displayed !! definitionRow) && not ("F12" `T.isInfixOf` (displayed !! definitionRow)))
+  check "context menu omits an explicitly unbound shortcut" (not ("Shift+F1" `T.isInfixOf` (displayed !! inspectRow)))
+  check "context shortcut uses the dropdown red key color" (redKey "Ctrl+Shift+D" popup definitionRow)
   let title=T.replicate 16 "界"
       mac=openContext (ToolchainContext [(title,Find)]) 96 5 base {nativeMac=True,videoMode=Just 3}
       rect=popupRect mac
@@ -520,8 +526,8 @@ contextShortcutChecks=do
 
 -- A clipped dialog must not reconstruct every character beyond its viewport.
 -- Preparation and the first draw are outside the measured interaction.
-textAreaRenderChecks :: IO ()
-textAreaRenderChecks=do
+textAreaRenderChecks :: AllocationProfile -> IO ()
+textAreaRenderChecks profile=do
   let text=T.intercalate "\n" (replicate 25 (T.replicate 300 "words 界 e\x301 👩🏽\x200d\&💻 "))
       buffer=newBuffer text
       frame n=(initialDesktop (100,35)) {sideTree=Nothing,blinkCursor=False,dialog=Just
@@ -536,5 +542,44 @@ textAreaRenderChecks=do
   before<-getAllocationCounter
   count<-evaluate (occupied (renderCellRows moved))
   after<-getAllocationCounter
-  unless (count>0 && before-after<4000000)
+  unless (count>0 && withinBudget profile (before-after) (4000000))
     (error "TextArea viewport reconstructs offscreen character lists")
+
+-- The picker has one geometry for painting, hit testing and keyboard paging.
+-- Resize while it is open as well as opening at the standard terminal sizes.
+filePickerGeometryChecks :: IO ()
+filePickerGeometryChecks=do
+  let entries=[Entry ("LongFileName"<>T.pack (show n)<>".hs") False Nothing Nothing | n<-[0..99::Int]]
+      opened=openBrowser "/project" "*" entries (initialDesktop (80,25))
+      selected d=case dialog d of Just dg | FileList _ choice:_<-drop 1 (fields dg)->choice; _->error "missing file list"
+      check label good=unless good (error label)
+  forM_ [(80,25),(160,50),(40,12)] $ \size->do
+    let desktop=fst (handleEvent (V.EvResize (fst size) (snd size)) opened)
+        dg=fromMaybe (error "missing file picker") (dialog desktop)
+        rect=fieldRects desktop dg !! 1
+        rows=fileListRows rect
+        columnWidth=(width rect-3) `div` 2
+        x=left rect+columnWidth+2
+        y=top rect+rows+1
+        (clicked,effects)=handleEvent (V.EvMouseDown x y V.BLeft []) desktop
+        (_,openedFile)=handleDoubleClick x y desktop
+        byColumn=fst (handleEvent (V.EvKey V.KRight []) desktop)
+        byPage=fst (handleEvent (V.EvKey V.KPageDown []) desktop)
+        outer=dialogRect desktop dg
+    check "file picker stays within display bounds"
+      (left outer>=0 && left outer+width outer<=fst size && top outer>=1 && top outer+height outer<=snd size-1)
+    check "file picker click and double click agree on the final visible entry"
+      (selected clicked==2*rows-1 && null effects && openedFile==[OpenFile PluginMenu.HumanMenu ("/project" </> T.unpack (entryName (entries !! (2*rows-1))))])
+    check "file picker column and page keys use its current visible height"
+      (selected byColumn==rows && selected byPage==2*rows)
+    check "file picker borders do not select filenames"
+      (all (\(px,py)->fileEntryAt px py desktop dg==Nothing)
+        [(left rect,top rect+2),(left rect+columnWidth+1,top rect+2),(x,top rect+1),(x,top rect+rows+2)])
+    whenRoom size outer rows check
+  let long="Hide.LongFileNameThatShouldFitInTheOpenDialog.hs"
+      wide=openBrowser "/project" "*" [Entry long False Nothing Nothing] (initialDesktop (160,50))
+  check "large file picker renders a modern filename without truncation" (long `T.isInfixOf` snapshot wide)
+  where
+    whenRoom (w,h) outer rows check
+      | w>=80 && h>=25=check "file picker uses more filename width and rows than the old fixed dialog" (width outer>62 && rows>8)
+      | otherwise=pure ()

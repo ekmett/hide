@@ -827,7 +827,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
           safeSettings<-publicAgentSettings runtime value
           keys<-conversationKeys runtime s
           case control of
-            AR.ConfigurePrimary _ _ _ reply->void (tryPutMVar reply (Right (AH.filterPrivateCapabilities keys (AH.parseCapabilities (agentInitialized s) value))))
+            AR.ConfigurePrimary _ _ _ reply->void (tryPutMVar reply (Right (AP.filterPrivateCapabilities keys (AP.parseCapabilities (agentInitialized s) value))))
             _->pure ()
           pure d {agentSettings=safeSettings,contextMenu=Nothing,status=if M.member "" (agentControls s) then "Updating conversation settings..." else "Conversation settings updated."}
         (Just (Steering text control),Right value,_) -> case field "outcome" value :: Maybe Text of
@@ -1487,7 +1487,7 @@ syncConversationAgent runtime@(ConversationState _ ref _ _) = do
   owner<-traverse (\client->makeStableName =<< evaluate client) (connection s)
   deliveryActive<-AR.primaryDeliveryActive (conversationAgents runtime)
   let key=fromMaybe "" (session s)
-      caps=AH.filterPrivateCapabilities keys (AH.parseCapabilities (agentInitialized s) (agentConfig s))
+      caps=AP.filterPrivateCapabilities keys (AP.parseCapabilities (agentInitialized s) (agentConfig s))
       externallyBusy=busy s && not deliveryActive
       signature=(project s,owner,key,caps,externallyBusy)
   when (lastAgentSync s/=Just signature) $ do

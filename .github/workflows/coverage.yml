@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
+name: Coverage
+on:
+  push:
+    branches: [main]
+    paths-ignore: &docs-only
+      - '**/*.md'
+      - 'docs/**'
+      - 'tools/docs/**'
+      - 'assets/examples/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths-ignore: *docs-only
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: ${{ matrix.flag }} / GHC 9.14.1
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            flag: Linux_X64
+          - runner: macos-15
+            flag: macOS_ARM64
+          - runner: windows-2025
+            flag: Windows_X64
+    defaults:
+      run:
+        shell: bash
+    env:
+      TEST_RESULTS: build/coverage-results/${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.flag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-haskell
+        id: setup
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: cache
+        with:
+          path: |
+            ${{ steps.setup.outputs.cabal-store }}
+            build/coverage
+          key: hpc-v3-smoke-${{ matrix.flag }}-ghc9.14.1-${{ hashFiles('hide.cabal', 'packages/**/*.cabal', 'plugins/**/*.cabal', 'cabal.project') }}-${{ github.sha }}
+          restore-keys: |
+            hpc-v3-smoke-${{ matrix.flag }}-ghc9.14.1-${{ hashFiles('hide.cabal', 'packages/**/*.cabal', 'plugins/**/*.cabal', 'cabal.project') }}-
+            hpc-v3-smoke-${{ matrix.flag }}-ghc9.14.1-
+            hpc-v2-${{ matrix.flag }}-ghc9.14.1-cabal3.16-core-web-
+      - name: Prepare invocation reports
+        run: mkdir -p "$TEST_RESULTS"
+      - name: Install report converter
+        run: cabal install hpc-codecov-0.6.4.1 --installdir="$RUNNER_TEMP/coverage-tools" --install-method=copy --overwrite-policy=always
+      - name: Build representative coverage checks
+        run: cabal build coverage-smoke --builddir=build/coverage --enable-coverage -O0 -j2 -f-window -f-terminal
+      - name: Cache completed build
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ${{ steps.setup.outputs.cabal-store }}
+            build/coverage
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Exercise representative paths once
+        id: tests
+        run: |
+          test_exe=$(cabal list-bin coverage-smoke --builddir=build/coverage --enable-coverage -O0 -f-window -f-terminal)
+          test_exe=${test_exe%$'\r'}
+          HPCTIXFILE="$TEST_RESULTS/editor-tests.tix" cabal exec --builddir=build/coverage --enable-coverage -O0 -f-window -f-terminal -- "$test_exe" --xml="$TEST_RESULTS/tests.xml" +RTS --read-tix-file=no -RTS
+      - name: Collect HPC and JUnit reports
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        run: python tools/coverage.py --builddir build/coverage --output "$TEST_RESULTS" --converter "$RUNNER_TEMP/coverage-tools/hpc-codecov"
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() && hashFiles(format('{0}/coverage.info', env.TEST_RESULTS)) != '' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          files: ${{ env.TEST_RESULTS }}/coverage.info
+          disable_search: true
+          flags: ${{ matrix.flag }}
+          name: ${{ matrix.flag }}-hpc
+          fail_ci_if_error: true
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && hashFiles(format('{0}/tests.xml', env.TEST_RESULTS)) != '' }}
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          report_type: test_results
+          use_oidc: true
+          files: ${{ env.TEST_RESULTS }}/tests.xml
+          disable_search: true
+          flags: ${{ matrix.flag }}
+          name: ${{ matrix.flag }}-coverage
+          fail_ci_if_error: true
+      - name: Retain invocation reports
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ matrix.flag }}
+          path: |
+            ${{ env.TEST_RESULTS }}/
+            build/coverage/cache/plan.json
+            build/coverage/**/hpc/**/*.mix
+          retention-days: 7
+          if-no-files-found: error

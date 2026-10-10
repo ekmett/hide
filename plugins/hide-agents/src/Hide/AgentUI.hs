@@ -1,23 +1,22 @@
 {-# LANGUAGE OverloadedStrings #-}
--- | Module      : Hide.AgentSidebar
+-- | Module      : Hide.AgentUI
 -- Copyright   : (c) Edward Kmett 2026
 -- License     : BSD-3-Clause
 -- Maintainer  : Edward Kmett
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 --
--- Agents consumes the shared tree with scoped ID-bound commands. One worker
--- prepares only names, parents and states; owner ticks compare its small revision
--- and invalidate at most four nodes through the existing tree request machinery.
-module Hide.AgentSidebar (AgentSidebar, withAgentSidebar, tickAgentSidebar) where
+-- Agents contributes a tree and scoped ID-bound commands through public plugin
+-- capabilities. Its worker prepares metadata and queues invalidations; the host
+-- adopts bounded deltas without calling plugin code on the UI owner.
+module Hide.AgentUI (plugin) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync)
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
-import Control.Monad (forever)
-import Data.Aeson (Value(Null),withObject,(.:))
-import Data.Aeson.Types (parseMaybe)
+import Control.Monad (forever,forM_)
+import Data.Aeson (Value(Null))
 import Data.IORef
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
@@ -25,18 +24,27 @@ import Data.Maybe (mapMaybe,listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
-import qualified Hide.AgentHub as A
-import Hide.AgentRuntime (AgentRuntime,agentHub)
-import Hide.Autocomplete (Autocomplete,completionSummary,completionChoices)
-import Hide.AgentSidebarTypes
+import qualified Hide.Plugin.Agent as A
+import qualified Hide.Plugin.AgentDirectory as A
+import Hide.Plugin.AgentDirectory (AgentDirectory(..),DirectoryRequest(..),CompletionEntry(..))
 import qualified Hide.Plugin.Form as Form
 import Hide.Plugin.Command
+import Hide.Plugin.Session (Plugin(..),Session(..))
+import qualified Hide.AgentTools as AgentTools
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Sidebar as Sidebar
 
-data Snapshot = Snapshot !Integer ![P.NodeId] !(M.Map A.AgentId A.AgentSummary) !(Maybe CompletionSummary)
-data AgentSidebar c r = AgentSidebar !(Sidebar.Sidebar c r) !P.TreeRef !(IORef Snapshot) !(IORef (Integer,[P.NodeId]))
+data Snapshot completion = Snapshot !(M.Map A.AgentId A.AgentSummary) !(Maybe (CompletionEntry completion))
+
+-- | Register the Agents directory for this session. Closing its view or this
+-- registration never stops providers; the host retains their shared lifetime.
+plugin :: Plugin
+plugin=Plugin
+  { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
+  , pluginAgentTools=AgentTools.tools
+  }
+
 rootId :: P.NodeId
 rootId=ident "agents"
 ident :: Text -> P.NodeId
@@ -44,17 +52,12 @@ ident=either (error . T.unpack) id . P.nodeId
 agentNode :: A.AgentId -> P.NodeId
 agentNode=ident . A.agentIdText
 
-completionNodeId :: CompletionTarget -> P.NodeId
-completionNodeId (CompletionTarget epoch _)=ident ("acp-completion-"<>T.pack (show epoch))
-
 -- | Scope commands and one metadata preparation worker. Closing the view never
 -- closes agents; closing this registration rejects retained hits and commands.
-withAgentSidebar :: Sidebar.Sidebar c r -> (AgentSidebarRequest -> r) -> AgentRuntime -> Autocomplete -> (AgentSidebar c r -> IO a) -> IO a
-withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->do
+withAgentSidebar :: Eq completion => Sidebar.Sidebar c r -> (DirectoryRequest settings completion -> r) -> AgentDirectory settings completion -> IO a -> IO a
+withAgentSidebar host inject directory use=withRegistry $ \registry->do
   (initial,initialCompletion)<-prepare
-  affected<-prepareParents M.empty initial
-  source<-newIORef (Snapshot 1 affected initial initialCompletion)
-  pending<-newIORef (0,[])
+  source<-newIORef (Snapshot initial initialCompletion)
   let command name title run=registerCommand registry (CommandDef name title hidden hidden run) >>= either (ioError . userError . show) pure
       human ctx value=if Sidebar.sidebarOrigin host ctx==Menu.HumanMenu then pure (Right (inject value)) else pure (Left (CommandRejected "Agent sidebar actions require the human."))
   open<-command "hide.sidebar.agents.open" "Conversation" (\ctx who->human ctx (ShowAgent who))
@@ -64,11 +67,11 @@ withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->
     human ctx (RenameAgentTo who copied))
   rename<-command "hide.sidebar.agents.rename" "Rename" (\ctx who->
     if Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Agent forms require the human.")) else do
-      selected<-A.statusAgent (agentHub runtime) A.Human who
+      selected<-directoryAgent directory who
       case selected of
         Left err->pure (Left (CommandRejected err))
         Right entry->do
-          let name=case parseMaybe (withObject "Agent" (.: "name")) entry of Just value->value; Nothing->A.agentIdText who
+          let name=A.summaryName entry
           prepared<-Form.prepareForm Form.PrivateForm (Form.InputFormSpec "Rename agent" "Name" name "Rename")
             (Form.formAction registry renameTo (\text->(who,text)) (\_ reply->pure reply))
           pure (Sidebar.formReply host <$> prepared))
@@ -82,10 +85,9 @@ withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->
       configurationCommand category ctx who
         | Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Agent forms require the human."))
         | otherwise=do
-            -- tickConversation keeps the primary hub advertisement current.
-            -- Opening may show old metadata; final ConfigureAgent sync/currentness
-            -- remains the authority and cannot apply a replaced receipt.
-            captured<-A.agentConfiguration (agentHub runtime) who
+            -- The host owns advertised metadata and validates the captured
+            -- receipt again on application. A refresh cannot retarget this form.
+            captured<-directorySettings directory who
             case captured of
               Right (receipt,choices) | [choice]<-[choice | choice<-choices,A.configCategory choice==category]->do
                 prepared<-Form.prepareForm Form.ReadableForm (choiceSpec "Agent setting" (A.configValues choice) (A.configCurrent choice))
@@ -95,7 +97,7 @@ withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->
       completionCommand category ctx target
         | Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Completion forms require the human."))
         | otherwise=do
-            captured<-completionChoices autocomplete target category
+            captured<-directoryCompletionSettings directory target category
             case captured of
               Left err->pure (Left (CommandRejected err))
               Right (receipt,option,choices,current)->do
@@ -127,12 +129,12 @@ withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->
              (if branch then Nothing else Just action)
              ([P.ActionMenu "Conversation" action | branch]++[P.ActionMenu "Rename" (P.treeAction registry rename who (\_ value->pure value))]++
               [P.ActionMenu title (P.treeAction registry setting who (\_ value->pure value)) | (title,setting)<-[(title,setting) | (title,setting,available)<-[("Model",model,A.summaryModel summary),("Effort",effort,A.summaryEffort summary)],available]])
-      completionNode (CompletionSummary target state)=P.NodeDef
-        (P.NodeInfo (completionNodeId target) ("ACP completion  "<>state) "" False Nothing)
+      completionNode (CompletionEntry key target state)=P.NodeDef
+        (P.NodeInfo (ident key) ("ACP completion  "<>state) "" False Nothing)
         (Just (P.treeAction registry completionOpen target (\_ value->pure value)))
         [P.ActionMenu title (P.treeAction registry setting target (\_ value->pure value)) | (title,setting)<-[("Model",completionModel),("Effort",completionEffort)]]
   provider<-P.registerTree registry "hide.sidebar.agents" root (\_ (P.ChildRequest parent cursor)->do
-    Snapshot _ _ values completion<-readIORef source
+    Snapshot values completion<-readIORef source
     let children=filter (\summary->if parent==rootId then maybe True (not . (`M.member` values)) (A.summaryParent summary) else fmap agentNode (A.summaryParent summary)==Just parent) (M.elems values)
     case traverse (readMaybe . T.unpack) cursor of
       Nothing->pure (Left (InvalidArguments "Invalid agent page cursor."))
@@ -145,38 +147,24 @@ withAgentSidebar host inject runtime autocomplete use=withRegistry $ \registry->
   let worker=forever $ do
         threadDelay 250000
         (next,nextCompletion)<-prepare
-        Snapshot revision _ previous oldCompletion<-readIORef source
+        Snapshot previous oldCompletion<-readIORef source
         if next==previous && nextCompletion==oldCompletion then pure () else do
           affectedNodes<-prepareParents previous next
-          writeIORef source (Snapshot (revision+1) affectedNodes next nextCompletion)
-  withAsync worker (const (use (AgentSidebar host (P.treeReference provider) source pending)))
+          writeIORef source (Snapshot next nextCompletion)
+          forM_ affectedNodes (Sidebar.invalidateTree host (P.treeReference provider))
+  withAsync worker (const use)
   where
     hidden=Codec Null (const (Left "Agent arguments are host-captured.")) (const Null)
     prepare=do
-      summaries<-A.agentSummaries (agentHub runtime)
+      summaries<-directoryAgents directory
       let bounded=take 1024 summaries
       _<-evaluate (force [(A.agentIdText (A.summaryId summary),A.summaryName summary,fmap A.agentIdText (A.summaryParent summary),A.summaryStatus summary) | summary<-bounded])
       values<-evaluate (M.fromList [(A.summaryId summary,summary) | summary<-bounded])
-      completion<-completionSummary autocomplete
+      completion<-directoryCompletion directory
+      _<-evaluate (force [(completionKey entry,completionStatus entry) | Just entry<-[completion]])
       pure (values,completion)
     prepareParents previous next=do
       let affectedNodes=parents previous next
       _<-evaluate (force (map P.nodeIdText affectedNodes))
       pure affectedNodes
     parents previous next=rootId:map agentNode (S.toList (S.fromList (mapMaybe A.summaryParent (M.elems previous++M.elems next))))
-
--- | /O(1)/ revision admission, then at most four scoped invalidations. Provider
--- callbacks and metadata/history scans never run on this owner tick.
-tickAgentSidebar :: AgentSidebar c r -> IO ()
-tickAgentSidebar (AgentSidebar host owner source ref)=do
-  Snapshot revision changed _ _<-readIORef source
-  (adopted,waiting)<-readIORef ref
-  let requested=if revision==adopted then waiting else changed
-  retained<-submit (4::Int) requested
-  writeIORef ref (revision,retained)
-  where
-    submit _ []=pure []
-    submit 0 pending=pure pending
-    submit budget pending@(node:rest)=do
-      accepted<-Sidebar.tryInvalidateTree host owner node
-      if accepted then submit (budget-1) rest else pure pending

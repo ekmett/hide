@@ -94,6 +94,7 @@ sanitizedPreparedContent prepared
 guestCommandAllowed :: Command -> Bool
 guestCommandAllowed cmd=case cmd of
   RegisteredMenu _ allowed -> allowed
+  ExportBuffer -> False
   DebugCommand action | privateDebuggerAction action -> False
   GitDiff -> False
   GitCommit -> False
@@ -189,6 +190,7 @@ guestEffectsAllowed=all allowed
     allowed SaveChatSubmit{}=False
     allowed AutocompleteAction{}=False
     allowed DownloadCancelAction{}=False
+    allowed ExportBufferDocument{}=False
     allowed (DebugAction action _)=not (privateDebuggerAction action)
     allowed (ServiceAction action _)=serviceActionAllowed action
     allowed AgentAction{}=False
@@ -254,12 +256,11 @@ guestTransitionAllowed before after effects
   | not metadataUnchanged = pure False
   | otherwise = do
       drafts<-foldM sameDraft True (M.toList (editorDrafts before))
-      autocomplete<-sameContent (autocompleteDraft before) (autocompleteDraft after)
       question<-case (chatQuestion before,chatQuestion after) of
         (Nothing,Nothing)->pure True
         (Just a,Just b)->sameConstructor a b
         _->pure False
-      if not (drafts && autocomplete && question) then pure False else
+      if not (drafts && question) then pure False else
         foldM unchanged True (M.toList (buffers before))
   where
     metadataUnchanged=guestEffectsAllowed effects && not (guestModalBlocked after) &&
@@ -267,7 +268,6 @@ guestTransitionAllowed before after effects
       M.keys (editorDrafts before)==M.keys (editorDrafts after) &&
       editingInput before==editingInput after &&
       autocompleteWindow before==autocompleteWindow after && autocompleteACPEnabled before==autocompleteACPEnabled after &&
-      autocompleteSelection before==autocompleteSelection after && autocompleteFocused before==autocompleteFocused after &&
       agentSettings before==agentSettings after && childAgentSettings before==childAgentSettings after &&
       childAgentSteering before==childAgentSteering after && childAgentContextUsage before==childAgentContextUsage after
     sameDraft False _=pure False
@@ -356,7 +356,6 @@ readableAt d x y
   _ | overlayAt d x y -> True
     | otherwise -> case topWindow d x y of
         Just w | windowHasEditor d w,inside (composerRect d w) x y -> False
-        Just w | autocompletePane d w,inside (autocompleteComposerRect d w) x y -> False
         Just w | PluginContent _<-windowContent w ->case windowPluginText d w of
           Just prepared | not (privatePreparedWindow d prepared)->not (preparedCellPrivate W.textGuestHidden d prepared w x y)
           _->False
@@ -419,14 +418,15 @@ privateBrowserCell d dg x y=case purpose dg of
     privateFieldCell base (r,field) | Just (_,value)<-inputValue field=inside r x y && y==top r+1 && privateName base (T.unpack value)
     privateFieldCell base (r,FileList entries chosen)
       | not (inside r x y)=False
-      | y==top r+12=privateEntry chosen
-      | y==top r+11=case purpose dg of Opening _ pattern _ -> privateName base (T.unpack pattern); _ -> privateName base base
-      | y>=top r+2 && y<top r+10,x>left r,x<left r+cw+1=privateEntry (page+y-top r-2)
-      | y>=top r+2 && y<top r+10,x>left r+cw+1,x<left r+2*cw+2=privateEntry (page+8+y-top r-2)
+      | y==top r+height r-1=privateEntry chosen
+      | y==top r+height r-2=case purpose dg of Opening _ pattern _ -> privateName base (T.unpack pattern); _ -> privateName base base
+      | y>=top r+2 && y<top r+2+count,x>left r,x<left r+cw+1=privateEntry (page+y-top r-2)
+      | y>=top r+2 && y<top r+2+count,x>left r+cw+1,x<left r+2*cw+2=privateEntry (page+count+y-top r-2)
       | otherwise=False
       where
         cw=max 1 ((width r-3) `div` 2)
-        page=(max 0 chosen `div` 16)*16
+        count=fileListRows r
+        page=(max 0 chosen `div` (2*count))*(2*count)
         privateEntry index=maybe False (privateName base . T.unpack . entryName) (at entries index)
     privateFieldCell _ _=False
 

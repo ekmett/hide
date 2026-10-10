@@ -126,8 +126,6 @@ data RenderState = RenderState
   , keyInlineEpoch :: Int
   , keyAutocompleteWindow :: Maybe PluginWindow.WindowRef
   , keyAutocompleteACPEnabled :: Bool
-  , keyAutocompleteSelection :: Selection
-  , keyAutocompleteFocused :: Bool
   , keyDockedTerminals :: M.Map Int (Rect,Maybe Rect)
   , keyBottomTerminal :: Maybe Int
   } deriving Eq
@@ -152,7 +150,7 @@ renderKey original = do
   identities<-newIORef []
   let payload value = do
         evaluated<-evaluate value
-        identity<-makeStableName evaluated
+        identity<-makeStableName $! evaluated
         modifyIORef' identities (RenderIdentity identity:)
       present=maybe False (const True)
       file value=do
@@ -207,7 +205,6 @@ renderKey original = do
   documents<-mapM document (buffers original)
   drafts<-mapM draft (editorDrafts original)
   mapM_ payload (inlinePreview original)
-  payload (autocompleteDraft original)
   views<-mapM view (conversationViews original)
   question'<-traverse question (chatQuestion original)
   dialog'<-traverse dialogKey (dialog original)
@@ -286,8 +283,6 @@ renderKey original = do
         , keyInlineEpoch=inlineEpoch original
         , keyAutocompleteWindow=autocompleteWindow original
         , keyAutocompleteACPEnabled=autocompleteACPEnabled original
-        , keyAutocompleteSelection=autocompleteSelection original
-        , keyAutocompleteFocused=autocompleteFocused original
         , keyDockedTerminals=dockedTerminals original
         , keyBottomTerminal=bottomTerminal original
         }
@@ -364,7 +359,7 @@ desktopCanvases d=zipWith surface [1..64] eligible
     surface slot (w,image,prepared,viewport,clipped)=CanvasSurface (windowId w) slot image clipped
       (canvasImageTarget (modeHeight (fromMaybe 3 (videoMode d))) viewport (imageViewport w) image)
       (T.take 256 (PluginWindow.preparedWindowTitle prepared))
-      ("PNG "<>T.pack (show (imageWidth image))<>" × "<>T.pack (show (imageHeight image))<>
+      (imageFormat image<>" "<>T.pack (show (imageWidth image))<>" × "<>T.pack (show (imageHeight image))<>
        ". F: fit; 1: actual size; plus/minus or wheel: zoom; arrows or drag: pan.")
 
 -- | Cursor from the same scene, without projecting its cell grid into an image.
@@ -442,10 +437,6 @@ renderSceneWith canvases d=(privacyLayers++layers,visibleCursor)
           cy=top rect
           body=pluginTextRect d w
           in if inside body cx cy then V.Cursor cx cy else V.NoCursor
-        (Just w,_) | activeAutocomplete d && autocompleteFocused d -> let
-          b=autocompleteDraft d; (r,c)=bufferLineColumn b (caret (autocompleteSelection d)); (sr,sc)=autocompleteComposerScroll d w
-          rect=autocompleteComposerRect d w
-          in if height rect>0 && width rect>0 then V.Cursor (left rect+displayColumn (bufferLineAt b r) c-sc) (top rect+r-sr) else V.NoCursor
         (Just w,_) | composerActive d,Just draft<-windowEditorDraft d w -> let
           b=editorDraftBuffer draft; (r,c)=bufferLineColumn b (caret (editorDraftSelection draft)); (sr,sc)=composerScroll d w
           rect=composerRect d w; (marker,line)=if windowEditorCode w then composerLine b r else (0,bufferLineAt b r)
@@ -484,17 +475,16 @@ hostWindowFrame d active w frame=
 -- The host paints one input owner identically over source and prepared bodies.
 composerLayers :: Desktop -> Bool -> Window -> [V.Image]
 composerLayers d active w
-  | not (windowHasEditor d w) && not hintComposer = []
+  | not (windowHasEditor d w) = []
   | otherwise = [place (left rect) (top rect) inputImage] ++ thoughtEdges
   where
     attached=windowEditorDraft d w
-    hintComposer=autocompletePane d w
-    rect=if hintComposer then autocompleteComposerRect d w else composerRect d w
-    draft=if hintComposer then autocompleteDraft d else maybe emptyEditorBuffer editorDraftBuffer attached
-    draftSelection=if hintComposer then autocompleteSelection d else maybe (Selection 0 0) editorDraftSelection attached
-    draftFocused=if hintComposer then autocompleteFocused d else maybe False editorDraftFocused attached
-    (sr,sc)=if hintComposer then autocompleteComposerScroll d w else composerScroll d w
-    draftLine n=if not hintComposer && windowEditorCode w then composerLine draft n else (0,bufferLineAt draft n)
+    rect=composerRect d w
+    draft=maybe emptyEditorBuffer editorDraftBuffer attached
+    draftSelection=maybe (Selection 0 0) editorDraftSelection attached
+    draftFocused=maybe False editorDraftFocused attached
+    (sr,sc)=composerScroll d w
+    draftLine n=if windowEditorCode w then composerLine draft n else (0,bufferLineAt draft n)
     thoughtEdges
       | width rect<=0 || height rect<=0 = []
       | otherwise = [place (left rect-1) (top rect) (edgeImage True),
@@ -1159,14 +1149,14 @@ dialogLayers d dg =
           CheckBox name checked -> row a fw ((if checked then "[X] " else "[ ] ")<>name)
           Radio name values chosen -> V.vertCat (row paper fw name:[row (if focus dg==i && n==chosen then selected else paper) fw ((if n==chosen then "(●) " else "( ) ")<>v) | (n,v)<-zip [0..] values])
           FileList entries chosen ->
-            let cw=max 1 ((fw-3) `div` 2); page=(max 0 chosen `div` 16)*16
+            let cw=max 1 ((fw-3) `div` 2); rows=fileListRows rect; page=(max 0 chosen `div` (2*rows))*(2*rows)
                 listColor=attr black scrollCyan
                 borderColor=attr blue scrollCyan
                 item idx=case drop idx entries of
                   e:_ -> row (if idx==chosen then attr (if focus dg==i then white else black) green else listColor) cw (" "<>entryName e<>(if entryDirectory e then "/" else ""))
                   _ -> row listColor cw ""
                 bar=label borderColor "┌" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┬" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┐"
-                line r=label borderColor "│" V.<|> item (page+r) V.<|> label borderColor "│" V.<|> item (page+8+r) V.<|> label borderColor "│"
+                line r=label borderColor "│" V.<|> item (page+r) V.<|> label borderColor "│" V.<|> item (page+rows+r) V.<|> label borderColor "│"
                 path=case purpose dg of Opening base pattern _ -> T.pack (base </> T.unpack pattern); ChangingDirectory base _ -> T.pack base; _ -> ""
                 details=case drop chosen entries of
                   entry:_ | chosen>=0 ->
@@ -1175,7 +1165,7 @@ dialogLayers d dg =
                         suffix="  "<>size<>"  "<>stamp
                     in T.take (columnOffset (entryName entry) (max 0 (fw-T.length suffix))) (entryName entry)<>suffix
                   _ -> ""
-            in V.vertCat ([row paper fw (case purpose dg of ChangingDirectory{} -> "Directories"; _ -> "Files"),bar] ++ [line r | r<-[0..7]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
+            in V.vertCat ([row paper fw (case purpose dg of ChangingDirectory{} -> "Directories"; _ -> "Files"),bar] ++ [line r | r<-[0..rows-1]] ++ [label borderColor "└" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┴" V.<|> V.charFill borderColor '─' cw 1 V.<|> label borderColor "┘",row (attr scrollCyan blue) fw path,row (attr scrollCyan blue) fw details])
           ListBox name values chosen -> V.vertCat (row paper fw name:[row (if n==chosen then a else paper) fw (" "<>v) | (n,v)<-take 4 (drop (max 0 (chosen-3)) (zip [0..] values))])
 
 -- | Render a colorless character-grid snapshot for inspection and tests.

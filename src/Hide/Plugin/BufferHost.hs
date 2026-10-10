@@ -9,11 +9,12 @@ module Hide.Plugin.BufferHost
   , ContentVersion, captureRead, captureVersion, versionCurrent
   , BufferReader, newBufferReader, readerReference, requestCapture, requestListing
   , ListedBuffer(..)
-  , BufferEditor, newBufferEditor, editorReference, requestDiff, DiffResult(..)
+  , BufferDiff(..), BufferEditor, newBufferEditor, editorReference, requestDiffs, requestDiff, DiffResult(..)
   , CapturedRead(..), BufferMetadata(..) ) where
 
 import Control.Exception (evaluate)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Unique (Unique,newUnique)
 import System.Mem.StableName (StableName, makeStableName)
 import Hide.Buffer (Buffer, BufferContent, bufferContent, revision)
@@ -50,7 +51,9 @@ captureRead = bufferContent
 captureVersion :: Buffer -> IO ContentVersion
 captureVersion b=do
   evaluated<-evaluate b
-  identity<-makeStableName evaluated
+  -- Strict application also removes an HPC tick thunk at this call site.
+  -- Name the evaluated buffer constructor, never an instrumentation wrapper.
+  identity<-makeStableName $! evaluated
   pure (ContentVersion (revision evaluated) identity)
 
 -- | Check current immutable identity and revision without payload traversal.
@@ -99,12 +102,16 @@ data CapturedRead = CapturedRead
   , capturedContent :: BufferContent, capturedRedacted :: Bool
   , capturedMetadata :: !BufferMetadata }
 
--- | Session/actor-bound strict-diff admission; no cached approval or Human call.
-data BufferEditor = BufferEditor BufferNamespace (BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult))
+-- | One strict unified diff against the exact version from an admitted read.
+-- The reference names a session-owned target; construction grants no authority.
+data BufferDiff = BufferDiff !BufferRef !ContentVersion !Text
+
+-- | Session/actor-bound atomic diff admission; no cached approval or Human call.
+data BufferEditor = BufferEditor BufferNamespace ([BufferDiff] -> IO (Either Text [DiffResult]))
 
 -- | Host-only assembly over the fixed admission transport. The callback owns
 -- current policy, actor and target validation; constructing a handle grants none.
-newBufferEditor :: BufferNamespace -> (BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)) -> BufferEditor
+newBufferEditor :: BufferNamespace -> ([BufferDiff] -> IO (Either Text [DiffResult])) -> BufferEditor
 newBufferEditor = BufferEditor
 
 -- | Host wire adapter: a reference alone confers no edit authority.
@@ -112,8 +119,18 @@ editorReference :: BufferEditor -> Int -> BufferRef
 editorReference (BufferEditor namespace _) = bufferReference namespace
 
 -- | Submit on a worker; waiting for approval must remain outside session locks.
+-- The host validates the entire batch and returns results in input order.
+requestDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])
+requestDiffs (BufferEditor _ request) = request
+
+-- | Singleton convenience over the same batch admission callback. A malformed
+-- host result cannot silently select a result from an empty or larger response.
 requestDiff :: BufferEditor -> BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)
-requestDiff (BufferEditor _ request) = request
+requestDiff editor target version patch=do
+  result<-requestDiffs editor [BufferDiff target version patch]
+  pure $ result >>= \results->case results of
+    [applied]->Right applied
+    _->Left (T.pack "Diff host returned an invalid singleton result")
 
 -- | Exact applied review and resulting revision. Success never saves the buffer.
 data DiffResult = DiffResult { diffRevision :: !Int, appliedDiff :: !Text, userModified :: !Bool }

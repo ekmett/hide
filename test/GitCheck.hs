@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 module GitCheck (checks) where
 
@@ -29,6 +30,8 @@ checks = bracket temporary removePathForcibly $ \base -> do
   absent <- repositoryStatus dir
   check "nonrepository has no status" (absent == Nothing)
   void (git ["init", "-b", "main"])
+  void (git ["config", "core.autocrlf", "false"])
+  void (git ["config", "core.symlinks", "true"])
   void (git ["config", "core.hooksPath", dir </> ".git" </> "hooks"])
   initial <- repositoryStatus dir
   check "unborn branch has clean status" (fmap repoBranch initial == Just "main" && fmap repoDirty initial == Just False)
@@ -53,10 +56,19 @@ checks = bracket temporary removePathForcibly $ \base -> do
   dirty <- repositoryStatus dir
   check "modified and untracked repository is dirty" (fmap repoDirty dirty == Just True)
   check "line counts combine net tracked edits and untracked additions" (fmap counts dirty==Just (2,1))
-  let unusual=dir </> "tab\tline\nname.txt"
+  let unusual=dir </>
+#ifdef mingw32_HOST_OS
+        "brackets [λ] $ ; name.txt"
+#else
+        "tab\tline\nname.txt"
+#endif
   writeFile unusual "one\ntwo\nthree\n"
   unusualStatus<-repositoryStatus dir
+#ifdef mingw32_HOST_OS
+  check "numstat handles legal Windows filename metacharacters" (fmap counts unusualStatus==Just (5,1))
+#else
   check "numstat handles filenames containing tabs and newlines" (fmap counts unusualStatus==Just (5,1))
+#endif
   removeFile unusual
   changes <- repositoryDiff dir Nothing >>= right
   check "diff includes staged unstaged and untracked" (all (`T.isInfixOf` changes) ["+staged", "+working", "new file.txt"])
@@ -118,13 +130,18 @@ checks = bracket temporary removePathForcibly $ \base -> do
   let activeMenu=badge {menu=Just (0,0)}
   check "active menu heading has green background and red mnemonic" ("color:rgb(170,0,0);background:rgb(0,170,0)'>F" `T.isInfixOf` snapshotHtml activeMenu)
   check "selected menu item has green background and black label" ("color:rgb(0,0,0);background:rgb(0,170,0)'>ew" `T.isInfixOf` snapshotHtml activeMenu)
-  writeFile (dir </> ":(glob)*") "literal path\n"
-  literal <- repositoryDiff dir (Just ":(glob)*") >>= right
-  check "pathspec metacharacters are literal" ("literal path" `T.isInfixOf` literal && not ("untracked only.txt" `T.isInfixOf` literal))
+  writeFile (dir </> "literal[1].txt") "literal path\n"
+  writeFile (dir </> "literal1.txt") "unselected glob match\n"
+  literal <- repositoryDiff dir (Just "literal[1].txt") >>= right
+  check "pathspec metacharacters are literal"
+    ("literal path" `T.isInfixOf` literal && not (any (`T.isInfixOf` literal) ["unselected glob match", "untracked only.txt"]))
   let hook = dir </> ".git" </> "hooks" </> "pre-commit"
-  writeFile hook "#!/bin/sh\necho hook-refused >&2\nexit 1\n"
+  BS.writeFile hook "#!/bin/sh\necho hook-refused >&2\nexit 1\n"
+#ifndef mingw32_HOST_OS
+  -- Git for Windows runs shebang hooks through its bundled shell.
   permissions <- getPermissions hook
   setPermissions hook (permissions { executable = True })
+#endif
   beforeFailure <- git ["rev-parse", "HEAD"]
   failingReview <- reviewRepository dir >>= right
   failure <- commitReview failingReview "hook must reject"
@@ -132,7 +149,7 @@ checks = bracket temporary removePathForcibly $ \base -> do
   preserved <- readFile (dir </> "untracked only.txt")
   check "failed commit preserves HEAD and file contents" (isLeft failure && beforeFailure == afterFailure && preserved == "new\n")
   check "failed commit reports hook error" (either (T.isInfixOf "hook-refused") (const False) failure)
-  writeFile hook "#!/bin/sh\nprintf 'hook transformed\\n' > hook-output.txt\ngit add -- hook-output.txt\n"
+  BS.writeFile hook "#!/bin/sh\nprintf 'hook transformed\\n' > hook-output.txt\ngit add -- hook-output.txt\n"
   hookReview <- reviewRepository dir >>= right
   hookResult <- commitReview hookReview "normal transforming hook" >>= right
   check "transforming hook is reported after successful commit" ("Git hooks changed" `T.isInfixOf` hookResult)
@@ -175,6 +192,7 @@ filteredChecks base=do
       readFiltered=repositoryDiffFiltered root private >>= either (error . T.unpack) pure
       check label ok=unless ok (error label)
   git ["init","--quiet"]
+  git ["config","core.autocrlf","false"]
   git ["config","core.hooksPath",root </> ".git/hooks"]
   writeFile (root </> "visible.txt") "visible addition\n"
   (initial,initialCount)<-readFiltered

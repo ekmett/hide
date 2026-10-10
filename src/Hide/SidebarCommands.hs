@@ -8,6 +8,8 @@ module Hide.SidebarCommands
   , tickSidebar, refreshTreeFromHost, initializeSidebar, awaitFileOpening, prepareSidebarFile, publishFormRefreshFromHost
   ) where
 
+import Hide.FileIO (withFileRead)
+
 import Control.Concurrent.Async (Async,async,asyncWithUnmask,cancel,poll)
 import qualified Control.Concurrent.Async
 import Control.Concurrent.STM
@@ -22,13 +24,12 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import System.Directory (canonicalizePath,doesFileExist,doesDirectoryExist)
 import qualified Data.ByteString as BS
-import System.IO (withBinaryFile,IOMode(ReadMode))
 import System.FilePath ((</>),takeExtension,takeFileName,takeDirectory,isAbsolute)
 import Data.Char (toLower)
 import System.Mem.StableName
 import Text.Read (readMaybe)
 import Hide.Browser
-import Hide.Buffer (captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,Selection(..))
+import Hide.Buffer (Buffer,bufferLength,bufferBytes,byteMode,captureDirty,snapshotDirty,bufferLineChanges,prepareBuffer,Selection(..))
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
 import Hide.Files (FileState(..),FileRepresentation(..),loadFileForDisplay,fileBuffer)
 import Hide.Plugin.Canvas (isImageContent)
@@ -45,6 +46,7 @@ import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Sidebar as PluginSidebar
 import Hide.AgentSidebarTypes
 import Hide.SessionSidebarTypes
+import qualified Hide.Recovery as Recovery
 import Hide.Sidebar
 import qualified Hide.Plugin.EditorHost as Editor
 import Hide.Plugin.Command
@@ -54,12 +56,13 @@ import qualified Hide.Plugin.Menu as Menu
 -- | Captured host policy; extension labels and paths grant no authority.
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
-  , sidebarColumns :: !Int, sidebarOpenedImage :: !(Maybe (FilePath,Int,PluginWindow.WindowRef)), sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int }
-data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+  , sidebarColumns :: !Int, sidebarOpenedImage :: !(Maybe (FilePath,Int,PluginWindow.WindowRef)), sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int, sidebarAttachment :: !Int }
+data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
   | FileJob !Menu.MenuOrigin !(Maybe Int) !Int !(Async (Either CommandError SidebarReply)) !Bool
+  | ExportJob !Int !Int !ContentVersion ![Integer] !(Async (Either CommandError SidebarReply)) !Bool
   | FormJob !Form.FormRef !(Async (Either CommandError SidebarReply)) !Bool
   | EditorJob !Editor.DraftSubmission !(Async (Either CommandError SidebarReply)) !Bool
 data FileRequest = FilePathRequest !Menu.MenuOrigin !FilePath | FileBytesRequest !Text !BS.ByteString
@@ -89,16 +92,15 @@ sidebarRegistry (SidebarHost registry _ _ _ _ _)=registry
 -- | Public contribution capabilities reuse this host's ordered close-aware
 -- queue. The host retains all currentness, privacy and presentation decisions.
 sidebarCapabilities :: SidebarHost -> PluginSidebar.Sidebar SidebarContext SidebarReply
-sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm SidebarEditorWindow SidebarEditorUpdate
-  (publishTreeFromHost host) (publishFormRefreshFromHost host) (tryInvalidateTree host)
+sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm
+  (publishTreeFromHost host) (publishFormRefreshFromHost host) (invalidateTree host)
 
--- Nonblocking because metadata-owner ticks call this while input is serialized.
-tryInvalidateTree :: SidebarHost -> P.TreeRef -> P.NodeId -> IO Bool
-tryInvalidateTree (SidebarHost _ _ queue _ _ closed) owner node=atomically $ do
+-- A preparation worker publishes invalidation through the same bounded queue as
+-- a tree or form. Shutdown wakes a blocked publisher and rejects its retained hit.
+invalidateTree :: SidebarHost -> P.TreeRef -> P.NodeId -> IO ()
+invalidateTree (SidebarHost _ _ queue _ _ closed) owner node=atomically $ do
   stopped<-readTVar closed
-  if stopped then throwSTM (userError "Sidebar host closed.") else do
-    full<-isFullTBQueue queue
-    if full then pure False else writeTBQueue queue (TreeInvalidation owner node) >> pure True
+  if stopped then throwSTM (userError "Sidebar host closed.") else writeTBQueue queue (TreeInvalidation owner node)
 
 withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=PluginWindow.withWindowScope $ \scope->withRegistry $ \registry->bracket (acquire scope registry) close use
@@ -139,6 +141,7 @@ publishFormRefreshFromHost (SidebarHost _ _ queue _ _ closed) prepared=atomicall
 actionWorker :: ActionJob -> Async (Either CommandError SidebarReply)
 actionWorker (ActionJob _ _ _ _ worker _)=worker
 actionWorker (FileJob _ _ _ worker _)=worker
+actionWorker (ExportJob _ _ _ _ worker _)=worker
 actionWorker (FormJob _ worker _)=worker
 actionWorker (EditorJob _ worker _)=worker
 -- | Withdrawal belongs to the session owner, so queued/late results cannot race
@@ -151,7 +154,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d))
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (guestPrivatePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d)
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -222,7 +225,7 @@ createFiles host root=do
         exists<-doesFileExist resolved
         if not exists then pure (Left (CommandRejected "File export needs an existing saved file.")) else
           do
-            bytes<-withBinaryFile resolved ReadMode (\h->BS.hGet h (16*1024*1024))
+            bytes<-withFileRead resolved (\h->BS.hGet h (16*1024*1024))
             pure $ if BS.length bytes>=16*1024*1024 then Left (CommandRejected "File export exceeds the 16 MiB limit.")
               else Right (SidebarExportFile (sidebarExportEpoch ctx) (T.pack (takeFileName resolved)) bytes)))
   renameTo<-either (ioError . userError . show) pure =<< registerCommand registry
@@ -329,6 +332,7 @@ sidebarEffects host@(SidebarHost _ ref _ _ _ closed) core d effects=do
           case resolved of
             Left err->pure (False,current {status="Cannot open file: "<>T.pack (show err)})
             Right actual->(False,) <$> queueFileOpen host (FilePathRequest origin actual) current
+      ExportBufferDocument wid bid->(False,) <$> exportBuffer host wid bid current
       OpenFileBytes name bytes->(False,) <$> queueFileOpen host (FileBytesRequest name bytes) current
       OpenChoice origin base input pattern->do
         let chosen=if T.null input then pattern else input
@@ -695,6 +699,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
   case actionJob state of
     Nothing->pure d
     Just (FileJob origin active serial worker cancelled)->finishFileJob host origin active serial worker cancelled d
+    Just (ExportJob wid bid version view worker cancelled)->finishExport host wid bid version view worker cancelled d
     Just (FormJob reference worker cancelled)->finishFormJob host core d reference worker cancelled
     Just (EditorJob submitted worker cancelled)->finishEditorJob host core d submitted worker cancelled
     Just (ActionJob trace reference origin columns worker cancelled)->do
@@ -732,6 +737,9 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
             Right (Right (SidebarBuild action target)) | current && origin==Menu.HumanMenu->snd <$> core d [PackageBuildAction action target]
             Right (Right (SidebarDebug request)) | current && origin==Menu.HumanMenu->snd <$> core d [DebugSidebarAction request]
             Right (Right (SidebarSession request)) | current && origin==Menu.HumanMenu->snd <$> core d [SessionSidebarAction request]
+            Right (Right (SidebarRecoveredSources attachment workspace sources))
+              | current && origin==Menu.HumanMenu && attachment==sessionAttachment d && workspace==sidebarContextDirectory (context origin d) &&
+                not (questionActive d) && pendingSessionSwitch d==Nothing->pure (Recovery.adoptRecoveredSources sources d)
             Right (Right (SidebarWindow request)) | current->adoptWindowUpdate origin request d
             Right (Right (SidebarEditorWindow request)) | current->adoptEditor host origin request d
             Right (Right (SidebarForm prepared)) | current && origin==Menu.HumanMenu->adoptForm host True prepared d
@@ -745,6 +753,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarBuild{})->d {status="Sidebar result expired."}
               Right (Right SidebarDebug{})->d {status="Sidebar result expired."}
               Right (Right SidebarSession{})->d {status="Sidebar result expired."}
+              Right (Right SidebarRecoveredSources{})->d {status="Recovery result expired."}
               Right (Right SidebarWindow{})->d {status="Sidebar result expired."}
               Right (Right SidebarEditorWindow{})->d {status="Sidebar result expired."}
               Right (Right SidebarEditorUpdate{})->d {status="Editor result has no submitted job."}
@@ -756,6 +765,69 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarExistingImage{})->d {status="Sidebar result expired."}
               Right (Right SidebarImage{})->d {status="Sidebar result expired."}
               Right (Right SidebarUpload{})->d {status="Dropped file has no opening request."}
+
+-- Source export borrows an immutable buffer and scalar UI receipt. Preparation
+-- is bounded on the existing action worker; adoption never walks its contents.
+exportBuffer :: SidebarHost -> Int -> Int -> Desktop -> IO Desktop
+exportBuffer (SidebarHost _ ref _ _ _ _) wid bid d=do
+  state<-readIORef ref
+  case (actionJob state,activeWindow d,M.lookup bid (buffers d)) of
+    (Nothing,Just window,Just doc) | windowId window==wid,bufferId window==Just bid,
+      commandEnabled d ExportBuffer->do
+        version<-captureVersion (documentBuffer doc)
+        let captured=documentBuffer doc
+            name=T.pack (maybe (fromMaybeName captured (documentSuggestedName doc)) (takeFileName.filePath) (documentFile doc))
+            serial=fst (pendingFileExport d)
+        worker<-async $ do
+          prepared<-evaluate (bufferExportBytes captured)
+          pure (SidebarExportFile serial name <$> prepared)
+        writeIORef ref state {actionJob=Just (ExportJob wid bid version (fileExportView d) worker False)}
+        pure d {status="Preparing buffer copy…"}
+    _->pure d {status="Buffer export is unavailable or busy."}
+  where
+    fromMaybeName buffer=maybe (if byteMode buffer then "NONAME.bin" else "NONAME.HS") takeFileName
+
+bufferExportBytes :: Buffer -> Either CommandError BS.ByteString
+bufferExportBytes buffer
+  -- Scalar count rejects oversized buffers before flattening; UTF-8 encoding
+  -- can require at most four bytes per remaining scalar. All work stays here.
+  | bufferLength buffer>=limit=tooLarge
+  | BS.length bytes>=limit=tooLarge
+  | otherwise=Right bytes
+  where
+    limit=16*1024*1024
+    bytes=bufferBytes buffer
+    tooLarge=Left (CommandRejected "Buffer export exceeds 16 MiB; save the file instead.")
+
+finishExport :: SidebarHost -> Int -> Int -> ContentVersion -> [Integer]
+  -> Async (Either CommandError SidebarReply) -> Bool -> Desktop -> IO Desktop
+finishExport (SidebarHost _ ref _ cancellation _ _) wid bid version view worker cancelled d=do
+  same<-case (activeWindow d,M.lookup bid (buffers d)) of
+    (Just window,Just doc) | windowId window==wid,bufferId window==Just bid,
+      view==fileExportView d,commandEnabled d ExportBuffer,dialog d==Nothing,
+      menu d==Nothing,contextMenu d==Nothing->versionCurrent version (documentBuffer doc)
+    _->pure False
+  let current=same && not cancelled
+  completed<-poll worker
+  case completed of
+    Nothing | not current && not cancelled->do
+      queued<-atomically $ do full<-isFullTBQueue cancellation; if full then pure False else writeTBQueue cancellation (Cancellation worker) >> pure True
+      modifyIORef' ref (\state->state {actionJob=Just (ExportJob wid bid version view worker queued)})
+      pure d {status="Buffer export expired."}
+    Nothing->pure d
+    Just result->do
+      modifyIORef' ref (\state->state {actionJob=Nothing})
+      pure $ case result of
+        Right (Right (SidebarExportFile serial name bytes)) | current,Just window<-activeWindow d ->
+          let r=bounds window
+              row=Rect (left r+1) (top r) (max 1 (width r-2)) 1
+              offered=d {pendingFileExport=(serial+1,Nothing)}
+          in offered {pendingFileExport=(serial+1,Just (ExportFileCopy name bytes row (fileExportView offered))),
+            status="Buffer copy ready; drag its title on macOS, or use the frontend's export control."}
+        _ | not current->d {status="Buffer export expired."}
+        Left err->d {status="Buffer export failed: "<>T.pack (displayException err)}
+        Right (Left err)->d {status="Buffer export failed: "<>T.pack (show err)}
+        _->d {status="Buffer export reply was invalid."}
 
 -- Ordinary opens share the existing single action worker. A bounded FIFO keeps
 -- drop bursts in order; only that worker's own successful openings advance the
@@ -919,6 +991,8 @@ adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
     let spec=Form.formSpec prepared
         choiceIndex value=maybe 0 id (Form.formChoiceIndex prepared value)
         build=case spec of
+          Form.ConfirmationFormSpec _ label _->Dialog (Form.formTitle spec) (PluginInputForm reference)
+            [] 0 [Form.formSubmit spec,"Cancel"] [label]
           Form.InputFormSpec _ label initial _->Dialog (Form.formTitle spec) (PluginInputForm reference)
             [SelectedInput label initial (Selection 0 (T.length initial))] 0 [Form.formSubmit spec,"Cancel"] []
           Form.InputsFormSpec _ inputs _->Dialog (Form.formTitle spec) (PluginInputsForm reference (map Form.inputId inputs))
@@ -926,7 +1000,8 @@ adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
             0 [Form.formSubmit spec,"Cancel"] []
           Form.ChoiceFormSpec _ label choices initial _->Dialog (Form.formTitle spec) (PluginChoiceForm reference (Form.formRevision prepared))
             [ListBox label (map snd choices) (choiceIndex initial)] 0 [Form.formSubmit spec,"Cancel"] []
-        refresh dg=dg {purpose=case spec of Form.ChoiceFormSpec{}->PluginChoiceForm reference (Form.formRevision prepared); _->purpose dg,dialogTitle=Form.formTitle spec,buttons=[Form.formSubmit spec,"Cancel"],fields=case spec of
+        refresh dg=dg {purpose=case spec of Form.ChoiceFormSpec{}->PluginChoiceForm reference (Form.formRevision prepared); _->purpose dg,dialogTitle=Form.formTitle spec,buttons=[Form.formSubmit spec,"Cancel"],body=case spec of Form.ConfirmationFormSpec _ label _->[label]; _->[],fields=case spec of
+          Form.ConfirmationFormSpec{}->[]
           Form.InputFormSpec _ label _ _->[case field of SelectedInput _ text selected->SelectedInput label text selected; _->field | field<-fields dg]
           Form.InputsFormSpec _ inputs _->[case field of
             SelectedInput _ text selected->SelectedInput (Form.inputLabel input) text selected
@@ -1004,6 +1079,9 @@ forceFormReply reply@(SidebarAgent request)=case request of
   where checked option value
           | T.length option>4096 || T.length value>4096=ioError (userError "Oversized choice form result.")
           | otherwise=evaluate (T.length option+T.length value) >> evaluate reply
+forceFormReply reply@(SidebarSession (SessionDeleted ident))
+  | T.length ident==48=evaluate (T.length ident) >> evaluate reply
+  | otherwise=ioError (userError "Invalid deleted session result.")
 forceFormReply reply@SidebarRename{}=evaluate reply
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
 acceptedFormRequest :: AgentSidebarRequest -> Bool
@@ -1033,6 +1111,7 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
       consumed<-if current then Form.finishFormSubmission reference else Form.retireForm reference >> pure False
       case result of
         Right (Right (SidebarAgent request)) | consumed,acceptedFormRequest request->snd <$> core d [AgentSidebarAction request]
+        Right (Right (SidebarSession request@SessionDeleted{})) | consumed->snd <$> core d [SessionSidebarAction request]
         Right (Right (SidebarRename owner prepared)) | consumed->do
           provider<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
           if not provider then pure d {status="Files provider expired."} else do

@@ -25,7 +25,7 @@ import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffe
 import qualified Data.Map.Strict as M
 import Data.IORef
 import Hide.Buffer (contents,newBuffer,contentSlice,contentLength,Selection(..))
-import Hide.AgentSidebarTypes (AgentSidebarRequest(ShowAgent))
+import Hide.AgentSidebarTypes (DirectoryRequest(ShowAgent))
 import Hide.Recovery (writeCheckpoint,readCheckpoint,checkpointKey)
 import Hide.BufferReadCommand (withBufferReadCommands,readPage,readWindowCommand)
 import Hide.BufferReads (windowReadTarget,captureWindow)
@@ -222,8 +222,11 @@ checks=bracket temporary removePathForcibly $ \root ->
       configuredChild<-tickUntil (pure . (\d->not (agentReplying d) && any ((=="large").settingCurrent) (childAgentSettings d))) changedChild
       ensure "child configuration does not replace primary provider settings" (agentSettings configuredChild==agentSettings liveView && "large" `T.isInfixOf` conversationTitle configuredChild)
       waitingChild<-submit QuerySubmit (draft "steer-wait" (Selection 10 10) configuredChild)
-      steerReady<-tickUntil (pure . (==Just (120,1000)) . childAgentContextUsage) waitingChild
-      ensure "child reports its own context usage" (conversationContextUsage steerReady==Just (120,1000))
+      -- Prior-turn usage survives idle. Wait for this held turn's provider update
+      -- and host adoption of the submitted draft before starting another action.
+      steerReady<-testUntil "held child turn and accepted query" (pure . (\d->
+        childAgentContextUsage d==Just (121,1000) && T.null (contents (composerBuffer d)))) waitingChild
+      ensure "child reports its own context usage" (conversationContextUsage steerReady==Just (121,1000))
       steeringChild<-submit SteerSubmit (draft "human direction" (Selection 15 15) steerReady)
       ensure "pending child steering keeps the draft until acknowledged" (contents (composerBuffer steeringChild)=="human direction")
       steeredChild<-tickUntil (pure . (\d->not (agentReplying d) && T.null (contents (composerBuffer d)) && "human direction" `T.isInfixOf` activeText d)) steeringChild
@@ -237,7 +240,12 @@ checks=bracket temporary removePathForcibly $ \root ->
       primaryWhileQueued<-ui "show" [] secondQueued
       configuredPrimary<-ui "configure" ["0","python3",TE.decodeUtf8 (BL.toStrict (encode [script])),"{}"] primaryWhileQueued
       childAfterPrimaryConfig<-select liveChild configuredPrimary
-      awaiting<-tickUntil (pure . maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) . dialog) childAfterPrimaryConfig
+      -- Provider approval and editor-intent publication have separate owners.
+      -- Wait for both before sampling a followup that is still being transferred.
+      awaiting<-testUntil "child approval and published followup" (\desktop->do
+        entry<-AH.statusAgent hub AH.Human liveChild >>= right
+        pure (maybe False (T.isPrefixOf "Agent permission:" . dialogTitle) (dialog desktop) &&
+          maybe False (>= (1::Int)) (field "queued" entry) && agentQueued desktop>=1)) childAfterPrimaryConfig
       ensure "human can queue a followup while child is running" (agentQueued awaiting>=1)
       _<-AH.cancelAgent hub AH.Human primary >>= right
       childStillWaiting<-tickBody presentation conversation awaiting
@@ -437,7 +445,7 @@ fixture=unlines
   ,"  text=\"\\n\".join(block['text'] for block in p['prompt'])+' private-main-key '+str(tokens)"
   ,"  send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'usage_update','used':120,'size':1000}}})"
   ,"  if any(block['text'].strip().endswith('steer-wait') for block in p['prompt']):"
-  ,"   pending=r['id']; send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'usage_update','used':120,'size':1000}}}); continue"
+  ,"   pending=r['id']; send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'usage_update','used':121,'size':1000}}}); continue"
   ,"  if 'private-configuration' in text:"
   ,"   cfg=options(); cfg[0]['currentValue']='private-main-key'; cfg[1]['options'][0]['name']=str(tokens); send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'config_option_update','configOptions':cfg}}})"
   ,"  if 'split-private' in text:"

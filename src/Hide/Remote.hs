@@ -32,7 +32,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Char8 as B8
 import Data.Char (isHexDigit, isLower, isDigit, isSpace)
 import Data.IORef
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Network.Socket as N
@@ -68,6 +68,8 @@ data RemotePeer = RemotePeer
     -- ^ Atomically enqueue related metadata/payload packets, with capacity
     -- backpressure. Queueing does not confirm execution.
   , peerReceive :: IO (Maybe WirePacket)
+  , peerAttachment :: IO Int -- Local input lifetime, advanced before and after handoff.
+  , peerSession :: IO String -- Current session, including successful handoffs.
   }
 
 #ifdef WITH_REMOTE
@@ -94,14 +96,14 @@ helloParser = withObject "remote hello" $ \o -> do
   args <- o .:? "args" .!= []
   unless (length args<=128 && sum (map length args)<=65536 && all (all (/='\0')) args) (fail "Invalid remote startup arguments")
   let options=takeWhile (/="--") args
-  unless (all (`notElem` ["--remote","--remote-daemon","--ssh","--remote-session","--resume","--mcp-editor","--snapshot","--snapshot-html","--help","-h"]) options &&
+  unless (all (`notElem` ["--remote","--remote-daemon","--ssh","--remote-session","--resume","--require-checkpoint","--mcp-editor","--snapshot","--snapshot-html","--help","-h"]) options &&
     all (\arg -> not (any (`T.isPrefixOf` T.pack arg) ["--remote-daemon=","--ssh=","--remote-session=","--resume=","--mcp-editor="])) options) (fail "Invalid remote startup mode")
   resume <- o .:? "resume" .!= False
   pure (Hello session client ack args resume)
 
-readFirstPacket :: Handle -> IO WirePacket
-readFirstPacket h = do
-  packet <- timeout 15000000 (readPacket h)
+readFirstPacket :: IO (Maybe WirePacket) -> IO WirePacket
+readFirstPacket receive = do
+  packet <- timeout 15000000 receive
   case packet of
     Just (Just p) -> pure p
     _ -> failure "Expected protocol packet within 15 seconds"
@@ -112,7 +114,7 @@ parseHelloPacket _ = failure "Expected remote protocol hello"
 
 readHello :: Handle -> IO (Hello, WirePacket)
 readHello h = do
-  packet <- readFirstPacket h
+  packet <- readFirstPacket (readPacket h)
   greeting <- parseHelloPacket packet
   pure (greeting,packet)
 
@@ -132,17 +134,6 @@ runRemoteRelay args = handle report $ do
       writePacket stdout (json "error" ["message" .= show err]) `catch` \(_::IOException) -> pure ()
       throwIO err
     relay source destination = readPacket source >>= maybe (pure ()) (\packet -> writePacket destination packet >> relay source destination)
-
--- GHC's Windows Handle readiness wait can remain inside a foreign call after
--- socket shutdown. Bound that wait so cancellation can run between polls.
-awaitInspectionEOF :: Handle -> IO ()
-#ifdef mingw32_HOST_OS
-awaitInspectionEOF connection = do
-  ready <- hWaitForInput connection 100
-  if ready then void (BS.hGetSome connection 1) else awaitInspectionEOF connection
-#else
-awaitInspectionEOF connection = void (BS.hGetSome connection 1)
-#endif
 
 -- Run the wakeup before withAsync joins a blocked socket reader on Windows.
 raceWithShutdown :: IO () -> IO a -> IO b -> IO ()
@@ -173,7 +164,7 @@ openSession args (Hello session _ _ startup resume) = do
         Nothing -> pure currentDirectory
       let effective=maybe (if null startup then args else startup) sessionArguments saved
           (options,paths)=break (=="--") effective
-          daemonArgs=options++["--remote-daemon",session]++paths
+          daemonArgs=options++["--remote-daemon",session]++["--require-checkpoint" | recovery || resume]++paths
       let logfile=path++".log"
       process <- spawnDetached executable daemonArgs logfile directory
       void (forkIO (void (waitForProcess process)))
@@ -250,7 +241,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
               let s=if serial==0 then original else original {savedReplies=filter ((>received).fst) (savedReplies original)}
               if serial==0 then do
                 cancelRequestedPaste pasteReads
-                let settled=if stopped s || suspending s then s else s {desktop=fst (applyInput Blur (desktop s))}
+                let released=(if stopped s || suspending s then desktop s else fst (applyInput Blur (desktop s))) {sessionAttachment=sessionAttachment (desktop s)+1,pendingSessionSwitch=Nothing}
+                    settled=s {desktop=released}
                 pure (settled,Right ([],stopped s,acknowledged s,webDirty (desktop s)))
               else if stopped s then pure (s,Right ([],True,acknowledged s,webDirty (desktop s)))
               else if input==SuspendSession && serial>acknowledged s then do
@@ -312,8 +304,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
             d <- tick (desktop s)
             refreshRequestedPaste pasteReads d
             pure s {desktop=d}
-        serve shutdown connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
-          first <- readFirstPacket connection
+        serve shutdown receiveChunk connection = flip finally (quietClose connection) $ handle (\(err::IOException) -> writePacket connection (json "error" ["message" .= show err])) $ do
+          first <- readFirstPacket (readPacketWith receiveChunk)
           case first of
             JsonPacket _ | packetType first==Just "session-status" -> do
               current <- readMVar state
@@ -346,7 +338,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                     pure (s {desktop=updated,stopped=stopped s || exited},(exited,reply))
                   -- Start deferred work masked before accepting cancellation. Its
                   -- interruptible waits install their cleanup before EOF can stop it.
-                  withAsync finish $ \response -> withAsync (restore (awaitInspectionEOF connection)) $ \eof ->
+                  withAsync finish $ \response -> withAsync (restore (void (receiveChunk 1))) $ \eof ->
                     flip finally (do
                       shutdown
                       when exited $ do
@@ -367,7 +359,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
               available <- tryTakeMVar writer
               case available of
                 Nothing -> writePacket connection (json "error" ["message" .= ("Remote editor already has a writer"::T.Text)])
-                Just () -> finally (attachment connection client clientAck) (do
+                Just () -> finally (attachment receiveChunk connection client clientAck) (do
                   closing<-atomically (writeTVar activeDisplay False >> readTVar inspectionClosing)
                   when closing (void (tryPutMVar done ()))
                   -- Wait behind accepted commands before another writer can attach.
@@ -375,7 +367,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                   atomically (writeTBQueue commands (0,0,Blur,barrier))
                   void (atomically (takeTMVar barrier))
                   putMVar writer ())
-        attachment connection client clientAck = do
+        attachment receiveChunk connection client clientAck = do
           (ack,attachmentEpoch,replay) <- modifyMVar state $ \s -> do
             when (stopped s || suspending s) (failure "Editor session is closing or suspending")
             cancelRequestedPaste pasteReads
@@ -385,7 +377,8 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                 saved=if switched then [(1,concatMap snd (savedReplies s)) | not (null (savedReplies s))] else filter ((>clientAck).fst) (savedReplies s)
             unless (clientAck<=ack) (failure "Remote server lost acknowledged input")
             atomically (writeTVar activeDisplay True)
-            pure (s {owner=Just client,acknowledged=ack,generation=gen,savedReplies=saved},(ack,epoch++"-"++show gen,concatMap snd saved))
+            let attached=(desktop s) {sessionAttachment=sessionAttachment (desktop s)+1,pendingSessionSwitch=Nothing}
+            pure (s {desktop=attached,owner=Just client,acknowledged=ack,generation=gen,savedReplies=saved},(ack,epoch++"-"++show gen,concatMap snd saved))
           writePacket connection (json "hello" ["version" .= protocolVersion,"session" .= session,"epoch" .= attachmentEpoch,"ack" .= ack,"replay" .= length replay])
           writePacket connection (JsonPacket (assetsPacket font scale))
           canvasEpoch<-T.pack <$> randomIdentity
@@ -398,13 +391,13 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
           inflight <- newTVarIO (0::Int)
           settledFrame <- newIORef (-1::Int)
           let receive = forever $ do
-                packet <- readPacket connection >>= maybe (failure "Remote client detached") pure
+                packet <- readPacketWith receiveChunk >>= maybe (failure "Remote client detached") pure
                 value <- case packet of JsonPacket v -> pure v; _ -> failure "Unexpected remote binary input"
                 (serial,received,input) <- decodeValue (\v -> (,,) <$> withObject "sequence" (\o -> o .: "seq") v <*> withObject "receipt" (\o -> o .:? "received" .!= 0) v <*> parseInput v) value
                 unless (serial>0) (failure "Remote input sequence must be positive")
                 complete <- case input of
                   UploadFile name _ -> do
-                    payload <- timeout 30000000 (readPacket connection)
+                    payload <- timeout 30000000 (readPacketWith receiveChunk)
                     case payload of Just (Just (BinaryPacket bytes)) -> pure (UploadFile name bytes); _ -> failure "Expected upload bytes"
                   _ -> pure input
                 reply <- newEmptyTMVarIO
@@ -422,7 +415,10 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                   writeTBQueue outgoing (responses++[json "ack" ["seq" .= committed,"dirty" .= isDirty]]++[json "closed" ["resumable" .= resumable] | exit])
                   modifyTVar' inflight (subtract 1)
               send transfers previous = do
-                s <- readMVar state
+                (s,switchTarget) <- modifyMVar state $ \current ->
+                  let d=desktop current
+                  in pure (current {desktop=d {pendingSessionSwitch=Nothing}},(current,if stopped current || suspending current then Nothing else pendingSessionSwitch d))
+                forM_ switchTarget $ \target->writePacket connection (json "switch-session" ["session" .= target])
                 cwd <- getCurrentDirectory
                 let d=desktop s
                 stateKey<-renderKey d
@@ -497,6 +493,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                     writePacket connection (json "closed" [])
                     void (tryPutMVar done ())
                   Nothing -> send nextTransfers (Just (key,resetKey,rows,metadata,scene))
+          -- The chunk reader remains cancellable with a partial packet and an
+          -- open Windows peer. Join it before the outer owner sends an error;
+          -- shutting down both socket directions here would discard that reply.
           race_ receive (race_ respond (send (CanvasSender canvasEpoch M.empty) Nothing)) `finally` do
             s <- readMVar state
             when (stopped s) (void (tryPutMVar done ()))
@@ -576,9 +575,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
       rememberSession record {sessionId=session,sessionHost=Nothing}
       let acceptLoop = forever $ do
             (sock,_) <- N.accept socket
-            (connection,shutdown) <- socketToEndpoint sock
+            (connection,shutdown,receiveChunk) <- socketToEndpoint sock
             void (forkIO (finally
-              ((authenticate connection >> serve shutdown connection) `catch` \(_::IOException) -> pure ())
+              ((authenticate connection >> serve shutdown receiveChunk connection) `catch` \(_::IOException) -> pure ())
               (quietClose connection)))
           drainInspections=do
             let empty=atomically (readTVar inspections >>= check . M.null)
@@ -598,6 +597,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
 
   withoutDaemon args@("--":_)=args
   withoutDaemon ("--remote-daemon":_:rest)=withoutDaemon rest
+  withoutDaemon ("--require-checkpoint":rest)=withoutDaemon rest
   withoutDaemon (arg:rest)=arg:withoutDaemon rest
   withoutDaemon []=[]
 
@@ -643,33 +643,78 @@ withSSHSession host = withSessionPeer (Just host)
 withLocalPeer :: String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withLocalPeer = withSessionPeer Nothing
 
+type PeerConnection = (Maybe Handle,Maybe Handle,Maybe Handle,Maybe ProcessHandle,IO ())
+data PeerLifetime = PeerLifetime SessionRecord String (TVar Journal)
+data PreparedPeer = PreparedPeer PeerLifetime PeerConnection Int [WirePacket]
+
+-- Preparation accepts only display settings. Prepared freezes their final
+-- watermark; the masked connection owner commits it. Input reopens after RESET
+-- and connection=True, when frontends also resend their current display state.
+data HandoffState = NoHandoff | PreparingHandoff | PreparedHandoff deriving Eq
+
 withSessionPeer :: Maybe String -> String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withSessionPeer host session resume remoteArgs action = do
   unless (validIdentity session && all (all (/='\0')) remoteArgs) (failure "Invalid session identity or argument")
   forM_ host $ \name -> unless ((case name of [] -> False; '-':_ -> False; _ -> True) && all (\c -> c>' ' && not (isSpace c)) name) (failure "Invalid SSH host")
-  record <- loadSession session >>= maybe (do
-    fresh <- newSessionRecord host remoteArgs
-    pure fresh {sessionId=session}) pure
-  client <- randomIdentity
-  journal <- newTVarIO (Journal 1 0 [] M.empty Nothing Nothing Nothing Nothing)
+  let freshLifetime ident args = do
+        record <- loadSession ident >>= maybe (do
+          fresh <- newSessionRecord host args
+          pure fresh {sessionId=ident}) pure
+        client <- randomIdentity
+        journal <- newTVarIO (Journal 1 0 [] M.empty Nothing Nothing Nothing Nothing)
+        pure (PeerLifetime record client journal)
+  first <- freshLifetime session remoteArgs
+  current <- newTVarIO first
+  attachmentSerial <- newTVarIO (0::Int)
+  switching <- newTVarIO NoHandoff
+  settings <- newTVarIO M.empty
   incoming <- newTBQueueIO 8
-  -- The callback borrows the Handle's socket descriptor. Clear it under this
-  -- lock before closing handles, so it can never act on a reused descriptor.
+  candidate <- newMVar Nothing
+  -- Clear borrowed descriptors under this lock before closing their handles.
   activeShutdown <- newMVar (pure ())
-  let shutdown = withMVar activeShutdown id
+  let lifetimeId (PeerLifetime record _ _)=sessionId record
+      lifetimeJournal (PeerLifetime _ _ journal)=journal
+      shutdown = withMVar activeShutdown id
       emit packet=atomically (writeTBQueue incoming (Right (Just packet)))
-      status connected message=emit (json "connection" ["connected" .= connected,"message" .= (message::T.Text)])
+      status online message=do
+        serial<-readTVarIO attachmentSerial
+        handoff<-(/=NoHandoff) <$> readTVarIO switching
+        emit (json "connection" ["connected" .= online,"attachment" .= serial,"switching" .= handoff,"message" .= (message::T.Text)])
       send packet = sendBatch [packet]
       sendBatch packets = do
         let events=length [() | JsonPacket _<-packets]
         when (events>128 || sum (map packetSize packets)+256*events>33554432) (failure "Remote input batch exceeds the journal capacity")
+        captured<-readTVarIO attachmentSerial
         atomically $ do
-          mapM_ enqueue packets
-          j <- readTVar journal
-          case pendingUpload j of
-            Nothing -> pure ()
-            Just _ -> throwSTM (userError "Upload metadata and bytes must be sent together with peerSendBatch")
-      enqueue packet = do
+          handoff<-readTVar switching
+          let live=handoff==NoHandoff
+          serial<-readTVar attachmentSerial
+          stamps<-mapM (\packet->case packet of
+            JsonPacket (Object fields)->case KM.lookup "attachment" fields of
+              Nothing->pure captured
+              Just value->either (throwSTM . userError) pure (fromJSONInt value)
+            _->pure captured) packets
+          when (handoff/=PreparedHandoff && all (==serial) stamps) $ do
+            forM_ packets $ \packet->case packet of
+              JsonPacket value->case parseEither parseInput value of
+                Right (Frontend mode mac)->remember "frontend" ["mode" .= mode,"mac" .= mac]
+                Right (SystemTheme dark)->remember "theme" ["dark" .= dark]
+                Right (Resize w h)->remember "resize" ["width" .= w,"height" .= h]
+                _->pure ()
+              _->pure ()
+          when (live && all (==serial) stamps) $ do
+            selected<-readTVar current
+            let journal=lifetimeJournal selected
+            mapM_ (enqueue journal . stripStamp) packets
+            j <- readTVar journal
+            case pendingUpload j of
+              Nothing -> pure ()
+              Just _ -> throwSTM (userError "Upload metadata and bytes must be sent together with peerSendBatch")
+      remember kind fields=modifyTVar' settings (M.insert kind (json kind fields))
+      fromJSONInt value=case fromJSON value of Error err->Left err;Success n->Right (n::Int)
+      stripStamp (JsonPacket (Object fields))=JsonPacket (Object (KM.delete "attachment" fields))
+      stripStamp packet=packet
+      enqueue journal packet = do
         when (packetSize packet>16777216) (throwSTM (userError "Remote packet exceeds 16 MiB"))
         j <- readTVar journal
         maybe (pure ()) (throwSTM . userError) (terminalError j)
@@ -677,7 +722,7 @@ withSessionPeer host session resume remoteArgs action = do
               let serial=nextSequence j
                   tagged=case value of Object o -> JsonPacket (Object (KM.insert "seq" (toJSON serial) o)); _ -> JsonPacket value
                   entries=pending j++[(serial,tagged:payload)]
-                  bytes=sum [sum (map packetSize packets) | (_,packets)<-entries]
+                  bytes=sum [sum (map packetSize batch) | (_,batch)<-entries]
               when (sum (map packetSize (tagged:payload))>33554432 || any ((>=maxPacketSize) . packetSize) (tagged:payload)) (throwSTM (userError "Remote event exceeds the journal or packet size limit"))
               when (serial==maxBound) (throwSTM (userError "Remote input sequence exhausted"))
               check (length entries<=128 && bytes<=33554432)
@@ -688,162 +733,297 @@ withSessionPeer host session resume remoteArgs action = do
           (Just value,BinaryPacket bytes) -> add value [BinaryPacket bytes]
           (Just _,_) -> throwSTM (userError "Expected remote upload bytes")
           (Nothing,JsonPacket value@(Object _)) -> do
-            case parseEither parseInput value of Left err -> throwSTM (userError err); Right _ -> pure ()
+            case parseEither parseInput value of Left err->throwSTM (userError err);Right _->pure ()
             if packetType packet==Just "upload" then writeTVar journal j {pendingUpload=Just value} else add value []
           _ -> throwSTM (userError "Unexpected remote binary input")
       receive=atomically (readTBQueue incoming) >>= either failure pure
-      peer=RemotePeer send sendBatch receive
-      hello = do
+      peer=RemotePeer send sendBatch receive (readTVarIO attachmentSerial) (lifetimeId <$> readTVarIO current)
+      hello (PeerLifetime record client journal) reattach = do
         j <- readTVarIO journal
-        pure (json "hello" ["version" .= protocolVersion,"session" .= session,"client" .= client,"ack" .= lastAck j,"args" .= remoteArgs,"resume" .= (serverEpoch j/=Nothing || resume)])
-      retire serial dirtyState = do
+        pure (json "hello" ["version" .= protocolVersion,"session" .= sessionId record,"client" .= client,"ack" .= lastAck j,"args" .= sessionArguments record,"resume" .= (serverEpoch j/=Nothing || reattach)])
+      retire selected forward serial dirtyState = do
         forwarded <- atomically $ do
+          let journal=lifetimeJournal selected
           j <- readTVar journal
           unless (serial>=lastAck j && serial<nextSequence j) (throwSTM (userError "Invalid remote acknowledgement"))
           let (finished,remaining)=M.partitionWithKey (\n _ -> n<=serial) (aliases j)
           writeTVar journal j {lastAck=serial,pending=filter ((>serial).fst) (pending j),aliases=remaining,
             acknowledgedAlias=case M.lookupMax finished of Just (_,value)->Just value; Nothing->acknowledgedAlias j}
           pure (M.elems finished)
-        mapM_ (\value -> emit (json "ack" (["seq" .= value]++maybe [] (\dirty -> ["dirty" .= (dirty::Bool)]) dirtyState))) forwarded
-      fatal message=atomically (modifyTVar' journal (\j -> j {terminalError=Just message})) >> failure message
-      connect handshook = do
-        greeting <- hello
-        let open = do
-              connection <- case host of
-                Nothing -> do
-                  parsed <- case greeting of JsonPacket value -> decodeValue helloParser value; _ -> failure "Invalid local hello"
-                  (connectionHandle,stop) <- openSession remoteArgs parsed `catch` \(err::IOException) -> fatal (show err)
-                  pure (Just connectionHandle,Just connectionHandle,Nothing,Nothing,stop)
-                Just name -> do
-                  -- Dynamic paths travel in the framed hello, never through a login shell.
-                  let command="hide --remote"
-                      sshArgs=["-T","-a","-x","-oForwardAgent=no","-oClearAllForwardings=yes","-oRequestTTY=no","-oServerAliveInterval=15","-oServerAliveCountMax=3","-oConnectTimeout=10","--",name,command]
-                  (input,output,errors,process) <- createProcess (proc "ssh" sshArgs) {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit,close_fds=True}
-                  pure (input,output,errors,Just process,pure ())
-              let (_,_,_,_,stop)=connection
-              modifyMVar_ activeShutdown (const (pure stop))
-              pure connection
-            close connection = do
-              modifyMVar_ activeShutdown (const (pure (pure ())))
-              cleanup connection
-        bracket open close $ \(inputPipe,outputPipe,_,process,_) -> do
-          input <- maybe (failure "Transport did not create its input pipe") pure inputPipe
-          output <- maybe (failure "Transport did not create its output pipe") pure outputPipe
-          hSetBinaryMode input True; hSetBinaryMode output True; hSetBuffering input NoBuffering
-          responseResult <- try (writePacket input greeting >> timeout 20000000 (readPacket output))
-          let response=either (const Nothing) id (responseResult :: Either IOException (Maybe (Maybe WirePacket)))
-          value <- case response of
-            Just (Just (JsonPacket v)) -> pure v
-            _ -> do
-              exited <- maybe (pure Nothing) (timeout 1000000 . waitForProcess) process
-              j <- readTVarIO journal
-              case exited of
-                Just (ExitFailure 127) -> fatal "hide is not installed or not on PATH on the remote host"
-                Just code | serverEpoch j==Nothing -> fatal ("SSH remote startup failed ("++show code++"); check authentication and the remote hide installation")
-                _ -> failure "SSH remote handshake timed out or ended"
-          (epoch,ack,replayCount) <- either fatal pure $ parseEither (withObject "remote hello" $ \o -> do
-            kind <- o .: "type"
-            when (kind==("error"::T.Text)) (o .: "message" >>= fail)
-            version <- o .: "version"; returned <- o .: "session"
-            unless (kind==("hello"::T.Text) && version==protocolVersion && returned==session) (fail "Remote protocol or session mismatch")
-            count <- o .:? "replay" .!= 0
-            unless (count>=0 && count<=1024) (fail "Invalid remote replay count")
-            (,,) <$> o .: "epoch" <*> o .: "ack" <*> pure (count::Int)) value
-          atomically $ do
-            j <- readTVar journal
-            unless (maybe True (==epoch) (serverEpoch j) && ack>=lastAck j && ack<nextSequence j) $ do
-              writeTVar journal j {terminalError=Just "Remote session restarted or lost input; refusing unsafe replay"}
-            j' <- readTVar journal
-            case terminalError j' of
-              Just _ -> pure ()
-              Nothing -> writeTVar journal j' {serverEpoch=Just epoch}
-          readTVarIO journal >>= maybe (pure ()) failure . terminalError
-          assets <- readPacket output >>= maybe (failure "Remote assets missing") pure
-          unless (packetType assets==Just "assets") (fatal "Expected remote assets after hello")
-          emit assets
-          let receiveReplay 0 = pure ()
-              receiveReplay n = do
-                packet <- readPacket output >>= maybe (failure "Remote reply replay interrupted") pure
-                if packetType packet==Just "download" then do
-                  unless (n>=2) (fatal "Incomplete remote download replay")
+        when forward $ mapM_ (\value -> emit (json "ack" (["seq" .= value]++maybe [] (\dirty -> ["dirty" .= (dirty::Bool)]) dirtyState))) forwarded
+      fatal selected message=atomically (modifyTVar' (lifetimeJournal selected) (\j -> j {terminalError=Just message})) >> failure message
+      open selected reattach = do
+        greeting<-hello selected reattach
+        case host of
+          Nothing -> do
+            parsed <- case greeting of JsonPacket value -> decodeValue helloParser value; _ -> failure "Invalid local hello"
+            (connection,stop) <- openSession (case selected of PeerLifetime record _ _->sessionArguments record) parsed
+            pure (Just connection,Just connection,Nothing,Nothing,stop)
+          Just name -> do
+            -- Paths travel in the framed hello, never through a login shell.
+            let sshArgs=["-T","-a","-x","-oForwardAgent=no","-oClearAllForwardings=yes","-oRequestTTY=no","-oServerAliveInterval=15","-oServerAliveCountMax=3","-oConnectTimeout=10","--",name,"hide --remote"]
+            (input,output,errors,process) <- createProcess (proc "ssh" sshArgs) {std_in=CreatePipe,std_out=CreatePipe,std_err=Inherit,close_fds=True}
+            pure (input,output,errors,Just process,pure ())
+      cleanup :: PeerConnection -> IO ()
+      cleanup (input,output,_,process,stop) = do
+        stop
+        mapM_ quietClose input; mapM_ quietClose output
+        forM_ process $ \child -> do
+          terminateProcess child `catch` \(_::IOException) -> pure ()
+          void (waitForProcess child)
+      close connection = modifyMVar_ activeShutdown (const (pure (pure ()))) >> cleanup connection
+      discardCandidate=modifyMVar candidate (\held->pure (Nothing,held)) >>= mapM_ cleanup
+      pipes (inputPipe,outputPipe,_,_,_) = (,) <$> maybe (failure "Transport did not create its input pipe") pure inputPipe <*> maybe (failure "Transport did not create its output pipe") pure outputPipe
+      admit selected reattach configuration connection = do
+        (input,output)<-pipes connection
+        hSetBinaryMode input True; hSetBinaryMode output True; hSetBuffering input NoBuffering
+        greeting<-hello selected reattach
+        responseResult <- try (writePacket input greeting >> timeout 20000000 (readPacket output))
+        let response=either (const Nothing) id (responseResult :: Either IOException (Maybe (Maybe WirePacket)))
+            (_,_,_,process,_)=connection
+        value <- case response of
+          Just (Just (JsonPacket v)) -> pure v
+          _ -> do
+            exited <- maybe (pure Nothing) (timeout 1000000 . waitForProcess) process
+            j <- readTVarIO (lifetimeJournal selected)
+            case exited of
+              Just (ExitFailure 127) -> fatal selected "hide is not installed or not on PATH on the remote host"
+              Just code | serverEpoch j==Nothing -> fatal selected ("SSH remote startup failed ("++show code++"); check authentication and the remote hide installation")
+              _ -> failure "SSH remote handshake timed out or ended"
+        (epoch,ack,replayCount) <- either (fatal selected) pure $ parseEither (withObject "remote hello" $ \o -> do
+          kind <- o .: "type"
+          when (kind==("error"::T.Text)) (o .: "message" >>= fail)
+          version <- o .: "version"; returned <- o .: "session"
+          unless (kind==("hello"::T.Text) && version==protocolVersion && returned==lifetimeId selected) (fail "Remote protocol or session mismatch")
+          count <- o .:? "replay" .!= 0
+          unless (count>=0 && count<=1024) (fail "Invalid remote replay count")
+          (,,) <$> o .: "epoch" <*> o .: "ack" <*> pure (count::Int)) value
+        atomically $ do
+          let journal=lifetimeJournal selected
+          j <- readTVar journal
+          if maybe True (==epoch) (serverEpoch j) && ack>=lastAck j && ack<nextSequence j
+            then writeTVar journal j {serverEpoch=Just epoch}
+            else writeTVar journal j {terminalError=Just "Remote session restarted or lost input; refusing unsafe replay"}
+        readTVarIO (lifetimeJournal selected) >>= mapM_ failure . terminalError
+        assets <- readPacket output >>= maybe (failure "Remote assets missing") pure
+        unless (packetType assets==Just "assets") (fatal selected "Expected remote assets after hello")
+        let replay 0=pure []
+            replay n=do
+              packet<-readPacket output >>= maybe (failure "Remote reply replay interrupted") pure
+              if packetType packet==Just "download" then do
+                unless (n>=2) (failure "Incomplete remote download replay")
+                payload<-readPacket output
+                case payload of Just binary@BinaryPacket{}->(\rest->packet:binary:rest) <$> replay (n-2);_->failure "Remote download replay interrupted"
+              else (packet:) <$> replay (n-1)
+        retained<-replay replayCount
+        -- Admission precedes input. Sending settings before a refusal is read
+        -- can turn its explanatory reply into a reset when the server closes
+        -- with those unwanted bytes unread (notably on Windows TCP).
+        mapM_ (writePacket input) configuration
+        pure (ack,assets:retained)
+      prepare target = mask $ \restore -> do
+        selected<-freshLifetime target []
+        configuration<-readTVarIO settings
+        let numberFrom firstSequence packets=zipWith (\serial packet->case packet of
+              JsonPacket (Object fields)->JsonPacket (Object (KM.insert "seq" (toJSON (serial::Int)) fields))
+              _->packet) [firstSequence..] packets
+            numbered=numberFrom 1 (M.elems configuration)
+            initialWatermark=length numbered
+            journal=lifetimeJournal selected
+        atomically $ modifyTVar' journal (\j->j {nextSequence=initialWatermark+1,pending=zip [1..] (map (:[]) numbered)})
+        connection<-restore (open selected True)
+        modifyMVar_ candidate (const (pure (Just connection)))
+        restore (do
+          (initialAck,prefix)<-admit selected True numbered connection
+          retire selected False initialAck Nothing
+          (input,output)<-pipes connection
+          -- Decode privately until the exact initialized snapshot is complete.
+          let collect configured watermark rows metadata serial waiting payload retained bytes = do
+                packet<-readPacket output >>= maybe (failure "Target attachment ended before its first complete frame") pure
+                when (payload && case packet of BinaryPacket{}->False;_->True) (failure "Target interrupted a binary payload pair")
+                when (bytes+packetSize packet>100663296) (failure "Target startup output exceeds 96 MiB")
+                let keep item=do
+                      let size=bytes+packetSize item
+                      collect configured watermark rows metadata serial waiting payload (item:retained) size
+                    ready latest fields = do
+                      unless (not (null latest)) (failure "Target did not provide a complete reset frame")
+                      case KM.lookup "size" fields of
+                        Just value->case fromJSON value of
+                          Success ([w,h]::[Int]) | w>=40 && w<=512 && h>=12 && h<=256 && length latest==h->pure ()
+                          _->failure "Invalid target frame dimensions"
+                        _->failure "Target frame dimensions missing"
+                      encoded<-evaluate (BL.toStrict (framePacket True [] latest (KM.toList fields)))
+                      when (BS.length encoded>=maxPacketSize) (failure "Target reset frame exceeds packet capacity")
+                      case selected of PeerLifetime record _ _->rememberSession record {sessionHost=host}
+                      decision<-atomically $ do
+                        latestSettings<-readTVar settings
+                        if latestSettings==configured then do
+                          writeTVar switching PreparedHandoff
+                          pure Nothing
+                        else do
+                          j<-readTVar journal
+                          let updates=numberFrom (nextSequence j) (M.elems latestSettings)
+                              next=nextSequence j+length updates
+                          let entries=pending j++zip [nextSequence j..] (map (:[]) updates)
+                          when (length entries>128) (throwSTM (userError "Target display settings exceeded its input journal"))
+                          writeTVar journal j {nextSequence=next,pending=entries}
+                          pure (Just (latestSettings,updates,next-1))
+                      case decision of
+                        Nothing->pure (PreparedPeer selected connection watermark (prefix++reverse retained++[json "frame-ready" ["seq" .= (0::Int),"changed" .= True],BinaryPacket encoded]))
+                        Just (latestSettings,updates,nextWatermark)->do
+                          mapM_ (writePacket input) updates
+                          collect latestSettings nextWatermark latest fields serial False False retained bytes
+                case packet of
+                  BinaryPacket _ | payload->collect configured watermark rows metadata serial waiting False (packet:retained) (bytes+packetSize packet)
+                  BinaryPacket body->do
+                    (delta,latest)<-decodeFrame rows body
+                    fields<-case delta of Object deltaFields->pure (KM.union (foldr KM.delete deltaFields ["type","reset","rows"]) (if KM.lookup "reset" deltaFields==Just (Bool True) then KM.empty else metadata));_->failure "Invalid target frame"
+                    when (null rows) $ unless (case delta of Object resetFields->KM.lookup "reset" resetFields==Just (Bool True);_->False) (failure "Target initial frame is not RESET")
+                    if serial>=watermark && waiting then ready latest fields else collect configured watermark latest fields serial False False retained bytes
+                  JsonPacket value->case packetType packet of
+                    Just "ack"->do
+                      serialAck<-decodeValue (withObject "ack" (.: "seq")) value
+                      retire selected False serialAck Nothing
+                      collect configured watermark rows metadata serial waiting False retained bytes
+                    Just "frame-ready"->do
+                      (committed,changed)<-decodeValue (withObject "frame readiness" (\o->(,) <$> o .: "seq" <*> o .: "changed")) value
+                      unless (committed>=0 && committed<=watermark) (failure "Invalid target frame watermark")
+                      if committed>=watermark && not changed then ready rows metadata else collect configured watermark rows metadata committed changed False retained bytes
+                    Just "error"->decodeValue (withObject "error" (.: "message")) value >>= failure
+                    Just "closed"->failure "Target closed during attachment"
+                    kind | kind `elem` [Just "canvas-chunk",Just "download"]->collect configured watermark rows metadata serial waiting True (packet:retained) (bytes+packetSize packet)
+                    _->keep packet
+          collect configuration initialWatermark [] KM.empty 0 False False [] 0) `onException` discardCandidate
+      connected selected connection sent = do
+        (input,output)<-pipes connection
+        requests<-newEmptyTMVarIO
+        let journal=lifetimeJournal selected
+            sender delivered = do
+              entries <- atomically $ do
+                j <- readTVar journal
+                let entries=filter ((>delivered).fst) (pending j)
+                check (not (null entries))
+                pure entries
+              forM_ entries $ \(_,packets) -> do
+                j <- readTVarIO journal
+                let receipt (JsonPacket (Object fields))=JsonPacket (Object (KM.insert "received" (toJSON (lastAck j)) fields))
+                    receipt packet=packet
+                mapM_ (writePacket input . receipt) packets
+              sender (fst (last entries))
+            receiver = do
+              packet <- readPacket output >>= maybe (failure "SSH connection ended") pure
+              case packetType packet of
+                Just "switch-session"->do
+                  target<-case packet of JsonPacket value->decodeValue (withObject "session switch" (.: "session")) value;_->failure "Invalid session switch"
+                  unless (validIdentity target && target/=lifetimeId selected) (failure "Invalid session switch target")
+                  accepted<-atomically $ do
+                    busy<-readTVar switching
+                    if busy/=NoHandoff then pure False else writeTVar switching PreparingHandoff >> modifyTVar' attachmentSerial (+1) >> pure True
+                  when accepted $ do
+                    status False "Switching session"
+                    atomically (putTMVar requests target)
+                  receiver
+                Just "ack" -> do
+                  (serial,dirtyState)<-case packet of JsonPacket value->decodeValue (withObject "ack" (\o->(,) <$> o .: "seq" <*> o .:? "dirty")) value;_->failure "Invalid acknowledgement"
+                  retire selected True serial dirtyState
+                  receiver
+                Just "frame-ready" -> do
+                  (serial,changed)<-case packet of JsonPacket value->decodeValue (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) value;_->failure "Invalid frame readiness marker"
+                  j<-readTVarIO journal
+                  unless (serial>=lastAck j && serial<nextSequence j) (failure "Invalid frame input sequence")
+                  let alias=if serial==lastAck j then acknowledgedAlias j else M.lookup serial (aliases j)
+                  emit (json "frame-ready" ["seq" .= fromMaybe (Number 0) alias,"changed" .= (changed::Bool)])
+                  receiver
+                Just kind | kind `elem` ["download","canvas-chunk"] -> do
+                  count<-if kind=="canvas-chunk"
+                    then case packet of
+                      JsonPacket value->Just <$> decodeValue (withObject "canvas chunk" $ \o->do
+                        n<-o .: "length"
+                        unless (n>0 && n<=262144) (fail "Invalid image chunk length")
+                        pure (n::Int)) value
+                      _->failure "Invalid image chunk header"
+                    else pure Nothing
                   payload <- readPacket output
                   case payload of
-                    Just binary@(BinaryPacket _) -> atomically (writeTBQueue incoming (Right (Just packet)) >> writeTBQueue incoming (Right (Just binary))) >> receiveReplay (n-2)
-                    _ -> failure "Remote download replay interrupted"
-                else emit packet >> receiveReplay (n-1)
-          receiveReplay replayCount
-          retire ack Nothing
-          rememberSession record {sessionHost=host}
-          writeIORef handshook True
-          status True "Connected"
-          let sender sent = do
-                entries <- atomically $ do
-                  j <- readTVar journal
-                  let entries=filter ((>sent).fst) (pending j)
-                  check (not (null entries))
-                  pure entries
-                forM_ entries $ \(_,packets) -> do
-                  j <- readTVarIO journal
-                  let receipt (JsonPacket (Object fields))=JsonPacket (Object (KM.insert "received" (toJSON (lastAck j)) fields))
-                      receipt packet=packet
-                  mapM_ (writePacket input . receipt) packets
-                sender (fst (last entries))
-              receiver = do
-                packet <- readPacket output >>= maybe (failure "SSH connection ended") pure
-                case packetType packet of
-                  Just "ack" -> case packet of
-                    JsonPacket v -> do
-                      serial <- decodeValue (withObject "ack" (\o -> o .: "seq")) v
-                      dirtyState <- decodeValue (withObject "ack" (\o -> o .:? "dirty")) v
-                      retire serial dirtyState
-                    _ -> pure ()
-                  Just "frame-ready" -> case packet of
-                    JsonPacket v -> do
-                      (serial,changed)<-decodeValue (withObject "frame readiness" (\o -> (,) <$> o .: "seq" <*> o .: "changed")) v
-                      j<-readTVarIO journal
-                      unless (serial>=lastAck j && serial<nextSequence j) (failure "Invalid frame input sequence")
-                      let alias=if serial==lastAck j then acknowledgedAlias j else M.lookup serial (aliases j)
-                      emit (json "frame-ready" ["seq" .= fromMaybe (Number 0) alias,"changed" .= (changed::Bool)])
-                    _ -> failure "Invalid frame readiness marker"
-                  Just "download" -> do
-                    payload <- readPacket output
-                    case payload of
-                      Just binary@(BinaryPacket _) -> atomically $ do
-                        writeTBQueue incoming (Right (Just packet))
-                        writeTBQueue incoming (Right (Just binary))
-                      _ -> failure "SSH disconnected during download; request the download again after reconnecting"
-                  Just "closed" -> do
-                    resumable <- case packet of
-                      JsonPacket v -> decodeValue (withObject "closed" (\o -> o .:? "resumable" .!= False)) v
-                      _ -> pure False
-                    unless resumable (forgetSession session)
-                    emit packet
-                  Just "error" -> case packet of
-                    JsonPacket v -> decodeValue (withObject "error" (\o -> o .: "message")) v >>= fatal
-                    _ -> failure "Remote protocol error"
-                  _ -> emit packet
-                if packetType packet==Just "closed" then atomically (writeTBQueue incoming (Right Nothing)) else receiver
-          raceWithShutdown shutdown (sender ack) receiver
-      reconnect attempts = do
+                    Just binary@(BinaryPacket bytes) -> do
+                      forM_ count $ \n->unless (BS.length bytes==n) (failure "Invalid image chunk bytes")
+                      -- A handoff may retire an old stream only between pairs.
+                      atomically $ writeTBQueue incoming (Right (Just packet)) >> writeTBQueue incoming (Right (Just binary))
+                    _ -> failure "SSH disconnected during a binary transfer; reconnect before requesting it again"
+                  receiver
+                Just "closed" -> do
+                  resumable <- case packet of JsonPacket value -> decodeValue (withObject "closed" (\o -> o .:? "resumable" .!= False)) value;_->pure False
+                  -- The local daemon removes its checkpoint after joining the
+                  -- publisher. A frontend must not race that owner on Exit.
+                  -- SSH keeps a separate local discovery record to retire here.
+                  when (not resumable && isJust host) (forgetSession (lifetimeId selected))
+                  emit packet
+                  atomically (writeTBQueue incoming (Right Nothing))
+                  pure ()
+                Just "error" -> case packet of JsonPacket value -> decodeValue (withObject "error" (.: "message")) value >>= fatal selected;_->failure "Remote protocol error"
+                _ -> emit packet >> receiver
+            switches = do
+              target<-atomically (takeTMVar requests)
+              prepared<-try (timeout 75000000 (prepare target) >>= maybe (failure "Target attachment timed out") pure)
+              case prepared of
+                Right next->pure (Just next)
+                Left (err::IOException)->do
+                  atomically (writeTVar switching NoHandoff)
+                  status True "Connected"
+                  emit (json "notice" ["message" .= T.pack ("Could not switch session: "++show err)])
+                  switches
+        mask $ \restore -> withAsync (restore (race_ (sender sent) receiver)) $ \transport -> withAsync (restore switches) $ \handoff ->
+          flip finally shutdown $ do
+            winner<-restore (waitEither transport handoff)
+            case winner of
+              Left ()->pure Nothing
+              Right next@(Just (PreparedPeer target _ _ _))->do
+                atomically $ writeTVar current target >> modifyTVar' attachmentSerial (+1)
+                pure next
+              Right Nothing->pure Nothing
+      reconnect selected prepared attempts = do
         handshook <- newIORef False
-        result <- try (connect handshook)
+        result <- try $ bracket
+          (case prepared of
+            Nothing->open selected resume `catch` \(err::IOException)->fatal selected (show err)
+            Just (PreparedPeer _ connection _ _)->modifyMVar_ candidate (const (pure Nothing)) >> pure connection)
+          close $ \connection@(_,_,_,_,stop)->do
+            modifyMVar_ activeShutdown (const (pure stop))
+            (sent,events)<-case prepared of
+              Nothing->admit selected resume [] connection
+              Just (PreparedPeer _ _ sent events)->do
+                serial<-readTVarIO attachmentSerial
+                emit (json "session" ["session" .= lifetimeId selected,"attachment" .= serial])
+                pure (sent,events)
+            mapM_ emit events
+            case prepared of Nothing->retire selected True sent Nothing;Just _->pure ()
+            case selected of PeerLifetime record _ _->rememberSession record {sessionHost=host}
+            writeIORef handshook True
+            atomically (writeTVar switching NoHandoff)
+            status True "Connected"
+            connected selected connection sent
         case result of
-          Right () -> pure ()
+          Right Nothing->pure ()
+          Right (Just next@(PreparedPeer target _ _ _))->reconnect target (Just next) 0
           Left (err::IOException) -> do
+            discardCandidate
             established <- readIORef handshook
             let retries=if established then 0 else attempts
-            j <- readTVarIO journal
+            j <- readTVarIO (lifetimeJournal selected)
             case terminalError j of
               Just message -> failure message
               Nothing | retries>=8 -> failure ("SSH reconnect failed: "++show err)
                       | otherwise -> do
                           status False (T.pack ("Disconnected; reconnecting: "++show err))
                           threadDelay (min 5000000 (250000*2^retries))
-                          reconnect (retries+1)
-      worker = reconnect (0::Int) `catch` \(err::IOException) -> do
-        atomically $ modifyTVar' journal (\j -> j {terminalError=Just (show err)})
-        atomically (writeTBQueue incoming (Left (show err)))
+                          reconnect selected Nothing (retries+1)
+      worker = (reconnect first Nothing (0::Int) `catch` \(err::IOException) -> do
+        selected<-readTVarIO current
+        atomically $ modifyTVar' (lifetimeJournal selected) (\j -> j {terminalError=Just (show err)})
+        atomically (writeTBQueue incoming (Left (show err)))) `finally` discardCandidate
       drain = do
+        selected<-readTVarIO current
+        let journal=lifetimeJournal selected
         void $ timeout 2000000 $ atomically $ do
           j <- readTVar journal
           check (null (pending j) || terminalError j/=Nothing)
@@ -852,12 +1032,7 @@ withSessionPeer host session resume remoteArgs action = do
           ("Detached with "++show (length remaining)++" unacknowledged input events; their application could not be confirmed.")
   mask $ \restore -> withAsync (restore worker) $ \_ ->
     restore (action peer) `finally` (drain `finally` shutdown)
-  where
-    cleanup (input,output,_,process,_) = do
-      mapM_ quietClose input; mapM_ quietClose output
-      forM_ process $ \child -> do
-        terminateProcess child `catch` \(_::IOException) -> pure ()
-        void (waitForProcess child)
+
 #else
 withLocalPeer :: String -> Bool -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withLocalPeer _ _ _ _ = ioError (userError "Persistent sessions are not built")

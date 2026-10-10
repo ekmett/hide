@@ -10,7 +10,7 @@
 -- client after their terminal response. Cancellation rejects further edits while
 -- awaiting that response; only an unresponsive transport is retired. Accepted
 -- batches survive later failure and are reported as partial.
-module Hide.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, withToolingUsing, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
+module Hide.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, withToolingClock, withToolingUsing, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
 import Hide.Sidebar (treeFocused)
 import Control.Exception (bracket, try, IOException, onException, mask_, evaluate, finally, displayException)
@@ -46,7 +46,7 @@ type Target = (Int,Int,Int)
 data Pending = Pending LanguageAction Target FilePath (M.Map FilePath (Int,T.Text)) | ToolPending ToolQuery | CommandPending ToolQuery (Maybe T.Text) | CancelledCommand Integer
 data ToolQuery = ToolQuery
   { queryName :: T.Text, queryTarget :: Target, queryPath :: FilePath, queryArguments :: Value
-  , querySnapshot :: M.Map FilePath (Int,T.Text), queryDeadline :: Integer
+  , querySnapshot :: M.Map FilePath (Int,T.Text), queryDeadline :: Integer, queryClock :: IO Integer
   , queryReply :: TMVar (Either T.Text Value), queryHuman :: Bool
   , queryProgress :: TVar (Int,M.Map Int Int) }
 data CachedAction = CachedAction ToolQuery Value Bool
@@ -93,16 +93,24 @@ data Tooling = Tooling
   , snapshotSources :: Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))
   , readEditFile :: FilePath -> IO (Either String (FileState,Buffer))
   , editing :: IORef (Maybe Editing), editQueue :: IORef [EditRequest]
-  , heldEvents :: IORef (M.Map FilePath [L.Event])
+  , heldEvents :: IORef (M.Map FilePath [L.Event]), requestClock :: IO Integer
   }
 
 -- | Scope language sessions, preparation workers and pending retirement joins.
-withTooling :: (Tooling -> IO a) -> IO a
-withTooling = withToolingUsing projectRoot L.startClient editSnapshot loadFile
+-- The launcher receives each discovered project root and owns its server startup.
+withTooling :: (FilePath -> IO L.Client) -> (Tooling -> IO a) -> IO a
+withTooling = withToolingClock (toInteger <$> getMonotonicTimeNSec)
+
+-- | Supply the monotonic nanosecond clock used to create and expire requests.
+-- Advancing the clock expires pending requests on the next pump; blocking callers
+-- wait for at most the remaining deadline. The clock must never move backwards.
+withToolingClock :: IO Integer -> (FilePath -> IO L.Client) -> (Tooling -> IO a) -> IO a
+withToolingClock clock launch use = withToolingUsing projectRoot launch editSnapshot loadFile
+  (\t -> use t {requestClock=clock})
 
 -- | Override the filesystem/process operations, keeping their normal ownership.
 withToolingUsing :: (FilePath -> IO FilePath) -> (FilePath -> IO L.Client) -> (Desktop -> FilePath -> IO (M.Map FilePath (Int,T.Text))) -> (FilePath -> IO (Either String (FileState,Buffer))) -> (Tooling -> IO a) -> IO a
-withToolingUsing discover launch snapshot load = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef 0 <*> newIORef Nothing <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef M.empty <*> newIORef M.empty <*> newIORef [] <*> newIORef M.empty <*> pure discover <*> pure launch <*> pure snapshot <*> pure load <*> newIORef Nothing <*> newIORef [] <*> newIORef M.empty) closeTooling
+withToolingUsing discover launch snapshot load = bracket (Tooling <$> newIORef M.empty <*> newIORef M.empty <*> newIORef M.empty <*> newIORef 0 <*> newIORef Nothing <*> newIORef (Nothing,0,False) <*> newIORef M.empty <*> newIORef 1 <*> newIORef [] <*> newIORef Nothing <*> newIORef M.empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef M.empty <*> newIORef M.empty <*> newIORef [] <*> newIORef M.empty <*> pure discover <*> pure launch <*> pure snapshot <*> pure load <*> newIORef Nothing <*> newIORef [] <*> newIORef M.empty <*> pure (toInteger <$> getMonotonicTimeNSec)) closeTooling
 
 closeTooling :: Tooling -> IO ()
 closeTooling t = do
@@ -226,7 +234,7 @@ startToolWith seed human t _ d name arguments = case parseEither parameters argu
         Just (Left err) -> reject err
         Just (Right session) | not (discovering && name `elem` ["lsp_rename","lsp_code_actions"]) ->
           if name=="lsp_apply_code_action" then applyCodeAction seed human t d target path arguments else do
-            query<-newQuery seed human name target path arguments M.empty
+            query<-newQuery t seed human name target path arguments M.empty
             if name `elem` ["lsp_rename","lsp_code_actions"] then mask_ $ do
               result<-newEmptyMVar
               worker<-async (try (snapshotSources t d path) >>= putMVar result)
@@ -238,7 +246,7 @@ startToolWith seed human t _ d name arguments = case parseEither parameters argu
           case identity of
             Nothing->reject "HLS target changed or became private."
             Just stamp->do
-              query<-newQuery seed human name target path arguments M.empty
+              query<-newQuery t seed human name target path arguments M.empty
               accepted<-deferRequest t (DeferredTool query stamp)
               if accepted then pure (if human then d {status="Starting HLS..."} else d,waitTool query)
                 else completeTool query (Left "Too many pending HLS startup requests") >> reject "Too many pending HLS startup requests"
@@ -284,13 +292,13 @@ startToolWith seed human t _ d name arguments = case parseEither parameters argu
       when (name=="lsp_references") (void (o .:? "includeDeclaration" :: Parser (Maybe Bool)))
       pure ((bid,revision b,pos),filePath file,text)
 
-newQuery :: Maybe ToolQuery -> Bool -> T.Text -> Target -> FilePath -> Value -> M.Map FilePath (Int,T.Text) -> IO ToolQuery
-newQuery (Just query) _ _ _ _ _ snapshot = pure query {querySnapshot=snapshot}
-newQuery Nothing human name target path arguments snapshot = do
+newQuery :: Tooling -> Maybe ToolQuery -> Bool -> T.Text -> Target -> FilePath -> Value -> M.Map FilePath (Int,T.Text) -> IO ToolQuery
+newQuery _ (Just query) _ _ _ _ _ snapshot = pure query {querySnapshot=snapshot}
+newQuery t Nothing human name target path arguments snapshot = do
   promise<-newEmptyTMVarIO
-  now<-toInteger <$> getMonotonicTimeNSec
+  now<-requestClock t
   progress<-newTVarIO (0,M.empty)
-  pure (ToolQuery name target path arguments snapshot (now+30000000000) promise human progress)
+  pure (ToolQuery name target path arguments snapshot (now+30000000000) (requestClock t) promise human progress)
 
 completeTool :: ToolQuery -> Either T.Text Value -> IO ()
 completeTool query result = atomically $ do
@@ -306,7 +314,7 @@ commandResult query (count,changed) success failure = object
 
 waitTool :: ToolQuery -> IO (Either T.Text Value)
 waitTool query = (do
-  now<-toInteger <$> getMonotonicTimeNSec
+  now<-queryClock query
   result<-timeout (fromInteger (max 1 ((queryDeadline query-now) `div` 1000))) (atomically (readTMVar (queryReply query)))
   case result of
     Just answer -> pure answer
@@ -320,7 +328,7 @@ failPending _ _=pure ()
 
 toolActive :: ToolQuery -> IO Bool
 toolActive query = do
-  now<-toInteger <$> getMonotonicTimeNSec
+  now<-queryClock query
   when (now>=queryDeadline query) (completeTool query (Left "HLS request timed out"))
   atomically (isEmptyTMVar (queryReply query))
 
@@ -441,7 +449,7 @@ applyCodeAction seed human t d target path arguments = do
               case actionDisabled resolve (advertisedCommands caps) value of
                 Just reason->reject reason
                 Nothing->do
-                  query<-newQuery seed human "lsp_apply_code_action" (queryTarget original) path value (querySnapshot original)
+                  query<-newQuery t seed human "lsp_apply_code_action" (queryTarget original) path value (querySnapshot original)
                   let resolved=query {queryArguments=value}
 
                   if maybe False (/=Null) (member "edit" value) || either (const False) (/=Nothing) (actionCommand value)

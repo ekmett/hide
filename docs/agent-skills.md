@@ -185,6 +185,11 @@ moving the person's source window on each stop. At an interesting stop, send
 `view: "source"` and the current `generation`; `stack`, `scopes` and `output`
 reveal those views. Set `follow: true` to follow future stops automatically.
 The agent and the UI share one debugger, breakpoints and stopped state.
+`debug_status.sourcePreparation` reports the background source worker: `preparing`
+while it reads or decodes, `ready` once its result awaits the UI, and `idle` when
+no preparation remains. A human dialog can hold a ready result. Idle alone does
+not prove that a source opened; inspect the resulting window or error. Adapter
+requests that have not returned a source are separate from this worker state.
 
 **Check:** accepted execution commands are submissions. Wait for the next
 observed stop before drawing conclusions. Report pending versus verified
