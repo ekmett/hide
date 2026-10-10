@@ -311,11 +311,17 @@ draftReceiptChecks=withTextPresentation $ \presentation->
           check "input while initializing joins the original provider queue" (agentQueued queuedConnecting==1)
           newer<-fresh original
           putMVar release (); wait writer
-          accepted<-primaryDone runtime "connecting replacement" (draftBuffer newer queuedConnecting)
-          connectedMessages<-readMessages (root </> "messages.jsonl")
-          let sent=[params | entry<-connectedMessages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
-              sentText params=case (field "prompt" params::Maybe [Value]) of Just (first:_)->field "text" first; _->Nothing
-          check ("initial connection accepts queued input in order: "++show (map sentText sent::[Maybe T.Text],status accepted,agentReplying accepted,agentQueued accepted)) (map sentText sent==[Just ("stream"::T.Text),Just "stream\nconnecting followup"])
+          let sentTexts :: [Value] -> [Maybe T.Text]
+              sentTexts messages=
+                [case (field "prompt" params::Maybe [Value]) of Just (first:_)->field "text" first; _->Nothing
+                | entry<-messages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
+          -- Observe this request at its provider, not a momentarily idle view.
+          delivered<-await runtime "initial queued prompt receipt"
+            (\_->elem (Just ("stream\nconnecting followup"::T.Text)) . sentTexts <$> readMessages (root </> "messages.jsonl"))
+            (draftBuffer newer queuedConnecting)
+          accepted<-primaryDone runtime "connecting replacement" delivered
+          sent<-sentTexts <$> readMessages (root </> "messages.jsonl")
+          check ("initial connection accepts queued input in order: "++show (sent,status accepted,agentReplying accepted,agentQueued accepted)) (sent==[Just "stream",Just "stream\nconnecting followup"])
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
     writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
