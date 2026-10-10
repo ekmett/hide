@@ -241,6 +241,7 @@ tests = askOption $ \profile->withResource
   , testCase "LSP" (LSPCheck.checks profile)
   , testCase "Tooling.allocations" (ToolingCheck.allocationChecks profile)
   , testCase "Tooling" ToolingCheck.checks
+  , testCase "Tooling.startup" ToolingCheck.startupChecks
   , testCase "DialogMouse" (DialogMouseCheck.checks profile)
   , testCase "GitOperations" GitOperationsCheck.checks
   , testCase "Git" GitCheck.checks

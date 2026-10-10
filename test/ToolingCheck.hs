@@ -120,7 +120,6 @@ checks = do
       check "Save As while preparing cancels original target" (status renamedPath=="Rename target changed; request it again." && buffers renamedPath==buffers moved)
   check "HLS exposes code action discovery and checked application"
     (all (`elem` toolingToolNames) ["lsp_code_actions","lsp_apply_code_action"])
-  startupChecks
   workspaceEditChecks
   diagnosticCacheChecks
   mcpChecks
@@ -148,13 +147,15 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
       core d _=pure (False,d)
       check label ok=unless ok (error label)
       bounded label action=timeout 1000000 action >>= maybe (error label) pure
-      pump tooling d predicate=bounded "startup did not progress" (loop d)
+      -- The 30s query deadline owns external completion (initialize has 20s).
+      -- Leave it time to return its error, while every UI tick stays bounded.
+      pump label tooling d predicate=timeout 31000000 (loop d) >>= maybe (error (label++": receipt did not complete within the HLS request lifetime")) pure
         where loop state=do
-                next<-tickTooling tooling core state
+                next<-bounded (label++": UI tick blocked") (tickTooling tooling core state)
                 ready<-predicate next
                 if ready then pure next else threadDelay 1000 >> loop next
-      finish tooling d answer=withAsync answer $ \worker -> do
-        next<-pump tooling d (const (maybe False (const True) <$> poll worker))
+      finish label tooling d answer=withAsync answer $ \worker -> do
+        next<-pump label tooling d (const (maybe False (const True) <$> poll worker))
         (next,) <$> wait worker
       isLeft (Left _)=True; isLeft _=False
       field key=parseMaybe (withObject "result" (.: key))
@@ -181,18 +182,18 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
     withAsync answer $ \waiting->do
       check "request remains queued during discovery" . maybe True (const False) =<< poll waiting
       putMVar discoveryGate ()
-      processPending<-pump tooling ticked (const (maybe False (const True) <$> tryReadMVar started))
+      processPending<-pump "launcher entry after discovery" tooling ticked (const (maybe False (const True) <$> tryReadMVar started))
       _<-bounded "held process startup blocked tick" (tickTooling tooling core processPending)
       -- Ordinary UI requests and saved notifications share the same startup.
       (_,human)<-bounded "human operation blocked startup" (toolingEffects tooling core base [LanguageRequest TypeInfo])
       check "human startup request is accepted" (status human=="Starting HLS...")
       (_,saved)<-toolingEffects tooling core desktop [SaveDocument bid Nothing Nothing]
       putMVar startupGate ()
-      ready<-pump tooling saved (const (maybe False (const True) <$> poll waiting))
+      ready<-pump "initial hover reply after startup" tooling saved (const (maybe False (const True) <$> poll waiting))
       reply<-wait waiting
       let raw=either (const Nothing) (field "result") reply :: Maybe Value
       check "deferred request observes didOpen text" ((raw >>= field "text")==Just ("foo = 1\n"::T.Text))
-      _<-pump tooling ready (const (doesFileExist (root </> "saved.marker")))
+      _<-pump "didSave receipt" tooling ready (const (doesFileExist (root </> "saved.marker")))
       check "same root launches only one HLS" . (==1) =<< readIORef launches
       check "one coalesced discovery per path" . (==2) =<< readIORef rootsRead
   -- Never dispatch a captured request after editing, equal-revision reload,
@@ -233,14 +234,14 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
         pure client
   withToolingUsing (const (pure root)) heldLaunch (\_ _->pure M.empty) loadFile $ \tooling->flip finally (void (tryPutMVar release ())) $ do
     (_,firstReply)<-toolingTool tooling core base "lsp_hover" arguments
-    pending<-pump tooling base (const (maybe False (const True) <$> tryReadMVar launched))
+    pending<-pump "held launcher entry" tooling base (const (maybe False (const True) <$> tryReadMVar launched))
     (_,restarted)<-bounded "restart waited for held process operation" (toolingEffects tooling core pending [LanguageRequest RestartLanguage])
     check "restart completes original process-start waiter" . isLeft =<< bounded "process-start waiter stranded" firstReply
     (_,nextReply)<-toolingTool tooling core restarted "lsp_hover" arguments
     held<-foldM (\d _->tickTooling tooling core d <* threadDelay 1000) restarted [1..10::Int]
     check "retiring startup reserves its root" . (==1) =<< readIORef calls
     putMVar release ()
-    (_,reply)<-finish tooling held nextReply
+    (_,reply)<-finish "hover after launcher retirement" tooling held nextReply
     check "reopen resumes after startup cleanup" (not (isLeft reply))
     check "one replacement starts after old root retires" . (==2) =<< readIORef calls
   entered<-newEmptyMVar; releaseDiscovery<-newEmptyMVar; discoveries<-newIORef (0::Int)
@@ -260,7 +261,7 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
     check "restarted discovery completes old waiter" . isLeft =<< bounded "old root waiter stranded" originalReply
     (_,answer)<-toolingTool tooling core base "lsp_hover" arguments
     putMVar releaseDiscovery ()
-    (_,reply)<-finish tooling base answer
+    (_,reply)<-finish "hover after discovery retirement" tooling base answer
     check "root discovery resumes after retirement" (not (isLeft reply))
     check "only one replacement discovery runs" . (==2) =<< readIORef discoveries
   -- Canceling a snapshot does not release its slot while an uninterruptible
@@ -273,7 +274,7 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
         pure M.empty
   withToolingUsing (const (pure root)) (launchServer server) heldSnapshot loadFile $ \tooling->flip finally (void (tryPutMVar releasePreparation ())) $ do
     (_,warmReply)<-toolingTool tooling core base "lsp_hover" arguments
-    _<-finish tooling base warmReply
+    _<-finish "hover before snapshot cancellation" tooling base warmReply
     (_,first)<-toolingEffects tooling core base [LanguageRequest (RenameAt "first")]
     bounded "edit snapshot did not enter" (readMVar preparingEntered)
     (_,replaced)<-bounded "rename replacement blocked cancellation" (toolingEffects tooling core first [LanguageRequest (RenameAt "replacement")])
@@ -281,7 +282,7 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
     forM_ [1..3::Int] $ \_->do
       (_,restarted)<-bounded "restart blocked on snapshot cancellation" (toolingEffects tooling core base [LanguageRequest RestartLanguage])
       (_,queued)<-toolingEffects tooling core restarted [LanguageRequest (RenameAt "replacement")]
-      _<-pump tooling queued (pure . T.isInfixOf "still stopping" . status)
+      _<-pump "rename rejection during snapshot retirement" tooling queued (pure . T.isInfixOf "still stopping" . status)
       pure ()
     let renameArgs=object ["bufferId" .= bid,"revision" .= (0::Int),"line" .= (1::Int),"column" .= (1::Int),"newName" .= ("replacement"::T.Text)]
     (_,blockedReply)<-toolingTool tooling core base "lsp_rename" renameArgs
@@ -293,13 +294,13 @@ startupChecks = bracket temporary removePathForcibly $ \root -> do
           (_,requested)<-toolingEffects tooling core ticked [LanguageRequest (RenameAt "resumed")]
           if status requested=="Preparing rename..." then pure requested else threadDelay 1000 >> resume requested
     ready<-bounded "rename did not resume after preparation cleanup" (resume base)
-    _<-pump tooling ready (const ((==2) <$> readIORef preparations))
+    _<-pump "replacement snapshot entry" tooling ready (const ((==2) <$> readIORef preparations))
     check "one replacement snapshot starts after cleanup" . (==2) =<< readIORef preparations
   -- A process failure is cached until explicit restart, avoiding a spawn loop.
   attempts<-newIORef (0::Int)
   withToolingUsing (const (pure root)) (\_->modifyIORef' attempts (+1) >> ioError (userError "held startup failed")) (\_ _->pure M.empty) loadFile $ \tooling->do
     (_,answer)<-toolingTool tooling core base "lsp_hover" arguments
-    (failed,reply)<-finish tooling base answer
+    (failed,reply)<-finish "failed launch reply" tooling base answer
     check "startup failure reaches original waiter" (isLeft reply)
     _<-foldM (\d _->tickTooling tooling core d) failed [1..10::Int]
     check "startup failure is not retried every tick" . (==1) =<< readIORef attempts
