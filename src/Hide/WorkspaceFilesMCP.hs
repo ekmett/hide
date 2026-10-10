@@ -38,6 +38,8 @@ import Text.Read (readMaybe)
 import Hide.Buffer
 import Hide.BufferEdits (PreparedEdit,prepareBufferEdit,commitEdits)
 import Hide.Plugin.BufferHost (DiffResult(..),ContentVersion,captureVersion)
+import qualified Hide.Plugin.BufferDiff as D
+import Hide.Plugin.Command (Codec(..))
 import Hide.Build (resolveBuildRoot)
 import Hide.Files (FileState(..), saveFile)
 import Hide.GuestAccess (protectedBuffer, protectedPath, protectedPathParent)
@@ -45,14 +47,12 @@ import Hide.Model
 import Hide.Process (processCleanup)
 
 fileToolNames :: [Text]
-fileToolNames=["workspace_search","buffer_apply_diff","workspace_files"]
+fileToolNames=["workspace_search","workspace_files"]
 
 fileTools :: [Value]
 fileTools=
   [describe "workspace_search" "Literal line search of ignore-respecting workspace files, or Git tracked files only. Live buffers replace disk contents, including unsaved text; default search also includes untitled buffers. Matches are paged, lines/columns start at 1. Files over 1 MiB and binary files are skipped; total scan is capped at 32 MiB and 10000 files/matches." True ["query"]
     [("query",string),("trackedOnly",boolean),("offset",integer),("limit",integer)]
-  ,describe "buffer_apply_diff" "Apply one strict unified diff to a live text buffer at the given revision. Context and hunk positions must match exactly. This permission also covers linked plugin batches for several buffers; every patch in a batch is applied atomically with ordinary Undo per buffer. No file is saved. File headers are optional and identify only the target buffer, never disk paths." False ["bufferId","revision","diff"]
-    [("bufferId",integer),("revision",integer),("diff",string)]
   ,describe "workspace_files" "Create a directory or empty file, delete a file/empty directory, or rename a workspace path. Paths must stay inside the project; Git metadata and symlink endpoints are protected. Refuses overwrite and dirty open descendants. Delete closes clean views; rename updates open buffer paths. No recursive deletion." False ["operation","path"]
     [("operation",object ["type" .= ("string"::Text),"enum" .= (["mkdir","create_file","delete","rename"]::[Text])]),("path",string),("to",string)]]
   where
@@ -178,9 +178,12 @@ data PatchSource = PatchSource !Int !Buffer !(Maybe FileState)
 -- | Capture only original target metadata. Whole-text validation belongs to
 -- preparePatch's worker; current editability/privacy is checked again at adoption.
 capturePatchSource :: Desktop -> Value -> Either Text PatchSource
-capturePatchSource desktop args=do
-  (bid,expected,patch)<-patchArguments args
-  unless (T.length patch<=1048576) (Left "Diff exceeds 1 MiB characters")
+capturePatchSource desktop args=codecDecode D.applyInput args >>= captureDiffSource desktop
+
+captureDiffSource :: Desktop -> D.ApplyDiffArguments -> Either Text PatchSource
+captureDiffSource desktop request=do
+  let bid=D.targetBuffer request
+      expected=D.expectedRevision request
   doc<-maybe (Left "Unknown bufferId") Right (M.lookup bid (buffers desktop))
   unless (not (protectedBuffer desktop bid)) (Left "This buffer contains private user or editor configuration data")
   let old=documentBuffer doc
@@ -190,14 +193,12 @@ capturePatchSource desktop args=do
 
 -- | Validate wire arguments and capture only the exact original content identity.
 -- The queued typed service refuses replacement before its source admission.
-capturePatchRequest :: Desktop -> Value -> IO (Either Text (Int,ContentVersion,Text))
-capturePatchRequest desktop args=case capturePatchSource desktop args of
+capturePatchRequest :: Desktop -> D.ApplyDiffArguments -> IO (Either Text (Int,ContentVersion))
+capturePatchRequest desktop request=case captureDiffSource desktop request of
   Left err->pure (Left err)
-  Right (PatchSource bid old _)->case patchArguments args of
-    Left err->pure (Left err)
-    Right (_,_,patch)->do
-      version<-captureVersion old
-      pure (Right (bid,version,patch))
+  Right (PatchSource bid old _)->do
+    version<-captureVersion old
+    pure (Right (bid,version))
 
 preparePatch :: PatchSource -> Maybe Text -> Value -> IO (Either Text PreparedPatch)
 preparePatch (PatchSource target old file) original args=case patchArguments args of
@@ -211,10 +212,9 @@ preparePatch (PatchSource target old file) original args=case patchArguments arg
       pure (PreparedPatch bid patch modified <$> prepared)
 
 patchArguments :: Value -> Either Text (Int,Int,Text)
-patchArguments= either (Left . T.pack) Right . parseEither
-  (withObject "buffer_apply_diff" $ \o->do
-    unless (all (`elem` ["bufferId","revision","diff"]) (KM.keys o)) (fail "Unknown argument")
-    (,,) <$> o .: "bufferId" <*> o .: "revision" <*> o .: "diff")
+patchArguments value=do
+  request<-codecDecode D.applyInput value
+  pure (D.targetBuffer request,D.expectedRevision request,D.diffText request)
 
 -- | Recheck every target's current editability, then install the entire batch
 -- once through the shared all-target owner. The caller has rechecked ticket

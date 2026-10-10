@@ -27,6 +27,7 @@ import qualified Hide.AgentHub as AH
 import Hide.BufferReads
 import Hide.EditorMCP (builtinTools,readWindowTool)
 import qualified Hide.BufferTools as BufferTools
+import Hide.Plugin.Request (RequestServices(..))
 import qualified Hide.Plugin.Tool as Tool
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
@@ -52,7 +53,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
   withPermissionsAt path specs $ \runtime -> withBufferReadCommands $ \commands->do
     let reader=bufferReader runtime (pure (Right ()))
         begin reader' d=beginRequest d $ do
-          let context=bufferReadServices reader' (activeWindow d >>= bufferId) (nextId d)
+          let context=RequestServices (bufferReadServices reader' (activeWindow d >>= bufferId) (nextId d)) Nothing
           context `seq` pure (d,Tool.callTool toolset context "read_buffer" args)
         beginWindow d=beginRequest d (readWindowTool commands (windowReader runtime (pure (Right ()))) d "read_window" (object []))
         beginRequest d request=do

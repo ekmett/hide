@@ -19,7 +19,8 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Info (os)
 import System.Process (callProcess)
-import Hide.BufferDiffCommand (withBufferDiffCommands)
+import qualified Hide.BufferTools as BufferTools
+import qualified Hide.Plugin.Tool as Tool
 import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
 import Hide.BufferView
@@ -31,17 +32,17 @@ import Hide.Model
 import Hide.WorkspaceFilesMCP
 
 checks :: IO ()
-checks=withBufferDiffCommands $ \commands->do
+checks=Tool.withTools [] BufferTools.tools $ \toolset->do
   patchChecks
   bracket temporary removePathForcibly $ \directory -> do
     let policy=directory </> "policy.toml"
     TIO.writeFile policy "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
-    withPermissionsAt policy fileTools $ \runtime -> do
+    withPermissionsAt policy (fileTools++Tool.toolDefinitions toolset) $ \runtime -> do
       let root=directory </> "project"
           outside=directory </> "outside"
           core d _=pure (False,d)
           tool name args d=do
-            (next,response)<-if name=="buffer_apply_diff" then startDiffCall commands runtime (pure (Right ())) d name (object args) else fileTool core d name (object args)
+            (next,response)<-if name=="buffer_apply_diff" then startDiffCall toolset runtime (pure (Right ())) d name (object args) else fileTool core d name (object args)
             withAsync response $ \worker->do
               let await current=do
                     completed<-poll worker

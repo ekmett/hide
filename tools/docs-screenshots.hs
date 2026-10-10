@@ -13,9 +13,12 @@ import Hide.Buffer (newBuffer, Selection(..), revision, contents, replaceSelecti
 import Hide.BufferView (BufferView(SideBySideView,MarkdownView))
 import Hide.Files (FileState(..))
 import Hide.TextPresentation (prepareTextPresentations)
-import Hide.MCPPermissions (withPermissionsAt, bufferEditor, tickPermissions, policyEffects)
+import Hide.MCPPermissions (withPermissionsAt, bufferEditor, bufferReader, tickPermissions, policyEffects)
 import Hide.WorkspaceFilesMCP (fileTools)
-import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
+import Hide.BufferRequest (bufferRequestServices)
+import qualified Hide.BufferTools as BufferTools
+import qualified Hide.AgentTranscript as AgentTranscript
+import qualified Hide.Plugin.Tool as PluginTool
 import qualified Graphics.Vty as V
 import System.Directory
 import System.Environment (getArgs, lookupEnv, setEnv, unsetEnv)
@@ -68,7 +71,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
   setEnv "hide_datadir" root
   unsetEnv "THC_ROOT"
   setEnv "THC_EDIT_CAPTURE_EXIT" "1"
-  withDocsCommands $ \docs -> withMenuCommands docs $ \menuHost -> withSidebarCommands $ \sidebarHost -> withDebugger $ \debugger -> withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withPermissionsAt (scratch </> "permissions.toml") fileTools $ \permissions -> withBufferDiffCommands $ \diffCommands -> do
+  withDocsCommands $ \docs -> withMenuCommands docs $ \menuHost -> withSidebarCommands $ \sidebarHost -> withDebugger $ \debugger -> withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> PluginTool.withTools [] BufferTools.tools $ \bufferTools -> withPermissionsAt (scratch </> "permissions.toml") (fileTools++PluginTool.toolDefinitions bufferTools) $ \permissions -> do
     contributions <- PluginMenu.menuSnapshot (menuContributions menuHost)
     let core = policyEffects permissions (debuggerEffects debugger applyEffects)
         effects = sidebarEffects sidebarHost (menuEffects menuHost core)
@@ -81,7 +84,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           Driver.await label pump predicate d
         chat d = case agentConfig of
           Nothing -> recordedChat d
-          Just _ -> C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
+          Just _ -> C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \conversation -> do
             let liveEffects=conversationEffects conversation effects
             shown <- snd <$> liveEffects d [AgentAction "show" []]
             sent <- snd <$> liveEffects shown [AgentAction "send" ["0",
@@ -103,7 +106,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
         -- Visible messages transcribed from the original real capture's
         -- build/docs-capture/conversation.txt. Tool output was truncated there,
         -- so replay only the complete exchange, model and rounded usage.
-        recordedChat d = C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation -> do
+        recordedChat d = C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \conversation -> do
           let resized=fst (handleEvent (V.EvResize 100 21) d {sideTree=Nothing})
           opened <- snd <$> conversationEffects conversation effects resized [AgentAction "show" []]
           full <- command Zoom opened
@@ -262,9 +265,11 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
             let patch=T.unlines (["--- a/src/Hide/Buffer.hs","+++ b/src/Hide/Buffer.hs","@@ -1,6 +1,7 @@"] ++
                   ["-"<>first,"+{-# LANGUAGE MultiParamTypeClasses #-}","+{-# LANGUAGE OverloadedStrings #-}"] ++ map (" "<>) rest)
-            (_,reply)<-bufferDiffTool diffCommands (bufferEditor permissions (pure (Right ()))) d "buffer_apply_diff"
-              (object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch])
-            withAsync reply $ \_->await "typed diff approval" (tickPermissions permissions) ((/=Nothing).dialog) d
+            let args=object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch]
+            context<-bufferRequestServices (bufferReader permissions (pure (Right ())))
+              (bufferEditor permissions (pure (Right ()))) d "buffer_apply_diff" args >>= either (fail . T.unpack) pure
+            withAsync (PluginTool.callTool bufferTools context "buffer_apply_diff" args) $ \_->
+              await "typed diff approval" (tickPermissions permissions) ((/=Nothing).dialog) d
           _ -> fail "Permission screenshot requires the open source buffer"
         shellBlockMenu d = do
           opened <- command Help (fst (handleEvent (V.EvResize 80 25) d {sideTree=Nothing}))

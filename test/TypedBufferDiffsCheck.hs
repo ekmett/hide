@@ -20,7 +20,7 @@ import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
 import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
-import Hide.BufferDiffCommand
+import Hide.BufferRequest (bufferRequestServices)
 import Hide.Buffer
 import Hide.Files (FileState(..))
 import Hide.Model
@@ -28,6 +28,8 @@ import Hide.MCPPermissions
 import Hide.WorkspaceFilesMCP (fileTools)
 import Hide.EditorMCP (builtinTools)
 import qualified Hide.BufferTools as BufferTools
+import qualified Hide.Plugin.BufferDiff as D
+import Hide.Plugin.Request (RequestServices)
 import qualified Hide.Plugin.Tool as Tool
 import Hide.Plugin.BufferHost (editorReference,captureVersion,versionCurrent)
 import qualified Hide.Plugin.Buffer as P
@@ -35,13 +37,18 @@ import qualified Hide.Plugin.Command as C
 
 checks :: IO ()
 checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removePathForcibly $ \directory->do
-  let config=directory </> "config.toml"
+  let specs=builtinTools++Tool.toolDefinitions toolset++fileTools
+      config=directory </> "config.toml"
       base=addDocument Nothing (newBuffer "old\n") (initialDesktop (80,25))
       ident=maybe (error "missing typed diff target") sourceFixtureBuffer (activeWindow base)
       patch="@@ -1 +1 @@\n-old\n+agent\n"
+      arguments=object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch]
       check label ok=unless ok (error label)
+      rejected result=case result of Left _->True; _->False
   TIO.writeFile config "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
-  withPermissionsAt config (builtinTools++Tool.toolDefinitions toolset++fileTools) $ \owner->C.withRegistry $ \registry->do
+  check "public diff codec rejects patches above its character bound"
+    (rejected (C.codecDecode D.applyInput (object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= T.replicate 1048577 "x"])))
+  withPermissionsAt config specs $ \owner->C.withRegistry $ \registry->do
     let linkedEditor=bufferEditor owner (pure (Right ()))
         linkedReference=editorReference linkedEditor ident
         codec=C.Codec Null (const (Left "typed only")) (const Null)
@@ -61,8 +68,12 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
               Nothing->threadDelay 1000 >> tickPermissions owner current >>= await
       (updated,result)<-timeout 5000000 (await base) >>= maybe (error "typed diff reply timed out") pure
       response<-either (error . show) pure result
-      check "linked typed handler applies exact diff without Desktop" (activeText updated=="agent\n" && P.appliedDiff response==patch && not (P.userModified response))
-      check "linked typed diff has one ordinary Undo" (length (undoStack (documentBuffer (buffers updated M.! ident)))==1 && activeText (fst (runCommand Undo updated))=="old\n")
+      check "internal typed handler applies exact diff without Desktop" (activeText updated=="agent\n" && P.appliedDiff response==patch && not (P.userModified response))
+      check "internal typed diff has one ordinary Undo" (length (undoStack (documentBuffer (buffers updated M.! ident)))==1 && activeText (fst (runCommand Undo updated))=="old\n")
+    readOnlyContext<-bufferRequestServices reader linkedEditor base "read_buffer" (object []) >>= either (error . T.unpack) pure
+    missing<-timeout 5000000 (Tool.callTool toolset readOnlyContext "buffer_apply_diff" arguments)
+    check "public diff tool refuses a request without captured diff capability"
+      (missing==Just (Left "Diff requires an exact host-captured request."))
     let queued worker=do
           state<-threadStatus (asyncThreadId worker)
           case state of
@@ -73,7 +84,12 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
         editor=bufferEditor owner (pure (Right ()))
         reference=editorReference editor ident
     version<-captureVersion (documentBuffer (buffers base M.! ident))
-    withAsync (P.applyBufferDiff editor reference version patch) $ \worker->do
+    captured<-bufferRequestServices reader editor base "buffer_apply_diff" arguments >>= either (error . T.unpack) pure
+    substituted<-timeout 5000000 (Tool.callTool toolset captured "buffer_apply_diff"
+      (object ["bufferId" .= (ident+1),"revision" .= (0::Int),"diff" .= patch]))
+    check "captured diff capability cannot be redirected to another target"
+      (substituted==Just (Left "Diff request changed its original target or revision"))
+    withAsync (Tool.callTool toolset captured "buffer_apply_diff" arguments) $ \worker->do
       _<-timeout 5000000 (queued worker) >>= maybe (error "diff did not queue") pure
       TIO.writeFile (directory </> "replacement.txt") "old\n"
       replaced<-TIO.readFile (directory </> "replacement.txt")
@@ -82,7 +98,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
       check "queue-gap fixture replaces identity with equal numeric revision" (not same && revision (documentBuffer (buffers replacement M.! ident))==0)
       unchanged<-tickPermissions owner replacement
       result<-timeout 5000000 (wait worker) >>= maybe (error "stale diff reply timed out") pure
-      check "equal-revision replacement in admission gap rejects typed diff" (activeText unchanged=="old\n" && case result of Left _->True; _->False)
+      check "equal-revision replacement in admission gap rejects public plugin diff" (activeText unchanged=="old\n" && case result of Left _->True; _->False)
     actor<-newIORef (Right ())
     let attributed=bufferEditor owner (readIORef actor)
     withAsync (P.applyBufferDiff attributed reference version patch) $ \worker->do
@@ -96,13 +112,13 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
               Nothing->threadDelay 1000 >> tickPermissions owner current >>= await
       (unchanged,result)<-timeout 5000000 (await base) >>= maybe (error "revoked diff reply timed out") pure
       check "typed diff rechecks queued actor before source admission" (activeText unchanged=="old\n" && case result of Left "actor revoked"->True; _->False)
-  (closed,closedReference,closedVersion)<-withPermissionsAt config fileTools $ \owner->do
+  (closed,closedReference,closedVersion)<-withPermissionsAt config specs $ \owner->do
     let editor=bufferEditor owner (pure (Right ()))
     closedVersion<-captureVersion (documentBuffer (buffers base M.! ident))
     pure (editor,editorReference editor ident,closedVersion)
   stopped<-P.applyBufferDiff closed closedReference closedVersion patch
   check "retained editor refuses requests after session shutdown" (case stopped of Left _->True; _->False)
-  pending<-withPermissionsAt config fileTools $ \owner->do
+  pending<-withPermissionsAt config specs $ \owner->do
     let editor=bufferEditor owner (pure (Right ()))
         reference=editorReference editor ident
     version<-captureVersion (documentBuffer (buffers base M.! ident))
@@ -112,14 +128,14 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
       pure worker
   outcomes<-mapM (timeout 5000000 . wait) pending
   check "shutdown resolves every accepted typed diff reply" (all (\result->case result of Just (Left _)->True; _->False) outcomes)
-  retired<-withBufferDiffCommands pure
-  withPermissionsAt config fileTools $ \owner->do
-    let editor=bufferEditor owner (pure (Right ()))
-        reference=editorReference editor ident
-    version<-captureVersion (documentBuffer (buffers base M.! ident))
-    rejected<-timeout 5000000 (bufferDiffCommand retired editor reference version patch)
-    check "retired command cannot resurrect a diff request in live service" (case rejected of Just (Left _)->True; _->False)
-  batchChecks directory config base ident patch
+  retired<-Tool.withTools [] BufferTools.tools pure
+  withPermissionsAt config specs $ \owner->do
+    captured<-bufferRequestServices (bufferReader owner (pure (Right ())))
+      (bufferEditor owner (pure (Right ()))) base "buffer_apply_diff" arguments >>= either (error . T.unpack) pure
+    result<-timeout 5000000 (Tool.callTool retired captured "buffer_apply_diff" arguments)
+    check "retired plugin tool cannot resurrect a diff request in live service"
+      (case result of Just (Left "RegistryClosed")->True; _->False)
+  batchChecks specs directory config base ident patch
   putStrLn "typed buffer diff checks passed"
   where
     waitQueued worker=do
@@ -131,10 +147,10 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
         _->threadDelay 1000 >> waitQueued worker
     temporary=do root<-getTemporaryDirectory; (path,h)<-openTempFile root "hide-typed-diff"; hClose h; removeFile path; createDirectory path; pure path
 
--- The same public service owns singleton and multi-target edits. These checks
+-- The same internal owner handles singleton and multi-target edits. These checks
 -- observe target text/history and terminal replies, never permission internals.
-batchChecks :: FilePath -> FilePath -> Desktop -> Int -> T.Text -> IO ()
-batchChecks directory config single first firstPatch=do
+batchChecks :: [Value] -> FilePath -> FilePath -> Desktop -> Int -> T.Text -> IO ()
+batchChecks specs directory config single first firstPatch=do
   let opened=addDocument (Just (FileState (directory </> "second.hs") Nothing)) (newBuffer "other\n") single
       second=maybe (error "missing second batch target") sourceFixtureBuffer (activeWindow opened)
       base=opened {windows=map (\w->w {windowHexLow=True}) (windows opened)}
@@ -169,7 +185,7 @@ batchChecks directory config single first firstPatch=do
         Just w->focusWindow (windowId w) d
         Nothing->error "missing batch target window"
       enqueue worker=timeout 5000000 (waitQueued worker) >>= maybe (error "batch did not queue") pure
-  withPermissionsAt config fileTools $ \owner->do
+  withPermissionsAt config specs $ \owner->do
     let editor=bufferEditor owner (pure (Right ()))
     patches<-inputs editor
     withAsync (P.applyBufferDiffs editor patches) $ \worker->do
@@ -186,7 +202,7 @@ batchChecks directory config single first firstPatch=do
         after<-tickPermissions owner base
         check "duplicate batch targets reject without edits" (isLeft duplicate && original after)
       _->error "empty batch fixture"
-    foreignReference<-withPermissionsAt config fileTools $ \other->pure (editorReference (bufferEditor other (pure (Right ()))) first)
+    foreignReference<-withPermissionsAt config specs $ \other->pure (editorReference (bufferEditor other (pure (Right ()))) first)
     version<-captureVersion (buffer first base)
     case patches of
       a:_->withAsync (P.applyBufferDiffs editor [a,P.BufferDiff foreignReference version firstPatch]) $ \worker->do
@@ -199,7 +215,7 @@ batchChecks directory config single first firstPatch=do
         check "one invalid strict patch cannot partially commit a batch" (isLeft result && original unchanged)
       _->error "unexpected batch fixture"
   TIO.writeFile config "[editor.mcp.permissions]\nbuffer_apply_diff = 'prompt'\n"
-  withPermissionsAt config fileTools $ \owner->do
+  withPermissionsAt config specs $ \owner->do
     let editor=bufferEditor owner (pure (Right ()))
     patches<-inputs editor
     withAsync (P.applyBufferDiffs editor patches) $ \worker->do
@@ -250,7 +266,7 @@ batchChecks directory config single first firstPatch=do
       started<-submit owner 0 review
       (unchanged,result)<-await owner worker started
       check "revocation after batch review rejects every target" (original unchanged && case result of Left "actor revoked"->True; _->False)
-  pending<-withPermissionsAt config fileTools $ \owner->do
+  pending<-withPermissionsAt config specs $ \owner->do
     let editor=bufferEditor owner (pure (Right ()))
     patches<-inputs editor
     worker<-async (P.applyBufferDiffs editor patches)
@@ -270,9 +286,10 @@ batchChecks directory config single first firstPatch=do
 -- Existing owner checks also exercise the actual asynchronous MCP command route.
 -- Start its one reply worker, then run one admission tick; later waits reuse that
 -- same test worker rather than issuing a second diff request.
-startDiffCall :: BufferDiffCommands -> Permissions -> IO (Either T.Text ()) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
-startDiffCall commands owner caller desktop name args=do
-  (current,response)<-bufferDiffTool commands (bufferEditor owner caller) desktop name args
+startDiffCall :: Tool.Tools RequestServices -> Permissions -> IO (Either T.Text ()) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
+startDiffCall toolset owner caller desktop name args=do
+  captured<-bufferRequestServices (bufferReader owner caller) (bufferEditor owner caller) desktop name args
+  let response=either (pure . Left) (\context->Tool.callTool toolset context name args) captured
   worker<-async response
   let queued=do
         state<-threadStatus (asyncThreadId worker)
@@ -285,5 +302,5 @@ startDiffCall commands owner caller desktop name args=do
   let advance d=do
         completed<-race (STM.atomically (awaitPermissionWork owner)) (waitCatch worker)
         case completed of Left ()->tickPermissions owner d; Right _->pure d
-  admitted<-timeout 5000000 (advance current >>= advance) >>= maybe (cancel worker >> error "diff policy admission did not settle") pure
+  admitted<-timeout 5000000 (advance desktop >>= advance) >>= maybe (cancel worker >> error "diff policy admission did not settle") pure
   pure (admitted,(waitCatch worker >>= either (pure . Left . T.pack . show) pure) `onException` cancel worker)

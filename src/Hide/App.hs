@@ -59,8 +59,8 @@ import qualified Hide.AgentHub as AH
 import Hide.AgentAccess (resolveAgentAccess,resolveActiveAgentAccess)
 import Hide.AgentServicesHost (agentServices)
 import qualified Hide.Plugin.Tool as PluginTool
-import Hide.BufferReadCommand (withBufferReadCommands,bufferReadServices)
-import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
+import Hide.BufferReadCommand (withBufferReadCommands)
+import Hide.BufferRequest (bufferRequestServices)
 import Hide.EditorMCP (runEditorMCP, openEditorFiles, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, readWindowTool)
 import Hide.RemoteEndpoint (sessionEndpoint)
 import Hide.Session
@@ -299,11 +299,11 @@ runEditor plugins args = do
           let names definitions=[name | spec<-definitions,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]]
               declarations=concatMap Plugin.pluginTools plugins
           PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
-            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.BufferReadTool tool<-declarations] $ \bufferToolset ->
-            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions bufferToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions bufferToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
+            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.RequestTool tool<-declarations] $ \requestToolset ->
+            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let agentTools=PluginTool.toolDefinitions agentToolset
-                editorSpecs=specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions bufferToolset
+                editorSpecs=specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset
                 liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
             let liveDesktop=liveBase {keyBindings=keymap}
@@ -357,12 +357,12 @@ runEditor plugins args = do
                         hub=AR.agentHub agents
                         reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
                     let permitted callback current name parameters
-                          | PluginTool.hasTool bufferToolset name = do
-                              let active=activeWindow current >>= bufferId
-                              context<-evaluate (bufferReadServices (bufferReader permissions currentCaller) active (nextId current))
-                              pure (current,PluginTool.callTool bufferToolset context name parameters)
+                          | PluginTool.hasTool requestToolset name = do
+                              context<-bufferRequestServices (bufferReader permissions currentCaller)
+                                (bufferEditor permissions currentCaller) current name parameters
+                              pure (current,either (pure . Left)
+                                (\services'->PluginTool.callTool requestToolset services' name parameters) context)
                           | name=="read_window" = readWindowTool bufferCommands (windowReader permissions currentCaller) current name parameters
-                          | name=="buffer_apply_diff" = bufferDiffTool diffCommands (bufferEditor permissions currentCaller) current name parameters
                           | name=="editor_input" = permissionBuildInputAs currentCaller permissions
                               (\admission admittedDesktop admittedTool admittedArgs->withBuildAdmission services admission (controlTool guestCore admittedDesktop admittedTool admittedArgs)) current name parameters
                           | name=="ask_user",Nothing<-token = pure (current,pure (Left "ask_user requires the authenticated requesting agent."))

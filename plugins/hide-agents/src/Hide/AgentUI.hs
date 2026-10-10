@@ -47,7 +47,7 @@ plugin :: Plugin
 plugin=Plugin
   { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
   , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (DocsTools.tools++EnvironmentTools.tools)
-      ++map BufferReadTool BufferTools.tools
+      ++map RequestTool BufferTools.tools
   , pluginConversation=Just AgentTranscript.presentConversation
   }
 

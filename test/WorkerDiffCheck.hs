@@ -19,7 +19,8 @@ import System.Directory
 import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
-import Hide.BufferDiffCommand (withBufferDiffCommands)
+import qualified Hide.BufferTools as BufferTools
+import qualified Hide.Plugin.Tool as Tool
 import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
 import Hide.AgentAccess
@@ -31,8 +32,9 @@ import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Hide.WorkspaceFilesMCP (fileTools)
 
 checks :: AllocationProfile -> IO ()
-checks profile=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly $ \directory -> do
-  let path=directory </> "config.toml"
+checks profile=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removePathForcibly $ \directory -> do
+  let specs=fileTools++Tool.toolDefinitions toolset
+      path=directory </> "config.toml"
       enable=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
       promptPolicy=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'prompt'\n"
       base=addDocument Nothing (newBuffer "old\n") (initialDesktop (80,25))
@@ -40,7 +42,7 @@ checks profile=withBufferDiffCommands $ \commands->bracket temporary removePathF
       patch="@@ -1 +1 @@\n-old\n+agent\n"::T.Text
       corrected="@@ -1 +1 @@\n-old\n+human λ\n"::T.Text
       args text=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= text]
-      call runtime=startDiffCall commands runtime (pure (Right ()))
+      call runtime=startDiffCall toolset runtime (pure (Right ()))
       core d _=pure (False,d)
       submit runtime button d=case dialog d of
         Just dg->let (next,fx)=submitDialog button dg d in snd <$> policyEffects runtime core next fx
@@ -59,7 +61,7 @@ checks profile=withBufferDiffCommands $ \commands->bracket temporary removePathF
         timeout 5000000 (await d) >>= maybe (error "diff reply timeout") pure
       unchanged d=activeText d=="old\n" && maybe False (\doc->revision (documentBuffer doc)==0 && null (undoStack (documentBuffer doc))) (M.lookup bid (buffers d))
   enable
-  withPermissionsAt path fileTools $ \runtime -> do
+  withPermissionsAt path specs $ \runtime -> do
     (started,response)<-call runtime base "buffer_apply_diff" (args patch)
     check "enabled diff starts without synchronous adoption" (unchanged started)
     (applied,result)<-awaitReply runtime started response
@@ -84,14 +86,14 @@ checks profile=withBufferDiffCommands $ \commands->bracket temporary removePathF
   -- Hold the owning tick at the actual caller/adoption claim. Cancellation runs
   -- on another thread and cannot publish an error after that claim edits text.
   enable
-  withPermissionsAt path fileTools $ \runtime -> do
+  withPermissionsAt path specs $ \runtime -> do
     entered<-newEmptyMVar
     release<-newEmptyMVar
     called<-newIORef (0::Int)
     let caller=do
           count<-atomicModifyIORef' called (\n->(n+1,n+1))
           if count==2 then putMVar entered () >> readMVar release >> pure (Right ()) else pure (Right ())
-    (started,response)<-startDiffCall commands runtime caller base "buffer_apply_diff" (args patch)
+    (started,response)<-startDiffCall toolset runtime caller base "buffer_apply_diff" (args patch)
     withAsync (awaitReply runtime started response) $ \owner->do
       _<-timeout 5000000 (readMVar entered) >>= maybe (error "adoption claim not reached") pure
       withAsync response $ \waiter->do
@@ -112,7 +114,7 @@ checks profile=withBufferDiffCommands $ \commands->bracket temporary removePathF
           count<-readIORef called
           check "adoption-first adds exactly one Undo and cannot repeat" (revision (documentBuffer (buffers again M.! bid))==1 && length (undoStack (documentBuffer (buffers again M.! bid)))==1 && count==2)
   promptPolicy
-  withPermissionsAt path fileTools $ \runtime -> do
+  withPermissionsAt path specs $ \runtime -> do
     (shown,pending)<-call runtime base "buffer_apply_diff" (args patch)
     started<-submit runtime 0 shown
     let newer=started {dialog=fmap (\dg->dg {body=["new review body"],fields=map (\f->case f of TextArea "diff" True b sel sr sc->TextArea "diff" True (replaceSelection (Selection 0 (bufferLength b)) corrected b) sel sr sc; _->f) (fields dg)}) (dialog started)}
@@ -134,7 +136,7 @@ checks profile=withBufferDiffCommands $ \commands->bracket temporary removePathF
     _<-submit runtime 1 stale
     check "replacement failure keeps correction ticket until denied" . isLeft =<< replacementReply
   enable
-  withPermissionsAt path fileTools $ \runtime -> do
+  withPermissionsAt path specs $ \runtime -> do
     let caps=AH.Capabilities False False False []
         driver=AH.AgentDriver directory "test-diff-provider" caps (\_->pure (Right caps))
           (\_->pure (Right Null)) (pure ()) (pure ()) (\_->pure (Left "unsupported"))
@@ -143,14 +145,14 @@ checks profile=withBufferDiffCommands $ \commands->bracket temporary removePathF
       access<-newAgentAccess
       secret<-grantAgentAccess access ident
       let caller=fmap (() <$) (resolveActiveAgentAccess access hub secret)
-      (started,response)<-startDiffCall commands runtime caller base "buffer_apply_diff" (args patch)
+      (started,response)<-startDiffCall toolset runtime caller base "buffer_apply_diff" (args patch)
       revokeAgentAccess access ident
       (rejected,result)<-awaitReply runtime started response
       check "actual token revocation before adoption rejects prepared diff" (unchanged rejected && isLeft result)
   -- The caller thread's allocation counter excludes the worker's full parsing.
   -- The source is already measured before observing admission allocation.
   enable
-  withPermissionsAt path fileTools $ \runtime -> do
+  withPermissionsAt path specs $ \runtime -> do
     let source=newBuffer (T.replicate 262144 "old line\n")
         large=base {buffers=M.adjust (\doc->doc {documentBuffer=source}) bid (buffers base)}
         largePatch="@@ -1 +1 @@\n-old line\n+new line\n"::T.Text

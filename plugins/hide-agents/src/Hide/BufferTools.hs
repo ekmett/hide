@@ -7,12 +7,13 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 --
--- Agent discovery and bounded buffer reads through self-admitting host services.
+-- Agent discovery, bounded reads and exact diffs through self-admitting services.
 -- The plugin owns wire presentation, never a buffer tree or permission decision.
 module Hide.BufferTools
   ( tools
   , listOutput
   , readOutput
+  , applyOutput
   ) where
 
 import Control.Monad (unless)
@@ -24,19 +25,51 @@ import Data.Char (intToDigit)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Hide.Plugin.BufferRead
-import Hide.Plugin.Command (Codec(..),CommandDef(..))
+import qualified Hide.Plugin.BufferDiff as D
+import Hide.Plugin.Request (RequestServices(..))
+import Hide.Plugin.Command (Codec(..),CommandDef(..),CommandError(..))
 import Hide.Plugin.Tool (Tool(..))
 
--- | Explicit editor-visible reads. Every service call owns fresh host admission;
--- read-only metadata is not authority and must not add an outer approval call.
-tools :: [Tool BufferReadServices]
+-- | Explicit editor-visible requests. Every service call owns fresh host
+-- admission; read-only metadata grants no authority and must not add an outer
+-- approval call. A diff requires the exact request-bound capability from the host.
+tools :: [Tool RequestServices]
 tools=
   [Tool "list_buffers" True (CommandDef "hide.buffer.list"
     "List open buffers with paths and unsaved-change state, including untitled buffers."
-    listInput listOutput (\services ()->bufferList services))
+    listInput listOutput (\services ()->bufferList (requestBuffers services)))
   ,Tool "read_buffer" True (CommandDef "hide.buffer.read"
     "Read live buffer contents including unsaved edits; private conversation fields are redacted and approval buffers are unavailable. Text is paged by 1-based lines (200 default, 1000 maximum), capped at 131072 characters; binary buffers return up to 4096 hex bytes from byteOffset."
-    readInput readOutput bufferRead)]
+    readInput readOutput (\services->bufferRead (requestBuffers services)))
+  ,Tool "buffer_apply_diff" False (CommandDef "hide.buffer.apply-diff"
+    "Apply one strict unified diff to a live text buffer at the given revision. Context and hunk positions must match exactly. This permission also covers linked plugin batches for several buffers; every patch in a batch is applied atomically with ordinary Undo per buffer. No file is saved. File headers are optional and identify only the target buffer, never disk paths."
+    D.applyInput applyOutput (\services arguments->case requestDiff services of
+      Nothing->pure (Left (CommandRejected "Diff requires an exact host-captured request."))
+      Just editing->D.applyDiff editing arguments))]
+
+-- | Concrete singleton diff outcome, preserving the exact edited approval and
+-- existing wire fields. A diff never saves a file; a true saved marker fails.
+--
+-- @codecDecode applyOutput (codecEncode applyOutput reply) = Right reply@.
+-- for an outcome satisfying the one-MiB-character applied-diff bound.
+applyOutput :: Codec D.DiffReply
+applyOutput=Codec (objectSchema [("bufferId",number),("revision",number),
+  ("saved",object ["type" .= ("boolean"::Text),"const" .= False]),
+  ("appliedDiff",object ["type" .= ("string"::Text),"maxLength" .= (1048576::Int)]),
+  ("userModified",boolean)])
+  (decodeValue (withObject "buffer diff reply" $ \fields->do
+    only ["bufferId","revision","saved","appliedDiff","userModified"] fields
+    target<-fields .: "bufferId"
+    revision<-fields .: "revision"
+    saved<-fields .: "saved"
+    unless (not saved) (fail "Diff does not save files")
+    patch<-fields .: "appliedDiff"
+    unless (T.length patch<=1048576) (fail "Applied diff exceeds 1 MiB characters")
+    modified<-fields .: "userModified"
+    pure (D.DiffReply target revision patch modified)))
+  (\reply->object ["bufferId" .= D.editedBuffer reply,"revision" .= D.editedRevision reply,
+    "saved" .= False,"appliedDiff" .= D.appliedDiff reply,"userModified" .= D.userModified reply])
+  where number=object ["type" .= ("integer"::Text)]
 
 -- | Concrete masked discovery reply. Encoding traverses metadata only, on the
 -- caller's worker; listing grants no subsequent content-read authority.

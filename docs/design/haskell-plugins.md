@@ -773,8 +773,8 @@ entire batch validates before mutation; project settings override global ones,
 and existing child processes keep their environment. Captured services reject
 calls after their session registration retires.
 
-`PluginTool` distinguishes `EditorTool`, `BufferReadTool` and `CoordinationTool`
-by their service contexts. Buffer read services own fresh admission on every
+`PluginTool` distinguishes `EditorTool`, `RequestTool` and `CoordinationTool`
+by their service contexts. Request services own fresh admission on every
 invocation; ordinary editor services are supplied after admission. This is an
 explicit declaration, never inferred from tool names or read-only metadata.
 Child coordination receives neither kind of editor service.
@@ -783,8 +783,15 @@ The first-party `list_buffers` and `read_buffer` tools now consume
 `Hide.Plugin.BufferRead`: checked requests, masked metadata, and bounded
 text/byte pages. The host retains measured source trees, target identity,
 permission ownership and privacy filtering. The plugin owns tool declarations
-and wire presentation. Editable captures and exact version grants remain
-host-internal until their own boundary is extracted.
+and wire presentation.
+
+`buffer_apply_diff` consumes the public `Hide.Plugin.BufferDiff` service through
+`RequestServices`. Its target and exact content identity are captured before
+worker dispatch, and only that request receives the diff capability. The callback
+rejects target/revision substitution and invokes the same host permission owner
+for admission, editable approval, cancellation and one ordinary Undo. It returns
+the human-approved patch and `userModified`; the plugin owns the concrete reply
+codec. Buffers, exact version grants and batch preparation remain host-internal.
 
 The broader registration shape below remains proposed:
 

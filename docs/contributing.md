@@ -195,7 +195,7 @@ Hub-owned. These tools receive no human approval or settings capability.
 
 Plugin declarations carry their service context. `EditorTool` receives
 `EditorServices` after admission; `CoordinationTool` receives authenticated
-`AgentServices`. `BufferReadTool` receives `BufferReadServices`, whose operations
+`AgentServices`. `RequestTool` receives `RequestServices`, whose buffer operations
 request fresh permission themselves. This explicit distinction prevents nested
 approvals and never follows from a read-only hint. Anonymous editor connections
 cannot manufacture an agent context, and child coordination connections do not
@@ -337,7 +337,7 @@ run unmasked, and cancellation/finalizer joins run outside the desktop lock.
 Request lifetime is separate from an attempt, so failed preparation cannot retire
 a correction ticket or allow an obsolete completion to apply.
 
-Linked handlers now call
+Host-internal handlers call
 `applyBufferDiff :: BufferEditor -> BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)`
 from `Hide.Plugin.Buffer`, using `capturedVersion` from the admitted read. The
 opaque editor belongs to the running Permissions session and a fixed actor; it
@@ -346,17 +346,24 @@ contains no cached approval or Human provenance. Call on a worker. The existing
 version before retaining any original source, including equal-revision replacement
 in the queue gap. Current policy, actor and privacy still apply to every request.
 
-The real `buffer_apply_diff` MCP route calls registered `hide.buffer.apply-diff`
-through `Hide.BufferDiffCommand`. Its locked wire adapter checks numeric revision
-and captures exact content identity; the reply worker retains only editor/ref/
-version/diff. The same Waiting request owns editable correction attempts,
-cancellation/adoption claim and terminal typed result. Cancellation retires the
-shared attempt; shutdown rejects new calls and resolves accepted replies before
-joining workers outside the session lock. `DiffResult` reports exact appliedDiff,
-userModified and resulting revision; formatting the wire result stays on the worker.
-Retiring the command rejects later invocation without redirecting retained handles.
+`Hide.Plugin.BufferDiff` in `hide-plugin-api` exposes checked diff arguments and
+an immutable result through a request-bound service. `hide-agents` owns the actual
+`buffer_apply_diff` declaration and JSON codec. `Hide.BufferRequest` checks its
+arguments and captures exact content identity before worker dispatch. Only that
+request receives a diff capability; it cannot substitute another buffer or
+revision. This capture does not grant approval: the existing permission owner
+still checks the actor, policy and current target on every invocation.
 
-For edits across buffers, use the same service in one call:
+The reply worker retains only the editor, target and exact version. The same
+Waiting request owns editable correction attempts, cancellation/adoption claim
+and terminal typed result. Cancellation retires the shared attempt; shutdown
+rejects new calls and resolves accepted replies before joining workers outside
+the session lock. The public `DiffReply` carries the exact `appliedDiff`,
+`userModified` and resulting revision. The plugin encodes that bounded reply on
+the worker; retiring its tool registry rejects later calls. Buffers, version
+tokens and preparation objects stay host-internal.
+
+Host-internal edits across buffers use the same owner in one call:
 
 ```haskell
 applyBufferDiffs editor

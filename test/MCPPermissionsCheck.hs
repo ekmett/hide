@@ -31,7 +31,8 @@ import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),OpenFileFlags
 import System.Timeout (timeout)
 import qualified Hide.Plugin.Buffer as P
 import Hide.Plugin.BufferHost (readerReference)
-import Hide.BufferDiffCommand (withBufferDiffCommands)
+import qualified Hide.BufferTools as BufferTools
+import qualified Hide.Plugin.Tool as Tool
 import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
 import Hide.MCPPermissions
@@ -346,15 +347,15 @@ policyWakeChecks=bracket temporary removePathForcibly $ \directory->do
   check "shutdown resolves pending policy admission once" . either (const True) (const False) =<< pending
 
 reviewChecks :: IO ()
-reviewChecks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly $ \directory ->
-  withPermissionsAt (directory </> "review.toml") fileTools $ \runtime -> do
+reviewChecks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removePathForcibly $ \directory ->
+  withPermissionsAt (directory </> "review.toml") (fileTools++Tool.toolDefinitions toolset) $ \runtime -> do
     let core d _=pure (False,d)
         base=addDocument Nothing (newBuffer "old\n") (initialDesktop (100,32))
         bid=fromMaybe (error "missing buffer") (sourceFixtureBuffer <$> activeWindow base)
         patch="@@ -1 +1 @@\n-old\n+agent\n"
         revised="@@ -1 +1 @@\n-old\n+human λ\n"
         args=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= (patch::T.Text)]
-        request d=startDiffCall commands runtime (pure (Right ())) d "buffer_apply_diff" args
+        request d=startDiffCall toolset runtime (pure (Right ())) d "buffer_apply_diff" args
         input event d=let (next,fx)=handleEvent event d in snd <$> policyEffects runtime core next fx
         key k mods=input (V.EvKey k mods)
         replace text d=key (V.KChar 'a') [V.MCtrl] d >>= input (V.EvPaste (TE.encodeUtf8 text))

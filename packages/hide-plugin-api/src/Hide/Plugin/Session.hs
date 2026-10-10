@@ -20,7 +20,7 @@ module Hide.Plugin.Session
 import Hide.Plugin.AgentDirectory (AgentDirectory,DirectoryRequest)
 import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
-import Hide.Plugin.BufferRead (BufferReadServices)
+import Hide.Plugin.Request (RequestServices)
 import Hide.Plugin.Tool (Tool)
 import Hide.Plugin.Services (EditorServices)
 import Hide.Plugin.Transcript (ConversationPresenter)
@@ -39,13 +39,13 @@ data Session c r settings completion = Session
 -- require the host-attributed actor and are available to primary/child agents.
 -- Visibility never replaces permission or caller checks.
 --
--- Buffer read tools share editor visibility but receive only self-admitting read
--- services. Each operation requests fresh permission through its host capture
--- owner; do not wrap the tool in a second permission call or supply general
--- editor services before admission.
+-- Request tools share editor visibility but receive self-admitting services.
+-- Each operation requests fresh permission through its host owner; exact diff
+-- capability is present only for a host-captured request. Do not wrap these tools
+-- in a second permission call or supply general editor services before admission.
 data PluginTool
   = EditorTool (Tool EditorServices)
-  | BufferReadTool (Tool BufferReadServices)
+  | RequestTool (Tool RequestServices)
   | CoordinationTool (Tool AgentServices)
 
 -- | Scope registrations and workers around the supplied session action.
@@ -55,7 +55,7 @@ data PluginTool
 -- Plugins publish prepared results through host queues instead of UI callbacks.
 -- Tools are declared explicitly; the host registers their policies and
 -- supplies actor-bound services with their declared admission contract: editor
--- services follow permission admission; buffer read services admit each capture.
+-- services follow permission admission; request services own each admission.
 data Plugin = Plugin
   { withPlugin :: forall c r settings completion a. Eq completion =>
       Session c r settings completion -> IO a -> IO a

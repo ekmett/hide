@@ -54,7 +54,9 @@ captureVersion b=do
   -- Strict application also removes an HPC tick thunk at this call site.
   -- Name the evaluated buffer constructor, never an instrumentation wrapper.
   identity<-makeStableName $! evaluated
-  pure (ContentVersion (revision evaluated) identity)
+  -- Force the small token before returning: a deferred revision selector
+  -- would retain the whole buffer (including Undo) despite the stable name.
+  evaluate (ContentVersion (revision evaluated) identity)
 
 -- | Check current immutable identity and revision without payload traversal.
 -- The caller also revalidates target existence and current authority.

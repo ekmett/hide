@@ -30,7 +30,7 @@ import Hide.BufferReads (windowReadTarget,capturedWindowPrepared)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import Hide.Syntax (Style(..))
-import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
+import Hide.BufferRequest (bufferRequestServices)
 import Hide.WorkspaceFilesMCP (fileTools)
 import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
@@ -42,6 +42,7 @@ import Hide.Plugin.BufferHost (readerReference)
 import Hide.EditorMCP (builtinTools,readWindowTool,editorResponseOnly)
 import qualified Hide.BufferTools as BufferTools
 import qualified Hide.Plugin.BufferRead as R
+import Hide.Plugin.Request (RequestServices(..))
 import qualified Hide.Plugin.Tool as Tool
 import Hide.Plugin.Command (codecEncode)
 
@@ -93,7 +94,7 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
         captured<-wait worker >>= either (error . T.unpack) pure
         check "typed capture reads owner current state" (text captured==Right "current λ\n")
         check "granted snapshot retains measured source" (P.capturedRef captured==reference)
-      context<-evaluate (bufferReadServices reader (activeWindow base >>= bufferId) (nextId base))
+      context<-evaluate (RequestServices (bufferReadServices reader (activeWindow base >>= bufferId) (nextId base)) Nothing)
       let focusedElsewhere=addDocument Nothing (newBuffer "later source") base
       withAsync (Tool.callTool toolset context "read_buffer" (object [])) $ \worker->do
         queued worker
@@ -182,16 +183,15 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
     outcomes<-mapM wait accepted
     check "all accepted ingress replies survive shutdown" (all (either (const True) (const False)) outcomes)
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'enable'\nbuffer_apply_diff = 'enable'\n"
-    withPermissionsAt path (specs++fileTools) $ \owner->withBufferDiffCommands $ \diffCommands->do
+    withPermissionsAt path (specs++fileTools) $ \owner->do
       session<-randomIdentity
       endpoint<-sessionEndpoint session
       let reader=bufferReader owner (pure (Right ()))
+          editor=bufferEditor owner (pure (Right ()))
           inspect d _ request=do
-            let dispatch current name args
-                  | name=="buffer_apply_diff"=bufferDiffTool diffCommands (bufferEditor owner (pure (Right ()))) current name args
-                  | otherwise=do
-                      let context=bufferReadServices reader (activeWindow current >>= bufferId) (nextId current)
-                      context `seq` pure (current,Tool.callTool toolset context name args)
+            let dispatch current name args=do
+                  captured<-bufferRequestServices reader editor current name args
+                  pure (current,either (pure . Left) (\context->Tool.callTool toolset context name args) captured)
             (next,reply)<-editorResponseOnly (specs++fileTools) dispatch d request
             pure (False,next,reply)
           effects d requests=pure (Exit `elem` requests,d)
@@ -248,7 +248,7 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
   putStrLn "typed buffer reader checks passed"
 
 -- Discovery preserves the established projection but returns usable scoped refs.
-listingChecks :: Tool.Tools R.BufferReadServices -> [Value] -> FilePath -> IO ()
+listingChecks :: Tool.Tools RequestServices -> [Value] -> FilePath -> IO ()
 listingChecks toolset specs path=do
   let check label ok=unless ok (error label)
       base=addDocument Nothing (newBuffer "untitled source") (initialDesktop (80,25))
@@ -301,9 +301,9 @@ listingChecks toolset specs path=do
         queued capture
         _<-ownerUntil other current capture
         check "listed refs cannot cross session namespaces" . rejected =<< wait capture
-    let reply=Tool.callTool toolset (R.BufferReadServices
+    let reply=Tool.callTool toolset (RequestServices (R.BufferReadServices
           (R.bufferList (bufferReadServices reader Nothing 0))
-          (error "listing evaluated read-only context")) "list_buffers" (object [])
+          (error "listing evaluated read-only context")) Nothing) "list_buffers" (object [])
     withAsync reply $ \worker->do
       queued worker
       _<-ownerUntil owner current worker
@@ -342,7 +342,7 @@ listingChecks toolset specs path=do
       check "listing defers exceptional dirty comparison to consumer worker" (case outcome of Left _->True; _->False)
     retired<-Tool.withTools [] BufferTools.tools pure
     check "closed tool registry refuses listing before enqueue" . rejected =<<
-      Tool.callTool retired (bufferReadServices reader Nothing 0) "list_buffers" (object [])
+      Tool.callTool retired (RequestServices (bufferReadServices reader Nothing 0) Nothing) "list_buffers" (object [])
 
 -- One actual prepared-window read workflow, sharing the existing admission pump.
 windowReadChecks :: FilePath -> IO ()
