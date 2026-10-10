@@ -17,6 +17,7 @@ import Hide.Plugin.Questions (QuestionServices)
 import Hide.Plugin.BufferDiff (BufferDiffServices)
 import Hide.Plugin.BufferRead (BufferReadServices)
 import Hide.Plugin.WindowRead (WindowReadServices)
+import Hide.Plugin.Terminal (TerminalServices)
 
 -- | Request capabilities supplied before permission admission. Calls run on the
 -- invoking worker and use their existing session/actor-bound host owner; adding
@@ -30,9 +31,12 @@ import Hide.Plugin.WindowRead (WindowReadServices)
 -- another request cannot use a numeric window ID to acquire or replace that body.
 -- Questions require an authenticated requesting actor and its provider incarnation;
 -- neither tool arguments nor a retained service can substitute another requester.
+-- Terminal services bind the session and current caller; their fixed requests
+-- own initial authorization, preparation and fresh final admission or cleanup.
 data RequestServices = RequestServices
   { requestBuffers :: !BufferReadServices
   , requestDiff :: !(Maybe BufferDiffServices)
   , requestWindows :: !(Maybe WindowReadServices)
   , requestQuestions :: !(Maybe QuestionServices)
+  , requestTerminals :: !(Maybe TerminalServices)
   }

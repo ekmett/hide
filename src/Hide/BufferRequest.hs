@@ -64,8 +64,8 @@ bufferRequestServices reader editor captureWindow desktop name args=do
                       Left err->pure (Left err)
                       Right image->windowPage image candidate
                     pure (either (Left . CommandRejected) Right result)
-          pure (Right (RequestServices reading Nothing (Just (W.WindowReadServices readPage)) Nothing))
-  else if name/="buffer_apply_diff" then pure (Right (RequestServices reading Nothing Nothing Nothing))
+          pure (Right (RequestServices reading Nothing (Just (W.WindowReadServices readPage)) Nothing Nothing))
+  else if name/="buffer_apply_diff" then pure (Right (RequestServices reading Nothing Nothing Nothing Nothing))
   else case codecDecode D.applyInput args of
     Left err->pure (Left err)
     Right request->do
@@ -88,5 +88,5 @@ bufferRequestServices reader editor captureWindow desktop name args=do
                       Right results->Right <$> evaluate (force
                         [D.DiffReply ident (P.diffRevision result) (P.appliedDiff result) (P.userModified result)
                         | ((ident,_),result)<-zip captured results])
-          in Right (RequestServices reading (Just (D.BufferDiffServices apply)) Nothing Nothing)
+          in Right (RequestServices reading (Just (D.BufferDiffServices apply)) Nothing Nothing Nothing)
   where targetKey entry=(D.targetBuffer entry,D.expectedRevision entry)

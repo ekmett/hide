@@ -19,10 +19,11 @@ frontends:
 
 Buffer/window ownership and the multiline-editor interpreter still live in the
 main `hide` library. ACP completion and primary/child conversations declare their
-input and acknowledged commands through the public API. The remaining editor
-tools are the next package boundaries. The sections below distinguish implemented APIs
-from proposed contracts; proposed signatures are design sketches, not compilable
-SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
+input and acknowledged commands through the public API. The remaining first-party
+migration covers ACP provider composition and autocomplete. Generic build, debug,
+LSP and editor operations can remain explicit permission-controlled host services.
+The sections below distinguish implemented APIs from proposed contracts;
+proposed signatures are design sketches, not compilable SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
 navigation model.
 
 **Agents > Rename** and **Files > Rename** use single-input forms. **New Agent**
@@ -872,6 +873,28 @@ Cancellation and session retirement resolve pending admission without creating a
 question, and a replacement provider cannot inherit the previous caller's result.
 The host retains question state, presentation and answer delivery.
 
+`Hide.TerminalTools` declares the five shared-terminal tools through
+`RequestServices.requestTerminals`. The public terminal service supplies typed
+launch requests, terminal metadata and bounded output pages; the plugin owns
+argument codecs and MCP presentation. The host retains process handles, PTYs,
+terminal IDs and window adoption.
+
+Each call enters the existing permission owner. Starting a process requires
+approval before preparation begins. Directory resolution and process preparation
+run on a worker; the same request retains ownership until a fresh caller and
+policy check admits its window. A canceled or expired request closes any prepared
+terminal it has not adopted. It cannot open a late window or borrow another
+request's approval. The read-only approval fields describe the exact validated
+command and arguments that will run.
+
+Listing, output, input and stop also run through the session's console owner off
+the interaction thread. They use the exact session-local terminal ID, with no
+implicit shell. Output offsets count bytes in the retained tail; decoding for
+MCP happens on the worker. A canceled request cannot undo input already sent to
+a terminal or another side effect already admitted. Closing a window and stopping
+its process remain separate operations. Retained services refuse new calls after
+session retirement.
+
 `buffer_apply_diff` consumes the public `Hide.Plugin.BufferDiff` service through
 `RequestServices`. The checked `ApplyDiffArguments` contains 1–16 distinct
 `DiffEntry` targets with at most 1 MiB patch characters in total. All exact
@@ -1007,9 +1030,10 @@ requests, attributed messages, public capabilities/events and a driver lifetime.
 The adapter does not import the hub, Model, Render or Conversation. Capability
 decoding belongs to ACP; the hub decodes its own checkpoint representation.
 The linked `hide-agents` package supplies the Agents sidebar, primary and child
-transcripts, Query/Steer input, completion hints, coordination, documentation and
-environment tools through `hide-plugin-api`. The remaining editor tools still use
-host types; those consumers define the remaining public boundaries.
+transcripts, Query/Steer input, completion hints, coordination, documentation,
+environment, buffer and terminal tools through `hide-plugin-api`. Build/run,
+debugging and other generic editor operations remain permission-controlled host
+services; moving every declaration is not a first-party migration requirement.
 
 The hub remains the owner of agent IDs, ancestry, limits, workspaces, task tickets
 and message attribution. A provider plugin supplies a driver; a conversation
@@ -1136,10 +1160,10 @@ that presentation is present, so service results also refresh the conversation's
 layout. Session teardown joins pending acquisition cleanup before closing jobs
 and consoles.
 
-This is a private ownership boundary, not the finished agent plugin API.
-Conversation still owns provider permissions, controls and the remaining editor
-tools. Separating those remaining contributions is the next step; ACP, Ghostty and DAP keep their existing
-workers and protocols.
+The shared terminal tools use the public service described above. ACP provider
+composition and autocomplete are the remaining first-party migration units.
+Build planning and generic editor operations retain their host-owned interfaces.
+ACP, Ghostty and DAP retain their existing workers and protocols.
 
 The ACP completion transcript uses a scoped prepared text window. Its existing
 trace worker prepares the latest 65,536 characters after provider redaction;
