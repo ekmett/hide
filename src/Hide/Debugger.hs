@@ -1364,7 +1364,7 @@ observeAssistance runtime services state run receipt opened private forced budge
       nearby<-case opened of
         Just (_,buffer)->pure (A.sourceExcerpt secrets (integer "line" selected) buffer)
         Nothing | integer "sourceReference" source>0->do
-          body<-readAssistance runtime run receipt "source" (object ["sourceReference" .= integer "sourceReference" source])
+          body<-readAssistance runtime run receipt "source" (object ["sourceReference" .= integer "sourceReference" source,"source" .= source])
           pure (body >>= \value->maybe (Left "Adapter source unavailable.") (A.sourceExcerpt secrets (integer "line" selected) . newBuffer) (field "content" value))
         Nothing | Just file<-canonical->do
           bytes<-tryIOError (withFileRead file (\handle->BS.hGet handle (1024*1024+1)))

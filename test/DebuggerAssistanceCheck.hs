@@ -83,6 +83,10 @@ stepBudgetCheck=withSystemOne $ \owner->do
        (assistance value >>= field "steps")==Just (1::Int) &&
        (assistance value >>= field "reason")==Just ("step-budget"::T.Text))
     commands<-requests path
+    let sources=[arguments | request<-commands,commandOf request==Just "source",Just arguments<-[field "arguments" request :: Maybe Value]]
+        selectedSource=field "frame" before >>= field "source" :: Maybe Value
+    check "assisted source retrieval carries the exact observed stack source object"
+      (not (null sources) && all (\arguments->field "source" arguments==selectedSource) sources)
     check "one admitted next command exhausts maxSteps=1" (map commandOf (filter isStep commands)==[Just "next"])
     check "assistance never forces or mutates values" (all (\r->commandOf r `notElem` [Just "evaluate",Just "setVariable"]) commands)
     _<-tool runtime finished "debug_control" ["generation" .= generationOf value,"command" .= ("disconnect"::T.Text)]
@@ -316,7 +320,8 @@ sessionWith=sessionWithMode "assist"
 sessionWithMode :: String -> ((Debugger -> IO a) -> IO a) -> SystemOneServices -> (Debugger -> FilePath -> Desktop -> IO a) -> IO a
 sessionWithMode mode scope services use=bracket (Fixture.fixture mode) Fixture.cleanup $ \(port,path,_)->scope $ \runtime->
   withDebuggerSystemOne services runtime $ do
-    (connecting,_)<-tool runtime (initialDesktop (100,35)) "debug_attach" ["port" .= (read port::Int)]
+    (background,_)<-tool runtime (initialDesktop (100,35)) "debug_present" ["follow" .= False]
+    (connecting,_)<-tool runtime background "debug_attach" ["port" .= (read port::Int)]
     (ready,_)<-awaitState "ready paused DAP frame" runtime
       (\s->pure (field "stopped" s==Just True && field "ready" s==Just True && field "configured" s==Just True &&
         isJust (field "frame" s >>= field "id" :: Maybe Int))) connecting
