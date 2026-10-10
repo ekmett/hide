@@ -6,7 +6,7 @@ SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 <!-- badges:start -->
 [![build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/ci.yml?branch=main&style=flat&label=build&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/ci.yml?query=branch%3Amain)
 [![coverage](https://img.shields.io/github/actions/workflow/status/ekmett/hide/coverage.yml?branch=main&style=flat&label=coverage&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/coverage.yml?query=branch%3Amain)
-[![coverage: report](https://img.shields.io/static/v1?label=coverage&message=report&color=F01F7A&style=flat&logo=codecov&logoColor=white)](https://app.codecov.io/github/ekmett/hide)
+[![code coverage](https://img.shields.io/codecov/c/github/ekmett/hide?style=flat&logo=codecov&logoColor=%23ffffff)](https://app.codecov.io/github/ekmett/hide)
 [![docs build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/docs.yml?branch=main&style=flat&label=docs+build&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/docs.yml?query=branch%3Amain)
 [![issues](https://img.shields.io/github/issues/ekmett/hide?style=flat&label=issues&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/hide/issues)
 [![commits](https://img.shields.io/github/commit-activity/w/ekmett/hide?style=flat&label=commits&color=007ec6&logo=github&logoColor=white)](https://github.com/ekmett/hide/activity)
@@ -17,7 +17,7 @@ SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
 [![OS: Linux · macOS · Windows](https://img.shields.io/static/v1?label=OS&message=Linux+%C2%B7+macOS+%C2%B7+Windows&color=64748b&style=flat)](docs/install.md)
 
-[![license: BSD-2-Clause OR Apache-2.0](assets/badges/license.svg)](https://github.com/ekmett/hide/blob/5fb3e4328e0595f7e11ed4e6a20698823a82bb82/LICENSE)
+[![license: BSD-2-Clause OR Apache-2.0](assets/badges/license.svg)](LICENSE.md)
 [![Contributor Covenant: 2.0](https://img.shields.io/static/v1?label=Contributor+Covenant&message=2.0&color=007ec6&style=flat&logo=contributorcovenant&logoColor=white)](CODE_OF_CONDUCT.md)
 
 [![docs: read](https://img.shields.io/static/v1?label=docs&message=read&color=007ec6&style=flat)](https://ekmett.github.io/hide/)
