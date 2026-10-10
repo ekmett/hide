@@ -26,6 +26,7 @@ import System.Info (os)
 import System.Environment (getEnvironment,lookupEnv,setEnv,unsetEnv)
 import System.Timeout (timeout)
 import Hide.ACP
+import Hide.Plugin.Provider (newProviderSubmission, retireProviderSubmission, claimProviderSubmission)
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \root -> do
@@ -135,6 +136,32 @@ checks = bracket temporary removePathForcibly $ \root -> do
     result<-timeout 10000000 (drain [])
     check "ACP batches preserve FIFO and byte accounting across bursts"
       (fmap (\events->[name | Notification name _<-events]) result==Just (map (T.pack.show) [0::Int ..32]))
+  -- A following request is the wire barrier: the peer reports every method it
+  -- received before replying, so refused/reused sends cannot hide in a later poll.
+  writeFile server $ unlines
+    [ "import json,sys"
+    , "seen=[]"
+    , "for line in sys.stdin:"
+    , " r=json.loads(line); seen.append(r['method'])"
+    , " print(json.dumps(dict(jsonrpc='2.0',id=r['id'],result=seen)),flush=True)"
+    ]
+  bracket start stopClient $ \client->do
+    deferred<-try (prepareRequest client "unencoded" (String (error "deferred request encoding"))) :: IO (Either ErrorCall PreparedRequest)
+    check "preparing a request forces encoding before admission" (case deferred of Left _->True; _->False)
+    first<-prepareRequest client "first" Null
+    submission<-newProviderSubmission
+    admitted<-requestPrepared first (claimProviderSubmission submission)
+    reused<-requestPrepared first (claimProviderSubmission submission)
+    check "prepared send consumes exactly one submission" (case admitted of Right (Just _)->reused==Right Nothing; _->False)
+    retired<-newProviderSubmission
+    unsent<-prepareRequest client "retired" Null
+    retireProviderSubmission retired
+    refused<-requestPrepared unsent (claimProviderSubmission retired)
+    check "retirement prevents prepared admission" (refused==Right Nothing)
+    barrier<-request client "barrier" Null
+    reached<-waitEvents client (hasResponse barrier)
+    check "one-shot and retired requests cannot leak onto the wire"
+      (Response barrier (Right (toJSON (["first","barrier"]::[T.Text]))) `elem` reached)
   strict<-try (prepareResponse (String "strict") (Right (String (error "deferred response encoding")))) :: IO (Either ErrorCall PreparedResponse)
   check "preparing a response forces JSON encoding before enqueue" (case strict of Left _->True; _->False)
   writeFile server $ unlines

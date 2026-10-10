@@ -19,17 +19,20 @@ frontends:
 
 Buffer/window ownership and the multiline-editor interpreter still live in the
 main `hide` library. ACP completion and primary/child conversations declare their
-input and acknowledged commands through the public API. ACP autocomplete also
-uses a contributed provider and private tool declarations. The remaining
-first-party migration covers primary/child ACP provider composition. Generic build, debug,
-LSP and editor operations can remain explicit permission-controlled host services.
+input and acknowledged commands through the public API. The plugin contributes
+both the primary/child ACP provider and private autocomplete provider. Generic
+build, debug, LSP and editor operations remain explicit permission-controlled
+host services.
 The sections below describe the current contracts and separate further
 extensions from this delivery. The [sidebar design](../plans/sidebar-navigation.md)
 supplies the navigation model.
 
 **Agents > Rename** and **Files > Rename** use single-input forms. **New Agent**
 uses named Name and Task inputs. **Tools > Resume session** uses a private
-Session ID input. **Model** and **Effort** use choice forms for primary, child
+Session ID input. **Options > Agents** uses private executable, JSON arguments
+and JSON environment inputs when no reply is running; **Options > Agent Context** chooses Global or
+Project context before opening the corresponding TOML file. **Model** and
+**Effort** use choice forms for primary, child
 and ACP completion agents. With a conversation focused, its title and **Tools >
 Conversation model** open a two-level dropdown: choose a setting, then its value.
 The title selector and Agents tree share advertised choices and configuration
@@ -67,10 +70,11 @@ reply. Its remembered ID selects the saved provider and working directory only
 when explicitly resumed. Reading recovery metadata starts no provider.
 
 The checked host results support agent creation, rename, configuration, primary
-conversation New/Resume and saved-file basename rename. Persistent multiline
+conversation Open/New/Resume, provider configuration, context-file opening and
+saved-file basename rename. Persistent multiline
 input is described below; arbitrary widget actions remain separate work. Agent
 input cannot operate these forms. The linked owner declares capture disclosure when preparing a form;
-refresh cannot change it. Rename, new-agent and resume forms are private.
+refresh cannot change it. Rename, new-agent, resume and provider forms are private.
 Model/effort forms and popups expose filtered public capability labels, preserving
 readable agent settings while reserving submission for the human. A readable form
 is no authority to expose protected source or session keys; its owner must remove those before preparation.
@@ -90,12 +94,22 @@ The same session supplies `MenuPublisher c r` for scoped menu contributions.
 `mapMenu` projects immutable invocation context and adapts replies on the menu
 worker while retaining the original command registration. The host routes a
 prepared form to its existing form controller; there is no second modal queue.
-The New/Resume and model/effort declarations, labels and input validation live in
-`hide-agents`. `sessionSelectedAgent` supplies the agent captured at menu admission;
+Conversation Open/New/Resume, provider/context settings, raw copy, Cancel and
+model/effort declarations live in `hide-agents`, along with their labels and
+input validation. `sessionSelectedAgent` supplies the agent captured at menu admission;
 choice preparation never looks up whichever window happens to be focused later.
 New selects Primary without consuming a child conversation's draft. These commands
 retain their IDs, configured shortcuts and native labels, but require a live
-contribution.
+contribution. Provider/context forms retain the original host receipt through
+submission, so changing the selection or provider cannot redirect their reply.
+Raw copy retains the logical conversation source and original clipboard intent;
+a later copy supersedes it.
+
+Cancel uses the session's fixed `MenuAction`, not a registered worker callback.
+The host checks its live registration and human origin, then retires the current
+turn's requests, questions and queued input immediately. `invokeMenu` refuses
+this action: a delayed worker cannot cancel whatever turn happens to be running
+when it finishes. Context and reply mappings preserve that fixed action.
 
 ## Direction
 
@@ -797,35 +811,89 @@ It cannot return an 'approved' widget event on behalf of the human. Agent origin
 remain attached to semantic key/click commands, including rebound commands.
 Read-only access to policy does not grant mutation of it or private session keys.
 
-`Hide.Plugin.Agent` supplies the real `StartProvider`, `StartRequest`,
-`AgentDriver` and `DriverEvent` contract. The host binds actor/workspace identity,
-capabilities and private resume state at acquisition. The driver owns transport;
-its event sink publishes bounded public updates. A terminal delivery resolves
-its accepted ticket. Cancellation is a request with an eventual outcome, not a
-claim that the model has already stopped. The remaining primary/child composition
-work uses this boundary; it does not introduce another provider registry.
+### Provider acquisition and delivery
 
-Primary and child model/effort changes and human steering now use the same
-`AgentHub.configureAgentAt` and `steerAgentAt` control reservation. The primary
-driver enters the existing session mailbox with the exact ACP client identity
-and session key; a new connection invalidates old controls even when it reuses
-the same key. Provider acknowledgements complete the control. Only an `injected`
-steering outcome consumes the submitted draft; cancellation, rejection and
-uncertain ownership retain it. Cancellation and shutdown terminally resolve
-pending control replies, and a drained request cannot become live again. Primary
-Cancel keeps its existing synchronous conversation owner: it retires hub control
-receipts before cancelling that turn, so a delayed callback cannot cancel a new
-question. Cancelling turns refuse further steering until their terminal reply.
+`Plugin.pluginAgentProvider` selects one `StartAgentProvider` for primary and
+child conversations. `Hide.AgentUI.plugin` supplies the ACP implementation.
+`App` rejects multiple contributions and passes the selected factory to the
+existing Conversation and AgentRuntime owners. Missing contributions refuse
+startup; restored transcripts and drafts remain readable.
 
-Primary provider output, public tool/plan updates and context usage enter the
-same bounded Hub history/status path as child events. An external connection
-binding returns the existing epoch-bound event sink; replacing that binding
-retires the sink even when the session key repeats. Capability updates use the
-current sink without replacing the driver or retiring an outstanding control.
-Text is published only after the owner's cross-chunk redaction; tool events omit
-raw arguments/results and permission choices. Publication neither enqueues human
-prompts nor replays transcript state during synchronization. Conversation retains
-the primary transcript, ACP request dispatch and provider recovery.
+Acquisition receives a `ProviderKind`, host-minted `ProviderIdentity`, executable/
+argv/environment `ProviderLaunch`, private stdio `ProviderEndpoint`s, initial
+context, `ProviderHost` services and the existing `StartRequest`. The host retains
+actor, workspace, capacity and resume authority. The adapter owns protocol
+negotiation, process lifetime, correlation and redaction. A repeated private
+session key never identifies a new acquisition as the old one.
+
+`AgentDriver.driverDeliver` receives the host's exact `ProviderTurnId`, attributed
+`HubMessage`, additional text blocks and a one-shot `ProviderSubmission`. It
+returns `ProviderTurn` after the prepared prompt enters the transport queue.
+That receipt separately retains the terminal result and exact-turn cancellation;
+sending a prompt is not completing it. Reply preparation and transcript callbacks
+run outside the correlation lock used by cancellation. Canceling an old turn cannot affect a
+newer turn. The host's Hub worker awaits the retained result; primary input can
+acknowledge send admission without waiting for an answer.
+
+Encoding and byte counting run on the provider worker before admission. The
+prepared enqueue atomically checks provider lifetime and consumes the submission.
+Retirement prevents an uncommitted request from sending; it cannot undo a prompt
+already consumed by the provider. Unknown steering ownership retires the
+connection rather than replaying the draft. Startup/context delivery advances
+only at the corresponding successful admission or steering acknowledgement.
+
+Primary and child model/effort changes and human steering use the same
+`AgentHub.configureAgentAt` and `steerAgentAt` reservation. The primary driver
+enters the existing session mailbox with its host-issued provider identity and
+private session key. Only an `injected` steering outcome consumes the submitted
+draft. Cancellation, rejection and uncertain ownership retain it. Primary Cancel
+retires queued input, questions and host requests synchronously before requesting
+provider cancellation. Cancelling turns refuse steering until their real terminal
+reply or provider retirement.
+
+Both providers publish bounded public `DriverEvent`s to the same Hub history.
+Replacing a binding retires its event sink even if the session key repeats;
+capability refresh preserves the binding. Text passes through cross-chunk
+redaction before publication. Public tool events omit raw arguments/results and
+permission choices. Primary expanded transcript content uses the separate typed
+`ProviderContent` callback; it grants no human-message constructor or editor
+authority. Its exact turn boundary orders final content before terminal adoption.
+Conversation retains the primary transcript and host adoption; ACP decoding and
+request dispatch belong to the adapter.
+
+### Native provider services
+
+`ProviderHost` supplies typed permission, file and terminal services, bound to
+one acquisition before startup. Each returns a `ProviderReply` over the host's
+existing result cell: nonblocking poll, worker-only await and idempotent
+retirement. The adapter's pump retains wire correlation and polls these receipts.
+It adds no worker per terminal-exit waiter and no second host request queue.
+Cancellation retires host authority immediately; the pump still refuses the
+original native request IDs, including callbacks that return after cancellation.
+Closing the connection retires their wire correlation as well.
+
+Permission results select an offered option or cancel. The host retains human
+origin, Review and rejection; providers cannot approve themselves. Primary
+providers receive the actual optional native file/terminal services. Children
+advertise neither capability and refuse native requests explicitly.
+
+File paths are resolved and confined on a worker. An already-known literal
+source binding retains its identity at initial admission, so queued path
+resolution cannot accept a later edit or replacement as its original source.
+Aliases bind after canonical resolution. The UI owner captures only the matching
+immutable content, baseline and source receipt, then a worker reads and slices it.
+The same bounded slot spans preparation through final source/privacy admission.
+It never retains a Desktop, buffer map or Undo history. Private and
+hex buffers remain unavailable; UTF-8, NUL and 16 MiB limits remain enforced.
+Approved writes use the existing baseline check, save and Undo operation.
+
+Native terminal creation includes argv, environment, working directory and output
+retention. Output, wait, kill and release use the provider's exact owned IDs.
+`Consoles` retains processes; host approval admits creation. Provider retirement
+releases only its terminals. This native protocol differs from the MCP terminal
+tools' paged output and uses the same underlying process owner.
+
+### Hub and host ownership
 
 `AgentHub.historyAgent` and `searchAgentHistory` return public `HistoryPage` and
 `HistoryEvent` values from `Hide.Plugin.AgentServices`. Conversation reads typed
@@ -842,31 +910,21 @@ agent ID/task ticket through the existing mailbox. Conversation only adopts the
 checked human form/workspace and displays completion. The runtime joins pending
 acquisition before the final checkpoint; view state owns no launch worker.
 
-Primary Hub deliveries also use `AgentRuntime` ownership. The existing mailbox
-returns an opaque `PrimaryDelivery`; `admitPrimaryDelivery` claims it once for
-its issuing provider object and session. A drained request has no admission yet,
-and cancellation resolves it immediately. An admitted prompt retains the Hub
-reservation until its real terminal response; cancelling preparation before
-provider prompt IO releases the receipt locally. Replacement, disconnect and
-shutdown settle owned replies and retire queued cancellation callbacks. Foreign
-runtime receipts and late duplicate rejections cannot mutate a running reply.
-The response-dispatch owner calls `completePrimaryDelivery` only for its current
-terminal prompt response, after redaction. The runtime advertises the next human
-turn's busy state before releasing the Hub worker; completion from a replaced
-client cannot publish into the new provider. Capability refresh keeps the same
-provider lifetime. Conversation holds no prompt reply cell, and its human Query
-and Cancel timing stays unchanged.
+Primary Hub deliveries use the existing `AgentRuntime` mailbox. An opaque
+`PrimaryDelivery` carries distinct admission and terminal-result cells, bound to
+its original provider and turn. Draining the mailbox grants no admission.
+Cancellation before send retires the submission; an admitted prompt retains the
+Hub reservation until its actual terminal result or provider retirement.
+`completePrimaryDelivery` releases that original result after ordered transcript
+adoption and advertises the next human turn's busy state first. Late results
+cannot publish through a replaced binding.
 
-These remain host-only operations: agent tools cannot manufacture human steering
-or change their controlling user's model. Human query/cancel ownership, prompt
-preparation, ACP file and terminal requests, and provider startup/recovery still
-belong to Conversation; the full separate-package agent integration remains unfinished.
-
-This follows today's `AgentHub.StartProvider` and `AgentDriver` boundary rather
-than making the conversation window own transport. Model/effort choices come from provider capabilities.
-Fork/resume must mean actual provider support, not an invented fresh session.
-Private resume keys use a separate host credential/checkpoint service and never
-appear in public descriptions or window state.
+Human input ownership, prompt-context preparation, approvals, file adoption,
+terminal IDs and recovery remain host operations. Agent tools cannot manufacture
+human steering or change their controlling user's model. Fork/resume require
+actual provider support; a fresh session is not a substitute. Private resume
+keys stay in protected host persistence, outside public descriptions and window
+state.
 
 The ACP transport and driver are linked from `hide-acp`, a separate Cabal
 package in `plugins/hide-acp`. Its only Hide dependency is `hide-agent-api` in
@@ -960,9 +1018,9 @@ without stopping providers.
 The command, form, menu, tree and session contracts live in `hide-plugin-api`,
 without the editor's buffer or rendering dependencies. The real Agents tree is
 the linked `hide-agents` package. Its `Hide.AgentUI.plugin`
-uses `Hide.Plugin.Session` to scope its tree, New/Resume menu commands and
-metadata worker. `Hide.ConversationMenus` prepares the private Resume form through
-that public API. The executable selects the plugin with
+uses `Hide.Plugin.Session` to scope its tree, conversation menu commands and
+metadata worker. `Hide.ConversationMenus` prepares its private Resume/provider
+forms and readable context-scope choice through that public API. The executable selects the plugin with
 `Hide.App.main [Hide.AgentUI.plugin]`; the editor library does not import its
 implementation. The metadata worker publishes invalidations to the same
 bounded, close-aware queue as trees and forms. No
@@ -1002,10 +1060,10 @@ that presentation is present, so service results also refresh the conversation's
 layout. Session teardown joins pending acquisition cleanup before closing jobs
 and consoles.
 
-The shared terminal tools use the public service described above. Primary/child
-ACP provider composition and its native service bridge remain in progress.
-Build planning and generic editor operations retain their host-owned interfaces.
-ACP, Ghostty and DAP retain their existing workers and protocols.
+Shared MCP terminal tools and the native ACP bridge both use the session's
+console owner, with their distinct protocols and admission rules. Build planning
+and generic editor operations retain their host-owned interfaces. ACP, Ghostty
+and DAP retain their existing workers and protocols.
 
 ### Private autocomplete provider
 
@@ -1105,12 +1163,12 @@ runs in the existing control worker; context preparation keeps its own worker
 slot. A command cannot occupy the preparation slot while waiting for that slot
 to finish the same request.
 
-Provider startup, context capture and redaction remain host operations. Startup
-runs in the existing preparation worker: it resolves the directory, acquires the
-ACP process and sends `initialize`; a tick then adopts the completed client.
-Cancel or replacement detaches that owner immediately. Its retirement worker
-disposes a client that finished before cancellation but was never adopted, so
-neither acquisition nor that cleanup blocks interaction. The control receipt
+Startup runs in the existing preparation worker. The host resolves the workspace
+and invokes its selected provider factory; the adapter negotiates the connection
+and returns a driver. A tick adopts only the original acquisition. Cancel or
+replacement retires that acquisition immediately, and its cleanup worker stops
+any completed driver that was never adopted. Context capture stays on its host
+worker and redaction in the adapter; neither blocks interaction. The control receipt
 survives the original connection startup. Once connected, an
 invocation also keeps the captured model/configuration receipt; cancellation or
 replacement invalidates it. The plugin returns its prepared draft update
@@ -1182,13 +1240,13 @@ windows, stacked sidebar roots, agent/session navigation, debugger navigation an
 Cabal targets are implemented. The linked `hide-agents` and `hide-acp` packages
 are the first-party consumers, rather than an additional demonstration project.
 
-[#10](https://github.com/ekmett/hide/issues/10) has a fixed remainder: ACP
-primary/child provider composition with its existing filesystem, terminal and
-permission bridge; then a parity evidence index and API docs. Shared-terminal
-tools and private ACP autocomplete are complete. Generic build, debug, LSP, Git and editor
-services can stay permission-controlled host operations. The host continues to
-own state, authority and lifetimes; the plugin packages cannot import private
-Desktop, Render or Conversation internals.
+[#10](https://github.com/ekmett/hide/issues/10) moves primary and child ACP
+provider acquisition, permission/file/terminal requests, shared-terminal tools,
+private ACP autocomplete and conversation menu declarations through the public
+interfaces. Generic build, debug, LSP, Git and editor services remain
+permission-controlled host operations. The host owns state, authority and
+lifetimes; the plugin packages cannot import private Desktop, Render or
+Conversation internals.
 
 The semantic-tree and portable canvas milestones (#13 and #14) are independently
 delivered extensions. Future layout grammars, rendering pipelines, platform
@@ -1206,7 +1264,8 @@ Reuse the existing checks at the changed boundary:
 - Agent, conversation and autocomplete checks cover provider ownership, queueing,
   steering, cancellation, configuration receipts, private input and recovery.
 - Frontend/transport checks cover retained presentation and detach/reconnect;
-  the closeout includes one actual provider identity or request surviving detach.
+  one actual in-flight provider request completes while detached and remains
+  available after reattachment.
 - Allocation checks retain the prohibition on forcing whole desktop payloads or
   histories during interaction and rendering.
 

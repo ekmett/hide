@@ -45,7 +45,7 @@ import Hide.Links (LinkResult, applyLink, prepareMarkdown)
 import Hide.BufferView (BufferView(..))
 import qualified Hide.Plugin.EditorHost as Editor
 import Hide.SidebarCommands (SidebarHost,SidebarContext(..),SidebarReply(..),sidebarInvocationContext,adoptForm,adoptPopupForm)
-import Hide.Conversation (ConversationState,captureConversationSession,captureConversationChoices,conversationAgents)
+import Hide.Conversation (ConversationState,captureConversationSession,captureConversationOperation,captureConversationChoices,conversationAgents)
 import qualified Hide.AgentHub as AgentHub
 import qualified Hide.AgentRuntime as AgentRuntime
 import Hide.Model hiding (menus)
@@ -295,7 +295,7 @@ captureNavigation _ _ _=pure Nothing
 -- | Admission checks only policy/lifetimes and captures immutable read handles.
 -- Busy calls refuse instead of replacing another prepared result.
 menuEffects :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-menuEffects host@(MenuHost menus permitted _ _ ref _ conversation) _ original [InvokeMenu reference origin target]=mask $ \restore->do
+menuEffects host@(MenuHost menus permitted _ _ ref _ conversation) core original [InvokeMenu reference origin target]=mask $ \restore->do
   requireOpen host
   published<-adoptPublications host original
   d<-tickEditorBindings host published
@@ -305,18 +305,23 @@ menuEffects host@(MenuHost menus permitted _ _ ref _ conversation) _ original [I
       allowed=dialog d==Nothing && maybe False (\entry->origin==Plugin.HumanMenu || reference `elem` permitted && Plugin.menuAgentAllowed entry) item &&
         maybe True (\captured->contextTargetCurrent d {contextTarget=Just captured}) target &&
         maybe True (\entry->Plugin.menuSlot entry/="context.window-rows" || reference `elem` windowRowMenuRefsFor target d) item
-  if not live || not allowed then pure (False,d {status="Menu action is stale or unavailable."}) else case pending of
+  cancellation<-Plugin.menuCancelsConversation menus reference
+  if not live || not allowed then pure (False,d {status="Menu action is stale or unavailable."}) else if cancellation then
+    if origin==Plugin.HumanMenu then core d [AgentAction "cancel" []]
+      else pure (False,d {status="Conversation cancellation requires the human."})
+    else case pending of
     Just _->pure (False,d {status="A menu action is already running."})
     Nothing->do
       navigation<-captureNavigation origin target d
       source<-captureSource target d
       sessionTarget<-maybe (pure (Left "No conversation session owner.")) (\runtime->captureConversationSession runtime d) conversation
+      operationTarget<-maybe (pure (Left "No conversation session owner.")) (\runtime->captureConversationOperation runtime d) conversation
       popup<-if origin==Plugin.HumanMenu then
         maybe (pure (Left "No conversation owner.")) (\runtime->captureConversationChoices runtime d) conversation
         else pure (Left "Conversation choices require the human.")
       selected<-traverse (evaluate . AgentHub.agentConfigAgent . choicePopupConfig) popup
       _<-evaluate (either (const 0) (T.length . AgentHub.agentIdText) selected)
-      sidebar<-evaluate ((sidebarInvocationContext origin d) {sidebarConversation=sessionTarget,sidebarSelectedAgent=selected})
+      sidebar<-evaluate ((sidebarInvocationContext origin d) {sidebarConversation=sessionTarget,sidebarConversationOperation=operationTarget,sidebarSelectedAgent=selected})
       _<-evaluate (length (sidebarContextWorkspace sidebar))
       let row=case target of Just (WindowRowTarget windowRef ident)->Just (windowRef,ident); _->Nothing
           context=MenuContext (columns d) origin navigation source row (either (const Nothing) Just popup) sidebar

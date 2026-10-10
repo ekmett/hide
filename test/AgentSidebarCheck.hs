@@ -10,6 +10,7 @@
 
 module AgentSidebarCheck (checks) where
 
+import AgentHubCheck (completedTurn)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
@@ -72,9 +73,9 @@ checks=bracket temporary removePathForcibly $ \root->
     writeFile (root </> "thc.toml") (unlines ["[editor.autocomplete]","provider = 'acp'","executable = 'python3'","arguments = '"++show [script]++"'","debug = false"])
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
-    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Plugin.pluginPrimaryInput Hide.AgentUI.plugin) (Plugin.pluginChildInput Hide.AgentUI.plugin) consoles root $ \conversation->
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Plugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Plugin.pluginPrimaryInput Hide.AgentUI.plugin) (Plugin.pluginChildInput Hide.AgentUI.plugin) consoles root $ \conversation->
       withDocsCommands $ \docs->withConversationMenuCommands docs conversation $ \menuHost->
-      withAutocomplete (Plugin.pluginCompletionProvider Hide.AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools Hide.AgentUI.plugin] (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost host) sidebarConversation SidebarConversation sidebarSelectedAgent) $ do
+      withAutocomplete (Plugin.pluginCompletionProvider Hide.AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools Hide.AgentUI.plugin] (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost host) sidebarConversation SidebarConversation sidebarConversationOperation Menu.cancelConversationAction sidebarSelectedAgent) $ do
         createRequests<-newIORef []
         agentRequests<-newIORef []
         sessionRequests<-newIORef []
@@ -177,7 +178,7 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "selected rename range remains editable after refresh" (inputValue typed==Just ("N",Selection 1 1))
         -- Capture the target, then reorder metadata before applying the dialog.
         let caps=AH.Capabilities False False False []
-            driver=AH.AgentDriver root "private-peer-key" caps (const (pure (Right caps))) (const (pure (Right Null))) (pure ()) (pure ()) (const (pure (Left "unsupported")))
+            driver=AH.AgentDriver root "private-peer-key" caps (const (pure (Right caps))) (\turn _ _ _->completedTurn turn (pure (Right Null))) (pure ()) (pure ()) (\_ _ _->pure (Left "unsupported"))
         peer<-AH.registerAgent hub "A peer" root driver >>= right
         let primaryNamed name _=do
               current<-AH.statusAgent hub AH.Human primary >>= right
@@ -242,8 +243,8 @@ checks=bracket temporary removePathForcibly $ \root->
           (formRef staleIndex==formRef selectedLarge && any (\option->settingId option=="model" && settingCurrent option=="small") (agentSettings staleIndex))
         let capturedPrimary=handleEvent (V.EvKey V.KEnter []) staleIndex
             primaryLarge desktop=do
-              pending<-AH.agentControlPending hub primary
-              pure (not pending && any (\option->settingId option=="model" && settingCurrent option=="large") (agentSettings desktop))
+              controlPending<-AH.agentControlPending hub primary
+              pure (not controlPending && any (\option->settingId option=="model" && settingCurrent option=="large") (agentSettings desktop))
         primaryUpdated<-act capturedPrimary >>= awaitIO tick primaryLarge
         stalePrimary<-refuseReplay primaryUpdated (snd capturedPrimary)
         ensure "Primary model change retains its exact conversation" (T.null (conversationTarget stalePrimary))
@@ -310,8 +311,8 @@ checks=bracket temporary removePathForcibly $ \root->
             -- Advertised values can precede the control's final configuration commit.
             childModelReady value _=do
               current<-AH.agentConfiguration hub childId
-              pending<-AH.agentControlPending hub childId
-              pure (not pending && case current of
+              controlPending<-AH.agentControlPending hub childId
+              pure (not controlPending && case current of
                 Right (_,options)->any (\option->AH.configId option=="model" && AH.configCurrent option==value) options
                 _->False)
         childUpdated<-act capturedChild >>= awaitIO tick (childModelReady "large")

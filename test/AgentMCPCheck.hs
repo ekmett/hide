@@ -10,6 +10,7 @@
 
 module AgentMCPCheck (checks) where
 
+import AgentHubCheck (completedTurn)
 import Control.Concurrent.STM
 import Control.Exception (bracket)
 import Control.Monad (unless,forM_)
@@ -38,11 +39,11 @@ checks=Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTool
   let caps=Capabilities True True False [ConfigChoice "model-id" "model" "small" [("small","Small"),("large","Large")],ConfigChoice "effort-id" "thought_level" "low" [("low","Low"),("high","High")]]
       driver ident=AgentDriver directory ("private-test-key-"<>agentIdText ident) caps
         (\settings->modifyIORef' configured (++[settings]) >> pure (Right caps))
-        (\message->do
+        (\turn message _ _->completedTurn turn $ do
           atomically (modifyTVar' delivered (++[message]))
           atomically (readTVar gate >>= check)
           pure (Right (String (messageText message))))
-        (atomically (writeTVar gate True)) (atomically (writeTVar gate True)) (\_ ->pure (Left "unsupported"))
+        (atomically (writeTVar gate True)) (atomically (writeTVar gate True)) (\_ _ _->pure (Left "unsupported"))
       launcher request _=modifyIORef' launched (++[request]) >> pure (Right (driver (startAgent request)))
       right=either (error . T.unpack) pure
       isLeft (Left _)=True; isLeft _=False

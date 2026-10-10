@@ -588,7 +588,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
     forM_ ["revoked","disabled","needs-approval","stopped"] $ \reason->do
       policy "enable"
       clearMarker
-      withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+      withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing Nothing (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
         caller<-attributed conversation
         pending<-beforeAdoption runtime permissions caller $ \d->case reason of
           "revoked"->do
@@ -604,7 +604,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
 
     policy "prompt"
     clearMarker
-    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing Nothing (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
       caller<-attributed conversation
       pending<-beforeAdoption runtime permissions caller pure
       launched<-awaitLaunch runtime permissions pending
@@ -614,7 +614,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
 
     policy "enable"
     clearMarker
-    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing Nothing (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
       caller<-attributed conversation
       pending<-admit runtime permissions caller base
       allowed<-freshPolicy runtime permissions pending
@@ -631,7 +631,7 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
     -- Failure of the original callback must retire that intent, not just its RPC.
     policy "enable"
     clearMarker
-    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
+    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing Nothing (sessionConsoles runtime) root $ \conversation->withPermissionsAt policyPath controlTools $ \permissions->do
       caller<-attributed conversation
       seen<-newIORef (0::Int)
       let failing d fx=do
@@ -650,13 +650,13 @@ admittedBuildChecks=when (os/="mingw32") $ bracket temporary removePathForcibly 
     -- editor_input receipt but continues through the original execution gates.
     policy "enable"
     clearMarker
-    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing (sessionConsoles runtime) root $ \_->withPermissionsAt policyPath controlTools $ \permissions->do
+    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing Nothing (sessionConsoles runtime) root $ \_->withPermissionsAt policyPath controlTools $ \permissions->do
       pending<-admit runtime permissions (pure (Right ())) base
       _<-awaitLaunch runtime permissions pending
       check "anonymous input uses the same admitted lifecycle" . (==1) =<< launchCount
     policy "disable"
     clearMarker
-    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing (sessionConsoles runtime) root $ \_->withPermissionsAt policyPath controlTools $ \permissions->do
+    withSessionServices $ \runtime->withConversationAt Nothing Nothing Nothing Nothing (sessionConsoles runtime) root $ \_->withPermissionsAt policyPath controlTools $ \permissions->do
       pending<-snd <$> core runtime base [ServiceAction "make" []]
       _<-awaitLaunch runtime permissions pending
       check "human build remains independent of editor_input policy" . (==1) =<< launchCount

@@ -43,6 +43,7 @@ import qualified Hide.EnvironmentTools as EnvironmentTools
 import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.CompletionInput as CompletionInput
 import qualified Hide.CompletionTools as CompletionTools
+import qualified Hide.AgentACP as ACPProvider
 import qualified Hide.AutocompleteACP as CompletionACP
 import qualified Hide.ConversationInput as ConversationInput
 import qualified Hide.ConversationMenus as ConversationMenus
@@ -60,7 +61,8 @@ data Snapshot completion = Snapshot !(M.Map A.AgentId A.AgentSummary) !(Maybe (C
 plugin :: Plugin
 plugin=Plugin
   { withPlugin= \session->ConversationMenus.withConversationMenus (sessionSidebar session)
-      (sessionMenus session) (sessionConversation session) (sessionConversationReply session)
+      (sessionMenus session) (sessionConversation session) (sessionConversationOperation session)
+      (sessionConversationReply session) (sessionConversationCancel session)
       . ConversationChoices.withConversationChoices (sessionSidebar session) (sessionMenus session)
           (sessionAgents session) (sessionSelectedAgent session) (sessionAgentReply session)
       . withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
@@ -70,6 +72,7 @@ plugin=Plugin
       ++map RequestTool (BufferTools.tools++map (mapToolContext requestQuestions) QuestionTools.tools
         ++map (mapToolContext requestTerminals) TerminalTools.tools)
       ++map CompletionTool CompletionTools.tools
+  , pluginAgentProvider=Just ACPProvider.startACPProvider
   , pluginCompletionProvider=Just (CompletionACP.completionProvider CompletionTools.skill)
   , pluginConversation=Just AgentTranscript.presentConversation
   , pluginPrimaryInput=Just ConversationInput.primaryInput

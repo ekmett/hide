@@ -14,12 +14,16 @@ module Hide.ConversationSessionTypes (ConversationSessionReceipt(..)) where
 import Data.Text (Text)
 import Data.Unique (Unique)
 import System.Mem.StableName (StableName)
-import qualified Hide.ACP as A
+import Hide.Plugin.Provider (ProviderLaunch,ProviderIdentity)
+import Hide.ConversationBody (ConversationCopy)
 import Hide.AgentHub (AgentId,AgentConfigRef)
 
 data ConversationSessionReceipt = ConversationSessionReceipt
-  !Unique !AgentId !(StableName A.ProviderLaunch) !(Maybe (StableName A.Client))
-  !(Maybe Text) !(Maybe AgentConfigRef) deriving Eq
+  !Unique !AgentId !(StableName ProviderLaunch) !(Maybe (ProviderIdentity))
+  !(Maybe Text) !(Maybe AgentConfigRef)
+  | ConversationOperationReceipt !Unique !(StableName ProviderLaunch) !(Maybe ProviderIdentity)
+      !(Maybe Text) !FilePath !Text !(Maybe ConversationCopy)
+  deriving Eq
 
 -- Provider-private keys and launch configuration must never appear in status.
 instance Show ConversationSessionReceipt where

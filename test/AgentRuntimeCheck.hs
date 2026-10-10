@@ -26,6 +26,8 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Process (callProcess)
 import System.Timeout (timeout)
+import Hide.Plugin.Provider
+import Hide.Plugin.Agent (ProviderEndpoint(..))
 import qualified Hide.ACP as ACP
 import Hide.AgentAccess
 import Hide.AgentHub
@@ -56,18 +58,18 @@ checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTo
   writeFile logPath ""
   writeFile policy "[broken\n"
   withEnvironment [("XDG_CONFIG_HOME",config),("XDG_DATA_HOME",root </> "data"),("THC_EDIT_SESSION",session)] $
-    withAgentRuntimeUsing startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
+    withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
       let hub = agentHub runtime
           primary = primaryAgent runtime
           spec = SpawnSpec "child" "Inspect code" project Shared Fresh Nothing Nothing
-      token <- primaryServers runtime >>= serverToken
+      token <- primaryServers runtime >>= endpointToken
       assert "primary token resolves to primary identity" . (==Just primary) =<< resolveAgentAccess (agentAccess runtime) token
       rejected <- spawnAgent hub Human spec
       assert "malformed policy blocks spawning but not editor startup" (either (const True) (const False) rejected)
       writeFile policy "[editor.agents]\nmax_agents = 4\nmax_subagents = 2\n[editor.agent]\ncontext = 'global context marker'\n"
       primaryDeliveryChecks runtime project (ACP.ProviderLaunch "python3" [script] [("PROBE_LOG",logPath)])
       let choices=Capabilities False False True [ConfigChoice "model" "model" "small" [("small","Small"),("large","Large")]]
-      bracket (ACP.startClient (ACP.ProviderLaunch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \client->do
+      newProviderIdentity >>= \client->do
         _<-syncPrimary runtime project (Just client) "private-primary" choices False >>= right
         (captured,_)<-agentConfiguration hub primary >>= right
         withAsync (configureAgentAt hub captured "model" "large") $ \setting->do
@@ -80,7 +82,7 @@ checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTo
           _<-syncPrimary runtime project (Just client) "private-primary" refreshed False >>= right
           assert "capability refresh preserves an admitted primary control" =<< primaryControlCurrent runtime control (Just client) (Just "private-primary")
           recordPrimaryEvent runtime client "private-primary" (ProviderUsage 12 100)
-          bracket (ACP.startClient (ACP.ProviderLaunch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \replacement->do
+          newProviderIdentity >>= \replacement->do
             current<-primaryControlCurrent runtime control (Just replacement) (Just "private-primary")
             assert "same-key replacement cannot consume old primary control" (not current)
             _<-syncPrimary runtime project (Just replacement) "private-primary" choices False >>= right
@@ -138,7 +140,7 @@ checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTo
         [cell] -> pure cell
         _ -> error "Expected human permission request"
       _ <- cancelAgent hub Human child >>= right
-      assert "child cancellation releases human permission reply" . (==Just Nothing) =<< tryReadMVar permissionReply
+      assert "child cancellation releases human permission reply" . (==Just (Right Nothing)) =<< tryReadMVar permissionReply
       _ <- waitAgent hub Human child permissionTicket 2000 >>= right
       _ <- endAgent hub Human child >>= right
       assert "ending child revokes its bridge" . (==Nothing) =<< resolveAgentAccess (agentAccess runtime) childToken
@@ -176,7 +178,7 @@ checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTo
 -- The public receipt owns terminal completion; removing a mailbox entry alone
 -- grants no provider admission and cannot keep the cancellation barrier alive.
 primaryDeliveryChecks :: AgentRuntime -> FilePath -> ACP.ProviderLaunch -> IO ()
-primaryDeliveryChecks runtime project launch=bracket (ACP.startClient launch project) ACP.stopClient $ \client->do
+primaryDeliveryChecks runtime project launch=newProviderIdentity >>= \client->do
   let hub=agentHub runtime
       primary=primaryAgent runtime
       key="private-primary"
@@ -201,7 +203,7 @@ primaryDeliveryChecks runtime project launch=bracket (ACP.startClient launch pro
     Just message->messageTicket message==ticket && messageAuthor message==Human && messageIsUserSeat message && messageText message=="inspect"
     _->False
   assert "runtime owns admitted delivery" =<< primaryDeliveryActive runtime
-  withAgentRuntimeUsing (const (error "Unexpected editor startup")) (const (error "Unexpected editor reconnect")) project (pure launch) $ \other->do
+  withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) (const (error "Unexpected editor startup")) (const (error "Unexpected editor reconnect")) project (pure launch) $ \other->do
     _<-syncPrimary other project (Just client) key caps False >>= right
     foreignAdmission<-admitPrimaryDelivery other delivery client key
     assert "foreign runtime cannot admit an owned receipt" (maybe True (const False) foreignAdmission)
@@ -256,7 +258,7 @@ primaryDeliveryChecks runtime project launch=bracket (ACP.startClient launch pro
   idle
   (oldTicket,oldDelivery)<-request "old provider"
   _<-admitPrimaryDelivery runtime oldDelivery client key >>= maybe (error "Expected old-provider admission") pure
-  bracket (ACP.startClient launch project) ACP.stopClient $ \replacement->do
+  newProviderIdentity >>= \replacement->do
     _<-syncPrimary runtime project (Just replacement) key caps False >>= right
     oldResult<-waitAgent hub Human primary oldTicket 2000 >>= right
     assert "same-key provider replacement resolves old delivery" (field "status" oldResult==Just ("failed"::T.Text))
@@ -287,8 +289,8 @@ primaryShutdownCheck root=do
       launch=ACP.ProviderLaunch "python3" [root </> "provider.py"] [("PROBE_LOG",root </> "provider.jsonl")]
       key="private-shutdown"
   withEnvironment [("XDG_CONFIG_HOME",root </> "config"),("XDG_DATA_HOME",root </> "data"),("THC_EDIT_SESSION",replicate 48 'b')] $
-    bracket (ACP.startClient launch project) ACP.stopClient $ \client->do
-      (stopped,receipt,ticket)<-withAgentRuntimeUsing (const (error "Unexpected editor startup")) (const (error "Unexpected editor reconnect")) project (pure launch) $ \runtime->do
+    newProviderIdentity >>= \client->do
+      (stopped,receipt,ticket)<-withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) (const (error "Unexpected editor startup")) (const (error "Unexpected editor reconnect")) project (pure launch) $ \runtime->do
         _<-syncPrimary runtime project (Just client) key (Capabilities False False False []) False >>= right
         number<-sendAgent (agentHub runtime) Human (primaryAgent runtime) "scope exit" >>= right
         entries<-waitRequests runtime
@@ -321,7 +323,7 @@ creationChecks root=do
   started<-newEmptyMVar
   release<-newEmptyMVar
   withEnvironment (environment 'c') $ do
-    closedRuntime<-withAgentRuntimeUsing noEditor noEditor project (putMVar started () >> readMVar release >> pure launch) $ \runtime->do
+    closedRuntime<-withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) noEditor noEditor project (putMVar started () >> readMVar release >> pure launch) $ \runtime->do
       _<-requestAgentCreation runtime spec >>= right
       await "host launch starts on its owned worker" (not <$> isEmptyMVar started)
       overlapping<-requestAgentCreation runtime spec {spawnName="Overlapping"}
@@ -353,7 +355,7 @@ creationChecks root=do
     let saved=record {sessionId=replicate 48 'd',sessionDirectory=project}
     rememberSession saved
     path<-(++".agents.json") <$> checkpointPath (sessionId saved)
-    runtime<-withAgentRuntimeUsing noEditor noEditor project
+    runtime<-withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) noEditor noEditor project
       ((putMVar acquiring () >> readMVar gate >> pure launch) `finally` writeIORef joined True) $ \owner->do
         activateAgentCheckpoint owner
         _<-requestAgentCreation owner spec >>= right
@@ -385,10 +387,10 @@ persistenceChecks root = do
     let record = fresh {sessionId=sid,sessionDirectory=project}
     rememberSession record
     path <- (++".agents.json") <$> checkpointPath sid
-    (primary,child,workspace,oldToken,oldChildToken,oldAccess) <- withAgentRuntimeUsing startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
+    (primary,child,workspace,oldToken,oldChildToken,oldAccess) <- withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
       activateAgentCheckpoint runtime
       let hub = agentHub runtime
-      token <- primaryServers runtime >>= serverToken
+      token <- primaryServers runtime >>= endpointToken
       _ <- syncPrimary runtime project Nothing "primary-private" (Capabilities False True False []) False >>= right
       child <- spawnAgent hub Human spec >>= right
       workspace <- agentSession runtime child >>= maybe (error "Missing recoverable workspace") pure
@@ -405,7 +407,7 @@ persistenceChecks root = do
             Just params <- [field "params" entry :: Maybe Value], Just xs <- [field "mcpServers" params :: Maybe [Value]]]
       childToken <- serverToken servers
       assert "checkpoint omits child bearer" (not (T.unpack childToken `isIn` BS.unpack bytes))
-      withAgentRuntimeUsing (const (error "Competing startup must not launch editors")) (const (error "Competing startup must not resume editors")) project launch $ \competing -> do
+      withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) (const (error "Competing startup must not launch editors")) (const (error "Competing startup must not resume editors")) project launch $ \competing -> do
         recordAgentEvent (agentHub competing) (primaryAgent competing) "losing-startup" Null
         _ <- checkpointAgents competing >>= right
         pure ()
@@ -420,10 +422,10 @@ persistenceChecks root = do
           modifyIORef' resumedEditors (++[savedEditor])
           available <- readIORef editorAvailable
           unless available (ioError (userError "Saved editor is unavailable"))
-    withAgentRuntimeUsing (const (error "Recovery must not start a new editor")) resumeEditor project launch $ \runtime -> do
+    withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) (const (error "Recovery must not start a new editor")) resumeEditor project launch $ \runtime -> do
       activateAgentCheckpoint runtime
       assert "restored primary identity is stable" (primaryAgent runtime==primary)
-      token <- primaryServers runtime >>= serverToken
+      token <- primaryServers runtime >>= endpointToken
       assert "recovery issues a fresh bearer" (token/=oldToken)
       assert "old bearer is invalid in recovered runtime" . (==Nothing) =<< resolveAgentAccess (agentAccess runtime) oldToken
       restored <- statusAgent (agentHub runtime) Human child >>= right
@@ -486,7 +488,7 @@ persistenceChecks root = do
     assert "runtime teardown does not recreate sidecar after Exit" . not =<< doesFileExist path
     rememberSession record
     writeFile path "broken-checkpoint"
-    withAgentRuntimeUsing startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
+    withAgentRuntimeUsing (Plugin.pluginAgentProvider Hide.AgentUI.plugin) startEditor (const (error "Unexpected editor reconnect")) project launch $ \runtime -> do
       activateAgentCheckpoint runtime
       notice <- runtimeNotice runtime
       assert "invalid checkpoint is reported without preventing editor startup" (maybe False (T.isInfixOf "checkpoint") notice)
@@ -506,6 +508,11 @@ waitRequests runtime = timeout 3000000 loop >>= maybe (error "Timed out waiting 
 await :: String -> IO Bool -> IO ()
 await label condition = timeout 3000000 loop >>= assert label . (==Just ())
   where loop = condition >>= \ready -> unless ready (threadDelay 1000 >> loop)
+
+endpointToken :: [ProviderEndpoint] -> IO T.Text
+endpointToken endpoints=case [T.pack value | endpoint<-endpoints,(name,value)<-environment (endpointLaunch endpoint),name=="THC_EDIT_MCP_TOKEN"] of
+  [token]->pure token
+  _->error "Expected private bridge token"
 
 serverToken :: [Value] -> IO T.Text
 serverToken servers = case [token | server <- servers, entry <- maybe [] id (field "env" server :: Maybe [Value]),

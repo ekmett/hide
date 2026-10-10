@@ -41,6 +41,7 @@ import qualified Data.Text as T
 import System.FilePath (isAbsolute)
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
+import Hide.Plugin.Provider
 import Hide.Plugin.Agent
 import Hide.Plugin.AgentDirectory (AgentSummary(..))
 import Hide.Plugin.AgentServices (HistoryEvent(..),HistoryPage(..))
@@ -337,7 +338,11 @@ worker hub@(AgentHub _ _ ref) ident = do
   case next of
     Nothing -> pure ()
     Just (message, driver) -> do
-      result <- safeCall (driverDeliver driver message)
+      turn<-newProviderTurnId
+      submission<-newProviderSubmission
+      result<-safeCall (do
+        admitted<-driverDeliver driver turn message [] submission
+        either (pure . Left) (awaitProviderReply . providerTurnReply) admitted) `finally` retireProviderSubmission submission
       atomically $ modifyTVar' ref $ \state -> state
         {hubEntries = M.adjust (finish message result) ident (hubEntries state)}
       worker hub ident
@@ -412,7 +417,9 @@ steerAgentAt hub receipt=steerAgentChecked hub (agentConfigAgent receipt) (Just 
 
 steerAgentChecked :: AgentHub -> AgentId -> Maybe AgentConfigRef -> Text -> IO (Either Text Value)
 steerAgentChecked hub ident expected text=agentControl hub ident "steering" validate
-  (\entry driver->driverSteer driver (HubMessage 0 Human text (entryParent entry==Nothing)))
+  (\entry driver->do
+    submission<-newProviderSubmission
+    driverSteer driver (HubMessage 0 Human text (entryParent entry==Nothing)) [] submission `finally` retireProviderSubmission submission)
   (\_ entry->appendEvent "steered" Human (object ["text" .= text,"userSeat" .= (entryParent entry==Nothing)]) entry)
   where
     validate entry=do

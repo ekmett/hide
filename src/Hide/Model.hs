@@ -463,7 +463,7 @@ keyLabelWidth text = displayColumn text (T.length text)
 
 menuShortcut :: Desktop -> MenuItem -> Text
 menuShortcut d (MenuItem _ key cmd)
-  | nativeMac d,RegisteredMenu ref _<-cmd,Plugin.menuName ref=="hide.agents.new",Nothing<-effectiveBindings d=keyLabel d "Cmd+Shift+N"
+  | nativeMac d,RegisteredMenu ref _<-cmd,Plugin.menuName ref `elem` ["hide.agents.new","hide.agents.open"],Nothing<-effectiveBindings d=keyLabel d (if Plugin.menuName ref=="hide.agents.new" then "Cmd+Shift+N" else "Cmd+Shift+C")
   | Just _<-effectiveBindings d = keyLabel d (fromMaybe "" (listToMaybe (commandBindingKeys d cmd)))
   | nativeMac d = keyLabel d $ fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(Replace,"Cmd+Option+F"),(FindNext,"Cmd+G"),(FindPrevious,"Cmd+Shift+G"),(Conversation,"Cmd+Shift+C"),(AgentNew,"Cmd+Shift+N")])
   | otherwise = keyLabel d key
@@ -487,6 +487,11 @@ commandBindingKeys d cmd
                                | Plugin.menuName ref=="hide.agents.new" -> AgentNew
                                | Plugin.menuName ref=="hide.agents.resume" -> AgentResume
                                | Plugin.menuName ref=="hide.agents.model" -> AgentChoose
+                               | Plugin.menuName ref=="hide.agents.open" -> Conversation
+                               | Plugin.menuName ref=="hide.agents.provider" -> AgentOptions
+                               | Plugin.menuName ref=="hide.agents.context" -> AgentGuidance
+                               | Plugin.menuName ref=="hide.agents.copy" -> AgentCopyRaw
+                               | Plugin.menuName ref=="hide.agents.cancel" -> AgentCancel
           _ -> cmd
 
 commandDescription :: Command -> Text
@@ -703,13 +708,13 @@ menuItemsFor d i
   where
     original=menuItems i
     slot=let (title,_,_)=menus !! (i `mod` length menus) in T.toLower title
-    additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot,Plugin.menuName (Plugin.menuReference item) `notElem` ["hide.agents.new","hide.agents.resume","hide.agents.model"]]
+    additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot,Plugin.menuName (Plugin.menuReference item) `notElem` ["hide.agents.new","hide.agents.resume","hide.agents.model","hide.agents.open","hide.agents.provider","hide.agents.context","hide.agents.copy","hide.agents.cancel"]]
     helpEntry=[item | item@(MenuItem _ _ (RegisteredMenu ref _))<-additions,Plugin.menuName ref=="hide.help.contents"]
     sourceEntry=find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
     replaceSource (MenuItem title key (DebugCommand "breakpoint"))=case sourceEntry of
       Just item->MenuItem title key (contributionCommand d item)
       Nothing->MenuItem title key (if menusActive d then Disabled "Breakpoint command is unavailable." else DebugCommand "breakpoint")
-    replaceSource (MenuItem title key cmd) | cmd `elem` [AgentNew,AgentResume,AgentChoose]=case find ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
+    replaceSource (MenuItem title key cmd) | cmd `elem` [AgentNew,AgentResume,AgentChoose,Conversation,AgentOptions,AgentGuidance,AgentCopyRaw,AgentCancel]=case find ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
       Just item->MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item)
       Nothing->MenuItem title key (Disabled "Conversation session command is unavailable.")
     replaceSource item=item
@@ -739,7 +744,7 @@ commandEnabled d ExportBuffer = dialog d==Nothing && not (questionActive d) && m
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d (DebugCommand "breakpoint") | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
-commandEnabled d cmd | cmd `elem` [AgentNew,AgentResume] = any ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) && dialog d==Nothing
+commandEnabled d cmd | cmd `elem` [AgentNew,AgentResume,Conversation,AgentOptions,AgentGuidance,AgentCopyRaw,AgentCancel] = any ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) && dialog d==Nothing
 commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
 commandEnabled d (TreeCommand trace _) = dialog d==Nothing && maybe False (hitCurrent trace) (sideTree d)
 commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find ((==reference) . Plugin.menuReference) (contributedMenus d) of
@@ -787,6 +792,11 @@ commandEnabled _ _ = True
 sessionCommandName :: Command -> Text
 sessionCommandName AgentNew="hide.agents.new"
 sessionCommandName AgentChoose="hide.agents.model"
+sessionCommandName Conversation="hide.agents.open"
+sessionCommandName AgentOptions="hide.agents.provider"
+sessionCommandName AgentGuidance="hide.agents.context"
+sessionCommandName AgentCopyRaw="hide.agents.copy"
+sessionCommandName AgentCancel="hide.agents.cancel"
 sessionCommandName _="hide.agents.resume"
 
 contributedSession :: Text -> Desktop -> (Desktop,[Effect])
@@ -1528,19 +1538,17 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go OpenTerminal d = (d,[ServiceAction "terminal" []])
     go StopTerminal d = (d,[ServiceAction "terminal-stop" []])
     go AgentDirectory d = (d,[AgentAction "directory" []])
-    go AgentOptions d = (d,[AgentAction "options" []])
+    go AgentOptions d = contributedSession "hide.agents.provider" d
     go AgentPermissions d = (d,[PermissionAction "show" []])
     go EnvironmentOptions d = (d,[EnvironmentAction "show" []])
-    go AgentGuidance d = (d,[AgentAction "context" []])
-    go Conversation d = case find (\w->conversationTargetFor d w==Just (conversationTarget d)) (windows d) of
-      Just w -> let focused=focusWindow (windowId w) d in (setComposerInput (composerBuffer focused) (composerSelection focused) True focused,[AgentAction "focus" []])
-      Nothing -> (d,[AgentAction "show" []])
-    go AgentCancel d = (d,[AgentAction "cancel" []])
+    go AgentGuidance d = contributedSession "hide.agents.context" d
+    go Conversation d = contributedSession "hide.agents.open" d
+    go AgentCancel d = contributedSession "hide.agents.cancel" d
     go AgentResume d = contributedSession "hide.agents.resume" d
     go AgentNew d = contributedSession "hide.agents.new" d
     go AgentChoose d = contributedSession "hide.agents.model" d
     go FormChoice{} d = (d,[])
-    go AgentCopyRaw d = (d,[AgentAction "copy" []])
+    go AgentCopyRaw d = contributedSession "hide.agents.copy" d
     go SaveAs d = case activeWindow d of
       Nothing -> (d,[])
       Just _ | maybe False ((/=Nothing) . documentLabel) (activeDocument d) -> (d {status="This window is read-only."},[])

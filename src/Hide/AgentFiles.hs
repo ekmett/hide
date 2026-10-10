@@ -14,11 +14,17 @@
 -- and file identities let worker results be invalidated without comparing source
 -- text during routine adoption. Explicit approved writes separately verify the
 -- captured editor/disk baselines and use checked saving; they preserve Undo.
-module Hide.AgentFiles (Snapshot, captureFile, snapshotPath, snapshotText, acceptWrite, SourceIdentity, sourceIdentity, sourceSnapshots, contextText) where
+module Hide.AgentFiles
+  ( Snapshot, snapshotPath, snapshotText, acceptWrite
+  , ResolvedFile, resolveFile, resolvedFilePath
+  , FileInput, captureFileInput, fileInputIdentity, readFileInput
+  , SourceIdentity, sourceIdentity, sourceSnapshots, contextText
+  ) where
 
 import Hide.FileIO (withFileRead)
 
 import Control.Exception (IOException, try, evaluate)
+import Control.DeepSeq (force)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as M
@@ -56,12 +62,19 @@ textTooLarge text = T.length text>fileLimit || BS.length (TE.encodeUtf8 text)>fi
 data SourceIdentity = SourceIdentity !Int !ContentVersion (StableName FileState) deriving Eq
 
 sourceIdentity :: FilePath -> Desktop -> IO (Maybe SourceIdentity)
-sourceIdentity path d = case find (\(_,file,_)->filePath file==path) (reverse (publicSources d)) of
+sourceIdentity path d = case find eligible (reverse (matchingSources path d)) of
   Nothing -> pure Nothing
-  Just (bid,file,buffer) -> do
-    current<-captureVersion buffer
+  Just (bid,doc,file) -> do
+    current<-captureVersion (documentBuffer doc)
     baseline<-evaluate file >>= makeStableName
     pure (Just (SourceIdentity bid current baseline))
+  where eligible (bid,doc,_)=not (protectedBuffer d bid) && documentLabel doc==Nothing && textBuffer (documentBuffer doc)
+
+-- Filter on path metadata before inspecting a buffer. Unrelated contents and
+-- histories are not part of a single-file capture or its final identity check.
+matchingSources :: FilePath -> Desktop -> [(Int,Document,FileState)]
+matchingSources path d=[(bid,doc,file) | (bid,doc)<-M.toAscList (buffers d),
+  Just file<-[documentFile doc],filePath file==path]
 
 sourceSnapshots :: Desktop -> M.Map FilePath Snapshot
 sourceSnapshots d = M.fromList [(filePath file,Snapshot file (Just (bid,revision b)) (contents b)) |
@@ -73,36 +86,99 @@ publicSources :: Desktop -> [(Int,FileState,Buffer)]
 publicSources d = [(bid,file,b) | (bid,doc)<-M.toAscList (buffers d),not (protectedBuffer d bid),
   documentLabel doc==Nothing,textBuffer (documentBuffer doc),Just file<-[documentFile doc],let b=documentBuffer doc]
 
--- | Capture an absolute canonical project-contained file, excluding private paths
--- and byte buffers. A missing disk file is represented by empty text.
-captureFile :: FilePath -> FilePath -> Desktop -> IO (Either Text Snapshot)
-captureFile root path d = do
-  result <- try $ do
-    unless (isAbsolute path && '\0' `notElem` path) (ioError (userError "Expected an absolute file path."))
-    resolved <- canonicalizePath path
-    when (protectedPath d resolved) (ioError (userError "This file is private; use agent_settings for public context."))
-    base <- canonicalizePath root
-    let relative=makeRelative base resolved
-    when (isAbsolute relative || ".." `elem` splitDirectories relative) (ioError (userError "File is outside this session's project."))
-    when (any (\doc -> fmap filePath (documentFile doc)==Just resolved && not (textBuffer (documentBuffer doc))) (M.elems (buffers d)))
-      (ioError (userError "Hex buffers are not available through ACP text file APIs."))
-    captured <- case M.lookup resolved (sourceSnapshots d) of
-      Just captured -> pure captured
-      Nothing -> do
-        -- Bound the read itself: checking size before an unbounded read races
-        -- with a file growing between stat and read.
-        bytes <- catchIOError (Just <$> withFileRead resolved (\handle -> BS.hGet handle (fileLimit+1)))
-          (\err -> if isDoesNotExistError err then pure Nothing else ioError err)
-        let raw=maybe BS.empty id bytes
-        when (BS.length raw>fileLimit) (ioError (userError "ACP text files are limited to 16 MiB."))
-        when (BS.elem 0 raw) (ioError (userError "Binary text contains NUL bytes."))
-        text <- either (const (ioError (userError "The file is not valid UTF-8."))) pure (TE.decodeUtf8' raw)
-        pure (Snapshot (FileState resolved bytes) Nothing text)
-    when (textTooLarge (snapshotText captured)) (ioError (userError "ACP text files are limited to 16 MiB."))
-    current <- canonicalizePath path
-    unless (current==resolved) (ioError (userError "File path changed while reading; request a fresh read."))
-    pure captured
-  pure (either (Left . T.pack . show) Right (result :: Either IOException Snapshot))
+-- | Worker-resolved project path. The original spelling is retained only to
+-- detect a symlink changing while a read is in flight. No editor state is held.
+data ResolvedFile = ResolvedFile !FilePath !FilePath
+
+-- | /O(1)/. Canonical path used for the owner capture and later admission.
+resolvedFilePath :: ResolvedFile -> FilePath
+resolvedFilePath (ResolvedFile _ path)=path
+
+-- | Resolve an absolute path and confine it to the canonical project root.
+-- Filesystem work belongs on a worker. Privacy is checked against the current
+-- editor by 'captureFileInput', after this result returns to the owner.
+resolveFile :: FilePath -> FilePath -> IO (Either Text ResolvedFile)
+resolveFile root path=ioResult $ do
+  unless (isAbsolute path && '\0' `notElem` path) (ioError (userError "Expected an absolute file path."))
+  resolved<-canonicalizePath path
+  base<-canonicalizePath root
+  let relative=makeRelative base resolved
+  when (isAbsolute relative || ".." `elem` splitDirectories relative)
+    (ioError (userError "File is outside this session's project."))
+  (original,canonical)<-evaluate (force (path,resolved))
+  pure (ResolvedFile original canonical)
+
+-- | One shallow immutable read input. An open source retains live measured
+-- content and the required disk baseline, never the editable Buffer, Undo or
+-- the surrounding Desktop. A disk-only input retains just its resolved path.
+data FileInput = FileInput !ResolvedFile !(Maybe OpenSource)
+data OpenSource = OpenSource !FileState !Int !Int !BufferContent !SourceIdentity
+
+-- | Capture the matching source and privacy facts on the editor owner. This
+-- performs no filesystem IO and does not flatten text or compare baselines.
+-- The last eligible duplicate path wins, as with 'sourceSnapshots'. Any matching
+-- private/hex source refuses the request rather than falling back to disk.
+captureFileInput :: ResolvedFile -> Desktop -> IO (Either Text FileInput)
+captureFileInput resolved d
+  | protectedPath d path || any (protectedBuffer d . first) matching =
+      pure (Left "This file is private; use agent_settings for public context.")
+  | any (not . textBuffer . documentBuffer . second) matching =
+      pure (Left "Hex buffers are not available through ACP text file APIs.")
+  | otherwise=do
+      opened<-case find (\(_,doc,_)->documentLabel doc==Nothing) (reverse matching) of
+        Nothing->pure Nothing
+        Just (bid,doc,file)->do
+          let buffer=documentBuffer doc
+          version<-captureVersion buffer
+          baseline<-evaluate file >>= makeStableName
+          image<-evaluate (bufferContent buffer)
+          Just <$> evaluate (OpenSource file bid (revision buffer) image (SourceIdentity bid version baseline))
+      Right <$> evaluate (FileInput resolved opened)
+  where
+    path=resolvedFilePath resolved
+    matching=matchingSources path d
+    first (bid,_,_)=bid
+    second (_,doc,_)=doc
+
+-- | /O(1)/. Exact source receipt for final owner admission. A new open source
+-- invalidates a disk-only input; replacement invalidates an open one even if
+-- its numeric edit revision is unchanged.
+fileInputIdentity :: FileInput -> Maybe SourceIdentity
+fileInputIdentity (FileInput _ opened)=case opened of
+  Nothing->Nothing
+  Just (OpenSource _ _ _ _ identity)->Just identity
+
+-- | Read only this captured input on a worker, enforcing the same 16 MiB UTF-8
+-- and NUL limits for live and disk sources. Later edits cannot change the text
+-- read from an open input. The caller must still recheck privacy and
+-- 'fileInputIdentity' before publishing a result or admitting a write.
+readFileInput :: FileInput -> IO (Either Text Snapshot)
+readFileInput (FileInput (ResolvedFile original resolved) opened)=ioResult $ do
+  captured<-case opened of
+    Just (OpenSource file bid version image _)->do
+      when (contentLength image>fileLimit) (ioError (userError "ACP text files are limited to 16 MiB."))
+      pure (Snapshot file (Just (bid,version)) (contentSlice image 0 (contentLength image)))
+    Nothing->do
+      -- Bound the read itself; a preceding stat cannot bound a growing file.
+      bytes<-catchIOError (Just <$> withFileRead resolved (\handle->BS.hGet handle (fileLimit+1)))
+        (\err->if isDoesNotExistError err then pure Nothing else ioError err)
+      let raw=maybe BS.empty id bytes
+      when (BS.length raw>fileLimit) (ioError (userError "ACP text files are limited to 16 MiB."))
+      text<-either (const (ioError (userError "The file is not valid UTF-8."))) pure (TE.decodeUtf8' raw)
+      pure (Snapshot (FileState resolved bytes) Nothing text)
+  let text=snapshotText captured
+  when (textTooLarge text) (ioError (userError "ACP text files are limited to 16 MiB."))
+  when (T.any (=='\0') text) (ioError (userError "Binary text contains NUL bytes."))
+  current<-canonicalizePath original
+  unless (current==resolved) (ioError (userError "File path changed while reading; request a fresh read."))
+  pure captured
+
+ioResult :: IO a -> IO (Either Text a)
+ioResult action=do
+  result<-try action
+  pure $ case result of
+    Left err->Left (T.pack (show (err :: IOException)))
+    Right value->Right value
 
 -- | Validate an approved write against captured editor and disk state, then save it.
 -- This explicit write boundary can compare full contents; it is not a redraw check.

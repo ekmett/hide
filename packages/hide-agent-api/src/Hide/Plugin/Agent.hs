@@ -24,10 +24,15 @@ module Hide.Plugin.Agent
   , AgentDriver(..)
   , DriverEvent(..)
   , StartProvider
+  , ProviderKind(..), ProviderEndpoint(..), ProviderHost(..), StartAgentProvider
+  , ProviderPermission(..), ProviderFiles(..), ProviderTerminals(..)
+  , ProviderTerminal(..), ProviderTerminalOutput(..), ProviderContent(..)
   ) where
 
 import Data.Aeson (Value)
 import Data.Text (Text)
+import Data.ByteString (ByteString)
+import Hide.Plugin.Provider
 
 -- | Identity assigned by the host bridge, never decoded from tool arguments.
 newtype AgentId = AgentId { agentIdText :: Text } deriving (Eq,Ord,Show)
@@ -68,8 +73,14 @@ data HubMessage = HubMessage
 data AgentDriver = AgentDriver
   { driverDirectory :: FilePath, driverSessionKey :: Text, driverCapabilities :: Capabilities
   , driverConfigure :: [(Text,Text)] -> IO (Either Text Capabilities)
-  , driverDeliver :: HubMessage -> IO (Either Text Value)
-  , driverCancel :: IO (), driverStop :: IO (), driverSteer :: HubMessage -> IO (Either Text Value) }
+  , driverDeliver :: ProviderTurnId -> HubMessage -> [Text] -> ProviderSubmission -> IO (Either Text ProviderTurn)
+  , driverCancel :: IO (), driverStop :: IO ()
+  , driverSteer :: HubMessage -> [Text] -> ProviderSubmission -> IO (Either Text Value) }
+-- Deliver returns only after the original submission commits; its returned turn
+-- owns terminal completion and exact cancellation. The Hub's worker awaits that
+-- result; Primary's host acknowledges its captured draft at send admission.
+-- Extra text blocks preserve mutable editor context/skill attribution separately
+-- from the authenticated message. Steering uses the same one-shot send boundary.
 -- | Bounded, redacted public projection or a typed lifecycle/configuration event.
 data DriverEvent = ProviderUpdate Text Value | ProviderCapabilities Capabilities | ProviderUsage Integer Integer | ProviderClosed
   deriving (Eq,Show)
@@ -77,3 +88,47 @@ data DriverEvent = ProviderUpdate Text Value | ProviderCapabilities Capabilities
 -- partially acquired resource; success transfers ownership to 'driverStop'.
 -- Opening/forking/resuming a session does not itself submit the task as a prompt.
 type StartProvider = StartRequest -> (DriverEvent -> IO ()) -> IO (Either Text AgentDriver)
+
+-- | The two existing provider owners. Children have no native file/terminal bridge.
+data ProviderKind = PrimaryProvider | ChildProvider deriving (Eq,Show)
+-- | Host-selected private stdio endpoint; never decode caller authority from it.
+data ProviderEndpoint = ProviderEndpoint
+  { endpointName :: !Text, endpointLaunch :: !ProviderLaunch } deriving (Eq,Show)
+-- | Bounded, already-scrubbed human permission presentation. Result is one
+-- offered option ID or cancellation; the host still owns provenance and Review.
+data ProviderPermission = ProviderPermission
+  { permissionTitle :: !Text, permissionDetails :: !Text
+  , permissionOptions :: ![(Text,Text,Text)] } deriving (Eq,Show)
+-- | Existing host file capture/write owner, scoped to one acquisition.
+data ProviderFiles = ProviderFiles
+  { readProviderFile :: FilePath -> Int -> Maybe Int -> IO (ProviderReply Text)
+  , writeProviderFile :: FilePath -> Text -> IO (ProviderReply ()) }
+-- | Native create includes environment and full retained output, unlike MCP's
+-- paged terminal tools. These values carry no process or editor handle.
+data ProviderTerminal = ProviderTerminal
+  { providerTerminalLaunch :: !ProviderLaunch, providerTerminalDirectory :: !FilePath
+  , providerTerminalLimit :: !Int } deriving (Eq,Show)
+data ProviderTerminalOutput = ProviderTerminalOutput
+  { providerTerminalBytes :: !ByteString, providerTerminalTruncated :: !Bool
+  , providerTerminalExit :: !(Maybe Int) } deriving (Eq,Show)
+-- | Existing session Consoles owner, restricted to this provider's exact IDs.
+data ProviderTerminals = ProviderTerminals
+  { createProviderTerminal :: ProviderTerminal -> IO (ProviderReply Text)
+  , readProviderTerminal :: Text -> IO (ProviderReply ProviderTerminalOutput)
+  , waitProviderTerminal :: Text -> IO (ProviderReply Int)
+  , killProviderTerminal :: Text -> IO (ProviderReply ())
+  , releaseProviderTerminal :: Text -> IO (ProviderReply ()) }
+-- | Private primary transcript updates, separate from bounded public Hub events.
+-- Protocol IDs and human-author constructors are absent. Tool/plan payloads are
+-- scrubbed on the adapter worker before publication to the original host owner.
+data ProviderContent = ProviderMessage !Text !Text | ProviderTool !Value | ProviderPlan !Value | ProviderTurnBoundary !ProviderTurnId
+  deriving (Eq,Show)
+-- | Host-issued callbacks bound before acquisition. Native capabilities are
+-- advertised only when their actual host services are supplied.
+data ProviderHost = ProviderHost
+  { providerPermission :: ProviderPermission -> IO (ProviderReply (Maybe Text))
+  , providerFiles :: !(Maybe ProviderFiles), providerTerminals :: !(Maybe ProviderTerminals)
+  , providerContent :: !(Maybe (Maybe ProviderTurnId -> ProviderContent -> IO ())) }
+-- | Linked implementation selected once, consumed by both Primary and children.
+-- Negotiation/process/protocol ownership transfers to driverStop on success.
+type StartAgentProvider = ProviderKind -> ProviderIdentity -> ProviderLaunch -> [ProviderEndpoint] -> Text -> ProviderHost -> StartProvider

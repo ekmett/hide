@@ -8,7 +8,7 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 
-module AgentHubCheck (checks) where
+module AgentHubCheck (checks, completedTurn) where
 import Control.Concurrent
 import Control.Concurrent.Async (withAsync, cancel, wait, waitCatch)
 import Control.Concurrent.STM
@@ -25,6 +25,7 @@ import System.Timeout (timeout)
 import System.Directory (getTemporaryDirectory, canonicalizePath)
 import System.FilePath ((</>))
 import Hide.AgentHub
+import Hide.Plugin.Provider
 
 checks :: IO ()
 checks=do
@@ -35,10 +36,10 @@ checks=do
   let caps=Capabilities True True False [ConfigChoice "model-id" "model" "small" [("small","Small"),("large","Large")],ConfigChoice "effort-id" "thought_level" "low" [("low","Low"),("high","High")],ConfigChoice "format-id" "output_format" "text" [("text","Text")]]
       driver ident=AgentDriver directory ("private-provider-key-"<>agentIdText ident) caps
         (\_->pure (Right caps))
-        (\message->do atomically (modifyTVar' deliveries (++[(ident,message)])); atomically (readTVar gate >>= check); pure (Right (String (messageText message))))
+        (\turn message _ _->completedTurn turn $ do atomically (modifyTVar' deliveries (++[(ident,message)])); atomically (readTVar gate >>= check); pure (Right (String (messageText message))))
         (atomically (writeTVar gate True))
         (atomically (modifyTVar' stops (+1) >> writeTVar gate True))
-        (\_ ->pure (Left "Unsupported steering"))
+        (\_ _ _ ->pure (Left "Unsupported steering"))
       launch request emit=emit (ProviderUpdate "provider" (object ["connected" .= True])) >> pure (Right (driver (startAgent request)))
       spec name=SpawnSpec name "Test task" directory Shared Fresh Nothing Nothing
       ensure label value=unless value (error label)
@@ -209,7 +210,7 @@ checks=do
     ensure "host can explicitly reconnect recovered primary with stable ID" (field "status" revived==Just ("idle"::T.Text) && field "name" revived==Just ("Unconnected"::T.Text))
     closeAgentHub restoredPlaceholder
     (capturedTarget,_)<-agentConfiguration hub owner >>= right
-    let actual=(driver owner) {driverDeliver= \message->pure (Right (object ["newDriver" .= True,"body" .= messageText message]))}
+    let actual=(driver owner) {driverDeliver= \turn message _ _->completedTurn turn (pure (Right (object ["newDriver" .= True,"body" .= messageText message])))}
     oldEvents<-updateExternalAgent hub owner actual >>= right
     oldEvents (ProviderUsage 10 100)
     newEvents<-updateExternalAgent hub owner actual >>= right
@@ -254,7 +255,7 @@ checks=do
     releaseDelivery<-newEmptyMVar
     delivered<-newTVarIO (0::Int)
     let externalDriver=(driver (AgentId "external-race"))
-          {driverDeliver= \_->do
+          {driverDeliver= \turn _ _ _->completedTurn turn $ do
              atomically (modifyTVar' delivered (+1))
              void (tryPutMVar deliveryStarted ())
              readMVar releaseDelivery
@@ -335,9 +336,9 @@ controlChecks directory=do
       driver=AgentDriver directory "private-control-key" initial
         (\settings->if null settings then pure (Right initial) else do
           putMVar configuring (); atomically (readTVar configGate >>= check . not); pure (Right updated))
-        (\_->do putMVar prompting (); atomically (readTVar promptGate >>= check . not); pure (Right Null))
+        (\turn _ _ _->completedTurn turn $ do putMVar prompting (); atomically (readTVar promptGate >>= check . not); pure (Right Null))
         (atomically (writeTVar promptGate False)) (atomically (writeTVar promptGate False))
-        (\message->modifyIORef' steers (++[message]) >> pure (Right (object ["outcome" .= ("injected"::T.Text)])))
+        (\message _ _->modifyIORef' steers (++[message]) >> pure (Right (object ["outcome" .= ("injected"::T.Text)])))
       launch _ emit=putMVar callback emit >> pure (Right driver)
       right=either (error.T.unpack) pure
       ensure label condition=unless condition (error label)
@@ -431,3 +432,12 @@ controlChecks directory=do
     setExternalAgentBusy hub parent False
     idlePrimary<-steerAgent hub parent "keep draft"
     ensure "idle primary steering does not create a new prompt" (left idlePrimary)
+
+-- | Small fake drivers that complete synchronously retain one immutable result.
+-- Actual send admission and asynchronous reply ownership are checked with ACP.
+completedTurn :: ProviderTurnId -> IO (Either T.Text Value) -> IO (Either T.Text ProviderTurn)
+completedTurn turn action=do
+  result<-action
+  pure $ case result of
+    Left reason->Left reason
+    Right value->Right (ProviderTurn turn (ProviderReply (pure (Just (Right value))) (pure (Right value)) (pure ())) (pure ()))

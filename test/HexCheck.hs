@@ -70,7 +70,7 @@ checks = bracket temporary removeFile $ \path -> do
   check "undo across representation preserves saved-byte identity" (bufferBytes (undo savedHex)==TE.encodeUtf8 unicode && not (dirty (undo savedHex)))
   check "hex is excluded from ACP source and prompt context" (M.null (A.sourceSnapshots opened) && T.null (A.contextText True True False opened))
   root<-getTemporaryDirectory
-  capture<-A.captureFile root path hex
+  capture<-captureFile root path hex
   check "ACP rejects even valid text opened in hex mode" (case capture of Left _ -> True; _ -> False)
   let image=snapshot opened
   check "grid includes offset bytes and ASCII without a HEX title tag" (all (`T.isInfixOf` image) ["00000000","00 FF 41 0A 80 C3 A9","..A...."] && not ("[HEX]" `T.isInfixOf` image))
@@ -157,7 +157,7 @@ checks = bracket temporary removeFile $ \path -> do
   savedFile<-saveFile unicodeFile asHex >>= either error pure
   asText<-either (error.T.unpack) pure (toggleByteMode (markSaved asHex))
   let textDesktop=addDocument (Just savedFile) asText (initialDesktop (80,25))
-  beforeWrite<-A.captureFile root path textDesktop >>= either (error.T.unpack) pure
+  beforeWrite<-captureFile root path textDesktop >>= either (error.T.unpack) pure
   afterWrite<-A.acceptWrite beforeWrite "μ" textDesktop >>= either (error.T.unpack) pure
   check "ACP save after a hex roundtrip marks the text baseline clean" (not (dirty (buffer afterWrite)) && bufferBytes (buffer afterWrite)==TE.encodeUtf8 "μ")
   putStrLn "hex editor checks passed"
@@ -167,3 +167,9 @@ checks = bracket temporary removeFile $ \path -> do
       (path,h)<-openBinaryTempFile root "thc-hex-test"
       hClose h
       canonicalizePath path
+
+captureFile :: FilePath -> FilePath -> Desktop -> IO (Either T.Text A.Snapshot)
+captureFile root path desktop=do
+  resolved<-A.resolveFile root path
+  input<-either (pure . Left) (\file->A.captureFileInput file desktop) resolved
+  either (pure . Left) A.readFileInput input

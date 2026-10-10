@@ -63,6 +63,22 @@ checks = bracket temporary removePathForcibly $ \base -> do
   check "project authority config is protected before registration" (isLeft hiddenProject)
   local<-capture path dirtyDesktop
   check "agent reads current unsaved text" (snapshotText local==oldText)
+  resolved<-resolveFile root path >>= right "resolve source"
+  let borrowed=dirtyDesktop {buffers=M.adjust (\doc->doc {documentBuffer=(documentBuffer doc)
+        {saved=error "capture forced saved text",undoStack=error "capture forced Undo",redoStack=error "capture forced Redo"}}) 1 (buffers dirtyDesktop)}
+      unrelated=addDocument (Just (FileState (root </> "unrelated.hs") Nothing))
+        (error "capture inspected an unrelated buffer") borrowed
+  input<-captureFileInput resolved unrelated >>= right "capture measured source"
+  capturedSource<-readFileInput input >>= right "read measured source"
+  check "single-file capture reads live text without saved text, history or unrelated content"
+    (snapshotText capturedSource==oldText)
+  identityAtCapture<-sourceIdentity path unrelated
+  check "capture and adoption use the same exact source receipt"
+    (fileInputIdentity input==identityAtCapture)
+  laterIdentity<-sourceIdentity path (insertText "later " dirtyDesktop)
+  unchanged<-readFileInput input >>= right "read retained source"
+  check "later edits invalidate admission without changing the captured source"
+    (laterIdentity/=fileInputIdentity input && snapshotText unchanged==oldText)
   before<-BS.readFile path
   check "capturing unsaved text does not save it" (before==TE.encodeUtf8 "λ = 1\r\n")
   let selected=fst (runCommand SplitVertical dirtyDesktop)
@@ -173,3 +189,10 @@ checks = bracket temporary removePathForcibly $ \base -> do
     check label condition=unless condition (error label)
     isLeft (Left _)=True
     isLeft _=False
+
+-- Mirror the owner/worker phases without retaining a desktop in the read input.
+captureFile :: FilePath -> FilePath -> Desktop -> IO (Either T.Text Snapshot)
+captureFile root path desktop=do
+  resolved<-resolveFile root path
+  input<-either (pure . Left) (\file->captureFileInput file desktop) resolved
+  either (pure . Left) readFileInput input

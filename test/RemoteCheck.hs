@@ -23,7 +23,7 @@ import qualified Network.Socket as N
 import Data.IORef
 import qualified Data.Text as T
 import System.IO
-import System.Directory (getTemporaryDirectory, createDirectory, removeFile, removePathForcibly, canonicalizePath, withCurrentDirectory)
+import System.Directory (getTemporaryDirectory, createDirectory, createDirectoryIfMissing, removeFile, removePathForcibly, canonicalizePath, withCurrentDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv, withArgs)
 #ifndef mingw32_HOST_OS
 import Control.Monad (replicateM_)
@@ -34,6 +34,15 @@ import System.Timeout (timeout)
 import System.FilePath ((</>))
 import System.Exit (ExitCode)
 import qualified Hide.App as App
+import qualified Hide.AgentUI as AgentUI
+import qualified Hide.Plugin.Session as Plugin
+import qualified Hide.Plugin.ConversationSession as ConversationSession
+import qualified Hide.AgentRuntime as AR
+import qualified Hide.AgentHub as AH
+import qualified Hide.Conversation as Conversation
+import qualified Hide.Consoles as Consoles
+import qualified Hide.TextPresentation as Presentation
+import qualified AgentIntegrationCheck as AgentFixture
 import Hide.Files (filePath)
 import Hide.WorkspaceMCP (workspaceTools, workspaceTool)
 import Hide.Buffer (Selection(..), newBuffer, markSaved)
@@ -137,6 +146,7 @@ checks = isolatedStore $ do
   requestedPasteReconnectCheck
   linkOpenCheck
   localPeerCheck
+  agentDetachCheck
   localExitOwnershipCheck
   sessionSwitchCheck
   inspectionExitCheck
@@ -445,6 +455,93 @@ localPeerCheck = do
       assert "explicit Exit ends local daemon" (ended==Just ())
       exists' <- S.loadSession session
       assert "explicit Exit removes session catalog" (exists'==Nothing)
+
+-- The daemon owns the actual conversation and ACP connection across display
+-- attachments. The peer holds a prompt until steering arrives: a fresh provider
+-- cannot complete the old ticket by reusing the same printed session name.
+agentDetachCheck :: IO ()
+agentDetachCheck=do
+  Just root<-lookupEnv "XDG_DATA_HOME"
+  record<-S.newSessionRecord Nothing []
+  let session=S.sessionId record
+      config=root </> "agent-detach-config"
+      script=root </> "agent-detach-provider.py"
+      assert label good=unless good (fail label)
+      right=either (fail . T.unpack) pure
+      bounded label action=timeout 5000000 action >>= maybe (fail label) pure
+      untilTrue action=do ready<-action; unless ready (threadDelay 1000 >> untilTrue action)
+      environment name value action=bracket (lookupEnv name)
+        (maybe (unsetEnv name) (setEnv name)) (\_->setEnv name value >> action)
+      activity expected=do
+        result<-S.sessionActivity record
+        pure ((result >>= parseMaybe (withObject "activity" (.:"attached")))==Just expected)
+      receive peer wanted=bounded "Agent detach display handshake timed out" loop
+        where loop=peerReceive peer >>= \packet->case packet of
+                Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String wanted)->pure ()
+                Just _->loop
+                Nothing->fail "Agent detach display closed before handshake"
+      plugin=AgentUI.plugin
+      initial=(initialDesktop (80,25)) {defaultDirectory=Just root}
+  createDirectoryIfMissing True (config </> "thc-edit")
+  writeFile script AgentFixture.fixture
+  BL.writeFile (config </> "thc-edit" </> "agents.json")
+    (encode (object ["executable" .= ("python3"::T.Text),"arguments" .= [script]]))
+  flip finally (S.forgetSession session) $ do
+    S.rememberSession record
+    environment "XDG_CONFIG_HOME" config $ environment "THC_EDIT_SESSION" session $
+      Consoles.withConsoles $ \consoles->
+      Conversation.withConversationAt (Plugin.pluginAgentProvider plugin)
+        (Plugin.pluginConversation plugin) (Plugin.pluginPrimaryInput plugin)
+        (Plugin.pluginChildInput plugin) consoles root $ \conversation->
+      Presentation.withTextPresentation $ \presentation->do
+        let hub=AR.agentHub (Conversation.conversationAgents conversation)
+            primary=AR.primaryAgent (Conversation.conversationAgents conversation)
+            effects=Conversation.conversationEffects conversation (\d actions->pure (Exit `elem` actions,d))
+            tick d=do
+              current<-Conversation.tickConversation conversation d
+              requests<-Conversation.conversationBodyRequests conversation current
+              (prepared,completed)<-Presentation.tickTextPresentation presentation requests current
+              Conversation.adoptConversationBodies conversation completed prepared
+        captured<-Conversation.captureConversationSession conversation initial >>= right
+        (_,starting)<-effects initial [ConversationSessionAction
+          (ConversationSession.NewConversation (ConversationSession.conversationReceipt captured))]
+        withAsync (runRemoteDaemon session 1 effects tick inspect starting) $ \daemon->do
+          link daemon
+          bounded "Agent daemon did not start" (untilTrue (activity False))
+          sentTicket<-newEmptyMVar
+          withLocalPeer session True [] $ \peer->do
+            receive peer "assets"
+            bounded "ACP session did not acquire its advertised configuration" $ untilTrue $ do
+              acquired<-AH.agentConfiguration hub primary
+              pure (either (const False) (not . null . snd) acquired)
+            sent<-AH.sendAgent hub AH.Human primary "steer-wait" >>= right
+            let received=do
+                  current<-AH.statusAgent hub AH.Human primary >>= right
+                  pure (parseMaybe (withObject "agent" (.:"currentTicket")) current==Just sent &&
+                    parseMaybe (withObject "agent" (\o->o .: "contextUsage" >>= withObject "usage" (.:"used"))) current==Just (121::Int))
+            bounded "ACP did not receive the retained prompt" (untilTrue received)
+            putMVar sentTicket sent
+          ticket<-takeMVar sentTicket
+          bounded "Display did not detach from agent daemon" (untilTrue (activity False))
+          waiting<-AH.waitAgent hub AH.Human primary ticket 0 >>= right
+          assert "detaching does not cancel the original prompt"
+            (parseMaybe (withObject "ticket" (.:"status")) waiting==Just ("running"::T.Text))
+          accepted<-bounded "Detached agent did not accept steering"
+            (AH.steerAgent hub primary "Finish the retained request" >>= right)
+          assert "steering reaches the running provider while detached"
+            (parseMaybe (withObject "steering" (.:"outcome")) accepted==Just ("injected"::T.Text))
+          completed<-AH.waitAgent hub AH.Human primary ticket 5000 >>= right
+          assert "the original ACP request completes while detached"
+            (parseMaybe (withObject "ticket" (.:"status")) completed==Just ("completed"::T.Text) &&
+              parseMaybe (withObject "ticket" (\o->o .: "result" >>= withObject "result" (.:"stopReason"))) completed==Just ("end_turn"::T.Text))
+          withLocalPeer session True [] $ \peer->do
+            receive peer "assets"
+            retained<-AH.waitAgent hub AH.Human primary ticket 0 >>= right
+            assert "reattaching retains the original completed ticket" (retained==completed)
+            peerSend peer (JsonPacket (object ["type" .= ("command"::T.Text),
+              "command" .= ("hide.app.quit"::T.Text),"seq" .= (1::Int)]))
+            receive peer "closed"
+          bounded "Agent daemon did not exit" (wait daemon)
 
 -- Closing a frontend does not retire a local daemon's catalog or checkpoint.
 -- Hold the endpoint owner after its close notification to expose that boundary

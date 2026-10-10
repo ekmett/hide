@@ -9,6 +9,11 @@
 -- Portability : CPP, OverloadedStrings
 
 module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
+import AgentHubCheck (completedTurn)
+import qualified Hide.Plugin.ConversationSession as Session
+import qualified Hide.Plugin.Provider as Provider
+import qualified Hide.Plugin.Session as ProviderPlugin
+import qualified Hide.AgentUI
 import AllocationProfile (AllocationProfile, withinBudget)
 
 import EditorFixture (questionReply,agentSettingsReply,withEditorFixture,withEditorBodyFixture,sameBufferVersions)
@@ -110,41 +115,67 @@ draftAt b selected d=setComposerInput b selected True d
 -- provider startup, HUD text and another check's resources. Resume inspection
 -- alone starts no provider; its returned form is private even after scope end.
 sessionMenuAction :: ConversationState -> Command -> Maybe T.Text -> Desktop -> IO Desktop
-sessionMenuAction runtime command value original=SidebarHost.withSidebarCommands $ \forms->withDocsCommands $ \docs->
+sessionMenuAction runtime command value=humanMenuAction runtime command (fmap (:[]) value)
+
+humanMenuAction :: ConversationState -> Command -> Maybe [T.Text] -> Desktop -> IO Desktop
+humanMenuAction runtime command value=withHumanMenuAction runtime command value (runCommand command)
+
+withHumanMenuAction :: ConversationState -> Command -> Maybe [T.Text] -> (Desktop -> (Desktop,[Effect])) -> Desktop -> IO Desktop
+withHumanMenuAction runtime command value invoke original=SidebarHost.withSidebarCommands $ \forms->withDocsCommands $ \docs->
   MenuHost.withConversationMenuCommands docs runtime $ \menuOwner->
   ConversationMenus.withConversationMenus (SidebarHost.sidebarCapabilities forms)
-    (MenuHost.menuSidebarCapabilities menuOwner forms) SidebarHost.sidebarConversation SidebarHost.SidebarConversation $ do
-      result<-newIORef Nothing
+    (MenuHost.menuSidebarCapabilities menuOwner forms) SidebarHost.sidebarConversation SidebarHost.sidebarConversationOperation SidebarHost.SidebarConversation HideMenu.cancelConversationAction $ do
+      result<-newIORef False
       let core d requests=do
             changed<-conversationEffects runtime (\desktop _->pure (False,desktop)) d requests
-            when (any lifecycle requests) (writeIORef result (Just (snd changed)))
+            when (any lifecycle requests) (writeIORef result True)
             pure changed
+          lifecycle (AgentAction "cancel" [])=True
           lifecycle ConversationSessionAction{}=True
           lifecycle _=False
           effects=SidebarHost.sidebarEffects forms (MenuHost.menuEffects menuOwner core)
-          tick d=MenuHost.tickMenus menuOwner effects d >>= SidebarHost.tickSidebar forms effects
+          tick d=MenuHost.tickMenus menuOwner effects d >>= SidebarHost.tickSidebar forms effects >>= Conversation.tickConversation runtime
           submitted d=do
             next<-tick d
             completed<-readIORef result
-            maybe (threadDelay 1000 >> submitted next) pure completed
+            if completed then pure next else threadDelay 1000 >> submitted next
           opened d=do
             next<-tick d
             case dialog next of
-              Just dg | PluginInputForm{}<-purpose dg->pure next
+              Just dg | (case purpose dg of PluginInputForm{}->True;PluginInputsForm{}->True;PluginChoiceForm{}->True;_->False)->pure next
               _->threadDelay 1000 >> opened next
           bounded label action=timeout 5000000 action >>= maybe (error ("Session menu did not complete: "++label)) pure
           act (d,requests)=snd <$> effects d requests
       metadata<-HideMenu.menuSnapshot (MenuHost.menuContributions menuOwner)
       let initial=original {contributedMenus=metadata,menusActive=True,agentMenuRefs=MenuHost.menuAgentReferences menuOwner}
-      queued<-act (runCommand command initial)
-      if command==AgentNew then bounded "New" (submitted queued) else do
-        form<-bounded "Resume form" (opened queued)
+      queued<-act (invoke initial)
+      if command `elem` [AgentNew,Conversation,AgentCancel] then bounded "Conversation action" (submitted queued) else do
+        form<-bounded ("Form for "++show command) (opened queued)
         case value of
           Nothing->pure form
-          Just sid->do
-            let typed=form {dialog=fmap (\dg->dg {fields=[SelectedInput "Session ID" sid (Selection (T.length sid) (T.length sid))]}) (dialog form)}
+          Just values->do
+            let fill dg=dg {fields=case (fields dg,values) of
+                  ([ListBox label options _],scope:_)->[ListBox label options (if scope=="global" then 0 else 1)]
+                  (inputs,_)->zipWith inputValue inputs values}
+                inputValue (Input label _ _) text=SelectedInput label text (Selection (T.length text) (T.length text))
+                inputValue (SelectedInput label _ _) text=SelectedInput label text (Selection (T.length text) (T.length text))
+                inputValue existing _=existing
+                typed=form {dialog=fmap fill (dialog form)}
+                adopted d=do
+                  next<-tick d
+                  captured<-captureConversationOperation runtime next
+                  case captured of
+                    Right target | command==AgentOptions,commandText:argv:env:_<-values
+                      ,Right expectedArguments<-eitherDecodeStrict' (TE.encodeUtf8 argv)
+                      ,Right expectedEnvironment<-eitherDecodeStrict' (TE.encodeUtf8 env)
+                      ,let expected=Provider.ProviderLaunch (T.unpack (T.strip commandText)) expectedArguments (M.toList expectedEnvironment)
+                      ,Session.operationProvider target==expected,Session.operationConfigurable target->pure next
+                    Right _ | command==AgentGuidance,_:expectedPath:_<-values
+                      ,(filePath <$> (documentFile =<< activeDocument next))==Just (T.unpack expectedPath)->pure next
+                    _->threadDelay 1000 >> adopted next
             accepted<-act (runCommand DialogAccept typed)
-            bounded "Resume submission" (submitted accepted)
+            admitted<-bounded "Conversation form submission" (submitted accepted)
+            if command `elem` [AgentOptions,AgentGuidance] then bounded "Conversation operation adoption" (adopted admitted) else pure admitted
 
 -- Keep the existing menu/form owners alive across both dropdown levels.
 withChoiceMenus :: ConversationState -> Desktop
@@ -343,6 +374,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
         gate=root </> "steer-gate"
         source=root </> "Source.hs"
         environment=object ["THC_LOG" .= (root </> "messages.jsonl"),"THC_SOURCE" .= source,"THC_SECOND" .= source,"THC_RESUME" .= ("yes"::T.Text)]
+        send runtime "configure" (_:command:args:env:_) desktop=humanMenuAction runtime AgentOptions (Just [command,args,env]) desktop
         send runtime action values desktop=snd <$> conversationEffects runtime (\d _->pure (False,d)) desktop [AgentAction action values]
         configure runtime d=send runtime "configure" ["0","python3",json [server],json environment] d >>= send runtime "show" []
         prompt runtime text=send runtime "send" ["0",text,"false","false","false"]
@@ -384,7 +416,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
     let base=(addDocument (Just (FileState source Nothing)) (newBuffer "main=1\n") (initialDesktop (100,35))) {sideTree=Just (emptySidebar root 20 False)}
     -- Submission identity is captured before the initial provider handshake.
     bracket (lookupEnv "THC_CONNECT_GATE" <* setEnv "THC_CONNECT_GATE" gate) (restoreDraftEnvironment "THC_CONNECT_GATE") $ \_->
-      forM_ [False,True] $ \cancelled->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \runtime->do
+      forM_ [False,True] $ \cancelled->C.withConsoles $ \consoles -> withConversationAt (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \runtime->do
         configured<-configure runtime base
         original<-evaluate (newBuffer "stream")
         before<-length <$> readMessages (root </> "messages.jsonl")
@@ -419,7 +451,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
           check "connecting submission cannot clear a same-text new draft" (contents (composerBuffer accepted)=="stream")
         removeFile gate
     writeFile context "[editor.agent]\ncontext='receipt guidance'\n"
-    forM_ [(False,False,False),(False,True,False),(False,True,True),(True,False,False),(True,True,False)] $ \(steer,replaced,requeue)->withObservedInput ConversationInput.primaryInput $ \acknowledged declaration->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just declaration) (Just ConversationInput.childInput) consoles root $ \runtime->do
+    forM_ [(False,False,False),(False,True,False),(False,True,True),(True,False,False),(True,True,False)] $ \(steer,replaced,requeue)->withObservedInput ConversationInput.primaryInput $ \acknowledged declaration->C.withConsoles $ \consoles -> withConversationAt (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just declaration) (Just ConversationInput.childInput) consoles root $ \runtime->do
       let scenario=if steer then (if replaced then "steer replacement" else "steer unchanged") else if requeue then "query requeue" else if replaced then "query replacement" else "query unchanged"
       configured<-configure runtime base
       connected<-prompt runtime "stream" configured >>= primaryDone runtime (scenario++" connect")
@@ -465,7 +497,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
       check "acceptance preserves a replacement draft and clears only the submitted one"
         (if replaced then contents (composerBuffer restored)==contents original else bufferLength (composerBuffer restored)==0)
     bracket (lookupEnv "THC_CANCEL_GATE" <* setEnv "THC_CANCEL_GATE" gate) (restoreDraftEnvironment "THC_CANCEL_GATE") $ \_->
-      C.withConsoles $ \consoles->withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \runtime->do
+      C.withConsoles $ \consoles->withConversationAt (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \runtime->do
         configured<-configure runtime base
         active<-promptStarted runtime "wait" configured
         before<-readMessages (root </> "messages.jsonl")
@@ -488,7 +520,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
         removeFile gate
     bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" (replicate 48 'c')) (restoreDraftEnvironment "THC_EDIT_SESSION") $ \_->
       bracket (lookupEnv "THC_STEER_GATE" <* setEnv "THC_STEER_GATE" gate) (restoreDraftEnvironment "THC_STEER_GATE") $ \_->
-        forM_ [False,True] $ \replaced->withObservedInput ConversationInput.childInput $ \acknowledged declaration->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just declaration) consoles root $ \runtime->do
+        forM_ [False,True] $ \replaced->withObservedInput ConversationInput.childInput $ \acknowledged declaration->C.withConsoles $ \consoles -> withConversationAt (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just declaration) consoles root $ \runtime->do
           _<-configure runtime base
           let hub=AR.agentHub (conversationAgents runtime)
           ident<-AH.spawnAgent hub AH.Human (AH.SpawnSpec "Receipt child" "wait" root AH.Shared AH.Fresh Nothing Nothing) >>= either (error.T.unpack) pure
@@ -554,9 +586,15 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         secondSource=root </> "Second.hs"
         settings=root </> "config" </> "thc-edit"
         environment support=object ["THC_LOG" .= logPath,"THC_SOURCE" .= source,"THC_SECOND" .= secondSource,"THC_RESUME" .= support]
+        send runtime "cancel" _ desktop=humanMenuAction runtime AgentCancel Nothing desktop
         send runtime "new" _ desktop=sessionMenuAction runtime AgentNew Nothing desktop
         send runtime "resume" _ desktop=sessionMenuAction runtime AgentResume Nothing desktop
         send runtime "load" (_:sid:_) desktop=sessionMenuAction runtime AgentResume (Just sid) desktop
+        send runtime "configure" (_:command:args:env:_) desktop=humanMenuAction runtime AgentOptions (Just [command,args,env]) desktop
+        send runtime "options" _ desktop=humanMenuAction runtime AgentOptions Nothing desktop
+        send runtime "copy" _ desktop=do
+          target<-captureConversationOperation runtime desktop >>= either (error . T.unpack) pure
+          snd <$> textPresentationEffects presentation (conversationEffects runtime fallback) desktop [ConversationSessionAction (Session.CopyRawConversation (Session.operationReceipt target))]
         send runtime action values desktop=snd <$> textPresentationEffects presentation (conversationEffects runtime fallback) desktop [AgentAction action values]
         prompt runtime text=send runtime "send" ["0",text,"false","false","false"]
         questionTool runtime desktop args=do
@@ -595,6 +633,30 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
                   value<-reply >>= either (error . T.unpack) pure
                   if field "replying" value==Just False && agentQueued next==0 then pure next
                     else threadDelay 10000 >> loop next
+        connectionState runtime connected label desktop=do
+          observed<-newIORef Nothing
+          result<-timeout 8000000 (loop observed desktop)
+          case result of Just next->pure next; Nothing->readIORef observed >>= error . (("Conversation timeout: "++label++"; owning state ")++) . show
+          where loop observed d=do
+                  next<-tickConversation runtime d
+                  reply<-agentSettingsReply runtime next
+                  value<-reply >>= either (error . T.unpack) pure
+                  let agents=conversationAgents runtime
+                      hub=AR.agentHub agents
+                      primary=AR.primaryAgent agents
+                  configuration<-AH.agentConfiguration hub primary
+                  control<-AH.agentControlPending hub primary
+                  current<-case configuration of Right (receipt,_)->AH.agentConfigurationCurrent hub receipt; Left _->pure False
+                  writeIORef observed (Just (field "connected" value::Maybe Bool,field "replying" value::Maybe Bool,
+                    agentQueued next,current,control,dialogTitle <$> dialog next,status next))
+                  if field "connected" value==Just connected && field "replying" value==Just False &&
+                      agentQueued next==0 && (not connected || current && not control)
+                    then pure next else threadDelay 10000 >> loop observed next
+        waitingPrompt runtime label desktop=do
+          started<-submit runtime QuerySubmit (draftAt (newBuffer "wait") (Selection 4 4) desktop)
+          -- Clearing this submitted draft acknowledges its own send admission;
+          -- replying alone would also include context/provider preparation.
+          await runtime label (\d->bufferLength (composerBuffer d)==0 && agentReplying d) started
         modal runtime=await runtime "approval dialog" (maybe False isApproval . dialog)
         actDialog runtime button desktop=case dialog desktop of
           Nothing -> error "Expected conversation approval"
@@ -705,7 +767,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
               _->tickConversation runtime next
             else pure next
           _ -> error ("Missing inline action "++T.unpack action)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       let longReply=T.unwords (replicate 90 "window-width")
           rawShell="printf '%s\\n' 'literal λ'\n\tprintf 'tail  '  \n"
           question=longReply<>"\n\n```sh\n"<>rawShell<>"```"
@@ -737,7 +799,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           ("window-width" `T.isInfixOf` clipboard copied && not ("┌" `T.isInfixOf` clipboard copied) && not ("```" `T.isInfixOf` clipboard copied))
         stable<-tickConversation runtime reflowed
         check "timer tick keeps adopted body identity stable" (conversationBodySnapshot "" stable==Just prepared)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       let sourceText="# Alpha界Beta Gamma界Delta Epsilon Zeta Eta Theta\n\n"<>T.unwords (replicate 80 "following")
           base=(initialDesktop (32,18)) {wideSectionTitles=True}
           caretReady d=maybe False ((==Nothing).conversationCaretIntent) (M.lookup "" (conversationViews d))
@@ -785,7 +847,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       check "wide user bubbles anchor on the right and replies on the left"
         (styledLength (firstRow outgoing)==columns && maybe False (\(_,style)->case style of BubbleText _ False _->False; _->True) (listToMaybe incoming) &&
          maximum (map (styledLength . filter (\(_,style)->case style of BubbleText{}->True; _->False)) (splitStyled incoming))>columns-20)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       agents <- send runtime "directory" [] savedDraft
@@ -803,7 +865,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       shownDraft<-sameDraftRoot recovered shown
       check "opening a recovered conversation preserves its transcript and draft"
         (shownSources && shownDraft && conversationText shown=="Recovered user and agent transcript" && map windowId (windows shown)==map windowId (windows recovered) && composerSelection shown==composerSelection recovered && composerFocused shown)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (asked,reply)<-questionTool runtime savedDraft (object ["question" .= ("Question presentation identity"::T.Text),"choices" .= (["First","Second"]::[T.Text])])
@@ -885,13 +947,13 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
             (Nothing,Nothing)->True
             _->False
           _->False)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (_,anonymous)<-questionReply runtime Nothing savedDraft (object ["question" .= ("Anonymous question"::T.Text)])
       refused<-timeout 100000 anonymous
       check "anonymous ask_user cannot acquire a private answer" (case refused of Just (Left _)->True; _->False)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (asked,answer)<-questionTool runtime savedDraft (object ["question" .= ("Pick a direction"::T.Text),"choices" .= (["Left","Right"]::[T.Text])])
@@ -987,7 +1049,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           _->False)
       smallCancelled<-clickAction runtime "question-cancel" typedInput
       check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->
       Tool.withTools [] QuestionTools.tools $ \tools->do
         check "question metadata describes a local nondestructive state change"
           (case Tool.toolDefinitions tools of
@@ -1056,7 +1118,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         check "closed permission owner rejects retained question services" (case closedReply of
           Just (Left reason)->"closed" `T.isInfixOf` reason
           _->False)
-    (closedRuntime,closedId)<-C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->do
+    (closedRuntime,closedId)<-C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       (_,reply)<-questionTool runtime savedDraft (object ["question" .= ("Session closes"::T.Text)])
@@ -1071,15 +1133,16 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (emptySidebar root 20 False)})
     -- Provider acquisition completes independently of UI ticks. Holding adoption
     -- gives Cancel a deterministic completed-but-unowned client to retire.
-    forM_ [False,True] $ \cancelled->C.withConsoles $ \consoles->withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->do
+    forM_ [False,True] $ \cancelled->C.withConsoles $ \consoles->withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->do
       configured<-configure runtime ("yes"::T.Text) desktop
       before<-length <$> logged
       started<-send runtime "new" [] configured
       let waitInitialize=do
             entries<-drop before <$> logged
-            if any ((==Just ("initialize"::T.Text)).field "method") entries then pure ()
-              else threadDelay 1000 >> waitInitialize
-      timeout 8000000 waitInitialize >>= maybe (error "ACP startup did not send initialize independently of the UI") pure
+            case [pid | entry<-entries,field "method" entry==Just ("initialize"::T.Text),Just pid<-[field "fixtureProcessId" entry::Maybe Int]] of
+              pid:_->pure pid
+              _->threadDelay 1000 >> waitInitialize
+      originalProcess<-timeout 8000000 waitInitialize >>= maybe (error "ACP startup did not send initialize independently of the UI") pure
       pendingReply<-agentSettingsReply runtime started
       pendingSettings<-pendingReply >>= either (error . T.unpack) pure
       check "ACP client acquisition waits for UI adoption without running on the UI thread"
@@ -1092,8 +1155,14 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       _<-prompt runtime "stream" ready >>= done runtime
       entries<-drop before <$> logged
       let count method=length (filter ((==Just (method::T.Text)).field "method") entries)
+          promptProcesses=[pid | entry<-entries,field "method" entry==Just ("session/prompt"::T.Text),Just pid<-[field "fixtureProcessId" entry::Maybe Int]]
+          ownsNew pid=length [() | entry<-entries,field "method" entry==Just ("session/new"::T.Text),field "fixtureProcessId" entry==Just pid]==1
+      -- Negotiation can finish before cancellation without UI adoption. Observe
+      -- the actual replacement prompt owner, not discarded session/new history.
       check "replacement startup never reuses the cancelled provider"
-        (count "initialize"==(if cancelled then 2 else 1) && count "session/new"==1 && count "session/prompt"==1)
+        (count "initialize"==(if cancelled then 2 else 1) && count "session/prompt"==1 && case promptProcesses of
+          [pid]->ownsNew pid && (if cancelled then pid/=originalProcess else pid==originalProcess)
+          _->False)
     -- Services belong to the editor session, not its mounted ACP provider.
     -- Use the same real peer/approval route as the terminal checks below.
     when (terminalAvailable && os/="mingw32") $ withSessionServices $ \services->do
@@ -1117,7 +1186,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         pure ("shared captured output" `T.isInfixOf` out && either (const False) (\(bytes,_,_)->"shared terminal output" `BS.isInfixOf` bytes) terminal)) sharedDesktop
       before<-Jobs.buildJobStatus jobs warm
       jobId<-maybe (error "Missing shared job ID") pure (field "jobId" before :: Maybe T.Text)
-      (providerId,retired)<-withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \runtime->do
+      (providerId,retired)<-withConversationAt (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \runtime->do
         configured<-configure runtime ("yes"::T.Text) warm
         approval<-prompt runtime "terminal-hold" configured >>= modal runtime
         accepted<-actDialog runtime 0 approval
@@ -1164,7 +1233,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       pure ()
     -- A submitted answer resumes the original idle provider through its existing
     -- query owner. A replacement with the same provider session ID cannot replay it.
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       connected<-prompt runtime "stream" configured >>= done runtime
       let liveDraft=draftAt (newBuffer "newer independent draft") (Selection 6 6) connected
@@ -1183,18 +1252,22 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       oldId<-questionId reply
       originalCaller<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
       queued<-clickActionBeforeTick runtime False "question-submit" =<< clickAction runtime "question-choice" held
-      replacement<-send runtime "new" [] queued >>= await runtime "replacement provider" ((=="Session fixture-session").status)
+      -- This law supplies replacement before queued-answer admission. Ordinary
+      -- New menu tests above retain their worker path and fresh idle checks.
+      target<-captureConversationSession runtime queued >>= either (error . T.unpack) pure
+      replacement<-snd <$> conversationEffects runtime fallback queued
+        [ConversationSessionAction (Session.NewConversation (Session.conversationReceipt target))] >>= done runtime
       (_,oldCreation)<-questionReply runtime (Just originalCaller) replacement (object ["question" .= ("Old queued request"::T.Text)])
       check "old queued admission cannot bind to a replacement provider" . isLeft =<< oldCreation
       stale<-questionPoll runtime replacement oldId
       check "same session label on a new connection cannot retrieve an old answer"
         (case stale of Left reason->"expired" `T.isInfixOf` reason; _->False)
-      settled<-foldM (\value _->threadDelay 1000 >> tickConversation runtime value) replacement [1..20::Int]
+      let settled=replacement
       entries<-logged
       check "retired queued answer never prompts the replacement provider"
         (not (any (T.isInfixOf "async-retired-answer-marker".json) entries) && agentQueued settled==0)
       (pending,_)<-questionTool runtime settled (object ["question" .= ("Pending lifetime"::T.Text)])
-      retired<-send runtime "new" [] pending >>= await runtime "pending owner retirement" ((=="Session fixture-session").status)
+      retired<-send runtime "new" [] pending >>= connectionState runtime True "pending owner retirement"
       check "provider retirement removes an unanswered question without creating an answer" (chatQuestion retired==Nothing)
 #ifndef mingw32_HOST_OS
     -- Hold an actual filesystem read open while the provider sends more work.
@@ -1202,7 +1275,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     -- made while its request was waiting behind that read.
     let pipe=root </> "slow-source"
     createNamedPipe pipe 0o600
-    withHeldRead server pipe "held read\n" $ \opened release writer -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    withHeldRead server pipe "held read\n" $ \opened release writer -> C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
         configured<-configure runtime ("yes"::T.Text) desktop
         started<-prompt runtime "slow-files" configured
         responsive<-await runtime "provider update behind held file read"
@@ -1219,7 +1292,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         check "held read has not been released" =<< isEmptyMVar release
         putMVar release ()
         wait writer
-        completed<-await runtime "held file prompt completion" ((=="Agent: end_turn").status) progressed
+        completed<-done runtime progressed
         readResult<-response "slow-read"
         writeResult<-response "slow-write"
         check "held read replies after release" ((readResult >>= field "result" >>= field "content")==Just ("held read\n"::T.Text))
@@ -1227,7 +1300,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           (maybe False hasError writeResult && dialog completed==Nothing)
         check "stale asynchronous write leaves disk intact" . (=="disk original\n") =<< BS.readFile source
     forM_ ["slow-replaced","slow-private"] $ \scenario -> do
-      withHeldRead server pipe "held read\n" $ \held releaseCapture writer -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+      withHeldRead server pipe "held read\n" $ \held releaseCapture writer -> C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
           configured<-configure runtime ("yes"::T.Text) desktop
           started<-prompt runtime scenario configured
           waiting<-await runtime "prepared read behind FIFO head" (T.isInfixOf "guarded requests sent" . conversationText) started
@@ -1238,7 +1311,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           check "prepared response stays queued until FIFO head completes" . (==Nothing) =<< response (scenario<>"-source")
           putMVar releaseCapture ()
           wait writer
-          completed<-await runtime "prepared response revalidation" ((=="Agent: end_turn").status) guarded
+          completed<-done runtime guarded
           answer<-response (scenario<>"-source")
           check "prepared reads reject equal-revision replacement or newly private source"
             (maybe False hasError answer && dialog completed==Nothing)
@@ -1247,17 +1320,17 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     withAsync (bracket (Posix.openFd pipe Posix.ReadWrite Posix.defaultFileFlags >>= \fd -> Posix.setFdOption fd Posix.CloseOnExec True >> Posix.fdToHandle fd) hClose $ \_ -> do
       putMVar cancelOpened ()
       takeMVar cancelRelease) $ \writer -> do
-        closed<-timeout 3000000 $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+        closed<-timeout 3000000 $ C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
           takeMVar cancelOpened
           configured<-configure runtime ("yes"::T.Text) desktop
           started<-prompt runtime "slow-cancel" configured
           ready<-await runtime "held cancellation request" (T.isInfixOf "cancel file sent" . conversationText) started
           result<-timeout 1000000 (send runtime "cancel" [] ready)
           cancelled<-maybe (error "Cancellation joined blocked ACP read") pure result
-          _<-await runtime "held read cancellation acknowledgement" ((=="Agent: cancelled").status) cancelled
+          settledCancellation<-done runtime cancelled
           answer<-timeout 1000000 $ let loop=do value<-response "cancel-read"; maybe (threadDelay 1000 >> loop) pure value in loop
           check "cancellation responds to outstanding capture without approval" (maybe False hasError answer)
-          shutdown<-prompt runtime "slow-shutdown" cancelled
+          shutdown<-prompt runtime "slow-shutdown" settledCancellation
           _<-await runtime "held shutdown request" (T.isInfixOf "shutdown file sent" . conversationText) shutdown
           pure ()
         check "conversation shutdown owns and stops cancelled file workers" (closed==Just ())
@@ -1288,7 +1361,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     removeFile runSettings
     -- Context reads happen before enqueueing a prompt. Holding one must leave
     -- the draft editable; human and Hub cancellation must retire unsent work.
-    forM_ [False,True] $ \hubOrigin -> C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    forM_ [False,True] $ \hubOrigin -> C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       connected<-prompt runtime "stream" configured >>= done runtime
       let contextPath=root </> "thc.toml"
@@ -1336,7 +1409,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           check "cancelled context result never sends a prompt"
             (not (any (T.isInfixOf "cancel before send" . json) entries) && contents (composerBuffer settled)=="newer human draft")
 #endif
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       check "configuration saved to isolated XDG directory" =<< doesFileExist (settings </> "agents.json")
       streamed<-prompt runtime "stream" configured >>= done runtime >>= await runtime "adopted streamed body" (\d->"[completed] Local tool" `T.isInfixOf` conversationText d && "Hello" `T.isInfixOf` conversationText d)
@@ -1509,7 +1582,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       let unblocked=twoRejected {dialog=Nothing}
       waiting<-prompt runtime "wait" unblocked >>= await runtime "streamed waiting update" (T.isInfixOf "waiting for cancellation" . conversationText)
       cancelling<-send runtime "cancel" [] waiting
-      cancelled<-await runtime "cancel response" ((=="Agent: cancelled").status) cancelling
+      cancelled<-done runtime cancelling
       check "session cancellation notification sent" . any ((==Just ("session/cancel"::T.Text)).field "method") =<< logged
       let pasteDraft text=fst . handleEvent (V.EvPaste (TE.encodeUtf8 text))
           press key mods=fst . handleEvent (V.EvKey key mods)
@@ -1591,16 +1664,16 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
             _->Nothing
       check "submitting a code draft sends code Markdown and clears the accepted raw draft"
         (sentText==Just (composerMarkdown (contents (composerBuffer codeDraft))) && T.null (contents (composerBuffer codeSubmitted)))
-      busyDraft<-prompt runtime "wait" codeSubmitted >>= await runtime "composer busy" ((=="Agent is replying...").status)
+      busyDraft<-waitingPrompt runtime "composer busy" codeSubmitted
       preserved<-tickConversation runtime (pasteDraft "stream" busyDraft)
       queued<-applyEvent (V.EvKey V.KEnter []) preserved >>= await runtime "busy query acceptance" (\d->agentQueued d==1 && bufferLength (composerBuffer d)==0)
       check "Enter queues a query while replying and retains input during ticks"
         (contents (composerBuffer preserved)=="stream" && agentQueued queued==1 && T.null (contents (composerBuffer queued)) && "Enter Queue query" `T.isInfixOf` snapshot queued)
-      drained<-uncurry (conversationEffects runtime fallback) (clickStatus "Cancel" queued) >>= done runtime . snd
+      drained<-withHumanMenuAction runtime AgentCancel Nothing (clickStatus "Cancel") queued >>= done runtime
       check "Cancel stops current response then queued query runs" (agentQueued drained==0 && not (agentReplying drained) && "Enter Query" `T.isInfixOf` snapshot drained)
       idleDefault<-applyEvent (V.EvKey V.KEnter []) ((pasteDraft "idle direction" drained) {chatSubmit=SteerSubmit,agentSteering=True})
       check "default steering preserves idle draft and names Query" (contents (composerBuffer idleDefault)=="idle direction" && "Query" `T.isInfixOf` status idleDefault)
-      steeringWait<-prompt runtime "wait" drained >>= await runtime "steering active" ((=="Agent is replying...").status)
+      steeringWait<-waitingPrompt runtime "steering active" drained
       check "negotiated steering is available while replying" (agentSteering steeringWait && "Ctrl+Enter Steer" `T.isInfixOf` snapshot steeringWait)
       refused<-applyEvent (V.EvKey V.KEnter [V.MCtrl]) (pasteDraft "direction" steeringWait {agentSteering=False})
       check "unsupported steering retains draft" (contents (composerBuffer refused)=="direction")
@@ -1617,60 +1690,61 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         Right history->any (\event->AH.historyKind event=="steered" && AH.historyAuthor event==AH.Human && field "userSeat" (AH.historyDetail event)==Just True)
           (AH.historyEvents history)
         _->False)
-      idleRace<-prompt runtime "wait" steered >>= await runtime "idle race active" ((=="Agent is replying...").status)
+      idleRace<-waitingPrompt runtime "idle race active" steered
       rejectedSteer<-submit runtime SteerSubmit (draftBuffer (newBuffer "idle-race") idleRace) >>= await runtime "idle race response" (not . agentReplying)
       check "primary idle race leaves steering draft unsent" (contents (composerBuffer rejectedSteer)=="idle-race")
-      legacyWait<-prompt runtime "wait" rejectedSteer >>= await runtime "legacy steer active" ((=="Agent is replying...").status)
-      legacy<-submit runtime SteerSubmit (draftBuffer (newBuffer "legacy-steer") legacyWait) >>= await runtime "legacy steering retires provider" (T.isInfixOf "provider stopped" . status)
+      legacyWait<-waitingPrompt runtime "legacy steer active" rejectedSteer
+      legacy<-submit runtime SteerSubmit (draftBuffer (newBuffer "legacy-steer") legacyWait) >>= connectionState runtime False "legacy steering retires provider"
       check "primary legacy detached steering stops safely and retains the draft" (contents (composerBuffer legacy)=="legacy-steer" && not (agentSteering legacy))
       restarted<-prompt runtime "stream" legacy >>= done runtime
-      disconnected<-prompt runtime "disconnect" restarted >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
+      disconnected<-prompt runtime "disconnect" restarted >>= connectionState runtime False "provider EOF"
       reconnected<-prompt runtime "stream" disconnected >>= done runtime
-      resumed<-send runtime "load" ["0","  saved-id  "] reconnected >>= await runtime "resume session" (\d->status d=="Session saved-id" && "Session: saved-id" `T.isInfixOf` conversationText d)
+      adoptedResume<-send runtime "load" ["0","  saved-id  "] reconnected >>= connectionState runtime True "resume session"
+      resumed<-await runtime "adopted resumed session header" (T.isInfixOf "Session: saved-id" . conversationText) adoptedResume
       check "new session clears stale context usage" (agentContextUsage resumed==Nothing && " -- " `T.isInfixOf` snapshot resumed)
       check "conversation header follows resumed session" ("Session: saved-id" `T.isInfixOf` conversationText resumed)
       check "capability selects session/load" . any ((==Just ("session/load"::T.Text)).field "method") =<< logged
-      when terminalAvailable $ do
-        pendingTerminal<-prompt runtime "terminal" resumed >>= modal runtime
-        check "terminal requires explicit execution approval" (maybe False ((=="Run agent command").dialogTitle) (dialog pendingTerminal))
-        completedTerminal<-actDialog runtime 0 pendingTerminal >>= done runtime
-        output<-response "terminal-output-1"
-        let terminalOutput=output >>= field "result" >>= field "output"
-            -- ConPTY emits rendered VT updates, including cursor controls.
-            outputMatches=if os=="mingw32" then maybe False ((==8).BS.length.TE.encodeUtf8) terminalOutput
-              else terminalOutput==Just ("23456789"::T.Text)
-        check "ACP terminal output and truncation use real backend" (outputMatches && (output >>= field "result" >>= field "truncated")==Just True)
-        exit<-response "terminal-wait-1"
-        check "ACP waits for real exit status" ((exit >>= field "result" >>= field "exitCode")==Just (9::Int))
-        released<-response "terminal-after-release-1"
-        check "released terminal cannot be reused" (maybe False hasError released)
-        killDialog<-prompt runtime "terminal-kill" completedTerminal >>= modal runtime
-        killed<-actDialog runtime 0 killDialog >>= done runtime
-        killedExit<-response "terminal-wait-2"
-        check "ACP terminal kill completes pending wait" ((killedExit >>= field "result" >>= field "exitCode")==Just (137::Int))
-        rejectedTerminal<-prompt runtime "terminal-reject" killed >>= modal runtime
-        _<-escape runtime rejectedTerminal >>= done runtime
-        rejectedReply<-response "terminal-create-3"
-        check "rejected terminal request gets error" (maybe False hasError rejectedReply)
-        check "rejected terminal command never executes" . not =<< doesFileExist (root </> "should-not-exist")
+      afterTerminal<-if terminalAvailable
+        then do
+          pendingTerminal<-prompt runtime "terminal" resumed >>= modal runtime
+          check "terminal requires explicit execution approval" (maybe False ((=="Run agent command").dialogTitle) (dialog pendingTerminal))
+          completedTerminal<-actDialog runtime 0 pendingTerminal >>= done runtime
+          output<-response "terminal-output-1"
+          let terminalOutput=output >>= field "result" >>= field "output"
+              -- ConPTY emits rendered VT updates, including cursor controls.
+              outputMatches=if os=="mingw32" then maybe False ((==8).BS.length.TE.encodeUtf8) terminalOutput
+                else terminalOutput==Just ("23456789"::T.Text)
+          check "ACP terminal output and truncation use real backend" (outputMatches && (output >>= field "result" >>= field "truncated")==Just True)
+          exit<-response "terminal-wait-1"
+          check "ACP waits for real exit status" ((exit >>= field "result" >>= field "exitCode")==Just (9::Int))
+          released<-response "terminal-after-release-1"
+          check "released terminal cannot be reused" (maybe False hasError released)
+          killDialog<-prompt runtime "terminal-kill" completedTerminal >>= modal runtime
+          killed<-actDialog runtime 0 killDialog >>= done runtime
+          killedExit<-response "terminal-wait-2"
+          check "ACP terminal kill completes pending wait" ((killedExit >>= field "result" >>= field "exitCode")==Just (137::Int))
+          rejectedTerminal<-prompt runtime "terminal-reject" killed >>= modal runtime
+          deniedTerminal<-escape runtime rejectedTerminal >>= done runtime
+          rejectedReply<-response "terminal-create-3"
+          check "rejected terminal request gets error" (maybe False hasError rejectedReply)
+          check "rejected terminal command never executes" . not =<< doesFileExist (root </> "should-not-exist")
+          pure deniedTerminal
+        else pure resumed
       -- Reconfiguration stops the old provider; the next handshake lacks resume support.
-      current<-tickConversation runtime resumed
+      current<-tickConversation runtime afterTerminal
       unsupported<-configure runtime ("no"::T.Text) current
       countBefore<-length . filter ((==Just ("session/load"::T.Text)).field "method") <$> logged
-      gated<-send runtime "load" ["0","forbidden-id"] unsupported >>= await runtime "capability refusal" ((=="This provider cannot resume sessions.").status)
+      gated<-send runtime "load" ["0","forbidden-id"] unsupported >>= connectionState runtime False "capability refusal"
       countAfter<-length . filter ((==Just ("session/load"::T.Text)).field "method") <$> logged
       check "resume is capability-gated" (countBefore==countAfter)
-      _<-send runtime "options" [] gated
-      shownBeforeClose<-send runtime "show" [] gated
+      dismissedFailure<-escape runtime gated
+      shownBeforeClose<-send runtime "show" [] dismissedFailure
       pendingClosed<-prompt runtime "wide" shownBeforeClose
       let (closing,closeEffects)=runCommand Close pendingClosed
           oldPaint=conversationBodySnapshot "" closing
           oldSource=M.lookup "" (conversationViews closing) >>= conversationSource
-          received incomingView=do
-            next<-Conversation.tickConversation runtime incomingView
-            if status next=="Agent: end_turn" then pure next else threadDelay 10000 >> received next
       closed<-snd <$> conversationEffects runtime fallback closing closeEffects
-      receivedClosed<-timeout 8000000 (received closed) >>= maybe (error "Closed conversation source timed out") pure
+      receivedClosed<-done runtime closed
       let closedSource=M.lookup "" (conversationViews receivedClosed) >>= conversationSource
           checkpoint=root </> "closed-conversation.checkpoint"
           expected=T.replicate 90 "reply-width "<>"\n\n```sh\nprintf 'live λ'\n```"
@@ -1695,7 +1769,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     createDirectoryIfMissing True (root </> "config/thc")
     writeFile (root </> "config/thc/config.toml") "[editor.agent]\ncontext = 'Global guidance marker'\n"
     writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Project guidance marker'\n"
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       guided<-prompt runtime "stream" configured >>= done runtime
       entries<-logged
@@ -1717,28 +1791,23 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       let otherProject=root </> "other-project"
       createDirectory otherProject
       writeFile (otherProject </> "thc.toml") "[editor.agent]\ncontext = 'Not this conversation'\n"
-      scope<-send runtime "context" [] again {sideTree=fmap (\tree->tree {treeRoot=otherProject}) (sideTree again)}
+      opened<-humanMenuAction runtime AgentGuidance (Just ["project",T.pack (root </> "thc.toml")]) again {sideTree=fmap (\tree->tree {treeRoot=otherProject}) (sideTree again)}
       check "context UI is a human-only command" (not (guestCommandAllowed AgentGuidance))
-      case dialog scope of
-        Just dg -> do
-          let (next,effects)=submitDialog 0 dg scope
-          (_,opened)<-conversationEffects runtime App.applyEffects next effects
-          check "context UI opens protected project config for normal editing"
-            (fmap (fmap filePath . documentFile) (activeDocument opened)==Just (Just (root </> "thc.toml")) && maybe False (protectedBuffer opened . sourceFixtureBuffer) (activeWindow opened))
-        Nothing -> error "Missing Agent Context scope chooser"
+      check "context UI opens protected original project config for normal editing"
+        (fmap (fmap filePath . documentFile) (activeDocument opened)==Just (Just (root </> "thc.toml")) && maybe False (protectedBuffer opened . sourceFixtureBuffer) (activeWindow opened))
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Updated project guidance'\n"
       updated<-prompt runtime "stream" guided >>= done runtime
       messages<-logged
       let latest=last [params | entry<-messages,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
       check "saved project context reaches the next query without reconnecting" ("Updated project guidance" `T.isInfixOf` json latest)
-      waiting<-prompt runtime "wait" updated >>= await runtime "context steering wait" ((=="Agent is replying...").status)
+      waiting<-waitingPrompt runtime "context steering wait" updated
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Steering guidance marker'\n"
       steered<-submit runtime SteerSubmit (draftBuffer (newBuffer "direction") waiting) >>= await runtime "context steering completion" (not . agentReplying)
       steeringLog<-logged
       let lastSteer=last [params | entry<-steeringLog,field "method" entry==Just ("_session/steering"::T.Text),Just params<-[field "params" entry::Maybe Value]]
       check "primary steering requests host-owned idle handling" ((field "_meta" lastSteer >>= field "steering" >>= field "idleBehavior")==Just ("promptRequired"::T.Text))
       check "steering receives saved context updates" ("Steering guidance marker" `T.isInfixOf` json lastSteer)
-      rejectionWait<-prompt runtime "wait" steered >>= await runtime "rejected context steering wait" ((=="Agent is replying...").status)
+      rejectionWait<-waitingPrompt runtime "rejected context steering wait" steered
       writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Retry context marker'\n"
       pendingSteer<-submit runtime SteerSubmit (draftBuffer (newBuffer "reject-context") rejectionWait)
       rejectedSteer<-withEditorFixture "fixture-child" pendingSteer $ \childFixture->do
@@ -1765,27 +1834,27 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       _<-prompt runtime "stream" failed >>= done runtime
       pure ()
     -- A new runtime reads the saved provider configuration, without reconfiguring it.
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
-      restored<-send runtime "new" [] desktop >>= await runtime "persisted provider configuration" ((=="Session fixture-session").status)
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+      restored<-send runtime "new" [] desktop >>= connectionState runtime True "persisted provider configuration"
       _<-send runtime "resume" [] restored
       pure ()
     let editorSessions=[(replicate 48 'a',"resume-a"::T.Text,root),(replicate 48 'b',"resume-b",root </> "other-project")]
         withEditor ident action=bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" ident) (restoreEnvironment "THC_EDIT_SESSION") (const action)
         resumeId d=case [value | Just dg<-[dialog d],field'<-fields dg,value<-case field' of Input "Session ID" text _->[text]; SelectedInput "Session ID" text _->[text]; _->[]] of value:_->Just value; _->Nothing
-    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       offered<-send runtime "resume" [] desktop
       check "new editor session does not inherit another session resume ID" (resumeId offered==Just "")
       configured<-configure runtime ("yes"::T.Text) desktop {sideTree=fmap (\tree->tree {treeRoot=providerRoot}) (sideTree desktop)}
-      _<-send runtime "load" ["0",providerId] configured >>= await runtime "per-editor resume record" ((==("Session "<>providerId)).status)
+      _<-send runtime "load" ["0",providerId] configured >>= connectionState runtime True "per-editor resume record"
       sidecar<-(++".agent.json") <$> checkpointPath ident
       saved<-decodeStrict' <$> BS.readFile sidecar
       check "provider resume record is saved beside its editor checkpoint"
         ((saved >>= field "sessionId")==Just providerId && (saved >>= field "cwd")==Just providerRoot)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       _<-send runtime "configure" ["0","not-the-saved-provider", "[]", "{}"] desktop
       pure ()
     beforeRecovery<-logged
-    forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,_) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
       recovered<-recoveredBody "Retained conversation after a daemon crash" savedDraft
@@ -1797,11 +1866,12 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       check "reading resume metadata leaves recovered transcript and draft intact" (resumedSources && resumedDraft)
     afterRecovery<-logged
     check "recovery never starts a provider or sends a prompt automatically" (afterRecovery==beforeRecovery)
-    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       unrelated<-send runtime "load" ["0","unrelated-session-id"] desktop >>= done runtime
       check "an unrelated resume ID does not select another saved provider"
         (maybe False ((=="Cannot start agent").dialogTitle) (dialog unrelated))
-      shown<-send runtime "show" [] desktop
+      dismissedFailure<-escape runtime unrelated
+      shown<-send runtime "show" [] dismissedFailure
       before<-length <$> logged
       loading<-send runtime "load" ["0",providerId] shown
       submitted<-submit runtime QuerySubmit (draftAt (newBuffer "stream") (Selection 6 6) loading)
@@ -1814,11 +1884,11 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         (field "cwd" (last loads)==Just providerRoot)
       configured<-send runtime "options" [] loaded
       check "saved provider selection is local to the resumed editor"
-        (case dialog configured of Just dg->Input "Executable" "python3" 7 `elem` fields dg; _->False)
+        (case dialog configured of Just dg->any (\value->case value of Input "Executable" text _->text=="python3";SelectedInput "Executable" text _->text=="python3";_->False) (fields dg); _->False)
     globalProvider<-decodeStrict' <$> BS.readFile (settings </> "agents.json")
     check "resuming a saved provider does not rewrite global configuration"
       ((globalProvider >>= field "executable")==Just ("not-the-saved-provider"::T.Text))
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+    C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       configured<-configure runtime ("yes"::T.Text) desktop
       answered<-prompt runtime ("wide\n"<>T.unwords (replicate 90 "user-width")) configured >>= done runtime >>= await runtime "adopted wide reply" (T.isInfixOf "live λ".conversationText)
       forM_ [150,36,120] $ \columns -> do
@@ -1848,7 +1918,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       let hub=AR.agentHub (conversationAgents runtime)
           caps=AH.Capabilities False False False []
           driver=AH.AgentDriver root "layout-fixture" caps (const (pure (Right caps)))
-            (const (pure (Right Null))) (pure ()) (pure ()) (const (pure (Right Null)))
+            (\turn _ _ _->completedTurn turn (pure (Right Null))) (pure ()) (pure ()) (\_ _ _->pure (Right Null))
       child<-AH.registerAgent hub "Layout child" root driver >>= either (error . T.unpack) pure
       ticket<-AH.sendAgent hub AH.Human child (T.unwords (replicate 90 "child-user")) >>= either (error . T.unpack) pure
       _<-AH.waitAgent hub AH.Human child ticket 2000 >>= either (error . T.unpack) pure
@@ -2017,7 +2087,7 @@ providerScript=unlines
   , "  global prompt"
   , "  if prompt is not None: reply(prompt,{'stopReason':reason}); prompt=None"
   , "for line in sys.stdin:"
-  , "  msg=json.loads(line); log.write(json.dumps(msg,ensure_ascii=False)+'\\n')"
+  , "  msg=json.loads(line); log.write(json.dumps(dict(msg,fixtureProcessId=os.getpid()),ensure_ascii=False)+'\\n')"
   , "  method=msg.get('method'); ident=msg.get('id'); params=msg.get('params',{})"
   , "  if method=='initialize':"
   , "    if os.environ.get('THC_CONNECT_GATE'): open(os.environ['THC_CONNECT_GATE'],'rb').read()"

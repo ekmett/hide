@@ -18,7 +18,7 @@
 module Hide.Plugin.Menu
   ( Menus, MenuRef, MenuItem(..), MenuDef(..), MenuAction, MenuError(..), MenuOrigin(..), MenuPublisher(..)
   , withMenus, menuAction, mapMenu, contributeMenu, retireMenu, menuSnapshot, menuMetadata
-  , menuName, menuEpoch, menuGeneration, menuCurrent, invokeMenu
+  , menuName, menuEpoch, menuGeneration, menuCurrent, invokeMenu, cancelConversationAction, menuCancelsConversation
   ) where
 
 import Control.Concurrent.MVar
@@ -57,8 +57,20 @@ data MenuItem = MenuItem
 -- command work off the UI lock. Projection reads only captured immutable context.
 data MenuAction context reply = forall c a b. MenuAction
   (Registry c) (Command c a b) (context -> c) (c -> Either Text a) (context -> b -> IO reply)
+  | CancelConversationAction
 menuAction :: Registry context -> Command context a b -> (context -> Either Text a) -> (context -> b -> IO reply) -> MenuAction context reply
 menuAction registry command=MenuAction registry command id
+
+-- | Host-only control action contributed with ordinary metadata. Admission and
+-- exact-turn cancellation run synchronously at the host menu owner. Calling
+-- invokeMenu refuses this action; it cannot acquire worker callback authority.
+cancelConversationAction :: MenuAction c r
+cancelConversationAction = CancelConversationAction
+
+-- | Inspect the exact live registration for the fixed host control operation.
+-- The caller still checks human origin and current target before cancellation.
+menuCancelsConversation :: Menus c r -> MenuRef -> IO Bool
+menuCancelsConversation menus reference=entry menus reference >>= pure . either (const False) (\(Entry _ action)->case action of CancelConversationAction->True; _->False)
 
 -- | Ordered session publication supplied by the host. Calls may block their
 -- registration worker; never publish or withdraw beneath the UI lock. Scope
@@ -83,7 +95,8 @@ data MenuDef context reply = MenuDef
 mapMenu :: (c -> d) -> (c -> s -> IO r) -> MenuDef d s -> MenuDef c r
 mapMenu project prepare definition=definition {contributionAction=case contributionAction definition of
   MenuAction registry command capture arguments reply->MenuAction registry command (capture . project) arguments
-    (\context value->reply (project context) value >>= prepare context)}
+    (\context value->reply (project context) value >>= prepare context)
+  CancelConversationAction->CancelConversationAction}
 data MenuError = MenusClosed | InvalidMenu Text | DuplicateMenu Text | UnknownMenu Text
   | UnknownSlot Text | MenuLimit
   | StaleMenu Text | MenuCommandError CommandError deriving (Eq,Show)
@@ -141,6 +154,7 @@ retireMenu menus@(Menus _ _ _ state) reference=do
         _->pure (current,Left (StaleMenu (menuName reference)))
 
 actionCurrent :: MenuAction context reply -> IO Bool
+actionCurrent CancelConversationAction=pure True
 actionCurrent (MenuAction registry command _ _ _)=commandCurrent registry (commandRef command)
 
 -- | Currentness checks never call extension code. Use immediately before host
@@ -184,6 +198,7 @@ invokeMenu menus reference context=do
   found<-entry menus reference
   case found of
     Left err->pure (Left err)
+    Right (Entry _ CancelConversationAction)->pure (Left (InvalidMenu "Conversation cancellation belongs to the synchronous host owner."))
     Right (Entry _ (MenuAction registry command capture arguments prepare))->do
       let captured=capture context
       result<-case arguments captured of

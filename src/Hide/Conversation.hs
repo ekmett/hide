@@ -1,15 +1,15 @@
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{-# LANGUAGE CPP, OverloadedStrings #-}
+{-# LANGUAGE CPP, ExistentialQuantification, GADTs, ScopedTypeVariables, OverloadedStrings #-}
 -- | Module      : Hide.Conversation
 -- Copyright   : (c) Edward Kmett 2026
 -- License     : BSD-2-Clause OR Apache-2.0
 -- Maintainer  : Edward Kmett
 -- Stability   : experimental
--- Portability : CPP, OverloadedStrings
+-- Portability : CPP, ExistentialQuantification, GADTs, ScopedTypeVariables, OverloadedStrings
 --
 -- Primary ACP ownership and captured plugin transcript sources.
 --
--- The session tick consumes protocol and hub mailbox events. Owned workers prepare
+-- The session tick consumes typed provider and hub mailbox events. Owned workers prepare
 -- provider acquisition, prompt context, file captures and consoles before adoption; capture itself does
 -- not authorize an action. Prepared results must still match source identity and
 -- privacy policy. Child cancellation/configuration/steering completes through ticks.
@@ -20,7 +20,7 @@
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, captureConversationChoices, withConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, captureConversationOperation, captureConversationChoices, withConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
 import Hide.ConversationBody
@@ -43,7 +43,6 @@ import Control.Monad (foldM, filterM, forM, forM_, void, when, unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as K
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Time (UTCTime, TimeZone, getCurrentTime, getCurrentTimeZone, diffUTCTime, utcToLocalTime, formatTime, defaultTimeLocale)
@@ -51,7 +50,7 @@ import Data.IORef
 import Data.Unique (Unique,newUnique)
 import Hide.ConversationSessionTypes
 import qualified Hide.Plugin.ConversationSession as Session
-import Data.List (find, sortOn)
+import Data.List (find)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Maybe (fromMaybe, mapMaybe, isNothing)
@@ -60,19 +59,19 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, getCurrentDirectory)
 import System.FilePath ((</>), isAbsolute, makeRelative, splitDirectories)
-import Data.Text.Encoding.Error (lenientDecode)
 import qualified Hide.Terminal as Terminal
 import qualified Hide.Consoles as C
 import qualified Hide.Build as B
 import System.Mem.StableName (StableName, makeStableName)
 import Text.Read (readMaybe)
-import qualified Hide.ACP as A
+import Hide.Plugin.Provider
+import Hide.Plugin.Agent (StartAgentProvider,ProviderKind(..),ProviderContent(..),ProviderPermission(..),ProviderTerminal(..),ProviderTerminalOutput(..))
 import Hide.GuestAccess (sensitiveLabel, protectedPath, protectedBuffer)
 import Hide.Files (filePath)
+import qualified Hide.Files as Files
 import Hide.MCPPermissions (permissionConfigPath, projectConfigPath, readAgentContextAt, writeAgentContextAt, readAgentContexts)
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
-import qualified Hide.AgentACP as AP
 import Hide.Plugin.Transcript (ConversationPresenter,AgentHistory(..),PrimaryContent(..),PrimarySpeaker(..),PrimaryUpdate(..))
 import qualified Hide.Plugin.Transcript as Transcript
 import Hide.Session (checkpointPath)
@@ -94,12 +93,12 @@ import System.Environment (lookupEnv)
 import Hide.Syntax (Style(..),styledText)
 
 -- One configured stdio provider; its protocol supplies models and tools.
-data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | CancellingPrompt | Steering Text AR.PrimaryControl | Setting AR.PrimaryControl deriving Eq
+data Phase = Prompting | CancellingPrompt deriving Eq
 -- A human submission can consume only its captured immutable draft. Stable
 -- names in ContentVersion retain no Buffer/Undo; selection/focus are independent.
 type DraftReceipt = Editor.DraftSubmission
 -- Immutable input context captured at the original human input turn.
-data ChatEditorContext = ChatEditorContext !Text !(StableName A.ProviderLaunch) !(Maybe ProviderReceipt) !(Maybe AH.AgentConfigRef)
+data ChatEditorContext = ChatEditorContext !Text !(StableName ProviderLaunch) !(Maybe ProviderReceipt) !(Maybe AH.AgentConfigRef)
 -- Both input commands execute on the existing control worker. Their distinct
 -- services preserve primary context/connect ownership and child Hub admission.
 data ConversationEditor
@@ -112,18 +111,26 @@ conversationEditorMount (ChildEditor editor)=Editor.editorMount editor
 
 data AgentControlResult = AgentControlAccepted | ConversationInputAccepted !Editor.EditorUpdate
 data PromptPreparation
-  = StartingClient !(Maybe Text) !(Async (FilePath,A.Client,Int))
-  | ContextPrompt !Bool !Text !(Maybe AR.PrimaryControl) !(Async (Either Text ([Value],Value)))
+  = StartingClient !(Maybe Text) !(Async (Either Text (FilePath,AH.AgentDriver)))
+  | ContextPrompt !Bool !Text !(Maybe AR.PrimaryControl) !(Async (Either Text ([Text],Value)))
+  | SendingPrompt !ProviderTurnId !ProviderSubmission !Text !Value !(Maybe AR.PrimaryControl) !(Async (Either Text ProviderTurn))
+  | SteeringPrompt !ProviderSubmission !Text !Value !AR.PrimaryControl !(Async (Either Text Value))
+  | PreparingHuman !ConversationSessionReceipt !(Async (Either Text HumanResult))
+  | Configuring !AR.PrimaryControl !(Async (Either Text AH.Capabilities))
 preparationCancel :: PromptPreparation -> IO ()
 preparationCancel (StartingClient _ worker)=do
   cancel worker
-  -- Cancellation can lose to successful acquisition. Until a tick adopts the
-  -- result this owner must dispose it, including during session shutdown.
   completed<-poll worker
-  case completed of
-    Just (Right (_,client,_))->A.stopClient client
-    _->pure ()
+  case completed of Just (Right (Right (_,driver)))->AH.driverStop driver; _->pure ()
 preparationCancel (ContextPrompt _ _ _ worker)=cancel worker
+preparationCancel (SendingPrompt _ submission _ _ _ worker)=do
+  retireProviderSubmission submission
+  cancel worker
+  completed<-poll worker
+  case completed of Just (Right (Right turn))->cancelProviderTurn turn; _->pure ()
+preparationCancel (SteeringPrompt submission _ _ _ worker)=retireProviderSubmission submission >> cancel worker
+preparationCancel (PreparingHuman _ worker)=cancel worker
+preparationCancel (Configuring _ worker)=cancel worker
 
 
 unavailableConversation :: Text
@@ -132,16 +139,46 @@ unavailableConversation="Agent conversation plugin is unavailable; draft kept."
 toggleExpansion :: Text -> ToolExpansion -> State -> State
 toggleExpansion target item state=state {toolExpansions=if S.member key expanded then S.delete key expanded else S.insert key expanded}
   where key=(target,item); expanded=toolExpansions state
-data Approval = ChildPermission AH.AgentId AP.ACPPermission (MVar (Maybe Text)) | Permission Value [(Text,Text)] Value | Write Value Snapshot Text | Execute Value Terminal.TerminalConfig Int
+data Approval
+  = ChildPermission AH.AgentId ProviderPermission (MVar (Either Text (Maybe Text)))
+  | Permission !ProviderIdentity !ProviderPermission (MVar (Either Text (Maybe Text)))
+  | Write !ProviderIdentity (MVar (Either Text ())) !Snapshot !Text
+  | Execute !ProviderIdentity (MVar (Either Text Text)) !Terminal.TerminalConfig !Int
 
-data FileRequest = ReadFile Int (Maybe Int) | WriteFile Text
-data FileCapture = FileCapture Value (Async (Either Text CapturedFile))
-data CapturedFile = CapturedFile Snapshot (Maybe SourceIdentity) CapturedAction
-data CapturedAction = CapturedRead A.PreparedResponse | CapturedWrite Text
+data FileRequest
+  = ReadFile !Int !(Maybe Int) (MVar (Either Text Text))
+  | WriteFile !Text (MVar (Either Text ()))
+data FileCapture
+  = ResolvingFile !ProviderIdentity !FileRequest !(Maybe SourceIdentity) !(Async (Either Text ResolvedFile))
+  | ReadingFile !ProviderIdentity !FileRequest !(Maybe SourceIdentity) !(Async (Either Text Snapshot))
+  | SlicingFile !ProviderIdentity (MVar (Either Text Text)) !Snapshot !(Maybe SourceIdentity) !(Async (Either Text Text))
+  | CheckingTerminal !ProviderIdentity (MVar (Either Text Text)) !Int !(Async (Either Text Terminal.TerminalConfig))
+  | PreparingTerminal !ProviderIdentity (MVar (Either Text Text)) !(Async (Either Text C.PreparedConsole))
+  | forall a. TerminalOperation !ProviderIdentity (MVar (Either Text a)) !(Async (Either Text a))
+
+captureCancel :: FileCapture -> IO ()
+captureCancel (ResolvingFile _ request _ worker)=finishFile (Left "File request cancelled.") request >> cancel worker
+captureCancel (ReadingFile _ request _ worker)=finishFile (Left "File request cancelled.") request >> cancel worker
+captureCancel (SlicingFile _ reply _ _ worker)=void (tryPutMVar reply (Left "File request cancelled.")) >> cancel worker
+captureCancel (CheckingTerminal _ reply _ worker)=void (tryPutMVar reply (Left "Terminal request cancelled.")) >> cancel worker
+captureCancel (PreparingTerminal _ reply worker)=do
+  void (tryPutMVar reply (Left "Terminal request cancelled."))
+  cancel worker
+  ready<-poll worker
+  case ready of Just (Right (Right console))->C.closePreparedConsole console; _->pure ()
+captureCancel (TerminalOperation _ reply worker)=void (tryPutMVar reply (Left "Terminal request cancelled.")) >> cancel worker
+
+fileWaiting :: FileRequest -> IO Bool
+fileWaiting (ReadFile _ _ reply)=isEmptyMVar reply
+fileWaiting (WriteFile _ reply)=isEmptyMVar reply
+finishFile :: Either Text () -> FileRequest -> IO ()
+finishFile (Left err) (ReadFile _ _ reply)=void (tryPutMVar reply (Left err))
+finishFile (Left err) (WriteFile _ reply)=void (tryPutMVar reply (Left err))
+finishFile _ _=pure ()
 
 -- Fixed answer delivery reuses the ordinary query queue. Its receipt identifies
 -- the exact provider incarnation, not a reusable session label alone.
-data ProviderReceipt = ProviderReceipt !(StableName A.Client) !Text
+data ProviderReceipt = ProviderReceipt !(ProviderIdentity) !Text
 -- Host-minted before any permission wait; extension arguments cannot forge it.
 data QuestionCaller = QuestionCaller !(StableName (IORef State)) !AH.AgentId !(Maybe ProviderReceipt)
 data QueuedQuery = SubmittedQuery !Text | QuestionQuery !Int !AH.AgentId !ProviderReceipt !Text
@@ -151,26 +188,26 @@ data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 
 -- Reversed safe chunks give O(1) append and one concatenation on completion.
 -- The request ID scopes output to the provider prompt, never a displayed record.
-data PromptReply = PromptReply !Int [Text]
 
 data SettingsCapture = SettingsCapture !Bool !FilePath !Settings.SettingsSnapshot
 
 data State = State
   { sessionIdentity :: !Unique
-  , provider :: A.ProviderLaunch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
+  , provider :: ProviderLaunch, connection :: Maybe AH.AgentDriver, connectionIdentity :: Maybe ProviderIdentity, providerFactory :: Maybe StartAgentProvider,
+    currentTurn :: Maybe ProviderTurnId, completedTurn :: Maybe ProviderTurnId, activeTurn :: Maybe ProviderTurn, queuedDelivery :: Maybe AR.PrimaryDelivery, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe AR.PrimaryControl), transcript :: !Transcript.PrimaryTranscript, nextRecord :: !Int
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
   , queuedQueries :: [QueuedQuery]
   , ownedTerminals :: S.Set Text
-  , terminalWaiters :: M.Map Text [Value]
+  , terminalWaiters :: M.Map Text [MVar (Either Text Int)]
+  , terminalPoll :: Maybe (Async [(Text,Either Text (BS.ByteString,Bool,Maybe Int))])
   , lastMessageAt :: Maybe UTCTime
-  , lastSession :: Maybe (A.ProviderLaunch,FilePath,Text)
+  , lastSession :: Maybe (ProviderLaunch,FilePath,Text)
   , waitingQuestion :: Maybe QuestionTicket, questionResults :: M.Map Int QuestionResult, questionsClosed :: Bool, lastQuestion :: Maybe Int, lastQuestionInteraction :: Maybe (StableName ChatQuestion)
   , deliveredContext :: Maybe Value
   , directoryAgents :: [AH.AgentId]
-  , agentInitialized :: Value, agentConfig :: Value
-  , streamTails :: M.Map Text Text, promptReply :: Maybe PromptReply
-  , lastAgentSync :: Maybe (FilePath,Maybe (StableName A.Client),Text,AH.Capabilities,Bool)
+  , agentCapabilities :: AH.Capabilities
+  , lastAgentSync :: Maybe (FilePath,Maybe (ProviderIdentity),Text,AH.Capabilities,Bool)
   , conversationPresenter :: Maybe ConversationPresenter, childRecords :: M.Map Text TranscriptSource, childRender :: Maybe (Text,Value)
   , toolExpansions :: S.Set (Text,ToolExpansion)
   , agentControls :: M.Map Text (Maybe DraftReceipt,Async (Either Text AgentControlResult))
@@ -190,15 +227,15 @@ data ConversationState = ConversationState FilePath (IORef State) C.Consoles AR.
 conversationAgents :: ConversationState -> AR.AgentRuntime
 conversationAgents (ConversationState _ _ _ agents)=agents
 
-defaultLaunch :: A.ProviderLaunch
-defaultLaunch = A.ProviderLaunch "codex-acp" [] []
+defaultLaunch :: ProviderLaunch
+defaultLaunch = ProviderLaunch "codex-acp" [] []
 
-withConversation :: Maybe ConversationPresenter -> Maybe (InputDeclaration PrimaryInputServices) -> Maybe (InputDeclaration ChildInputServices) -> C.Consoles -> (ConversationState -> IO a) -> IO a
-withConversation presenter primary child consoles action = getCurrentDirectory >>= \root -> withConversationAt presenter primary child consoles root action
+withConversation :: Maybe StartAgentProvider -> Maybe ConversationPresenter -> Maybe (InputDeclaration PrimaryInputServices) -> Maybe (InputDeclaration ChildInputServices) -> C.Consoles -> (ConversationState -> IO a) -> IO a
+withConversation factory presenter primary child consoles action = getCurrentDirectory >>= \root -> withConversationAt factory presenter primary child consoles root action
 
 -- | Load conversation configuration and scope only provider and agent workers.
-withConversationAt :: Maybe ConversationPresenter -> Maybe (InputDeclaration PrimaryInputServices) -> Maybe (InputDeclaration ChildInputServices) -> C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
-withConversationAt presenter primary child consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->Command.withRegistry $ \childRegistry->Command.withRegistry $ \settingsRegistry->do
+withConversationAt :: Maybe StartAgentProvider -> Maybe ConversationPresenter -> Maybe (InputDeclaration PrimaryInputServices) -> Maybe (InputDeclaration ChildInputServices) -> C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
+withConversationAt factory presenter primary child consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->Command.withRegistry $ \childRegistry->Command.withRegistry $ \settingsRegistry->do
   settingsRead<-Command.registerCommand settingsRegistry (Command.CommandDef "hide.agent-settings.read" "Read public conversation settings"
     (Command.Codec Null (const (Right ())) (const Null))
     (Command.Codec Null (const (Left "Host-captured settings only.")) toJSON)
@@ -223,15 +260,19 @@ withConversationAt presenter primary child consoles root action = W.withWindowSc
   editors<-newIORef M.empty
   identity<-newUnique
   ref<-newIORef State
-    { sessionIdentity=identity,provider=launch,connection=Nothing,session=Nothing,project=root
+    { sessionIdentity=identity,provider=launch,connection=Nothing,connectionIdentity=Nothing,providerFactory=factory,currentTurn=Nothing,completedTurn=Nothing,activeTurn=Nothing,queuedDelivery=Nothing,session=Nothing,project=root
     , pending=M.empty,queuedPrompt=Nothing,transcript=Transcript.emptyPrimaryTranscript,nextRecord=0,reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
-    , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
+    , ownedTerminals=S.empty,terminalWaiters=M.empty,terminalPoll=Nothing,lastMessageAt=Nothing
     , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
     , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,settingsCommands=(settingsRegistry,settingsRead),resumeRecordPath=resumePath,directoryAgents=[]
-    , conversationPresenter=preparedPresenter,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,primaryInput=registeredPrimaryInput,childInput=registeredChildInput,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
-  AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
-    bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
+    , conversationPresenter=preparedPresenter,agentCapabilities=AH.Capabilities False False False [],lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,primaryInput=registeredPrimaryInput,childInput=registeredChildInput,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
+  AR.withAgentRuntime factory root (provider <$> readIORef ref) $ \agents ->
+    bracket (pure (ConversationState directory ref consoles agents)) closeConversation $ \runtime->do
+      -- Publish the acquired initial owner before any menu can capture its
+      -- configuration receipt; the first tick must not replace a placeholder.
+      syncConversationAgent runtime
+      action runtime
 
 -- Provider configuration remains global, but a recovered editor must resume
 -- its own conversation. Standalone/legacy callers retain their existing file.
@@ -245,39 +286,34 @@ closeConversation (ConversationState _ ref consoles agents) = do
   s<-readIORef ref
   let (registry,command)=settingsCommands s
   void (Command.retireCommand registry (Command.commandRef command))
-  writeIORef ref (abandonQuestion "Editor session closed." s) {questionsClosed=True,promptReply=Nothing}
+  writeIORef ref (abandonQuestion "Editor session closed." s) {questionsClosed=True}
   AR.failPendingPrimary agents "Editor session closed."
   mapM_ denyChild (map snd (approvals s))
   mapM_ preparationCancel (promptPreparation s)
   readIORef (conversationEditors s) >>= mapM_ (Editor.retireDraftRef . Editor.mountDraft . conversationEditorMount)
-  mapM_ (\(FileCapture _ worker) -> cancel worker) (fileCaptures s)
+  mapM_ captureCancel (fileCaptures s)
   mapM_ (wait . snd) (retiringRequests s)
   mapM_ cancel (childCancels s)
   mapM_ (cancel . snd) (agentControls s)
   mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
-  mapM_ A.stopClient (connection s)
+  mapM_ cancel (terminalPoll s)
+  mapM_ AH.driverStop (connection s)
 
-launchValue :: A.ProviderLaunch -> Value
-launchValue launch=object ["executable" .= A.executable launch,"arguments" .= A.arguments launch,"environment" .= M.fromList (A.environment launch)]
+launchValue :: ProviderLaunch -> Value
+launchValue launch=object ["executable" .= executable launch,"arguments" .= arguments launch,"environment" .= M.fromList (environment launch)]
 
-decodeLaunch :: BS.ByteString -> Either String A.ProviderLaunch
+decodeLaunch :: BS.ByteString -> Either String ProviderLaunch
 decodeLaunch bytes=do
   value<-eitherDecodeStrict' bytes
   maybe (Left "Expected executable, arguments array and environment object.") Right (parseMaybe (withObject "agent" $ \o ->
-    A.ProviderLaunch <$> o .: "executable" <*> o .:? "arguments" .!= [] <*> (M.toList <$> (o .:? "environment" .!= M.empty))) value) >>= validateLaunch
+    ProviderLaunch <$> o .: "executable" <*> o .:? "arguments" .!= [] <*> (M.toList <$> (o .:? "environment" .!= M.empty))) value) >>= validateLaunch
 
-validateLaunch :: A.ProviderLaunch -> Either String A.ProviderLaunch
+validateLaunch :: ProviderLaunch -> Either String ProviderLaunch
 validateLaunch launch
-  | null (A.executable launch) = Left "Enter an executable."
-  | any (elem '\0') (A.executable launch:A.arguments launch++concatMap (\(k,v)->[k,v]) (A.environment launch)) = Left "NUL bytes are not valid in process arguments."
-  | any (\(key,_) -> null key || '=' `elem` key) (A.environment launch) = Left "Invalid environment variable name."
+  | null (executable launch) = Left "Enter an executable."
+  | any (elem '\0') (executable launch:arguments launch++concatMap (\(k,v)->[k,v]) (environment launch)) = Left "NUL bytes are not valid in process arguments."
+  | any (\(key,_) -> null key || '=' `elem` key) (environment launch) = Left "Invalid environment variable name."
   | otherwise = Right launch
-
-parseLaunch :: Text -> Text -> Text -> Either String A.ProviderLaunch
-parseLaunch command args env = do
-  arguments<-eitherDecodeStrict' (TE.encodeUtf8 args)
-  environment<-eitherDecodeStrict' (TE.encodeUtf8 env)
-  validateLaunch (A.ProviderLaunch (T.unpack (T.strip command)) arguments (M.toList environment))
 
 -- | Consume conversation effects and delegate unrelated effects to the next interpreter.
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
@@ -298,18 +334,6 @@ conversationEffects runtime@(ConversationState _ ref _ _) fallback original effe
       updated<-applyConversationSession runtime request d
       syncConversationAgent runtime
       pure (False,updated)
-    apply (_,d) (AgentAction "edit-context" ("0":scope:_)) = do
-      state<-readIORef ref
-      root<-if isNothing (connection state) then B.resolveBuildRoot d else pure (project state)
-      path<-if scope=="0" then permissionConfigPath else projectConfigPath root
-      -- The existing editor supplies multiline editing, save and undo.
-      loaded<-readAgentContextAt path
-      result<-case loaded of Left err->pure (Left err); Right text->writeAgentContextAt path text
-      case result of
-        Left err -> pure (False,message "Agent Context" [err] d)
-        Right () -> do
-          (quit,opened)<-fallback d {guestPrivatePaths=path:guestPrivatePaths d} [ReadPath path]
-          pure (quit,opened {status="Edit [editor.agent] context; save to apply with the next query or steer."})
     apply (_,d) (AgentAction action values) = do
       updated<-perform runtime action values d
       syncConversationAgent runtime
@@ -358,7 +382,7 @@ perform runtime@(ConversationState _ ref _ _) action values d=do
       | otherwise->performPrimary runtime action values d
 
 performPrimary :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
-performPrimary runtime@(ConversationState directory ref consoles _) action values original = do
+performPrimary runtime@(ConversationState _ ref consoles _) action values original = do
   selected<-if action=="show" then ensureConversationEditor runtime "" "Primary" original else pure original
   d<-if action `elem` ["cancel","configure"] then cancelQuestion runtime "Question cancelled." selected else pure selected
   previous<-readIORef ref
@@ -430,33 +454,11 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
             paint False next d {chatQuestion=Nothing,status="Answer submitted.",agentQueued=queryCount "" queued}
     ("question-cancel",[token]) | Just q<-chatQuestion d,token==T.pack (show (questionToken q)) ->
       cancelQuestion runtime "Question cancelled by user." d
-    ("context",_) -> pure d {dialog=Just (Dialog "Agent Context" (AgentDialog "edit-context")
-      [Radio "Scope" ["Global","Project"] 1] 0 ["Edit","Cancel"]
-      ["Edit [editor.agent] context in the selected TOML file.","Use triple quotes for multiple lines. Save before sending.","Project context follows global context; permissions do not change."])}
-    ("options",_) -> pure d {dialog=Just (Dialog "Agents" (AgentDialog "configure")
-      [input "Executable" (T.pack (A.executable (provider s))),input "Arguments (JSON array)" (jsonText (A.arguments (provider s))),
-       input "Environment (JSON object)" (jsonText (M.fromList (A.environment (provider s))))] 0 ["OK","Cancel"]
-      ["ACP stdio provider. Arguments are passed without a shell."])}
-    ("configure",_:command:args:env:_) -> case parseLaunch command args env of
-      Left err -> pure (message "Invalid agent configuration" (wrapMessage (T.pack err)) d)
-      Right config -> do
-        result<-persist (directory </> "agents.json") (launchValue config)
-        case result of
-          Left err -> pure (message "Cannot save configuration" (wrapMessage err) d)
-          Right () -> do
-            mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
-            AR.failPendingPrimary (conversationAgents runtime) "Agent configuration changed."
-            mapM_ denyChild (map snd (approvals s))
-            retired<-retireRequests ref
-            mapM_ A.stopClient (connection s)
-            writeIORef ref retired {provider=config,connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
-            pure d {status="Agent configuration saved."}
     ("show",_) -> do
       modifyIORef' ref (\state -> state {deferredApproval=False})
       -- A recovered transcript belongs to the checkpoint until a provider
       -- connects. Opening its window must not repaint it from empty state.
       ensureEditorWithState True s "" "Primary" d
-    ("copy",_) -> pure d {status="Conversation copy requires its presentation owner."}
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)),not (primaryBusy s) ->
       submitPrimaryPrompt runtime s Nothing prompt (selectionFlag=="true",fileFlag=="true",diagnosticFlag=="true") d
     ("cancel",_) -> do
@@ -468,9 +470,15 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
           retained=filter child (approvals s)
           keepDialog=maybe False (`elem` map fst retained) (presented s)
       mapM_ (C.killConsole consoles) (S.toList (ownedTerminals s))
-      forM_ (connection s) $ \client -> do
-        forM_ (session s) $ \sid -> A.notify client "session/cancel" (object ["sessionId" .= sid])
-        mapM_ (cancelApproval client . snd) (filter (not . child) (approvals s))
+      mapM_ (cancelApproval . snd) (filter (not . child) (approvals s))
+      forM_ (promptPreparation s) $ \preparation->case preparation of
+        SendingPrompt _ submission _ _ _ _->retireProviderSubmission submission
+        SteeringPrompt submission _ _ _ _->retireProviderSubmission submission
+        _->pure ()
+      mapM_ (AR.retireProviderCalls (conversationAgents runtime)) (connectionIdentity s)
+      case activeTurn s of
+        Just turn->cancelProviderTurn turn
+        Nothing->mapM_ AH.driverCancel (connection s)
       retired<-retireRequests ref
       writeIORef ref retired {pending=M.map (\phase->if phase==Prompting then CancellingPrompt else phase) (pending retired),queuedPrompt=Nothing,approvals=retained,presented=if keepDialog then presented s else Nothing,deferredApproval=False}
       -- Context preparation has no provider prompt whose response could release
@@ -480,7 +488,6 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       pure (if keepDialog then d else dismissPermission d) {status="Cancellation requested."}
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
-  where input label text=Input label text (T.length text)
 
 -- | Capture only small session/provider/configuration identities at human menu
 -- dispatch. The returned private prefill is for a private form; capture starts
@@ -492,12 +499,98 @@ captureConversationSession (ConversationState _ ref _ agents) d=do
     then pure (Left unavailableConversation)
     else if primaryBusy s then pure (Left "Cancel the current reply before changing sessions.") else do
       launch<-makeStableName =<< evaluate (provider s)
-      client<-traverse (\value->makeStableName =<< evaluate value) (connection s)
+      let client=connectionIdentity s
       config<-either (const Nothing) (Just . fst) <$> AH.agentConfiguration (AR.agentHub agents) (AR.primaryAgent agents) >>= traverse evaluate
       sid<-traverse evaluate (session s)
       receipt<-evaluate (ConversationSessionReceipt (sessionIdentity s) (AR.primaryAgent agents) launch client sid config)
       target<-evaluate (Session.ConversationTarget receipt (T.null (conversationTarget d)) (maybe "" (\(_,_,value)->value) (lastSession s)))
       pure (Right target)
+
+-- | Human operation capture retains only small owner keys, private launch
+-- prefill and an immutable transcript read handle for the selected view.
+captureConversationOperation :: ConversationState -> Desktop -> IO (Either Text (Session.ConversationOperationTarget ConversationSessionReceipt))
+captureConversationOperation (ConversationState _ ref _ _) d=do
+  s<-readIORef ref
+  if questionsClosed s then pure (Left unavailableConversation) else if maybe False humanPreparation (promptPreparation s) then pure (Left "A conversation options operation is pending.") else do
+    launch<-evaluate (provider s)
+    identity<-makeStableName launch
+    let target=T.copy (conversationTarget d)
+        root=if isNothing (connection s) then startingDirectory d else project s
+        serial=fst (clipboardExport d)+1
+        copy=do
+          view<-M.lookup target (conversationViews d)
+          reference<-conversationBodyRef view
+          case conversationSource view of
+            Just source->Just (ConversationTranscriptCopy reference target source serial)
+            Nothing->(\logical->ConversationLogicalCopy reference target logical serial) <$> conversationLogical view
+    _<-evaluate (T.length target+length root+length (executable launch)+sum (map length (arguments launch))+sum [length name+length value | (name,value)<-environment launch])
+    copied<-traverse evaluate copy
+    sid<-traverse evaluate (session s)
+    receipt<-evaluate (ConversationOperationReceipt (sessionIdentity s) identity (connectionIdentity s) sid root target copied)
+    captured<-evaluate (Session.ConversationOperationTarget receipt launch (not (primaryBusy s)))
+    pure (Right captured)
+
+humanPreparation :: PromptPreparation -> Bool
+humanPreparation PreparingHuman{}=True
+humanPreparation _=False
+
+operationOwnerCurrent :: ConversationSessionReceipt -> State -> IO Bool
+operationOwnerCurrent (ConversationOperationReceipt owner expectedLaunch expectedClient expectedSession _ _ _) s=do
+  launch<-makeStableName =<< evaluate (provider s)
+  pure (not (questionsClosed s) && owner==sessionIdentity s && expectedLaunch==launch && expectedClient==connectionIdentity s && expectedSession==session s)
+operationOwnerCurrent _ _=pure False
+
+operationCurrent :: ConversationSessionReceipt -> State -> Desktop -> IO Bool
+operationCurrent receipt@(ConversationOperationReceipt _ _ _ _ _ target _) s d=do
+  current<-operationOwnerCurrent receipt s
+  pure (current && target==conversationTarget d && dialog d==Nothing)
+operationCurrent _ _ _=pure False
+
+data HumanResult = HumanProvider !ProviderLaunch | HumanContext !FilePath !Document
+
+prepareHuman :: FilePath -> FilePath -> Session.ConversationRequest ConversationSessionReceipt -> IO (Either Text HumanResult)
+prepareHuman directory root request=case request of
+  Session.ConfigureConversation _ launch->case validateLaunch launch of
+    Left err->pure (Left (T.pack err))
+    Right checked->fmap (HumanProvider checked <$) (persist (directory </> "agents.json") (launchValue checked))
+  Session.OpenConversationContext _ scope->do
+    base<-B.resolveBuildRootFrom root
+    path<-if scope==Session.GlobalContext then permissionConfigPath else projectConfigPath base
+    loaded<-readAgentContextAt path
+    saved<-case loaded of Left err->pure (Left err);Right text->writeAgentContextAt path text
+    case saved of
+      Left err->pure (Left err)
+      Right ()->do
+        opened<-Files.loadFile path
+        case opened of
+          Left err->pure (Left (T.pack err))
+          Right (file,buffer)->do
+            doc<-evaluate ((newDocument buffer (Just file)) {documentPrivate=True})
+            pure (Right (HumanContext (filePath file) doc))
+  _->pure (Left "Unsupported prepared human operation.")
+
+applyConversationOperation :: ConversationState -> Session.ConversationRequest ConversationSessionReceipt -> Desktop -> IO Desktop
+applyConversationOperation runtime@(ConversationState directory ref _ _) request d=do
+  s<-readIORef ref
+  let receipt=case request of Session.NewConversation r->r;Session.ResumeConversation r _->r;Session.OpenConversation r->r;Session.ConfigureConversation r _->r;Session.OpenConversationContext r _->r;Session.CopyRawConversation r->r
+  current<-operationCurrent receipt s d
+  if not current then pure d {status="Conversation operation expired; invoke it again."} else case request of
+    Session.OpenConversation (ConversationOperationReceipt _ _ _ _ _ target _) | not (T.null target)->showAgentHistory runtime (AH.AgentId target) d
+    Session.OpenConversation _->do
+      shown<-ensureConversationEditor runtime "" "Primary" d
+      ensureEditorWithState True s "" "Primary" (selectConversationView "" "Primary" shown)
+    Session.CopyRawConversation _->pure d {status="Conversation copy requires its presentation owner."}
+    Session.ConfigureConversation{} | primaryBusy s->pure d {status="Cancel the current reply before changing agent configuration."}
+    _ | not (isNothing (promptPreparation s))->pure d {status="Wait for the current preparation before changing conversation options."}
+      | ConversationOperationReceipt _ _ _ _ root _ _<-receipt->do
+          -- This owner check admits the exact captured filesystem operation.
+          -- The single preparation slot prevents another options operation from
+          -- replacing it. Provider adoption follows this owner; only context
+          -- presentation also follows the original focus.
+          worker<-async (prepareHuman directory root request)
+          modifyIORef' ref (\state->state {promptPreparation=Just (PreparingHuman receipt worker)})
+          pure d {status="Preparing conversation options…"}
+      | otherwise->pure d
 
 -- | Capture the selected agent and geometry without retaining a desktop or
 -- provider metadata. The original configuration governs opening and every
@@ -524,14 +617,17 @@ captureConversationChoices (ConversationState _ _ _ agents) d=case activeWindow 
 -- is serialized with provider ticks; a stale form never cancels a question,
 -- retires a request or starts a different provider incarnation.
 applyConversationSession :: ConversationState -> Session.ConversationRequest ConversationSessionReceipt -> Desktop -> IO Desktop
-applyConversationSession runtime@(ConversationState _ ref consoles agents) request original=do
+applyConversationSession runtime request original=case request of
+  Session.NewConversation receipt->changeConversationSession runtime receipt Nothing original
+  Session.ResumeConversation receipt sid->changeConversationSession runtime receipt (Just sid) original
+  _->applyConversationOperation runtime request original
+
+changeConversationSession :: ConversationState -> ConversationSessionReceipt -> Maybe Text -> Desktop -> IO Desktop
+changeConversationSession runtime@(ConversationState _ ref _ agents)
+    (ConversationSessionReceipt owner primary expectedLaunch expectedClient expectedSession expectedConfig) resume original=do
   s<-readIORef ref
-  let (receipt,resume)=case request of
-        Session.NewConversation target->(target,Nothing)
-        Session.ResumeConversation target sid->(target,Just sid)
-      ConversationSessionReceipt owner primary expectedLaunch expectedClient expectedSession expectedConfig=receipt
   launch<-makeStableName =<< evaluate (provider s)
-  client<-traverse (\value->makeStableName =<< evaluate value) (connection s)
+  let client=connectionIdentity s
   config<-either (const Nothing) (Just . fst) <$> AH.agentConfiguration (AR.agentHub agents) (AR.primaryAgent agents)
   let current=not (questionsClosed s) && owner==sessionIdentity s && primary==AR.primaryAgent agents &&
         launch==expectedLaunch && client==expectedClient && session s==expectedSession && config==expectedConfig &&
@@ -544,11 +640,11 @@ applyConversationSession runtime@(ConversationState _ ref consoles agents) reque
         Just _->pure original
       d<-cancelQuestion runtime "Question cancelled." selected
       AR.failPendingPrimary agents "Agent session changed."
-      mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
-      retired<-retireRequests ref
-      mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=Transcript.emptyPrimaryTranscript,toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=maybe M.empty (const (sourceSnapshots d)) resume,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      retired<-retireProviderResources runtime "Agent session changed."
+      writeIORef ref retired {connection=Nothing,connectionIdentity=Nothing,currentTurn=Nothing,completedTurn=Nothing,activeTurn=Nothing,queuedDelivery=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=Transcript.emptyPrimaryTranscript,toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=maybe M.empty (const (sourceSnapshots d)) resume,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime resume d
+
+changeConversationSession _ _ _ original=pure original {status="Invalid conversation session receipt."}
 
 -- Direct prompts and already-enqueued queries carry no draft consumption right.
 submitPrimaryPrompt :: ConversationState -> State -> Maybe AR.PrimaryControl -> Text -> (Bool,Bool,Bool) -> Desktop -> IO Desktop
@@ -564,14 +660,9 @@ submitPrimaryPrompt runtime@(ConversationState _ ref _ _) s control prompt (sele
 isPrompt :: Phase -> Bool
 isPrompt Prompting=True
 isPrompt CancellingPrompt=True
-isPrompt _=False
-
-isSteering :: Phase -> Bool
-isSteering Steering{}=True
-isSteering _=False
 
 steeringPending :: State -> Bool
-steeringPending s=any isSteering (M.elems (pending s)) || maybe False preparingSteer (promptPreparation s)
+steeringPending s=maybe False preparingSteer (promptPreparation s)
 
 busy :: State -> Bool
 busy s=not (M.null (pending s)) || not (isNothing (queuedPrompt s)) || not (isNothing (promptPreparation s))
@@ -582,32 +673,30 @@ primaryBusy :: State -> Bool
 primaryBusy s=busy s || M.member "" (agentControls s)
 
 start :: ConversationState -> Maybe Text -> Desktop -> IO Desktop
-start (ConversationState _ ref _ _) resume d = mask_ $ do
+start (ConversationState _ ref _ agents) resume d=mask_ $ do
   s<-readIORef ref
-  if isNothing (conversationPresenter s) || isNothing (primaryInput s) then pure d {status=unavailableConversation}
-  else do
-    let (selectedLaunch,selectedDirectory)=case (resume,lastSession s) of
-          (Just wanted,Just (savedProvider,savedDirectory,savedId)) | wanted==savedId -> (savedProvider,savedDirectory)
-          _ -> (provider s,maybe (startingDirectory d) treeRoot (sideTree d))
-    -- Project the captured fields before the worker escapes; it needs neither
-    -- the source Desktop nor the rest of the conversation state.
-    launch<-evaluate selectedLaunch
-    directory<-evaluate selectedDirectory
-    -- Inherit the mask through Async result publication: a successfully acquired
-    -- client belongs either to the result or to its exception cleanup. Only the
-    -- directory lookup is unmasked before a client exists. ACP owns cancellation
-    -- safety within process acquisition; request failure closes the acquired peer.
-    worker<-asyncWithUnmask $ \unmask->do
-      root<-unmask (canonicalizePath directory)
-      client<-A.startClient launch root
-      (do
-        ident<-A.request client "initialize" (object ["protocolVersion" .= (1::Int),"clientInfo" .= object ["name" .= ("hide"::Text),"version" .= ("0.1.0.0"::Text)],
-          "clientCapabilities" .= object ["fs" .= object ["readTextFile" .= True,"writeTextFile" .= True],"terminal" .= Terminal.terminalAvailable]])
-        pure (root,client,ident)) `onException` A.stopClient client
-    -- Input captured while a saved provider starts belongs to that selected
-    -- launch, not the previously configured provider.
-    writeIORef ref s {provider=launch,promptPreparation=Just (StartingClient resume worker)}
-    pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
+  case providerFactory s of
+    Nothing->pure d {status="Agent provider plugin is unavailable; draft kept."}
+    Just _ | isNothing (conversationPresenter s) || isNothing (primaryInput s)->pure d {status=unavailableConversation}
+    Just acquire->do
+      let (selectedLaunch,selectedDirectory)=case (resume,lastSession s) of
+            (Just wanted,Just (savedProvider,savedDirectory,savedId)) | wanted==savedId->(savedProvider,savedDirectory)
+            _->(provider s,maybe (startingDirectory d) treeRoot (sideTree d))
+      launch<-evaluate (forceLaunch selectedLaunch)
+      directory<-evaluate (force selectedDirectory)
+      identity<-newProviderIdentity
+      worker<-asyncWithUnmask $ \unmask->do
+        root<-unmask (canonicalizePath directory)
+        endpoints<-AR.primaryServers agents
+        let request=AH.StartRequest (AR.primaryAgent agents) AH.Human
+              (AH.SpawnSpec "Primary" "Conversation" root AH.Shared AH.Fresh Nothing Nothing) Nothing resume
+        acquired<-acquire PrimaryProvider identity launch endpoints "" (AR.primaryProviderHost agents identity root)
+          request (AR.publishProviderEvent agents identity)
+        pure ((\driver->(root,driver)) <$> acquired)
+      writeIORef ref s {provider=launch,connectionIdentity=Just identity,promptPreparation=Just (StartingClient resume worker)}
+      pure d {status="Connecting to agent provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
+  where
+    forceLaunch launch=force (executable launch,arguments launch,environment launch) `seq` launch
 
 restorePrimaryDraft :: Text -> Desktop -> Desktop
 restorePrimaryDraft text d=case M.lookup "" (conversationViews d) of
@@ -642,81 +731,168 @@ beginPromptPreparation ref steering text control d = mask $ \restore -> do
       pure d {status="Preparing agent context...",agentReplying=True}
 
 pollPromptPreparation :: ConversationState -> Desktop -> IO Desktop
-pollPromptPreparation runtime@(ConversationState _ ref _ _) d = do
+pollPromptPreparation runtime@(ConversationState _ ref _ agents) d=do
   s<-readIORef ref
   case promptPreparation s of
-    Nothing -> if isNothing (queuedPrompt s) then pollQueuedPrimaryEditor runtime s d else sendQueued runtime d
-    Just (StartingClient resume worker)->do
-      result<-poll worker
-      case result of
-        Nothing->pure d
-        Just outcome->mask_ $ case outcome of
+    Nothing->if isNothing (queuedPrompt s) then pollQueuedPrimaryEditor runtime s d else sendQueued runtime d
+    Just (StartingClient _ worker)->poll worker >>= \ready->case ready of
+      Nothing->pure d
+      Just result->case either (const (Left "Could not start the primary provider.")) id result of
+        Left err->do
+          mapM_ (AR.rejectPrimaryControl err) (snd =<< queuedPrompt s)
+          mapM_ (AR.retireProviderCalls agents) (connectionIdentity s)
+          writeIORef ref s {promptPreparation=Nothing,queuedPrompt=Nothing,connectionIdentity=Nothing}
+          completeConversationDelivery runtime (Left err)
+          pure (message "Cannot start agent" (wrapMessage err) d {status=err,agentReplying=False})
+        Right (root,driver)->do
+          let sid=AH.driverSessionKey driver; caps=AH.driverCapabilities driver
+          writeIORef ref s {connection=Just driver,session=Just sid,project=root,promptPreparation=Nothing,
+            deliveredContext=Nothing,agentCapabilities=caps,lastAgentSync=Nothing,
+            lastSession=Just (provider s,root,sid)}
+          saved<-persist (resumeRecordPath s) (object ["provider" .= launchValue (provider s),"cwd" .= root,"sessionId" .= sid])
+          syncConversationAgent runtime
+          sendQueued runtime d {agentSettings=publicAgentSettings caps,agentSteering=AH.supportsSteering caps,
+            status=either ("Session opened; could not save ID: "<>) (const "Conversation ready.") saved}
+    Just (ContextPrompt steering text control worker)->poll worker >>= \ready->case ready of
+      Nothing->pure d
+      Just result->do
+        modifyIORef' ref (\state->state {promptPreparation=Nothing})
+        let prepared=either (const (Left "Could not prepare agent context.")) id result
+        current<-maybe (pure True) (\request->AR.primaryControlCurrent agents request (connectionIdentity s) (session s)) control
+        case (connection s,prepared) of
+          (Just driver,Right (query:extra,context)) | current && (not steering || Prompting `elem` M.elems (pending s))->mask_ $ do
+            submission<-case (steering,control,queuedDelivery s) of
+              (True,Just (AR.SteerPrimary _ _ _ original _),_)->pure original
+              (False,_,Just delivery)->pure (AR.deliverySubmission delivery)
+              _->newProviderSubmission
+            if steering then case control of
+              Just request->do
+                sending<-async (AH.driverSteer driver (AH.HubMessage 0 AH.Human query True) extra submission)
+                modifyIORef' ref (\state->state {promptPreparation=Just (SteeringPrompt submission text context request sending)})
+                pure d {status="Steering request sent; draft kept until accepted."}
+              Nothing->retireProviderSubmission submission >> pure d
+            else do
+              turn<-maybe newProviderTurnId (pure . AR.deliveryTurn) (queuedDelivery s)
+              sending<-async (AH.driverDeliver driver turn (AH.HubMessage 0 AH.Human query True) extra submission)
+              modifyIORef' ref (\state->state {promptPreparation=Just (SendingPrompt turn submission text context control sending),
+                currentTurn=Just turn,completedTurn=Nothing})
+              pure d {status="Sending agent query...",agentReplying=True}
+          _->do
+            let err=either id (const "Agent control expired; draft kept.") prepared
+            mapM_ (AR.rejectPrimaryControl err) control
+            unless steering $ do
+              modifyIORef' ref (\state->state {queuedPrompt=Nothing})
+              completeConversationDelivery runtime (Left err)
+            pure (if steering || not (isNothing control) then d else restoreEmptyPrimaryDraft text d) {status=err}
+    Just (SendingPrompt turn submission text context control worker)->poll worker >>= \ready->case ready of
+      Nothing->pure d
+      Just result->do
+        retireProviderSubmission submission
+        case either (const (Left "Provider send interrupted; draft kept.")) id result of
           Left err->do
-            mapM_ (AR.rejectPrimaryControl "Could not start the primary provider.") (snd =<< queuedPrompt s)
-            writeIORef ref s {promptPreparation=Nothing,queuedPrompt=Nothing}
-            pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
-          Right (root,client,ident)->do
-            -- Transfer ownership in one state update. Retirement no longer owns
-            -- this completed result once the connection becomes current.
-            writeIORef ref s {connection=Just client,project=root,promptPreparation=Nothing,
-              deliveredContext=Nothing,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,
-              lastAgentSync=Nothing,pending=M.singleton ident (Initializing resume)}
-            pure d
-    Just (ContextPrompt steering text control worker) -> do
-      result<-poll worker
-      case result of
-        Nothing -> pure d
-        Just outcome -> do
-          modifyIORef' ref (\state -> state {promptPreparation=Nothing})
-          let prepared=either (const (Left "Could not prepare agent context.")) id outcome
-          case (connection s,session s,prepared) of
-            (_,_,Left err) -> do
-              mapM_ (AR.rejectPrimaryControl err) control
-              unless steering $ do
-                modifyIORef' ref (\state -> state {queuedPrompt=Nothing})
-                completeConversationDelivery runtime (Left err)
-              pure (if steering || not (isNothing control) then d else restoreEmptyPrimaryDraft text d) {status=err}
-            (Just client,Just sid,Right (blocks,context))
-              | steering && Prompting `notElem` M.elems (pending s) -> do
-                  mapM_ (AR.rejectPrimaryControl "The turn ended while preparing steering; draft kept.") control
-                  pure d {status="The turn ended while preparing steering; draft kept."}
-              | otherwise -> do
-                current<-maybe (pure True) (\request->AR.primaryControlCurrent (conversationAgents runtime) request (connection s) (session s)) control
-                if not current then do
-                  mapM_ (AR.rejectPrimaryControl "Agent control expired; draft kept.") control
-                  unless steering (modifyIORef' ref (\state->state {queuedPrompt=Nothing}))
-                  pure d {status="Agent control expired; draft kept."}
-                else do
-                  let method=if steering then "_session/steering" else "session/prompt"
-                      meta=["_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]] | steering]
-                  ident<-A.request client method (object (["sessionId" .= sid,"prompt" .= blocks]++meta))
-                  modifyIORef' ref (\state -> state {queuedPrompt=if steering then queuedPrompt state else Nothing,
-                    pending=M.insert ident (if steering then maybe Prompting (Steering text) control else Prompting) (pending state),deliveredContext=Just context,
-                    promptReply=if steering then promptReply state else Just (PromptReply ident [])})
-                  unless steering $ forM_ control $ \request->case request of
-                    AR.QueryPrimary _ _ _ _ _ _ reply->void (tryPutMVar reply (Right ()))
-                    _->pure ()
-                  pure d {status=if steering then "Steering request sent; draft kept until accepted." else "Agent is replying...",agentReplying=True}
-            _ -> do
-              mapM_ (AR.rejectPrimaryControl "Primary provider disconnected; draft kept.") control
-              unless steering (modifyIORef' ref (\state->state {queuedPrompt=Nothing}))
-              pure d
+            mapM_ (AR.rejectPrimaryControl err) control
+            modifyIORef' ref (\state->state {promptPreparation=Nothing,queuedPrompt=Nothing,currentTurn=Nothing,completedTurn=Nothing,activeTurn=Nothing})
+            completeConversationDelivery runtime (Left err)
+            pure (if isNothing control then restoreEmptyPrimaryDraft text d else d) {status=err}
+          Right receipt | providerTurnId receipt==turn->do
+            modifyIORef' ref (\state->state {promptPreparation=Nothing,queuedPrompt=Nothing,queuedDelivery=Nothing,
+              activeTurn=Just receipt,pending=M.singleton 1 Prompting,deliveredContext=Just context})
+            AR.acknowledgePrimaryDelivery agents
+            forM_ control $ \request->case request of AR.QueryPrimary _ _ _ _ _ _ reply->void (tryPutMVar reply (Right ())); _->pure ()
+            pure d {status="Agent is replying...",agentReplying=True}
+          Right receipt->cancelProviderTurn receipt >> pure d
+    Just (SteeringPrompt submission text context control worker)->poll worker >>= \ready->case ready of
+      Nothing->pure d
+      Just result->do
+        retireProviderSubmission submission
+        modifyIORef' ref (\state->state {promptPreparation=Nothing})
+        case either (const (Left "Steering interrupted; draft kept.")) id result of
+          Left err->AR.rejectPrimaryControl err control >> pure d {status=err}
+          Right value->do
+            modifyIORef' ref (\state->appendPrimary [PrimaryMessage UserSpeaker (composerMarkdown text)] state {deliveredContext=Just context})
+            case control of AR.SteerPrimary _ _ _ _ reply->void (tryPutMVar reply (Right value)); _->pure ()
+            pure d {status="Follow-up added to the active turn."}
+    Just (PreparingHuman receipt worker)->poll worker >>= \ready->case ready of
+      Nothing->pure d
+      Just outcome->do
+        modifyIORef' ref (\state->state {promptPreparation=Nothing})
+        latest<-readIORef ref
+        ownerCurrent<-operationOwnerCurrent receipt latest
+        presentationCurrent<-operationCurrent receipt latest d
+        if not ownerCurrent then pure d {status="Conversation options were prepared; provider ownership changed before adoption."} else case either (Left . T.pack . show) id outcome of
+          Left err->pure d {status=err}
+          Right (HumanContext _ _) | not presentationCurrent->pure d {status="Agent context file prepared; the current view was kept."}
+          Right (HumanContext path doc)->do
+            let protected=d {guestPrivatePaths=path:guestPrivatePaths d}
+                opened=case find (\(_,document)->fmap filePath (documentFile document)==Just path) (M.toList (buffers d)) of
+                  Just (bid,_)->case find ((==Just bid).bufferId) (windows d) of
+                    Just window->focusWindow (windowId window) protected {buffers=M.adjust (\document->document {documentPrivate=True}) bid (buffers protected)}
+                    Nothing->protected
+                  Nothing->let added=addDocument (documentFile doc) (documentBuffer doc) protected in
+                    case activeWindow added >>= bufferId of Just bid->added {buffers=M.insert bid doc (buffers added)};Nothing->added
+            pure opened {status="Edit [editor.agent] context; save to apply with the next query or steer."}
+          Right (HumanProvider launch)->do
+            cancelled<-performPrimary runtime "cancel" [] d
+            retired<-retireProviderResources runtime "Agent configuration changed."
+            writeIORef ref retired {provider=launch,connection=Nothing,connectionIdentity=Nothing,currentTurn=Nothing,completedTurn=Nothing,activeTurn=Nothing,queuedDelivery=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False}
+            pure cancelled {status="Agent configuration saved."}
+    Just (Configuring control worker)->poll worker >>= \ready->case ready of
+      Nothing->pure d
+      Just result->do
+        modifyIORef' ref (\state->state {promptPreparation=Nothing})
+        case either (const (Left "Configuration interrupted.")) id result of
+          Left err->AR.rejectPrimaryControl err control >> pure d {status=err}
+          Right caps->do
+            modifyIORef' ref (\state->state {agentCapabilities=caps})
+            case control of AR.ConfigurePrimary _ _ _ reply->void (tryPutMVar reply (Right caps)); _->pure ()
+            pure d {agentSettings=publicAgentSettings caps,contextMenu=Nothing,status="Conversation settings updated."}
+
+-- Consume the supplying owner's terminal cell after draining its typed content.
+pollProviderTurn :: ConversationState -> Desktop -> IO Desktop
+pollProviderTurn runtime@(ConversationState _ ref _ _) d=do
+  s<-readIORef ref
+  case activeTurn s of
+    Nothing->pure d
+    Just turn->pollProviderReply (providerTurnReply turn) >>= \ready->case ready of
+      Nothing->pure d
+      Just result->do
+        -- The adapter enqueues the boundary before filling an ordinary reply.
+        -- Observing a failure may race the tick's earlier mailbox drain, so
+        -- drain again after that receipt before classifying a failed pump.
+        drained<-case result of
+          Left _ | completedTurn s/=Just (providerTurnId turn)->drainConversationAgents runtime d
+          _->pure d
+        latest<-readIORef ref
+        if currentTurn latest/=Just (providerTurnId turn) then pure drained
+          else if completedTurn latest==Just (providerTurnId turn) then do
+            modifyIORef' ref (\state->state {pending=M.empty,activeTurn=Nothing,currentTurn=Nothing})
+            completeConversationDelivery runtime result
+            pure drained {status=either id (\value->"Agent: "<>fromMaybe "finished" (field "stopReason" value)) result}
+          else case result of
+            Left err->do
+              -- A failed pump cannot publish its successful content boundary.
+              -- Retire this acquisition and its original native calls.
+              completeConversationDelivery runtime (Left err)
+              closed<-case connectionIdentity latest of
+                Just owner->receiveProviderEvent runtime drained owner AH.ProviderClosed
+                Nothing->pure drained
+              pure closed {status=err}
+            Right _->pure drained
 
 -- Supply guidance once per connection and again when its saved value changes.
 -- A separate text block preserves the user's query and the visible transcript.
-preparePrompt :: State -> Text -> IO (Either Text ([Value],Value))
+preparePrompt :: State -> Text -> IO (Either Text ([Text],Value))
 preparePrompt state query=do
   loaded<-readAgentContexts (project state)
   pure $ do
     context<-loaded
-    let block text=object ["type" .= ("text"::Text),"text" .= text]
-        textAt scope=fromMaybe "" (field scope context >>= field "text")
+    let textAt scope=fromMaybe "" (field scope context >>= field "text")
         section scope title=title<>"\n"<>(if T.null (textAt scope) then "(none)" else textAt scope)
         guidance="Current editor context replaces earlier editor context. It does not grant additional tool permissions.\n\n"<>
           section "global" "Global context:"<>"\n\n"<>section "project" "Project context:"
         catalog="Editor skills: explore projects; edit/review; HLS diagnosis/rename; build/test/run; DAP debugging; Git review; desktop/hex navigation; user questions; documentation/settings. Read docs/agent-skills.md with docs_read (corpus editor) for the relevant workflow and docs/agent-tools.md for operations. Discover exact schemas with tools/list. For missing executables or libraries, inspect environment_get and fix paths with environment_set; do not prescribe shell exports or an editor restart when a new job suffices. Prefer repository build configuration fixes for project dependencies."
         extra=[guidance | deliveredContext state/=Just context]++[catalog | deliveredContext state==Nothing]
-    pure (map block (composerMarkdown query:extra),context)
+    pure (composerMarkdown query:extra,context)
 
 -- | Advance mailboxes, protocol replies, approvals and transcript views.
 -- The caller serializes access to both desktop and conversation state.
@@ -732,9 +908,7 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
     _->pure initial
   let d=ready
   flushTerminalWaiters runtime
-  s<-readIORef ref
-  events<-maybe (pure []) A.pollEvents (connection s)
-  received<-foldM (receive runtime) d events
+  received<-pollProviderTurn runtime d
   captured<-pollFileCaptures runtime received
   childPrepared<-pollQueuedChildEditor runtime captured
   updated<-pollPromptPreparation runtime childPrepared
@@ -756,7 +930,7 @@ tickConversation runtime@(ConversationState _ ref _ _) original = do
   -- Esc/Cancel of a permission dialog denies it; it must never leave the peer waiting.
   case presented current of
     Just token | not (isApprovalDialog token advanced) -> do
-      forM_ (lookup token (approvals current)) $ \approval -> denyChild approval >> mapM_ (\client -> cancelApproval client approval) (connection current)
+      forM_ (lookup token (approvals current)) $ \approval -> cancelApproval approval
       modifyIORef' ref (\state -> state {approvals=filter ((/=token).fst) (approvals state),presented=Nothing})
     _ -> pure ()
   laidOut<-revealQuestion runtime advanced
@@ -775,7 +949,7 @@ captureConversationSources (ConversationState _ ref _ agents) desktop=do
   state<-readIORef ref
   launch<-makeStableName =<< evaluate (provider state)
   sessionName<-traverse evaluate (session state)
-  primary<-traverse (\client->do ident<-makeStableName =<< evaluate client; evaluate (ident,sessionName)) (connection state)
+  primary<-traverse (\ident->evaluate (ident,sessionName)) (connectionIdentity state)
   views<-M.traverseWithKey (capture state launch primary) (conversationViews desktop)
   pure desktop {conversationViews=views}
   where
@@ -799,9 +973,7 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
   state<-readIORef ref
   launch<-makeStableName =<< evaluate (provider state)
   sessionName<-traverse evaluate (session state)
-  primary<-traverse (\client->do
-    ident<-makeStableName =<< evaluate client
-    evaluate (ident,sessionName)) (connection state)
+  primary<-traverse (\ident->evaluate (ident,sessionName)) (connectionIdentity state)
   expansion<-makeStableName =<< evaluate (toolExpansions state)
   fmap concat $ forM (M.toList (conversationViews desktop)) $ \(target,view)->case conversationBodyRef view of
     Nothing->pure []
@@ -901,154 +1073,44 @@ adoptConversationBodies runtime results desktop=do
                 when (T.null target) (modifyIORef' (case runtime of ConversationState _ owner _ _->owner) (\state->state {lastQuestion=bodyQuestionToken key}))
                 pure (if previousQuestion/=bodyQuestionToken key then ensureQuestionVisible presented else presented)
 
-receive :: ConversationState -> Desktop -> A.Event -> IO Desktop
-receive runtime@(ConversationState _ ref consoles _) d event = do
+-- The adapter owns protocol correlation. Host updates retain the original
+-- acquisition/turn identity and enter only through the existing runtime mailbox.
+receiveProviderEvent :: ConversationState -> Desktop -> ProviderIdentity -> AH.DriverEvent -> IO Desktop
+receiveProviderEvent runtime@(ConversationState _ ref _ agents) d owner event=do
   s<-readIORef ref
-  case event of
-    A.Disconnected reason -> do
+  if connectionIdentity s/=Just owner then pure d else case event of
+    AH.ProviderClosed->do
       cleared<-cancelQuestion runtime "Question requester disconnected." d
-      current<-readIORef ref
-      redact<-conversationRedactor runtime current
-      AR.failPendingPrimary (conversationAgents runtime) "Agent disconnected."
-      mapM_ denyChild (map snd (approvals s))
-      mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
-      retired<-retireRequests ref
-      writeIORef ref (appendPrimary [PrimaryDisconnect (redact reason)]
-        retired {transcript=transcript current,connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty})
+      AR.failPendingPrimary agents "Agent disconnected."
+      retired<-retireProviderResources runtime "Agent disconnected."
+      writeIORef ref (appendPrimary [PrimaryDisconnect "Agent disconnected."] retired
+        {connection=Nothing,connectionIdentity=Nothing,session=Nothing,pending=M.empty,
+         currentTurn=Nothing,completedTurn=Nothing,activeTurn=Nothing,queuedDelivery=Nothing,queuedPrompt=Nothing,
+         queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,
+         ownedTerminals=S.empty,terminalWaiters=M.empty})
       pure (dismissPermission cleared) {status="Agent disconnected.",agentSteering=False}
-    A.Response ident result -> do
-      writeIORef ref s {pending=M.delete ident (pending s)}
-      when (maybe False isPrompt (M.lookup ident (pending s))) (flushConversationChunks runtime)
-      case (M.lookup ident (pending s),result,connection s) of
-        (Nothing,_,_) -> pure d
-        (_,Left err,_) -> do
-          mapM_ (AR.rejectPrimaryControl "Agent request failed; draft kept.") (snd =<< queuedPrompt s)
-          redact<-conversationRedactor runtime s
-          when (maybe False isPrompt (M.lookup ident (pending s))) (completeConversationDelivery runtime (Left "Agent prompt failed."))
-          modifyIORef' ref (\state -> appendPrimary [PrimaryFailure (redactValue redact err)] state {queuedPrompt=Nothing,deliveredContext=Nothing})
-          case M.lookup ident (pending s) of
-            Just (Setting control)->AR.rejectPrimaryControl "Agent configuration failed." control
-            Just (Steering _ control)->AR.rejectPrimaryControl "Agent request failed; see Conversation." control
-            _->pure ()
-          pure d {status="Agent request failed; see Conversation."}
-        (Just (Initializing resume),Right value,Just client)
-          | field "protocolVersion" value /= Just (1::Int) -> do
-              A.stopClient client
-              mapM_ (AR.rejectPrimaryControl "Unsupported ACP protocol version.") (snd =<< queuedPrompt s)
-              modifyIORef' ref (\state -> state {queuedPrompt=Nothing})
-              pure d {status="Unsupported ACP protocol version."}
-          | otherwise -> do
-              let capabilities=fromMaybe Null (field "agentCapabilities" value)
-                  loadSupported=field "loadSession" capabilities==Just True
-                  resumeSupported=case field "sessionCapabilities" capabilities >>= field "resume" of Just (Object _) -> True; _ -> False
-                  method=case resume of Nothing -> "session/new"; Just _ | loadSupported -> "session/load"; _ -> "session/resume"
-              if resume/=Nothing && not loadSupported && not resumeSupported then do
-                A.stopClient client
-                mapM_ (AR.rejectPrimaryControl "This provider cannot resume sessions.") (snd =<< queuedPrompt s)
-                modifyIORef' ref (\state -> state {connection=Nothing,session=Nothing,queuedPrompt=Nothing})
-                pure d {status="This provider cannot resume sessions.",agentReplying=False,agentSteering=False}
-              else do
-                servers<-AR.primaryServers (conversationAgents runtime)
-                requestId<-A.request client method (object (["cwd" .= project s,"mcpServers" .= servers]++maybe [] (\sid->["sessionId" .= sid]) resume))
-                modifyIORef' ref (\state -> state {pending=M.insert requestId (Starting resume) (pending state),session=resume,agentInitialized=value})
-                pure d {status="Opening agent session...",agentSteering=(field "_meta" value >>= field "steering" >>= field "supported")==Just True}
-        (Just (Starting resumed),Right value,_) -> case field "sessionId" value <|> resumed of
-          Nothing -> do
-            mapM_ (AR.rejectPrimaryControl "Agent returned no session ID.") (snd =<< queuedPrompt s)
-            modifyIORef' ref (\state->state {queuedPrompt=Nothing})
-            pure d {status="Agent returned no session ID."}
-          Just sid -> do
-            modifyIORef' ref (\state -> state {session=Just sid,agentConfig=value,lastSession=Just (provider state,project state,sid)})
-            savedId<-persist (resumeRecordPath s) (object ["provider" .= launchValue (provider s),"cwd" .= project s,"sessionId" .= sid])
-            safeSettings<-publicAgentSettings runtime value
-            syncConversationAgent runtime
-            sendQueued runtime d {agentSettings=safeSettings,status=either ("Session opened; could not save ID: "<>) (const ("Session "<>sid)) savedId}
-        (Just (Setting control),Right value,_) -> do
-          modifyIORef' ref (\state -> state {agentConfig=value})
-          safeSettings<-publicAgentSettings runtime value
-          keys<-conversationKeys runtime s
-          case control of
-            AR.ConfigurePrimary _ _ _ reply->void (tryPutMVar reply (Right (AP.filterPrivateCapabilities keys (AP.parseCapabilities (agentInitialized s) value))))
-            _->pure ()
-          pure d {agentSettings=safeSettings,contextMenu=Nothing,status=if M.member "" (agentControls s) then "Updating conversation settings..." else "Conversation settings updated."}
-        (Just (Steering text control),Right value,_) -> case field "outcome" value :: Maybe Text of
-          Just "injected" -> do
-            modifyIORef' ref (appendPrimary [PrimaryMessage UserSpeaker (composerMarkdown text)])
-            case control of
-              AR.SteerPrimary _ _ _ reply->void (tryPutMVar reply (Right value))
-              _->pure ()
-            pure d {status="Follow-up added to the active turn."}
-          Just outcome | outcome `elem` ["promptRequired","failed"] -> do
-            AR.rejectPrimaryControl "Steering was not applied; the draft remains. Use Query to send it." control
-            modifyIORef' ref (\state->state {deliveredContext=Nothing})
-            pure d {status="Steering was not applied; the draft remains. Use Query to send it."}
-          _ -> do
-            AR.rejectPrimaryControl "Steering ownership was not confirmed; provider stopped. Draft kept; queued turns cancelled without replay." control
-            mapM_ A.stopClient (connection s)
-            stopped<-receive runtime d (A.Disconnected "Provider started an unowned steering turn or returned an unknown outcome.")
-            pure stopped {status="Steering ownership was not confirmed; provider stopped. Draft kept; queued turns cancelled without replay."}
-        (Just phase,Right value,_) | isPrompt phase -> do
-          current<-readIORef ref
-          let text=case promptReply current of Just (PromptReply request chunks) | request==ident->T.concat (reverse chunks); _->""
-          redact<-conversationRedactor runtime current
-          completeConversationDelivery runtime (Right (object ["text" .= redact text,"stopReason" .= fmap redact (field "stopReason" value :: Maybe Text)]))
-          pure d {status="Agent: "<>redact (fromMaybe "finished" (field "stopReason" value))}
-        _ -> pure d
-    A.Notification "session/update" params
-      | field "sessionId" params==session s || any isStarting (M.elems (pending s)) -> do
-          let update=fromMaybe Null (field "update" params)
-              kind=fromMaybe "" (field "sessionUpdate" update :: Maybe Text)
-          case kind of
-            "agent_message_chunk" -> appendReply "Agent" update
-            "user_message_chunk" -> appendReply "You" update
-            "tool_call" -> recordTool update
-            "tool_call_update" -> recordTool update
-            "plan" -> do
-              redact<-conversationRedactor runtime s
-              let public=redactValue redact update
-              modifyIORef' ref (appendPrimary [PrimaryPlan public])
-              mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id public)
-            "usage_update" -> mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id update)
-            _ -> pure ()
-          when (kind=="config_option_update") (modifyIORef' ref (\state -> state {agentConfig=update}))
-          safeSettings<-if kind=="config_option_update" then publicAgentSettings runtime update else pure []
-          pure $ if kind=="config_option_update" then d {agentSettings=safeSettings,contextMenu=Nothing}
-            else if kind=="usage_update" then case (field "used" update,field "size" update) of
-            (Just used,Just size) | used>=0 && size>0 -> d {agentContextUsage=Just (used,size)}
-            _ -> d
-            else d
-      | otherwise -> pure d
-    A.Request ident method params -> case connection s of
-      Nothing -> pure d
-      Just client | field "sessionId" params/=session s || session s==Nothing -> A.respond client ident (Left (failure "Unknown session.")) >> pure d
-      Just client -> incoming runtime client ident method params d
-    _ -> pure d
-  where
-    isStarting Starting{}=True; isStarting _=False
-    appendReply role update = case field "content" update of
-      Just content | field "type" content==Just ("text"::Text),Just text<-field "text" content, not (T.null text) -> do
-        current<-readIORef ref
-        keys<-conversationKeys runtime current
-        now<-getCurrentTime
-        zone<-getCurrentTimeZone
-        emitted<-atomicModifyIORef' ref $ \state ->
-          let combined=M.findWithDefault "" role (streamTails state)<>text
-              redacted=redactText keys combined
-              held=maximum (0:[n | key<-keys,n<-[1..T.length key-1],T.take n key `T.isSuffixOf` redacted])
-              (safe,tailText)=T.splitAt (T.length redacted-held) redacted
-              timed=if T.null safe then state else stampReply now zone state
-              next=(if T.null safe then timed else recordChunk role safe timed)
-                {streamTails=M.insert role tailText (streamTails timed)}
-          in (next,safe)
-        when (role=="Agent") (publishPrimaryOutput runtime emitted)
-      _ -> pure ()
-    recordTool update=do
-      current<-readIORef ref
-      redact<-conversationRedactor runtime current
+    AH.ProviderCapabilities caps->do
+      modifyIORef' ref (\state->state {agentCapabilities=caps})
+      publishPrimaryEvent runtime event
+      pure d {agentSettings=publicAgentSettings caps,agentSteering=AH.supportsSteering caps,contextMenu=Nothing}
+    AH.ProviderUsage used size->publishPrimaryEvent runtime event >> pure d {agentContextUsage=Just (used,size)}
+    _->publishPrimaryEvent runtime event >> pure d
+
+receiveProviderContent :: ConversationState -> Desktop -> ProviderIdentity -> Maybe ProviderTurnId -> ProviderContent -> IO Desktop
+receiveProviderContent (ConversationState _ ref _ _) d owner turn content=do
+  s<-readIORef ref
+  when (connectionIdentity s==Just owner) $ case content of
+    ProviderMessage role text | not (T.null text),turn==currentTurn s,turn/=Nothing->do
       now<-getCurrentTime
-      let public=redactValue redact update
-      modifyIORef' ref (\state -> recordToolUpdate public state {lastMessageAt=Just now})
-      mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id public)
+      zone<-getCurrentTimeZone
+      modifyIORef' ref (recordChunk role text . stampReply now zone)
+    ProviderTool update->do
+      now<-getCurrentTime
+      modifyIORef' ref (\state->recordToolUpdate update state {lastMessageAt=Just now})
+    ProviderPlan update->modifyIORef' ref (appendPrimary [PrimaryPlan update])
+    ProviderTurnBoundary ident | Just ident==currentTurn s->modifyIORef' ref (\state->state {completedTurn=Just ident})
+    _->pure ()
+  pure d
 
 -- Provider publication runs on the daemon's existing serialized session tick
 -- (including its suspend drain), not the renderer or ordinary input branch.
@@ -1057,13 +1119,9 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
 publishPrimaryEvent :: ConversationState -> AH.DriverEvent -> IO ()
 publishPrimaryEvent (ConversationState _ ref _ agents) event=do
   state<-readIORef ref
-  case (connection state,session state) of
-    (Just client,Just sid)->AR.recordPrimaryEvent agents client sid event
+  case (connectionIdentity state,session state) of
+    (Just identity,Just sid)->AR.recordPrimaryEvent agents identity sid event
     _->pure ()
-
-publishPrimaryOutput :: ConversationState -> Text -> IO ()
-publishPrimaryOutput runtime text=unless (T.null text) $
-  publishPrimaryEvent runtime (AH.ProviderUpdate "output" (object ["text" .= T.take 8192 text,"truncated" .= (T.length text>8192)]))
 
 pauseLabel :: Maybe UTCTime -> UTCTime -> TimeZone -> Maybe Text
 pauseLabel previous now zone = case previous of
@@ -1088,112 +1146,103 @@ appendPrimary values state=case conversationPresenter state of
       {transcript=Transcript.appendPrimaryUpdate presenter (PrimaryUpdate (BodyItemId ident) ident value) (transcript current),nextRecord=ident+1}
 
 recordChunk :: Text -> Text -> State -> State
-recordChunk role text state=(appendPrimary [PrimaryChunk speaker text] state)
-  {promptReply=case (role,promptReply state) of
-      ("Agent",Just (PromptReply request chunks))->Just (PromptReply request (text:chunks))
-      _->promptReply state}
+recordChunk role text state=appendPrimary [PrimaryChunk speaker text] state
   where speaker=if role=="Agent" then AssistantSpeaker else UserSpeaker
 
 recordToolUpdate :: Value -> State -> State
 recordToolUpdate update=appendPrimary [PrimaryTool update]
 
-incoming :: ConversationState -> A.Client -> Value -> Text -> Value -> Desktop -> IO Desktop
-incoming runtime@(ConversationState _ ref consoles _) client ident method params d = do
+incomingProvider :: forall a. ConversationState -> ProviderIdentity -> FilePath -> AR.ProviderCall a -> MVar (Either Text a) -> Desktop -> IO Desktop
+incomingProvider runtime@(ConversationState _ ref consoles _) owner root operation reply d=do
   s<-readIORef ref
-  case method of
-    "session/request_permission" -> case permissionOptions params of
-      [] -> A.respond client ident (Right cancelled) >> pure d
-      options -> do
-        redact<-conversationRedactor runtime s
-        enqueueApproval runtime (Permission ident [(key,redact name) | (key,name)<-options] (redactValue redact (fromMaybe Null (field "toolCall" params))))
+  waiting<-isEmptyMVar reply
+  if connectionIdentity s/=Just owner || not waiting || questionsClosed s
+    then void (tryPutMVar reply (Left "Provider request expired.")) >> pure d
+    else case operation of
+      AR.AskProviderPermission request->enqueueApproval runtime (Permission owner request reply) >> pure d
+      AR.ReadProviderFile path line limit
+        | line>=1,maybe True (>=0) limit->queueFileCapture ref owner (ReadFile line limit reply) root path d
+        | otherwise->refuse "Invalid line range."
+      AR.WriteProviderFile path text->queueFileCapture ref owner (WriteFile text reply) root path d
+      AR.CreateProviderTerminal request | Terminal.terminalAvailable->queueBridge ref reply $ do
+        worker<-async (checkTerminal root request)
+        pure (CheckingTerminal owner reply (providerTerminalLimit request) worker)
+      AR.CreateProviderTerminal _->refuse "Native terminals are unavailable."
+      AR.ReadProviderTerminal tid->owned tid $ queueBridge ref reply $ do
+        worker<-async $ do
+          result<-C.consoleOutput consoles tid
+          case result of
+            Left err->pure (Left err)
+            Right (bytes,truncated,exited)->do
+              copied<-evaluate (BS.copy bytes)
+              pure (Right (ProviderTerminalOutput copied truncated exited))
+        pure (TerminalOperation owner reply worker)
+      AR.WaitProviderTerminal tid->owned tid $ do
+        modifyIORef' ref (\state->state {terminalWaiters=M.insertWith (++) tid [reply] (terminalWaiters state)})
         pure d
-    "fs/read_text_file" -> case parseMaybe (withObject "read" $ \o -> (,,) <$> o .: "path" <*> o .:? "line" .!= (1::Int) <*> o .:? "limit") params of
-      Nothing -> bad "Expected a path and optional integer line and limit."
-      Just (path,line,limit)
-        | line<1 || maybe False (<0) limit -> bad "Invalid line range."
-        | otherwise -> queueFileCapture ref client ident (ReadFile line limit) (project s) path d
-    "fs/write_text_file" -> case (field "path" params,field "content" params) of
-      (Just path,Just content) -> queueFileCapture ref client ident (WriteFile content) (project s) path d
-      _ -> bad "Expected path and content."
-    "terminal/create" | Terminal.terminalAvailable -> case parseTerminal (project s) params of
-      Left err -> bad err
-      Right (config,limit) -> do
-        checked<-try (canonicalizePath (Terminal.terminalDirectory config)) :: IO (Either IOException FilePath)
-        case checked of
-          Right root | let relative=makeRelative (project s) root, not (isAbsolute relative), ".." `notElem` splitDirectories relative ->
-            enqueueApproval runtime (Execute ident config {Terminal.terminalDirectory=root} limit) >> pure d
-          _ -> bad "Terminal directory is outside the session project."
-    "terminal/output" -> terminalId $ \tid -> do
-      result<-C.consoleOutput consoles tid
-      A.respond client ident (either (Left . failure) (\(bytes,truncated,exited) -> Right (object
-        (["output" .= TE.decodeUtf8With lenientDecode bytes,"truncated" .= truncated]++maybe [] (\code->["exitStatus" .= exitStatus code]) exited))) result)
-      pure d
-    "terminal/wait_for_exit" -> terminalId $ \tid -> do
-      result<-C.consoleOutput consoles tid
-      case result of
-        Left err -> bad err
-        Right (_,_,Just code) -> A.respond client ident (Right (exitStatus code)) >> pure d
-        Right _ -> modifyIORef' ref (\state -> state {terminalWaiters=M.insertWith (++) tid [ident] (terminalWaiters state)}) >> pure d
-    "terminal/kill" -> terminalId $ \tid -> C.killConsole consoles tid >>= replyUnit
-    "terminal/release" -> terminalId $ \tid -> do
-      result<-C.releaseConsole consoles tid
-      modifyIORef' ref (\state -> state {ownedTerminals=S.delete tid (ownedTerminals state)})
-      forM_ (M.findWithDefault [] tid (terminalWaiters s)) $ \waiter -> A.respond client waiter (Left (failure "Terminal released."))
-      modifyIORef' ref (\state -> state {terminalWaiters=M.delete tid (terminalWaiters state)})
-      replyUnit result
-    _ -> A.respond client ident (Left (object ["code" .= (-32601::Int),"message" .= ("Unsupported client method: "<>method)])) >> pure d
+      AR.KillProviderTerminal tid->owned tid $ terminalJob (C.killConsole consoles tid)
+      AR.ReleaseProviderTerminal tid->owned tid $ do
+        modifyIORef' ref (\state->state {ownedTerminals=S.delete tid (ownedTerminals state),terminalWaiters=M.delete tid (terminalWaiters state)})
+        forM_ (M.findWithDefault [] tid (terminalWaiters s)) (\waiter->void (tryPutMVar waiter (Left "Terminal released.")))
+        terminalJob (C.releaseConsole consoles tid)
   where
-    bad err=A.respond client ident (Left (failure err)) >> pure d
-    terminalId action=do
-      state<-readIORef ref
-      case field "terminalId" params of
-        Just tid | S.member tid (ownedTerminals state) -> action tid
-        _ -> bad "Unknown terminal ID for this session."
-    replyUnit result=A.respond client ident (either (Left . failure) (const (Right (object []))) result) >> pure d
+    refuse :: Text -> IO Desktop
+    refuse err=void (tryPutMVar reply (Left err)) >> pure d
+    owned :: Text -> IO Desktop -> IO Desktop
+    owned tid action=do
+      current<-readIORef ref
+      if S.member tid (ownedTerminals current) then action else refuse "Unknown terminal ID for this session."
+    terminalJob :: IO (Either Text a) -> IO Desktop
+    terminalJob action=queueBridge ref reply $ TerminalOperation owner reply <$> async action
+    queueBridge :: IORef State -> MVar (Either Text b) -> IO FileCapture -> IO Desktop
+    queueBridge state cell prepare=mask_ $ do
+      current<-readIORef state
+      if length (fileCaptures current)+sum (map fst (retiringRequests current))>=4
+        then void (tryPutMVar cell (Left "Too many pending native requests.")) >> pure d
+        else do
+          capture<-prepare
+          modifyIORef' state (\next->next {fileCaptures=fileCaptures next++[capture]})
+          pure d
 
--- Bound retained desktop snapshots and filesystem workers together, including
--- cancellation still waiting on the OS. Completion stays in request order;
--- workers never modify conversation state or grant an approval.
-queueFileCapture :: IORef State -> A.Client -> Value -> FileRequest -> FilePath -> FilePath -> Desktop -> IO Desktop
-queueFileCapture ref client ident request root path d = mask $ \restore -> do
+-- Resolve on the worker, capture the single immutable source on the owner,
+-- then read/slice on the worker. Every stage occupies the same bounded slot.
+queueFileCapture :: IORef State -> ProviderIdentity -> FileRequest -> FilePath -> FilePath -> Desktop -> IO Desktop
+queueFileCapture ref owner request root path d=mask_ $ do
   s<-readIORef ref
   if length (fileCaptures s)+sum (map fst (retiringRequests s))>=4
-    then A.respond client ident (Left (failure "Too many pending file requests."))
+    then finishFile (Left "Too many pending file requests.") request
     else do
-      worker<-async (restore (prepareFileCapture ident request root path d))
-      modifyIORef' ref (\state -> state {fileCaptures=fileCaptures state++[FileCapture ident worker]})
+      -- A known literal source binding belongs to this admission even while
+      -- resolution waits. Aliases bind at canonical capture below; both retain
+      -- the same final path/privacy/content-identity checks.
+      expected<-sourceIdentity path d >>= traverse evaluate
+      worker<-async (resolveFile root path)
+      modifyIORef' ref (\state->state {fileCaptures=fileCaptures state++[ResolvingFile owner request expected worker]})
   pure d
 
-prepareFileCapture :: Value -> FileRequest -> FilePath -> FilePath -> Desktop -> IO (Either Text CapturedFile)
-prepareFileCapture ident request root path before = do
-  captured<-captureFile root path before
-  case captured of
-    Left err -> pure (Left err)
-    Right snap -> do
-      expected<-sourceIdentity (snapshotPath snap) before
-      action<-case request of
-        WriteFile content -> pure (CapturedWrite content)
-        ReadFile line limit -> do
-          let content=snapshotText snap
-              buffer=newBuffer content
-              startOffset=if line>bufferLineCount buffer then T.length content else bufferLineOffset buffer (line-1)
-              endOffset=case limit of
-                Nothing -> T.length content
-                Just count | count>=bufferLineCount buffer-line+1 -> T.length content
-                           | otherwise -> bufferLineOffset buffer (line-1+count)
-              chosen=T.take (max 0 (endOffset-startOffset)) (T.drop startOffset content)
-          CapturedRead <$> A.prepareResponse ident (Right (object ["content" .= chosen]))
-      pure (Right (CapturedFile snap expected action))
+checkTerminal :: FilePath -> ProviderTerminal -> IO (Either Text Terminal.TerminalConfig)
+checkTerminal root request=case validateLaunch (providerTerminalLaunch request) of
+  Left err->pure (Left (T.pack err))
+  Right launch | length (arguments launch)>256 || length (environment launch)>256 ||
+    length (executable launch)>32768 || any ((>65536).length) (arguments launch++concatMap (\(k,v)->[k,v]) (environment launch))->pure (Left "Terminal launch exceeds its bounds.")
+  Right _ | not (isAbsolute cwd) || length cwd>32768 || '\0' `elem` cwd->pure (Left "Expected an absolute terminal directory.")
+  Right _ | limit<0 || limit>16*1024*1024->pure (Left "Terminal output limit must be between 0 and 16 MiB.")
+  Right launch->do
+    checked<-try (canonicalizePath cwd) :: IO (Either IOException FilePath)
+    pure $ case checked of
+      Right directory | let relative=makeRelative root directory,not (isAbsolute relative),".." `notElem` splitDirectories relative->
+        Right (Terminal.TerminalConfig (executable launch) (arguments launch) (environment launch) directory 80 24)
+      _->Left "Terminal directory is outside the session project."
+  where cwd=providerTerminalDirectory request; limit=providerTerminalLimit request
 
 retireRequests :: IORef State -> IO State
 retireRequests ref = mask $ \restore -> do
   s<-readIORef ref
-  forM_ (M.elems (pending s)) $ \phase->case phase of
-    Setting control->AR.rejectPrimaryControl "Agent control cancelled." control
-    Steering _ control->AR.rejectPrimaryControl "Agent control cancelled." control
-    _->pure ()
   case promptPreparation s of
     Just (ContextPrompt _ _ control _)->mapM_ (AR.rejectPrimaryControl "Agent control cancelled.") control
+    Just (SendingPrompt _ submission _ _ control _)->retireProviderSubmission submission >> mapM_ (AR.rejectPrimaryControl "Agent control cancelled.") control
+    Just (SteeringPrompt submission _ _ control _)->retireProviderSubmission submission >> AR.rejectPrimaryControl "Agent control cancelled." control
+    Just (Configuring control _)->AR.rejectPrimaryControl "Agent control cancelled." control
     _->pure ()
   mapM_ (AR.rejectPrimaryControl "Agent control cancelled.") (snd =<< queuedPrompt s)
   let activeInput=M.lookup "" (agentControls s)
@@ -1206,130 +1255,219 @@ retireRequests ref = mask $ \restore -> do
   -- in this queue, even if their command already began or no worker exists yet.
   mapM_ (void . Editor.abortEditorSubmission) queuedPrimary
   let captures=fileCaptures s
-      workers=[cancel worker | FileCapture _ worker<-captures]++map preparationCancel (maybe [] pure (promptPreparation s))++
+      workers=map captureCancel captures++map cancel (maybe [] pure (terminalPoll s))++map preparationCancel (maybe [] pure (promptPreparation s))++
         [cancel worker | Just (_,worker)<-[activeInput]]
   if null workers then writeIORef ref retired >> pure retired else do
-    forM_ (connection s) $ \client -> forM_ captures $ \(FileCapture ident _) ->
-      A.respond client ident (Left (failure "File request cancelled."))
     reaper<-async (restore (sequence_ workers))
-    let next=retired {fileCaptures=[],promptPreparation=Nothing,agentControls=M.delete "" (agentControls s),
+    let next=retired {fileCaptures=[],terminalPoll=Nothing,promptPreparation=Nothing,agentControls=M.delete "" (agentControls s),
           retiringRequests=retiringRequests s++[(length workers,reaper)]}
     writeIORef ref next
     pure next
 
+-- Retire host authority synchronously, then join only the detached provider and
+-- console handles on the existing reaper. No State or desktop escapes to it.
+retireProviderResources :: ConversationState -> Text -> IO State
+retireProviderResources (ConversationState _ ref consoles agents) reason=do
+  current<-readIORef ref
+  mapM_ (cancelApproval . snd) (approvals current)
+  forM_ (concat (M.elems (terminalWaiters current))) (\reply->void (tryPutMVar reply (Left reason)))
+  mapM_ (AR.retireProviderCalls agents) (connectionIdentity current)
+  retired<-retireRequests ref
+  tids<-evaluate (force (S.toList (ownedTerminals retired)))
+  driver<-traverse evaluate (connection retired)
+  let detached=retired {approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      count=length tids+maybe 0 (const 1) driver
+  next<-if count==0 then pure detached else do
+    reaper<-async (mapM_ (C.releaseConsole consoles) tids >> mapM_ AH.driverStop driver)
+    pure detached {retiringRequests=retiringRequests detached++[(count,reaper)]}
+  writeIORef ref next
+  pure next
+
 pollFileCaptures :: ConversationState -> Desktop -> IO Desktop
-pollFileCaptures runtime@(ConversationState _ ref _ _) d = do
+pollFileCaptures runtime@(ConversationState _ ref consoles _) original=do
   s<-readIORef ref
   retiring<-filterM (fmap isNothing . poll . snd) (retiringRequests s)
-  modifyIORef' ref (\state -> state {retiringRequests=retiring})
-  drain
-  pure d
+  modifyIORef' ref (\state->state {retiringRequests=retiring})
+  drain original
   where
-    drain=do
+    drain d=do
       s<-readIORef ref
-      case (connection s,fileCaptures s) of
-        (Just client,FileCapture ident worker:rest) -> do
-          ready<-poll worker
-          case ready of
-            Nothing -> pure ()
-            Just result -> do
-              modifyIORef' ref (\state -> state {fileCaptures=rest})
-              case either (const (Left "File request failed.")) id result of
-                Left err -> A.respond client ident (Left (failure err))
-                Right (CapturedFile snap expected action)
-                  | protectedPath d (snapshotPath snap) || any (\(bid,doc) ->
-                      fmap filePath (documentFile doc)==Just (snapshotPath snap) && (protectedBuffer d bid || not (textBuffer (documentBuffer doc)))) (M.toList (buffers d)) ->
-                      A.respond client ident (Left (failure "Agent authority files require human input."))
-                  | otherwise -> do
-                      current<-sourceIdentity (snapshotPath snap) d
-                      if current/=expected then A.respond client ident (Left (failure "File changed in the editor during capture; request a fresh read."))
-                      else case action of
-                        CapturedRead response -> do
-                          modifyIORef' ref (\state -> state {reads=M.insert (snapshotPath snap) snap (reads state)})
-                          A.respondPrepared client response
-                        CapturedWrite content -> enqueueApproval runtime (Write ident (M.findWithDefault snap (snapshotPath snap) (reads s)) content)
-              drain
-        _ -> pure ()
+      case fileCaptures s of
+        []->pure d
+        capture:rest->do
+          let replace next=modifyIORef' ref (\state->state {fileCaptures=next})
+              alive owner waiting=(connectionIdentity s==Just owner && not (questionsClosed s) && waiting)
+              failed result=either (const (Left "Native request failed.")) id result
+          case capture of
+            ResolvingFile owner request expected worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just outcome->do
+                waiting<-fileWaiting request
+                case failed outcome of
+                  Right resolved | alive owner waiting->do
+                    current<-sourceIdentity (resolvedFilePath resolved) d
+                    selected<-if maybe False (const (current/=expected)) expected
+                      then pure (Left "File changed in the editor during path resolution; request a fresh read.")
+                      else captureFileInput resolved d
+                    case selected of
+                      Left err->finishFile (Left err) request >> replace rest >> drain d
+                      Right input->do
+                        worker'<-async (readFileInput input)
+                        replace (ReadingFile owner request (fileInputIdentity input) worker':rest)
+                        pure d
+                  result->finishFile (either Left (const (Left "File request expired.")) result) request >> replace rest >> drain d
+            ReadingFile owner request expected worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just outcome->do
+                replace rest
+                waiting<-fileWaiting request
+                case failed outcome of
+                  Right snap | alive owner waiting->do
+                    current<-sourceIdentity (snapshotPath snap) d
+                    if current/=expected || not (filePublic (snapshotPath snap) d) then finishFile (Left "File changed in the editor during capture; request a fresh read.") request
+                    else case request of
+                      ReadFile line limit reply->do
+                        -- Slice the immutable read on the worker before publication.
+                        worker'<-async (sliceFile snap line limit)
+                        replace (SlicingFile owner reply snap expected worker':rest)
+                      WriteFile text reply->enqueueApproval runtime (Write owner reply (M.findWithDefault snap (snapshotPath snap) (reads s)) text)
+                  result->finishFile (either Left (const (Left "File request expired.")) result) request
+                drain d
+            SlicingFile owner reply snap expected worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just outcome->do
+                replace rest
+                waiting<-isEmptyMVar reply
+                current<-sourceIdentity (snapshotPath snap) d
+                let admitted=alive owner waiting && current==expected && filePublic (snapshotPath snap) d
+                    result=if admitted then failed outcome else Left "File changed during read preparation; request a fresh read."
+                void (tryPutMVar reply result)
+                case result of Right _->modifyIORef' ref (\state->state {reads=M.insert (snapshotPath snap) snap (reads state)}); _->pure ()
+                drain d
+            CheckingTerminal owner reply limit worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just outcome->do
+                replace rest
+                waiting<-isEmptyMVar reply
+                case failed outcome of
+                  Right config | alive owner waiting->enqueueApproval runtime (Execute owner reply config limit)
+                  result->void (tryPutMVar reply (either Left (const (Left "Terminal request expired.")) result))
+                drain d
+            PreparingTerminal owner reply worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just (Right (Right _)) | dialog d/=Nothing || chatQuestion d/=Nothing->pure d
+              Just outcome->do
+                replace rest
+                waiting<-isEmptyMVar reply
+                case failed outcome of
+                  Right prepared | alive owner waiting->do
+                    (tid,next)<-C.adoptConsole consoles prepared d `onException` C.closePreparedConsole prepared
+                    modifyIORef' ref (\state->state {ownedTerminals=S.insert tid (ownedTerminals state)})
+                    void (tryPutMVar reply (Right tid))
+                    drain next
+                  Right prepared->C.closePreparedConsole prepared >> drain d
+                  Left err->void (tryPutMVar reply (Left err)) >> drain d
+            TerminalOperation owner reply worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just outcome->do
+                replace rest
+                waiting<-isEmptyMVar reply
+                void (tryPutMVar reply (if alive owner waiting then failed outcome else Left "Native request expired."))
+                drain d
 
-permissionOptions :: Value -> [(Text,Text)]
-permissionOptions params=map (\(_,ident,name)->(ident,name)) . sortOn (\(kind,_,_)->not ("reject" `T.isPrefixOf` kind)) $
-  mapMaybe (parseMaybe (withObject "permission" $ \o -> (,,) <$> o .: "kind" <*> o .: "optionId" <*> o .: "name")) (fromMaybe [] (field "options" params))
+-- Only metadata for this path participates in final immutable source admission.
+filePublic :: FilePath -> Desktop -> Bool
+filePublic path d=not (protectedPath d path) && not (any privateMatching (M.toList (buffers d)))
+  where privateMatching (bid,doc)=fmap filePath (documentFile doc)==Just path &&
+          (protectedBuffer d bid || not (textBuffer (documentBuffer doc)))
+
+sliceFile :: Snapshot -> Int -> Maybe Int -> IO (Either Text Text)
+sliceFile snap line limit=do
+  let content=snapshotText snap; buffer=newBuffer content
+      startOffset=if line>bufferLineCount buffer then T.length content else bufferLineOffset buffer (line-1)
+      endOffset=case limit of Nothing->T.length content; Just count | count>=bufferLineCount buffer-line+1->T.length content
+                                                               | otherwise->bufferLineOffset buffer (line-1+count)
+  chosen<-evaluate (T.copy (T.take (max 0 (endOffset-startOffset)) (T.drop startOffset content)))
+  pure (Right chosen)
 
 enqueueApproval :: ConversationState -> Approval -> IO ()
 enqueueApproval (ConversationState _ ref _ _) approval=modifyIORef' ref (\s -> s {approvals=approvals s++[(nextApproval s,approval)],nextApproval=nextApproval s+1})
 
 present :: ConversationState -> Desktop -> IO Desktop
-present (ConversationState _ ref _ _) d = do
+present (ConversationState _ ref _ _) d=do
   s<-readIORef ref
   case (dialog d,presented s,approvals s) of
-    (Nothing,Nothing,(token,approval):_) | not (deferredApproval s) -> do
-      modifyIORef' ref (\state -> state {presented=Just token})
+    (Nothing,Nothing,(token,approval):_) | not (deferredApproval s)->do
+      modifyIORef' ref (\state->state {presented=Just token})
       let action="approval:"<>T.pack (show token)
+          permissionDialog title request buttons=Just (Dialog title (AgentDialog action)
+            [ListBox "Action" [label | (_,label,_)<-permissionOptions request] 0] 0 buttons
+            (take 7 (wrapMessage (permissionTitle request)++wrapMessage (permissionDetails request))))
       pure $ case approval of
-        ChildPermission ident request _ -> d {dialog=Just (Dialog ("Agent permission: "<>AH.agentIdText ident) (AgentDialog action)
-          [ListBox "Action" [label | (_,label,_)<-AP.permissionOptions request] 0] 0 ["Choose","Reject"]
-          (take 7 (wrapMessage (AP.permissionTitle request)++wrapMessage (AP.permissionDetails request))))}
-        Permission _ options detail -> d {dialog=Just (Dialog "Agent permission" (AgentDialog action)
-          [ListBox "Action" (map snd options) 0] 0 ["Choose","Review","Cancel"]
-          (take 6 (wrapMessage (fromMaybe "Tool permission" (field "title" detail))++wrapMessage (jsonText detail))))}
-        Execute _ config _ -> d {dialog=Just (Dialog "Run agent command" (AgentDialog action) [] 0 ["Run","Reject"]
-          (take 7 (wrapMessage (T.pack (Terminal.terminalCommand config)) ++ wrapMessage (jsonText (Terminal.terminalArguments config)) ++ wrapMessage (T.pack (Terminal.terminalDirectory config)))))}
-        Write _ snap content -> (addReadOnly "Proposed agent edit" ("CURRENT BUFFER\n"<>snapshotText snap<>"\n\nPROPOSED CONTENT\n"<>content) d)
+        ChildPermission ident request _->d {dialog=permissionDialog ("Agent permission: "<>AH.agentIdText ident) request ["Choose","Reject"]}
+        Permission _ request _->d {dialog=permissionDialog "Agent permission" request ["Choose","Review","Cancel"]}
+        Execute _ _ config _->d {dialog=Just (Dialog "Run agent command" (AgentDialog action) [] 0 ["Run","Reject"]
+          (take 7 (wrapMessage (T.pack (Terminal.terminalCommand config))++wrapMessage (TE.decodeUtf8 (BL.toStrict (encode (Terminal.terminalArguments config))))++wrapMessage (T.pack (Terminal.terminalDirectory config)))))}
+        Write _ _ snap text->(addReadOnly "Proposed agent edit" ("CURRENT BUFFER\n"<>snapshotText snap<>"\n\nPROPOSED CONTENT\n"<>text) d)
           {dialog=Just (Dialog "Apply agent edit" (AgentDialog action) [] 0 ["Apply","Review","Reject"]
             ["The proposed edit is open behind this dialog.","Apply saves it and preserves the old buffer in Undo."])}
-    _ -> pure d
+    _->pure d
+
+approvalCurrent :: State -> Approval -> IO Bool
+approvalCurrent state approval=case approval of
+  ChildPermission _ _ reply->isEmptyMVar reply
+  Permission owner _ reply->(connectionIdentity state==Just owner &&) <$> isEmptyMVar reply
+  Write owner reply _ _->(connectionIdentity state==Just owner &&) <$> isEmptyMVar reply
+  Execute owner reply _ _->(connectionIdentity state==Just owner &&) <$> isEmptyMVar reply
 
 decide :: ConversationState -> Int -> [Text] -> Desktop -> IO Desktop
-decide (ConversationState _ ref consoles _) token values d = do
+decide (ConversationState _ ref _ _) token values d=do
   s<-readIORef ref
-  case (connection s,lookup token (approvals s)) of
-    (_,Just (ChildPermission _ request reply)) -> do
-      let selected=case values of
-            "0":index:_ | Just n<-readMaybe (T.unpack index),n>=0,(chosen,_,_):_<-drop n (AP.permissionOptions request) -> Just chosen
-            _ -> Nothing
-      void (tryPutMVar reply selected)
-      writeIORef ref s {approvals=filter ((/=token).fst) (approvals s),presented=Nothing}
-      pure d
-    (Just _,Just approval) | take 1 values==["1"],not (isExecute approval) -> do
-      writeIORef ref s {presented=Nothing,deferredApproval=True}
-      let detail=case approval of
-            Permission _ _ value -> jsonText value
-            Write _ snap text -> "FILE: "<>T.pack (snapshotPath snap)<>"\n\nCURRENT BUFFER\n"<>snapshotText snap<>"\n\nPROPOSED CONTENT\n"<>text
-            _ -> ""
-      pure (addReadOnly "Agent request" detail d) {status="Tools > Conversation returns to the pending approval."}
-    (Just client,Just approval) -> do
-      writeIORef ref s {approvals=filter ((/=token).fst) (approvals s),presented=Nothing}
-      case approval of
-        Permission ident options _ -> case values of
-          "0":index:_ | Just n<-readMaybe (T.unpack index),n>=0, (chosen,_):_<-drop n options ->
-            A.respond client ident (Right (object ["outcome" .= object ["outcome" .= ("selected"::Text),"optionId" .= chosen]])) >> pure d
-          _ -> A.respond client ident (Right cancelled) >> pure d
-        Write ident snap text | take 1 values==["0"] -> do
-          result<-acceptWrite snap text d
-          case result of
-            Left err -> A.respond client ident (Left (failure err)) >> pure (message "Agent edit rejected" (wrapMessage err) d)
-            Right changed -> do
-              A.respond client ident (Right (object []))
-              modifyIORef' ref (\state -> state {reads=maybe (reads state) (\fresh -> M.insert (snapshotPath fresh) fresh (reads state)) (M.lookup (snapshotPath snap) (sourceSnapshots changed))})
-              pure changed
-        Execute ident config limit | take 1 values==["0"] -> do
-          result<-C.startConsole consoles config limit d
-          case result of
-            Left err -> A.respond client ident (Left (failure err)) >> pure d {status=err}
-            Right (tid,changed) -> do
-              modifyIORef' ref (\state -> state {ownedTerminals=S.insert tid (ownedTerminals state)})
-              A.respond client ident (Right (object ["terminalId" .= tid]))
-              pure changed
-        _ -> cancelApproval client approval >> pure d
-    _ -> pure d {status="Permission request expired."}
-  where isExecute Execute{}=True; isExecute _=False
+  case lookup token (approvals s) of
+    Nothing->pure d {status="Permission request expired."}
+    Just approval->do
+      current<-approvalCurrent s approval
+      if not current then cancelApproval approval >> pure d {status="Permission request expired."}
+      else if take 1 values==["1"] && reviewable approval then do
+        modifyIORef' ref (\state->state {presented=Nothing,deferredApproval=True})
+        let detail=case approval of
+              Permission _ request _->permissionDetails request
+              Write _ _ snap text->"FILE: "<>T.pack (snapshotPath snap)<>"\n\nCURRENT BUFFER\n"<>snapshotText snap<>"\n\nPROPOSED CONTENT\n"<>text
+              _->""
+        pure (addReadOnly "Agent request" detail d) {status="Tools > Conversation returns to the pending approval."}
+      else do
+        modifyIORef' ref (\state->state {approvals=filter ((/=token).fst) (approvals state),presented=Nothing})
+        case approval of
+          ChildPermission _ request reply->selectPermission request reply >> pure d
+          Permission _ request reply->selectPermission request reply >> pure d
+          Write _ reply snap text | take 1 values==["0"]->do
+            result<-acceptWrite snap text d
+            case result of
+              Left err->void (tryPutMVar reply (Left err)) >> pure (message "Agent edit rejected" (wrapMessage err) d)
+              Right changed->do
+                void (tryPutMVar reply (Right ()))
+                modifyIORef' ref (\state->state {reads=maybe (reads state) (\fresh->M.insert (snapshotPath fresh) fresh (reads state)) (M.lookup (snapshotPath snap) (sourceSnapshots changed))})
+                pure changed
+          Execute owner reply config limit | take 1 values==["0"]->mask_ $ do
+            worker<-async (C.prepareConsole [] config limit)
+            modifyIORef' ref (\state->state {fileCaptures=fileCaptures state++[PreparingTerminal owner reply worker]})
+            pure d {status="Starting approved agent command..."}
+          _->cancelApproval approval >> pure d
+  where
+    reviewable Permission{}=True
+    reviewable Write{}=True
+    reviewable _=False
+    selectPermission request reply=void (tryPutMVar reply (Right selected))
+      where selected=case values of
+              "0":index:_ | Just n<-readMaybe (T.unpack index),n>=0,(chosen,_,_):_<-drop n (permissionOptions request)->Just chosen
+              _->Nothing
 
-cancelApproval :: A.Client -> Approval -> IO ()
-cancelApproval client approval=case approval of
-  ChildPermission _ _ reply -> void (tryPutMVar reply Nothing)
-  Permission ident _ _ -> A.respond client ident (Right cancelled)
-  Execute ident _ _ -> A.respond client ident (Left (failure "User rejected the command."))
-  Write ident _ _ -> A.respond client ident (Left (failure "User rejected the edit."))
+cancelApproval :: Approval -> IO ()
+cancelApproval approval=case approval of
+  ChildPermission _ _ reply->void (tryPutMVar reply (Right Nothing))
+  Permission _ _ reply->void (tryPutMVar reply (Right Nothing))
+  Execute _ reply _ _->void (tryPutMVar reply (Left "User rejected the command."))
+  Write _ reply _ _->void (tryPutMVar reply (Left "User rejected the edit."))
 
 isApprovalDialog :: Int -> Desktop -> Bool
 isApprovalDialog token d = case dialog d of Just dg -> purpose dg==AgentDialog ("approval:"<>T.pack (show token)); _ -> False
@@ -1382,13 +1520,10 @@ paintView target opening state desktop
           in view {conversationBody=InstalledBody reference (Just current)}
       _->view
 
-publicAgentSettings :: ConversationState -> Value -> IO [AgentSetting]
-publicAgentSettings runtime@(ConversationState _ ref _ _) value=do
-  current<-readIORef ref
-  keys<-conversationKeys runtime current
-  let public option=not (any (\text->any (`T.isInfixOf` text) keys)
-        ([settingId option,settingName option,settingCategory option,settingCurrent option]++concatMap (\(ident,label)->[ident,label]) (settingChoices option)))
-  pure (filter public (parseAgentSettings value))
+publicAgentSettings :: AH.Capabilities -> [AgentSetting]
+publicAgentSettings caps=[AgentSetting (AH.configId choice)
+  (if AH.configCategory choice=="model" then "Model" else "Reasoning effort")
+  (AH.configCategory choice) (AH.configCurrent choice) (AH.configValues choice) | choice<-AH.configChoices caps]
 
 draftCurrent :: DraftReceipt -> Desktop -> IO Bool
 draftCurrent submitted d=maybe (pure False) (versionCurrent (Editor.submissionVersion submitted).editorDraftBuffer)
@@ -1416,42 +1551,27 @@ parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOption
 
 field :: FromJSON a => Text -> Value -> Maybe a
 field name=parseMaybe (withObject "object" (.: K.fromText name))
-jsonText :: ToJSON a => a -> Text
-jsonText=TE.decodeUtf8 . BL.toStrict . encode
-failure :: Text -> Value
-failure text=object ["code" .= (-32000::Int),"message" .= text]
-cancelled :: Value
-cancelled=object ["outcome" .= object ["outcome" .= ("cancelled"::Text)]]
-
-(<|>) :: Maybe a -> Maybe a -> Maybe a
-Just x <|> _=Just x
-Nothing <|> y=y
-
-parseTerminal :: FilePath -> Value -> Either Text (Terminal.TerminalConfig,Int)
-parseTerminal root params = case parseMaybe parser params of
-  Nothing -> Left "Invalid terminal command, arguments, environment or output limit."
-  Just (command,args,env,cwd,limit)
-    | not (isAbsolute cwd) || '\0' `elem` cwd -> Left "Expected an absolute terminal directory."
-    | limit<0 || limit>16*1024*1024 -> Left "Terminal output limit must be between 0 and 16 MiB."
-    | otherwise -> case validateLaunch (A.ProviderLaunch command args env) of
-        Left err -> Left (T.pack err)
-        Right _ -> Right (Terminal.TerminalConfig command args env cwd 80 24,limit)
-  where parser=withObject "terminal" $ \o -> (,,,,) <$> o .: "command" <*> o .:? "args" .!= []
-          <*> (o .:? "env" .!= [] >>= mapM (withObject "environment" $ \v -> (,) <$> v .: "name" <*> v .: "value"))
-          <*> o .:? "cwd" .!= root <*> o .:? "outputByteLimit" .!= (1024*1024)
-
-exitStatus :: Int -> Value
-exitStatus code=object ["exitCode" .= code,"signal" .= Null]
-
+-- Waiters remain lightweight cells; one batch refresh uses the existing
+-- console owner on a worker, rather than spawning one worker per waiter.
 flushTerminalWaiters :: ConversationState -> IO ()
-flushTerminalWaiters (ConversationState _ ref consoles _) = do
+flushTerminalWaiters (ConversationState _ ref consoles _)=do
   s<-readIORef ref
-  forM_ (connection s) $ \client -> forM_ (M.toList (terminalWaiters s)) $ \(tid,waiters) -> do
-    result<-C.consoleOutput consoles tid
-    let ready=case result of Left err -> Just (Left (failure err)); Right (_,_,Just code) -> Just (Right (exitStatus code)); _ -> Nothing
-    forM_ ready $ \reply -> do
-      mapM_ (\ident -> A.respond client ident reply) waiters
-      modifyIORef' ref (\state -> state {terminalWaiters=M.delete tid (terminalWaiters state)})
+  case terminalPoll s of
+    Nothing | not (M.null (terminalWaiters s))->do
+      let tids=M.keys (terminalWaiters s)
+      worker<-async (mapM (\tid->(tid,) <$> C.consoleOutput consoles tid) tids)
+      modifyIORef' ref (\state->state {terminalPoll=Just worker})
+    Just worker->poll worker >>= \ready->case ready of
+      Nothing->pure ()
+      Just outcome->do
+        modifyIORef' ref (\state->state {terminalPoll=Nothing})
+        forM_ (either (const []) id outcome) $ \(tid,result)->do
+          current<-readIORef ref
+          let completed=case result of Left err->Just (Left err); Right (_,_,Just code)->Just (Right code); _->Nothing
+          forM_ completed $ \reply->do
+            mapM_ (\cell->void (tryPutMVar cell reply)) (M.findWithDefault [] tid (terminalWaiters current))
+            modifyIORef' ref (\state->state {terminalWaiters=M.delete tid (terminalWaiters state)})
+    _->pure ()
 
 conversationWidth :: Desktop -> Int
 conversationWidth d = conversationWidthFor (conversationTarget d) d
@@ -1478,9 +1598,9 @@ captureAgentSettings (ConversationState _ ref _ _) desktop=do
   state<-readIORef ref
   connected<-evaluate (not (isNothing (connection state)))
   directory<-evaluate (if connected then project state else B.buildStartDirectory desktop)
-  executable<-evaluate (A.executable (provider state))
-  argumentCount<-evaluate (length (A.arguments (provider state)))
-  environmentNames<-evaluate (force (map (T.pack . fst) (A.environment (provider state))))
+  executable<-evaluate (executable (provider state))
+  argumentCount<-evaluate (length (arguments (provider state)))
+  environmentNames<-evaluate (force (map (T.pack . fst) (environment (provider state))))
   options<-evaluate (agentSettings desktop)
   target<-evaluate (conversationTarget desktop)
   snapshot<-evaluate Settings.SettingsSnapshot
@@ -1512,8 +1632,8 @@ captureQuestionCaller (ConversationState _ ref _ agents) actor
       if questionsClosed s then pure (Left "Editor session closed.") else case active of
         Left err->pure (Left err)
         Right _->do
-          receipt<-case (connection s,session s) of
-            (Just client,Just sid)->Just . (`ProviderReceipt` sid) <$> (makeStableName =<< evaluate client)
+          receipt<-case (connectionIdentity s,session s) of
+            (Just identity,Just sid)->pure (Just (ProviderReceipt identity sid))
             _->pure Nothing
           scope<-makeStableName =<< evaluate ref
           pure (Right (QuestionCaller scope actor receipt))
@@ -1598,9 +1718,7 @@ requesterCurrent receipt s=case receipt of
   Nothing->pure (isNothing (connection s) && session s==Nothing)
 
 providerCurrent :: ProviderReceipt -> State -> IO Bool
-providerCurrent (ProviderReceipt identity sid) s=case (connection s,session s) of
-  (Just client,Just current) | current==sid->(==identity) <$> (makeStableName =<< evaluate client)
-  _->pure False
+providerCurrent (ProviderReceipt identity sid) s=pure (connectionIdentity s==Just identity && session s==Just sid && not (isNothing (connection s)))
 
 cancelQuestion :: ConversationState -> Text -> Desktop -> IO Desktop
 cancelQuestion (ConversationState _ ref _ _) reason d=do
@@ -1617,21 +1735,20 @@ cancelQuestion (ConversationState _ ref _ _) reason d=do
 syncConversationAgent :: ConversationState -> IO ()
 syncConversationAgent runtime@(ConversationState _ ref _ _) = do
   s<-readIORef ref
-  keys<-conversationKeys runtime s
-  owner<-traverse (\client->makeStableName =<< evaluate client) (connection s)
+  let owner=connectionIdentity s
   deliveryActive<-AR.primaryDeliveryActive (conversationAgents runtime)
   let key=fromMaybe "" (session s)
-      caps=AP.filterPrivateCapabilities keys (AP.parseCapabilities (agentInitialized s) (agentConfig s))
+      caps=agentCapabilities s
       externallyBusy=busy s && not deliveryActive
       signature=(project s,owner,key,caps,externallyBusy)
   when (lastAgentSync s/=Just signature) $ do
-    result<-AR.syncPrimary (conversationAgents runtime) (project s) (connection s) key caps externallyBusy
+    result<-AR.syncPrimary (conversationAgents runtime) (project s) (connectionIdentity s) key caps externallyBusy
     case result of
       Left _ -> pure () -- Invalid policy stays fail-closed and can be repaired live.
       Right () -> modifyIORef' ref (\state -> state {lastAgentSync=Just signature})
 
 denyChild :: Approval -> IO ()
-denyChild (ChildPermission _ _ reply)=void (tryPutMVar reply Nothing)
+denyChild (ChildPermission _ _ reply)=void (tryPutMVar reply (Right Nothing))
 denyChild _=pure ()
 
 drainConversationAgents :: ConversationState -> Desktop -> IO Desktop
@@ -1641,21 +1758,21 @@ drainConversationAgents runtime@(ConversationState _ ref _ agents) d=do
   where
     apply desktop (AR.DeliverPrimary delivery)=do
       s<-readIORef ref
-      case (connection s,session s) of
-        (Just client,Just sid) | not (primaryBusy s)->do
-          admitted<-AR.admitPrimaryDelivery agents delivery client sid
+      case (connectionIdentity s,session s) of
+        (Just identity,Just sid) | not (primaryBusy s)->do
+          admitted<-AR.admitPrimaryDelivery agents delivery identity sid
           case admitted of
             Nothing->pure desktop
             Just msg->do
               let author=case AH.messageAuthor msg of AH.Human -> "Human"; AH.Agent ident -> "Agent "<>AH.agentIdText ident
                   attribution=if AH.messageIsUserSeat msg then "Human message" else author<>" sent a peer message, not the human user seat"
               writeIORef ref (appendPrimary [PrimaryMessage (PeerSpeaker (AH.messageAuthor msg)) (AH.messageText msg)] s
-                {queuedPrompt=Just (attribution<>"\n\n"<>AH.messageText msg,Nothing),reads=sourceSnapshots desktop})
+                {queuedPrompt=Just (attribution<>"\n\n"<>AH.messageText msg,Nothing),queuedDelivery=Just delivery,reads=sourceSnapshots desktop})
               sendQueued runtime desktop
         _->AR.rejectPrimaryDelivery agents delivery "The main conversation is not ready; connect it and retry." >> pure desktop
     apply desktop (AR.ControlPrimary control)=do
       state<-readIORef ref
-      current<-AR.primaryControlCurrent agents control (connection state) (session state)
+      current<-AR.primaryControlCurrent agents control (connectionIdentity state) (session state)
       if not current then AR.rejectPrimaryControl "Primary provider changed or the control was cancelled." control >> pure desktop
       else case control of
         AR.QueryPrimary identity _ _ _ _ text reply
@@ -1674,25 +1791,25 @@ drainConversationAgents runtime@(ConversationState _ ref _ agents) d=do
               painted<-paint True accepted desktop
               pure painted {agentQueued=queryCount "" queries,status="Query queued."}
             else submitPrimaryPrompt runtime admitted (Just control) text (False,False,False) desktop
-        AR.ConfigurePrimary _ sid [(option,value)] _
-          | not (busy state),Just client<-connection state->do
-              ident<-A.request client "session/set_config_option" (object ["sessionId" .= sid,"configId" .= option,"value" .= value])
-              modifyIORef' ref (\s->s {pending=M.insert ident (Setting control) (pending s)})
+        AR.ConfigurePrimary _ _ settings _
+          | not (busy state),Just driver<-connection state->mask_ $ do
+              worker<-async (AH.driverConfigure driver settings)
+              modifyIORef' ref (\s->s {promptPreparation=Just (Configuring control worker)})
               pure desktop {status="Updating conversation settings...",agentReplying=True}
-        AR.SteerPrimary _ _ msg _
+        AR.SteerPrimary _ _ msg _ _
           | Prompting `elem` M.elems (pending state),not (steeringPending state)->
               beginPromptPreparation ref True (AH.messageText msg) (Just control) desktop
         _->AR.rejectPrimaryControl "The primary turn changed before control admission; draft kept." control >> pure desktop
     apply desktop AR.CancelPrimary=performPrimary runtime "cancel" [] desktop
     apply desktop AR.EndPrimary=do
       cleared<-cancelQuestion runtime "Agent session ended." desktop
-      s<-readIORef ref
-      mapM_ denyChild (map snd (approvals s))
-      _<-retireRequests ref
-      mapM_ A.stopClient (connection s)
+      _<-retireProviderResources runtime "Agent session ended."
       AR.failPendingPrimary agents "Agent session ended."
-      modifyIORef' ref (\state -> state {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries state),approvals=[],presented=Nothing})
+      modifyIORef' ref (\state -> state {connection=Nothing,connectionIdentity=Nothing,currentTurn=Nothing,completedTurn=Nothing,activeTurn=Nothing,queuedDelivery=Nothing,session=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries state),approvals=[],presented=Nothing})
       pure cleared {status="Agent session ended."}
+    apply desktop (AR.ProviderEvent identity event)=receiveProviderEvent runtime desktop identity event
+    apply desktop (AR.ProviderContentEvent identity turn content)=receiveProviderContent runtime desktop identity turn content
+    apply desktop (AR.NativeProviderRequest identity root operation reply)=incomingProvider runtime identity root operation reply desktop
     apply desktop (AR.AgentCreated result)=pure desktop {status=either id (const "Agent created; task queued.") result}
     apply desktop (AR.AgentReconnected ident result)=do
       refreshed<-case dialog desktop of
@@ -1753,7 +1870,6 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
         worker<-async (AH.cancelAgent hub AH.Human ident)
         modifyIORef' ref (\s->s {childCancels=M.insert target worker (childCancels s),queuedQueries=filter ((/=target).queryTarget) (queuedQueries s)})
         pure d {status="Cancellation requested."}
-    "copy" -> pure d {status="Conversation copy requires its presentation owner."}
     "toggle-activity" | [activityId]<-values -> do
       let next=toggleExpansion target (ActivityExpansion activityId) state
       writeIORef ref next
@@ -1878,46 +1994,16 @@ recentChildHistory hub ident next=go (max 0 (next-101)) [] False
 -- worker can dequeue another peer in the gap before the editor's next tick.
 completeConversationDelivery :: ConversationState -> Either Text Value -> IO ()
 completeConversationDelivery (ConversationState _ ref _ agents) result=do
-  s<-atomicModifyIORef' ref (\state->(state {promptReply=Nothing},state))
-  void (AR.completePrimaryDelivery agents (connection s) (session s) (busy s || queryCount "" (queuedQueries s)>0) result)
+  s<-readIORef ref
+  void (AR.completePrimaryDelivery agents (connectionIdentity s) (session s) (busy s || queryCount "" (queuedQueries s)>0) result)
 
 pruneChildApprovals :: ConversationState -> Desktop -> IO Desktop
 pruneChildApprovals (ConversationState _ ref _ _) d=do
   s<-readIORef ref
-  live<-filterM (\(_,approval)->case approval of ChildPermission _ _ reply -> isEmptyMVar reply; _ -> pure True) (approvals s)
+  live<-filterM (approvalCurrent s . snd) (approvals s)
   let expired=maybe False (\ident -> ident `notElem` map fst live) (presented s)
   modifyIORef' ref (\state -> state {approvals=live,presented=if expired then Nothing else presented state})
   pure (if expired then dismissPermission d else d)
-
-conversationRedactor :: ConversationState -> State -> IO (Text -> Text)
-conversationRedactor runtime state=redactText <$> conversationKeys runtime state
-
-conversationKeys :: ConversationState -> State -> IO [Text]
-conversationKeys runtime state=do
-  servers<-AR.primaryServers (conversationAgents runtime)
-  let tokens=[value | server<-servers,entry<-fromMaybe [] (field "env" server :: Maybe [Value]),
-        field "name" entry==Just ("THC_EDIT_MCP_TOKEN"::Text),Just value<-[field "value" entry]]
-  pure (filter (not . T.null) (tokens++maybe [] pure (session state)))
-
-redactText :: [Text] -> Text -> Text
-redactText keys text=foldr (\key -> T.replace key "[private]") text keys
-
-redactValue :: (Text -> Text) -> Value -> Value
-redactValue redact value=case value of
-  String text -> String (redact text)
-  Array values -> Array (fmap (redactValue redact) values)
-  Object fields -> Object (KM.fromList [(K.fromText (redact (K.toText key)),redactValue redact item) | (key,item)<-KM.toList fields])
-  _ -> value
-
--- A matching prompt response is the only boundary that can release an
--- incomplete credential prefix. Unrelated RPC replies leave held text private.
-flushConversationChunks :: ConversationState -> IO ()
-flushConversationChunks runtime@(ConversationState _ ref _ _)=do
-  emitted<-atomicModifyIORef' ref $ \state ->
-    ((foldl' (\current (role,text) -> if T.null text then current else recordChunk role text current)
-      state (M.toList (streamTails state))) {streamTails=M.empty},M.findWithDefault "" "Agent" (streamTails state))
-  publishPrimaryOutput runtime emitted
-
 
 ensureConversationEditor :: ConversationState -> Text -> Text -> Desktop -> IO Desktop
 ensureConversationEditor (ConversationState _ ref _ _) target name d=readIORef ref >>= \s->ensureEditorWithState True s target name d
@@ -1955,6 +2041,7 @@ ensureEditorWithState opening state target name original=do
           pure $ visible $ case admitted of
             Nothing->detached {status="Conversation window expired."}
             Just (reference,prepared)->installBody Nothing reference prepared detached
+      attach :: (Editor.PreparedEditor services Editor.EditorUpdate -> ConversationEditor) -> Editor.PreparedEditor services Editor.EditorUpdate -> IO Desktop
       attach wrap binding=do
         live<-Editor.mountCurrent (Editor.editorMount binding)
         when (activate && not bodyLive && live) (Editor.retireEditorMount (Editor.editorMount binding))
@@ -2000,14 +2087,16 @@ showConversationFrame target desktop=case M.lookup target (conversationViews des
 preparingSteer :: PromptPreparation -> Bool
 preparingSteer StartingClient{}=False
 preparingSteer (ContextPrompt steering _ _ _)=steering
+preparingSteer SteeringPrompt{}=True
+preparingSteer _=False
 
 captureEditorContext :: ConversationState -> Text -> IO (Either Text ChatEditorContext)
 captureEditorContext (ConversationState _ ref _ agents) target=do
   state<-readIORef ref
   launch<-makeStableName =<< evaluate (provider state)
   if T.null target then do
-    receipt<-case (connection state,session state) of
-      (Just client,Just sid)->Just . (`ProviderReceipt` sid) <$> (makeStableName =<< evaluate client)
+    receipt<-case (connectionIdentity state,session state) of
+      (Just identity,Just sid)->pure (Just (ProviderReceipt identity sid))
       _->pure Nothing
     captured<-AH.agentConfiguration (AR.agentHub agents) (AR.primaryAgent agents)
     pure (Right (ChatEditorContext target launch receipt (either (const Nothing) (Just . fst) captured)))

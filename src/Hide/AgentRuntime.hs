@@ -1,12 +1,12 @@
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, ExistentialQuantification, GADTs, OverloadedStrings, ScopedTypeVariables #-}
 -- |
 -- Module      : Hide.AgentRuntime
 -- Copyright   : (c) 2026 Edward Kmett
 -- License     : BSD-2-Clause OR Apache-2.0
 -- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
--- Portability : CPP, OverloadedStrings, ScopedTypeVariables
+-- Portability : CPP, ExistentialQuantification, GADTs, OverloadedStrings, ScopedTypeVariables
 --
 -- Connect the agent hub to editor sessions, bridge capabilities and recovery.
 --
@@ -15,7 +15,7 @@
 -- activate only after the session lifetime lock is held. Invalid recovery data is
 -- retained and disables spawning rather than being silently replaced.
 module Hide.AgentRuntime
-  ( AgentRuntime, AgentRequest(..), PrimaryDelivery, admitPrimaryDelivery, rejectPrimaryDelivery, completePrimaryDelivery, primaryDeliveryActive, PrimaryControl(..), requestPrimaryQuery, primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
+  ( AgentRuntime, AgentRequest(..), ProviderCall(..), primaryProviderHost, publishProviderEvent, retireProviderCalls, PrimaryDelivery, admitPrimaryDelivery, rejectPrimaryDelivery, completePrimaryDelivery, primaryDeliveryActive, acknowledgePrimaryDelivery, deliveryTurn, deliverySubmission, PrimaryControl(..), requestPrimaryQuery, primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
   , syncPrimary, recordPrimaryEvent, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentCreation, requestAgentReconnect
   ) where
@@ -23,7 +23,7 @@ module Hide.AgentRuntime
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.Async (Async, async, cancel, poll, withAsync)
-import Control.Exception (IOException, bracket, finally, mask, onException, try, evaluate)
+import Control.Exception (IOException, bracket, finally, mask_, mask, onException, try, evaluate)
 import Control.Monad (filterM, forM_, forever, unless, void, when)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither, parseMaybe)
@@ -39,18 +39,20 @@ import System.Environment (lookupEnv)
 import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (IOMode(ReadMode), hClose, hFlush, openBinaryTempFile, withBinaryFile)
 import System.IO.Error (catchIOError, isDoesNotExistError)
+import Data.Unique (Unique,newUnique)
+import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
 import System.Mem.StableName (StableName,makeStableName)
 #ifndef mingw32_HOST_OS
 import System.Posix.Files (setFileMode)
 #endif
-import qualified Hide.ACP as ACP
-import Hide.AgentACP (ACPPermission, startACPDriver)
+import Hide.Plugin.Agent (StartAgentProvider,ProviderKind(..),ProviderHost(..),ProviderPermission,permissionTitle,permissionDetails,permissionOptions,ProviderEndpoint(..),ProviderFiles(..),ProviderTerminals(..),ProviderTerminal(..),ProviderTerminalOutput(..),ProviderContent(..))
+import Hide.Plugin.Provider
 import Hide.AgentAccess
 import Hide.Plugin.EditorHost (SubmissionIdentity)
 import Hide.AgentHub
 import qualified Hide.AgentWorkspace as Workspace
-import Hide.EditorMCP (editorServersAt)
+import Hide.EditorMCP (editorEndpointsAt)
 import Hide.MCPPermissions (readAgentLimitsFor, readAgentContexts)
 import Hide.Protocol (WirePacket(..))
 import Hide.Remote (RemotePeer(..), withLocalPeer)
@@ -61,35 +63,52 @@ import Hide.Session
 data AgentRequest = DeliverPrimary !PrimaryDelivery
   | ControlPrimary PrimaryControl
   | CancelPrimary | EndPrimary
-  | ProviderPermission AgentId ACPPermission (MVar (Maybe Text))
+  | ProviderPermission AgentId ProviderPermission (MVar (Either Text (Maybe Text)))
+  | forall a. NativeProviderRequest !ProviderIdentity !FilePath !(ProviderCall a) !(MVar (Either Text a))
+  | ProviderEvent !ProviderIdentity !DriverEvent
+  | ProviderContentEvent !ProviderIdentity !(Maybe ProviderTurnId) !ProviderContent
   | AgentReconnected AgentId (Either Text ())
   | AgentCreated (Either Text (AgentId,Int))
+-- Fixed host requests decoded only by the provider adapter. Their typed result
+-- cells retain the original call lifetime through worker preparation/adoption.
+data ProviderCall a where
+  AskProviderPermission :: ProviderPermission -> ProviderCall (Maybe Text)
+  ReadProviderFile :: FilePath -> Int -> Maybe Int -> ProviderCall Text
+  WriteProviderFile :: FilePath -> Text -> ProviderCall ()
+  CreateProviderTerminal :: ProviderTerminal -> ProviderCall Text
+  ReadProviderTerminal :: Text -> ProviderCall ProviderTerminalOutput
+  WaitProviderTerminal :: Text -> ProviderCall Int
+  KillProviderTerminal :: Text -> ProviderCall ()
+  ReleaseProviderTerminal :: Text -> ProviderCall ()
+
 -- | One Hub-issued delivery. Its filled terminal reply remains its lifetime;
 -- callers cannot mutate that reply or manufacture a fresh admission. Equality
 -- observes only reply identity, never the attributed prompt payload.
-data PrimaryDelivery = PrimaryDelivery !FilePath !(Maybe (StableName ACP.Client)) !Text !HubMessage !(MVar (Either Text Value))
-instance Eq PrimaryDelivery where
-  PrimaryDelivery _ _ _ _ a == PrimaryDelivery _ _ _ _ b=a==b
+data PrimaryDelivery = PrimaryDelivery
+  { deliveryDirectory :: !FilePath, deliveryProvider :: !(Maybe ProviderIdentity), deliverySession :: !Text
+  , deliveryMessage :: !HubMessage, deliveryTurn :: !ProviderTurnId, deliverySubmission :: !ProviderSubmission
+  , deliveryAdmission :: MVar (Either Text ()), deliveryResult :: MVar (Either Text Value) }
+instance Eq PrimaryDelivery where a==b=deliveryResult a==deliveryResult b
 
 
 -- | One host-only control bound to the exact primary connection. Reply cells
 -- stay filled after cancellation so a drained request cannot be admitted later.
 data PrimaryControl
-  = ConfigurePrimary !(StableName ACP.Client) !Text ![(Text,Text)] !(MVar (Either Text Capabilities))
-  | SteerPrimary !(StableName ACP.Client) !Text !HubMessage !(MVar (Either Text Value))
-  | QueryPrimary !SubmissionIdentity !(StableName ACP.ProviderLaunch) !(Maybe (StableName ACP.Client)) !(Maybe Text) !(Maybe AgentConfigRef) !Text !(MVar (Either Text ()))
+  = ConfigurePrimary !(ProviderIdentity) !Text ![(Text,Text)] !(MVar (Either Text Capabilities))
+  | SteerPrimary !ProviderIdentity !Text !HubMessage !ProviderSubmission !(MVar (Either Text Value))
+  | QueryPrimary !SubmissionIdentity !(StableName ProviderLaunch) !(Maybe (ProviderIdentity)) !(Maybe Text) !(Maybe AgentConfigRef) !Text !(MVar (Either Text ()))
 
 -- Reply identity is the control lifetime; never compare prompt/config payloads.
 instance Eq PrimaryControl where
   ConfigurePrimary _ _ _ a == ConfigurePrimary _ _ _ b=a==b
-  SteerPrimary _ _ _ a == SteerPrimary _ _ _ b=a==b
+  SteerPrimary _ _ _ _ a == SteerPrimary _ _ _ _ b=a==b
   QueryPrimary _ _ _ _ _ _ a == QueryPrimary _ _ _ _ _ _ b=a==b
   _ == _=False
 
 data AgentRuntime = AgentRuntime
   { agentHub :: AgentHub, agentAccess :: AgentAccess, primaryAgent :: AgentId
   , runtimeState :: MVar RuntimeState, primaryToken :: Text
-  , rootSession :: Maybe SessionRecord, configuredLaunch :: IO ACP.ProviderLaunch
+  , rootSession :: Maybe SessionRecord, configuredLaunch :: IO ProviderLaunch
   , checkpointFile :: Maybe FilePath, checkpointWritable :: Bool
   , checkpointLock :: MVar (), reconnectWorkers :: MVar (M.Map AgentId (Async ()))
   , creationWorker :: MVar (Maybe (Async (Either Text (AgentId,Int)))) }
@@ -97,29 +116,30 @@ data AgentRuntime = AgentRuntime
 -- Reply cells stay filled after consumption so a UI callback can reject a stale
 -- request even when cancellation raced with draining the mailbox.
 data RuntimeState = RuntimeState
-  { requests :: [AgentRequest]
+  { requests :: [AgentRequest], providerEventBytes :: !Int
+  , providerReplies :: [(ProviderIdentity,Unique,IO ())]
   , deliveries :: [PrimaryDelivery], admittedPrimary :: Maybe PrimaryDelivery
-  , permissions :: M.Map AgentId [MVar (Maybe Text)]
+  , permissions :: M.Map AgentId [MVar (Either Text (Maybe Text))]
   , sessions :: M.Map AgentId SessionRecord
-  , launches :: M.Map AgentId ACP.ProviderLaunch
-  , primaryState :: Maybe (FilePath,Maybe (StableName ACP.Client),Text,Capabilities)
+  , launches :: M.Map AgentId ProviderLaunch
+  , primaryState :: Maybe (FilePath,Maybe (ProviderIdentity),Text,Capabilities)
   , primaryControl :: Maybe PrimaryControl
   , primaryEvents :: Maybe (DriverEvent -> IO ())
   , closed :: Bool, notice :: Maybe Text, checkpointActive :: Bool }
 
 -- | Scope providers, private bridge access, pending replies and checkpoint workers.
-withAgentRuntime :: FilePath -> IO ACP.ProviderLaunch -> (AgentRuntime -> IO a) -> IO a
-withAgentRuntime = withAgentRuntimeUsing startEditor resumeEditor
+withAgentRuntime :: Maybe StartAgentProvider -> FilePath -> IO ProviderLaunch -> (AgentRuntime -> IO a) -> IO a
+withAgentRuntime providerFactory = withAgentRuntimeUsing providerFactory startEditor resumeEditor
 
 -- Only editor acquisition is replaceable: tests use the real Hub, ACP process
 -- and worktree code without recursively launching their own test executable.
-withAgentRuntimeUsing :: (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> FilePath -> IO ACP.ProviderLaunch -> (AgentRuntime -> IO a) -> IO a
-withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = bracket acquire release $ \runtime ->
+withAgentRuntimeUsing :: Maybe StartAgentProvider -> (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> FilePath -> IO ProviderLaunch -> (AgentRuntime -> IO a) -> IO a
+withAgentRuntimeUsing providerFactory openEditor restoreEditor directory getLaunch action = bracket acquire release $ \runtime ->
   withAsync (forever (threadDelay 2000000 >> void (checkpointAgents runtime))) (const (action runtime))
   where
     acquire = mask $ \restore -> do
       access <- newAgentAccess
-      state <- newMVar (RuntimeState [] [] Nothing M.empty M.empty M.empty Nothing Nothing Nothing False Nothing False)
+      state <- newMVar (RuntimeState [] 0 [] [] Nothing M.empty M.empty M.empty Nothing Nothing Nothing False Nothing False)
       root <- lookupEnv "THC_EDIT_SESSION" >>= traverse (\sid -> do
         saved <- loadSession sid
         case saved of
@@ -138,7 +158,7 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
             fault <- readMVar recoveryFault
             pure $ if starting then either (const (Right (HubLimits 8 4))) Right result else
               case fault of Just _ -> Left "Agent recovery checkpoint is invalid; spawning is disabled until it is repaired."; _ -> result
-          starter = startChild openEditor restoreEditor getLaunch root access state
+          starter = startChild providerFactory openEditor restoreEditor getLaunch root access state
       restored <- case saved of
         Right (Just checkpoint) -> restoreHubWithLimits limits starter (savedHub checkpoint)
         _ -> Right <$> newAgentHubWithLimits limits starter
@@ -179,15 +199,100 @@ withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = brac
       modifyMVar_ (runtimeState runtime) $ \s -> do
         mapM_ (rejectPrimaryControl "Editor closed.") (primaryControl s)
         mapM_ (settleDelivery (Left "Editor closed.")) (deliveries s)
-        forM_ (concat (M.elems (permissions s))) (\cell -> void (tryPutMVar cell Nothing))
-        pure s {closed=True,requests=[],admittedPrimary=Nothing}
+        forM_ (concat (M.elems (permissions s))) (\cell -> void (tryPutMVar cell (Right Nothing)))
+        mapM_ (\(_,_,retire)->retire) (providerReplies s)
+        pure s {closed=True,requests=[],providerReplies=[],providerEventBytes=0,admittedPrimary=Nothing}
       withMVar (reconnectWorkers runtime) (mapM_ cancel)
       closeAgentHub (agentHub runtime) `finally` do
         ids <- M.keys . sessions <$> readMVar (runtimeState runtime)
         mapM_ (revokeAgentAccess (agentAccess runtime)) (primaryAgent runtime:ids)
 
-primaryServers :: AgentRuntime -> IO [Value]
-primaryServers runtime = maybe (pure []) (\record -> editorServersAt (sessionId record) (Just (primaryToken runtime))) (rootSession runtime)
+primaryServers :: AgentRuntime -> IO [ProviderEndpoint]
+primaryServers runtime = maybe (pure []) (\record -> editorEndpointsAt (sessionId record) (Just (primaryToken runtime))) (rootSession runtime)
+
+-- | Actual native services for one host-minted primary acquisition. The existing
+-- runtime mailbox owns pending calls; retiring an acquisition fills all replies.
+primaryProviderHost :: AgentRuntime -> ProviderIdentity -> FilePath -> ProviderHost
+primaryProviderHost runtime identity root=ProviderHost
+  (call . AskProviderPermission)
+  (Just (ProviderFiles (\path line limit->call (ReadProviderFile path line limit))
+    (\path text->call (WriteProviderFile path text))))
+  (Just (ProviderTerminals (call . CreateProviderTerminal) (call . ReadProviderTerminal)
+    (call . WaitProviderTerminal) (call . KillProviderTerminal) (call . ReleaseProviderTerminal)))
+  (Just (\turn content->publishContent identity turn content))
+  where
+    state=runtimeState runtime
+    call :: ProviderCall a -> IO (ProviderReply a)
+    call operation=mask_ $ do
+      ident<-newUnique
+      cell<-newEmptyMVar
+      let finish=void (tryPutMVar cell (Left "Provider request retired."))
+          retire=do
+            finish
+            modifyMVar_ state (\s->pure s {providerReplies=filter (\(_,key,_)->key/=ident) (providerReplies s)})
+      case validateProviderCall operation of
+        Left err->void (tryPutMVar cell (Left err))
+        Right ()->modifyMVar_ state $ \s->if closed s || length (providerReplies s)>=32
+          then finish >> pure s
+          else pure s {requests=requests s++[NativeProviderRequest identity root operation cell]
+            ,providerReplies=(identity,ident,finish):providerReplies s}
+      pure (ProviderReply (tryReadMVar cell) (readMVar cell) retire)
+    publishContent owner turn content=do
+      bytes<-case content of
+        ProviderMessage _ text->pure (BS.length (TE.encodeUtf8 text))
+        ProviderTool value->pure (fromIntegral (BL.length (encode value)))
+        ProviderPlan value->pure (fromIntegral (BL.length (encode value)))
+        ProviderTurnBoundary _->pure 64
+      publishBounded state bytes (ProviderContentEvent owner turn content)
+
+-- Called by the adapter worker before mailbox publication, including typed
+-- callers. Payload traversal/UTF-8 sizing never migrates into the UI owner.
+validateProviderCall :: ProviderCall a -> Either Text ()
+validateProviderCall operation=case operation of
+  AskProviderPermission request
+    | T.length (permissionTitle request)>4096 || BS.length (TE.encodeUtf8 (permissionDetails request))>16*1024*1024->Left "Permission details exceed their bounds."
+    | null choices || length choices>32 || M.size (M.fromList [(key,()) | (key,_,_)<-choices])/=length choices ||
+      any (\(key,label,kind)->T.null key || T.length key>4096 || T.length label>4096 || kind `notElem` ["allow_once","allow_always","reject_once","reject_always"]) choices->Left "Invalid permission choices."
+    | otherwise->Right ()
+    where choices=permissionOptions request
+  ReadProviderFile path line limit | validPath path && line>=1 && maybe True (>=0) limit->Right ()
+                                  | otherwise->Left "Invalid file path or line range."
+  WriteProviderFile path text | not (validPath path) || T.any (=='\0') text || BS.length (TE.encodeUtf8 text)>16*1024*1024->Left "File content must be bounded UTF-8 text without NUL."
+                             | otherwise->Right ()
+  CreateProviderTerminal _->Right () -- Checked/canonicalized on the launch worker before approval.
+  ReadProviderTerminal tid->terminalId tid
+  WaitProviderTerminal tid->terminalId tid
+  KillProviderTerminal tid->terminalId tid
+  ReleaseProviderTerminal tid->terminalId tid
+  where
+    validPath path=not (null path) && length path<=32768 && '\0' `notElem` path
+    terminalId tid=if T.null tid || T.length tid>4096 || T.any (<' ') tid then Left "Invalid terminal ID." else Right ()
+
+-- | Worker publication stays bounded by the original transport ingress budget.
+-- Closing/overrun rejects the adapter rather than creating an unbounded host log.
+publishProviderEvent :: AgentRuntime -> ProviderIdentity -> DriverEvent -> IO ()
+publishProviderEvent runtime identity event=do
+  bytes<-case event of
+    ProviderUpdate _ value->pure (fromIntegral (BL.length (encode value)))
+    ProviderCapabilities caps->evaluate (length (show caps))
+    _->pure 64
+  publishBounded (runtimeState runtime) bytes (ProviderEvent identity event)
+
+publishBounded :: MVar RuntimeState -> Int -> AgentRequest -> IO ()
+publishBounded state bytes event=modifyMVar_ state $ \s->
+  if closed s then pure s else if bytes>16*1024*1024 || providerEventBytes s+bytes>32*1024*1024 || length (requests s)>=4096
+    then ioError (userError "Provider event ingress exceeded its bound.")
+    else pure s {requests=requests s++[event],providerEventBytes=providerEventBytes s+bytes}
+
+-- | Synchronous monotone retirement; cleanup/joins belong to preparation owners.
+retireProviderCalls :: AgentRuntime -> ProviderIdentity -> IO ()
+retireProviderCalls runtime identity=modifyMVar_ (runtimeState runtime) $ \s->do
+  forM_ (providerReplies s) $ \(owner,_,retire)->when (owner==identity) retire
+  pure s {providerReplies=filter (\(owner,_,_)->owner/=identity) (providerReplies s)
+    ,requests=filter keep (requests s)}
+  where
+    keep (NativeProviderRequest owner _ _ _)=owner/=identity
+    keep _=True
 
 -- | Drain unresolved mailbox requests and at most one host launch completion.
 -- Polling never waits for provider startup. Draining a launch releases its single
@@ -201,19 +306,20 @@ drainAgentRequests runtime = do
       Just completed->pure (Nothing,[AgentCreated (either (const (Left "Agent creation interrupted.")) id completed)])
   modifyMVar (runtimeState runtime) $ \s -> do
     ready <- filterM unresolved (requests s)
-    pure (s {requests=[]},if closed s then [] else ready++created)
+    pure (s {requests=[],providerEventBytes=0},if closed s then [] else ready++created)
   where
     unresolved (DeliverPrimary delivery) = deliveryWaiting delivery
     unresolved (ControlPrimary control) = primaryControlWaiting control
     unresolved (ProviderPermission _ _ cell) = isEmptyMVar cell
+    unresolved (NativeProviderRequest _ _ _ cell)=isEmptyMVar cell
     unresolved _ = pure True
 
 -- | Publish primary capabilities and exact connection identity. A replacement
 -- client invalidates captured controls even if it reuses the same session key;
 -- capability refresh retains the existing provider lifetime and delivery receipt.
-syncPrimary :: AgentRuntime -> FilePath -> Maybe ACP.Client -> Text -> Capabilities -> Bool -> IO (Either Text ())
+syncPrimary :: AgentRuntime -> FilePath -> Maybe ProviderIdentity -> Text -> Capabilities -> Bool -> IO (Either Text ())
 syncPrimary runtime directory client key caps busy = do
-  connection<-traverse (\value->makeStableName =<< evaluate value) client
+  let connection=client
   previous <- readMVar (runtimeState runtime)
   let signature=(directory,connection,key,caps)
       sameProvider (oldDirectory,oldConnection,oldKey,_)=
@@ -255,9 +361,9 @@ syncPrimary runtime directory client key caps busy = do
 -- | Publish an already-scrubbed update from the exact live primary connection.
 -- The sink retains its Hub incarnation after this check, so concurrent provider
 -- replacement also rejects publication. This never synchronizes or replays state.
-recordPrimaryEvent :: AgentRuntime -> ACP.Client -> Text -> DriverEvent -> IO ()
+recordPrimaryEvent :: AgentRuntime -> ProviderIdentity -> Text -> DriverEvent -> IO ()
 recordPrimaryEvent runtime client key event=do
-  owner<-makeStableName =<< evaluate client
+  let owner=client
   publish<-withMVar (runtimeState runtime) $ \state->pure $ case primaryState state of
     Just (_,Just current,sid,_) | not (closed state),owner==current,key==sid->primaryEvents state
     _->Nothing
@@ -266,13 +372,14 @@ recordPrimaryEvent runtime client key event=do
 -- | Claim one unresolved Hub delivery for the exact current provider object.
 -- Claiming twice cannot fail an already running prompt. No new prompt queue is
 -- created: the Hub worker still waits for this receipt's terminal result.
-admitPrimaryDelivery :: AgentRuntime -> PrimaryDelivery -> ACP.Client -> Text -> IO (Maybe HubMessage)
-admitPrimaryDelivery runtime delivery@(PrimaryDelivery directory expected sid message _) client key=do
-  owner<-makeStableName =<< evaluate client
+admitPrimaryDelivery :: AgentRuntime -> PrimaryDelivery -> ProviderIdentity -> Text -> IO (Maybe HubMessage)
+admitPrimaryDelivery runtime delivery client key=do
+  let owner=client
   current<-statusAgent (agentHub runtime) Human (primaryAgent runtime)
   let running=case current of Right value->field "status" value==Just ("running"::Text); _->False
   modifyMVar (runtimeState runtime) $ \state->do
     waiting<-deliveryWaiting delivery
+    let directory=deliveryDirectory delivery; expected=deliveryProvider delivery; sid=deliverySession delivery; message=deliveryMessage delivery
     if delivery `notElem` deliveries state || not waiting || admittedPrimary state/=Nothing
       then pure (state,Nothing)
       else if closed state || not running || expected/=Just owner || sid/=key || not (driverBinding state directory expected sid)
@@ -296,16 +403,16 @@ rejectPrimaryDelivery runtime delivery reason=withMVar (runtimeState runtime) $ 
 -- pending until that real provider outcome.
 -- Returns whether this call settled an admitted delivery. Calls without one may
 -- still update the matching external human turn's existing busy advertisement.
-completePrimaryDelivery :: AgentRuntime -> Maybe ACP.Client -> Maybe Text -> Bool -> Either Text Value -> IO Bool
+completePrimaryDelivery :: AgentRuntime -> Maybe ProviderIdentity -> Maybe Text -> Bool -> Either Text Value -> IO Bool
 completePrimaryDelivery runtime client session busy result=case (client,session) of
   (Just current,Just key)->do
-    owner<-makeStableName =<< evaluate current
+    let owner=current
     modifyMVar (runtimeState runtime) $ \state->
       if closed state || not (primaryBinding state owner key) then pure (state,False) else do
         -- This Hub operation is STM-only and cannot re-enter provider callbacks.
         setExternalAgentBusy (agentHub runtime) (primaryAgent runtime) busy
         case admittedPrimary state of
-          Just delivery@(PrimaryDelivery _ expected sid _ _) | Just owner==expected && key==sid->do
+          Just delivery | Just owner==deliveryProvider delivery && key==deliverySession delivery->do
             settled<-settleDelivery result delivery
             pure (state {admittedPrimary=Nothing},settled)
           _->pure (state,False)
@@ -315,22 +422,30 @@ completePrimaryDelivery runtime client session busy result=case (client,session)
 primaryDeliveryActive :: AgentRuntime -> IO Bool
 primaryDeliveryActive runtime=maybe False (const True) . admittedPrimary <$> readMVar (runtimeState runtime)
 
-primaryBinding :: RuntimeState -> StableName ACP.Client -> Text -> Bool
+primaryBinding :: RuntimeState -> ProviderIdentity -> Text -> Bool
 primaryBinding state owner key=case primaryState state of
   Just (_,Just expected,sid,_)->owner==expected && key==sid
   _->False
 
 -- A Hub worker may retain an old driver across replacement before its IO begins.
 -- Preserve its issuance binding through admission instead of adopting a new client.
-driverBinding :: RuntimeState -> FilePath -> Maybe (StableName ACP.Client) -> Text -> Bool
+driverBinding :: RuntimeState -> FilePath -> Maybe (ProviderIdentity) -> Text -> Bool
 driverBinding state directory owner key=case primaryState state of
   Just (current,expected,sid,_)->directory==current && owner==expected && key==sid
   _->False
 
 deliveryWaiting :: PrimaryDelivery -> IO Bool
-deliveryWaiting (PrimaryDelivery _ _ _ _ reply)=isEmptyMVar reply
+deliveryWaiting delivery=isEmptyMVar (deliveryResult delivery)
 settleDelivery :: Either Text Value -> PrimaryDelivery -> IO Bool
-settleDelivery result (PrimaryDelivery _ _ _ _ reply)=tryPutMVar reply result
+settleDelivery result delivery=do
+  retireProviderSubmission (deliverySubmission delivery)
+  void (tryPutMVar (deliveryAdmission delivery) (either Left (const (Right ())) result))
+  tryPutMVar (deliveryResult delivery) result
+
+-- | Acknowledge only the original admitted delivery after its provider send committed.
+acknowledgePrimaryDelivery :: AgentRuntime -> IO ()
+acknowledgePrimaryDelivery runtime=withMVar (runtimeState runtime) $ \state->
+  forM_ (admittedPrimary state) (\delivery->void (tryPutMVar (deliveryAdmission delivery) (Right ())))
 
 failPendingPrimary :: AgentRuntime -> Text -> IO ()
 failPendingPrimary runtime = failDeliveries (runtimeState runtime)
@@ -382,33 +497,41 @@ activateAgentCheckpoint runtime = modifyMVar_ (runtimeState runtime) $ \s ->
 readLimits :: FilePath -> IO (Either Text HubLimits)
 readLimits directory = fmap (uncurry HubLimits) <$> readAgentLimitsFor directory
 
-primaryDriver :: MVar RuntimeState -> AgentAccess -> IO (Maybe AgentId) -> Maybe (StableName ACP.Client) -> FilePath -> Text -> Capabilities -> AgentDriver
+primaryDriver :: MVar RuntimeState -> AgentAccess -> IO (Maybe AgentId) -> Maybe (ProviderIdentity) -> FilePath -> Text -> Capabilities -> AgentDriver
 primaryDriver state access identity connection directory key caps = AgentDriver
   { driverDirectory=directory,driverSessionKey=key,driverCapabilities=caps
-  , driverSteer= \message->case connection of
+  , driverSteer= \message _extra submission->case connection of
       Nothing->pure (Left "Primary provider is disconnected.")
       Just owner->do
         reply<-newEmptyMVar
-        requestPrimaryControl state (SteerPrimary owner key message reply) reply
+        requestPrimaryControl state (SteerPrimary owner key message submission reply) reply
   , driverConfigure= \settings->case connection of
       Nothing->pure (Left "Primary provider is disconnected.")
       Just owner->do
         reply<-newEmptyMVar
         requestPrimaryControl state (ConfigurePrimary owner key settings reply) reply
-  , driverDeliver= \message -> mask $ \restore -> do
-      cell <- newEmptyMVar
-      let delivery=PrimaryDelivery directory connection key message cell
+  , driverDeliver= \turn message _extra submission -> mask $ \restore -> do
+      admitted<-newEmptyMVar
+      cell<-newEmptyMVar
+      let delivery=PrimaryDelivery directory connection key message turn submission admitted cell
+          retire=do
+            void (settleDelivery (Left "Primary delivery interrupted.") delivery)
+            modifyMVar_ state (\s->pure s
+              {deliveries=filter (/=delivery) (deliveries s),requests=filter (not . matchingDelivery delivery) (requests s)
+              ,admittedPrimary=if admittedPrimary s==Just delivery then Nothing else admittedPrimary s})
       modifyMVar_ state $ \s -> if closed s
-        then putMVar cell (Left "Editor closed.") >> pure s
+        then settleDelivery (Left "Editor closed.") delivery >> pure s
         else pure s {requests=requests s++[DeliverPrimary delivery],deliveries=delivery:deliveries s}
-      restore (readMVar cell) `finally` do
-        void (tryPutMVar cell (Left "Primary delivery interrupted."))
-        modifyMVar_ state (\s -> pure s
-          {deliveries=filter (/=delivery) (deliveries s),requests=filter (not . matchingDelivery delivery) (requests s)
-          ,admittedPrimary=case admittedPrimary s of Just active | active==delivery->Nothing; kept->kept})
+      admission<-restore (readMVar admitted) `onException` retire
+      case admission of
+        Left err->retire >> pure (Left err)
+        Right ()->pure (Right (ProviderTurn turn
+          (ProviderReply (tryReadMVar cell) (restore (readMVar cell) `finally` retire) retire)
+          (modifyMVar_ state $ \current->pure current
+            {requests=requests current++[CancelPrimary | admittedPrimary current==Just delivery && not (closed current)]})))
   , driverCancel=modifyMVar_ state $ \s -> do
       let current=driverBinding s directory connection key
-          belongs (PrimaryDelivery cwd owner sid _ _)=cwd==directory && owner==connection && sid==key
+          belongs delivery=deliveryDirectory delivery==directory && deliveryProvider delivery==connection && deliverySession delivery==key
       when current (mapM_ (rejectPrimaryControl "Agent control cancelled.") (primaryControl s))
       -- Draining alone is not admission. Only a claimed provider prompt retains
       -- the Hub reservation until its owner dispatches the terminal response.
@@ -432,7 +555,7 @@ primaryDriver state access identity connection directory key caps = AgentDriver
 -- Connected submissions keep their captured configuration receipt. Only original
 -- disconnected startup omits it, because acquiring that provider changes the Hub
 -- incarnation itself. The submission identity retains no draft source payload.
-requestPrimaryQuery :: AgentRuntime -> SubmissionIdentity -> StableName ACP.ProviderLaunch -> Maybe (StableName ACP.Client,Text) -> Maybe AgentConfigRef -> Text -> IO (Either Text ())
+requestPrimaryQuery :: AgentRuntime -> SubmissionIdentity -> StableName ProviderLaunch -> Maybe (ProviderIdentity,Text) -> Maybe AgentConfigRef -> Text -> IO (Either Text ())
 requestPrimaryQuery runtime submitted launch provider config text=do
   reply<-newEmptyMVar
   requestPrimaryControl (runtimeState runtime)
@@ -440,7 +563,7 @@ requestPrimaryQuery runtime submitted launch provider config text=do
 
 -- Missing identity pieces describe only the original startup. Binding is
 -- monotone: once present, a client/session can only compare equal, never change.
-bindPrimaryQuery :: StableName ACP.ProviderLaunch -> Maybe (StableName ACP.Client) -> Maybe Text -> PrimaryControl -> Maybe PrimaryControl
+bindPrimaryQuery :: StableName ProviderLaunch -> Maybe (ProviderIdentity) -> Maybe Text -> PrimaryControl -> Maybe PrimaryControl
 bindPrimaryQuery launch client session (QueryPrimary submitted expected original key config text reply)
   | launch==expected,maybe True (\value->Just value==client) original,maybe True (\value->Just value==session) key=
       Just (QueryPrimary submitted expected client session config text reply)
@@ -450,11 +573,11 @@ bindPrimaryQuery _ _ _ _=Nothing
 -- Cancellation before this check refuses the request without protocol IO.
 -- Query's canonical binding lives in the existing control slot; retained copies
 -- share only reply identity and cannot restore an earlier unbound startup phase.
-primaryControlCurrent :: AgentRuntime -> PrimaryControl -> Maybe ACP.Client -> Maybe Text -> IO Bool
+primaryControlCurrent :: AgentRuntime -> PrimaryControl -> Maybe ProviderIdentity -> Maybe Text -> IO Bool
 primaryControlCurrent runtime control client session=case control of
   QueryPrimary{}->do
     launch<-makeStableName =<< (configuredLaunch runtime >>= evaluate)
-    owner<-traverse (\value->makeStableName =<< evaluate value) client
+    let owner=client
     modifyMVar (runtimeState runtime) $ \state->do
       waiting<-primaryControlWaiting control
       case primaryControl state of
@@ -468,22 +591,22 @@ primaryControlCurrent runtime control client session=case control of
     waiting<-primaryControlWaiting control
     case (client,session) of
       (Just current,Just key) | reserved && waiting->do
-        owner<-makeStableName =<< evaluate current
+        let owner=current
         pure $ case control of
           ConfigurePrimary expected sid _ _->owner==expected && key==sid
-          SteerPrimary expected sid _ _->owner==expected && key==sid
+          SteerPrimary expected sid _ _ _->owner==expected && key==sid
       _->pure False
 
 primaryControlWaiting :: PrimaryControl -> IO Bool
 primaryControlWaiting (ConfigurePrimary _ _ _ reply)=isEmptyMVar reply
-primaryControlWaiting (SteerPrimary _ _ _ reply)=isEmptyMVar reply
+primaryControlWaiting (SteerPrimary _ _ _ _ reply)=isEmptyMVar reply
 primaryControlWaiting (QueryPrimary _ _ _ _ _ _ reply)=isEmptyMVar reply
 
 -- | Terminally refuse one retained control. Repeated retirement preserves its
 -- first result and cannot turn a cancelled reply into success.
 rejectPrimaryControl :: Text -> PrimaryControl -> IO ()
 rejectPrimaryControl reason (ConfigurePrimary _ _ _ reply)=void (tryPutMVar reply (Left reason))
-rejectPrimaryControl reason (SteerPrimary _ _ _ reply)=void (tryPutMVar reply (Left reason))
+rejectPrimaryControl reason (SteerPrimary _ _ _ submission reply)=retireProviderSubmission submission >> void (tryPutMVar reply (Left reason))
 rejectPrimaryControl reason (QueryPrimary _ _ _ _ _ _ reply)=void (tryPutMVar reply (Left reason))
 
 -- | Resolve the primary's outstanding control without completing its running
@@ -524,46 +647,53 @@ enqueue :: MVar RuntimeState -> AgentRequest -> IO ()
 enqueue state request = modifyMVar_ state $ \s -> pure s
   {requests=if closed s then requests s else requests s++[request]}
 
-requestPermission :: MVar RuntimeState -> AgentId -> ACPPermission -> IO (Maybe Text)
-requestPermission state ident permission = mask $ \restore -> do
-  cell <- newEmptyMVar
-  modifyMVar_ state $ \s -> if closed s then putMVar cell Nothing >> pure s else pure s
+requestPermission :: MVar RuntimeState -> AgentId -> ProviderPermission -> IO (ProviderReply (Maybe Text))
+requestPermission state ident permission=mask_ $ do
+  cell<-newEmptyMVar
+  modifyMVar_ state $ \s->if closed s then putMVar cell (Left "Editor closed.") >> pure s else pure s
     {requests=requests s++[ProviderPermission ident permission cell],permissions=M.insertWith (++) ident [cell] (permissions s)}
-  restore (readMVar cell) `finally` do
-    void (tryPutMVar cell Nothing)
-    modifyMVar_ state (\s -> pure s
-      {permissions=M.update (nonempty . filter (/=cell)) ident (permissions s)
-      ,requests=filter (\request -> case request of ProviderPermission _ _ other -> cell/=other; _ -> True) (requests s)})
-  where nonempty [] = Nothing
-        nonempty xs = Just xs
+  let retire=do
+        void (tryPutMVar cell (Right Nothing))
+        modifyMVar_ state (\s->pure s
+          {permissions=M.update (nonempty . filter (/=cell)) ident (permissions s)
+          ,requests=filter (\request->case request of ProviderPermission _ _ other->cell/=other; _->True) (requests s)})
+  pure (ProviderReply (tryReadMVar cell) (readMVar cell) retire)
+  where nonempty []=Nothing
+        nonempty xs=Just xs
 
 cancelPermissions :: MVar RuntimeState -> AgentId -> IO ()
 cancelPermissions state ident = modifyMVar_ state $ \s -> do
-  forM_ (M.findWithDefault [] ident (permissions s)) (\cell -> void (tryPutMVar cell Nothing))
+  forM_ (M.findWithDefault [] ident (permissions s)) (\cell -> void (tryPutMVar cell (Right Nothing)))
   pure s {permissions=M.delete ident (permissions s),requests=filter keep (requests s)}
   where keep (ProviderPermission other _ _) = other/=ident
         keep _ = True
 
-startChild :: (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> IO ACP.ProviderLaunch -> Maybe SessionRecord -> AgentAccess -> MVar RuntimeState -> StartProvider
-startChild openEditor restoreEditor getLaunch root access state request emit = mask $ \restore -> do
+startChild :: Maybe StartAgentProvider -> (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> IO ProviderLaunch -> Maybe SessionRecord -> AgentAccess -> MVar RuntimeState -> StartProvider
+startChild providerFactory openEditor restoreEditor getLaunch root access state request emit = mask $ \restore -> do
   let ident = startAgent request
       spec = startSpec request
       retire = revokeAgentAccess access ident >> cancelPermissions state ident
-  result <- restore (prepare spec) `onException` retire
+  result <- case providerFactory of
+    Nothing->pure (Left "Agent provider plugin is unavailable.")
+    Just _->restore (prepare spec) `onException` retire
   case result of
     Left err -> retire >> pure (Left err)
     Right (record,launch,context) -> do
       token <- grantAgentAccess access ident
       let run = do
-            ownServers <- editorServersAt (sessionId record) Nothing
-            orchestration <- maybe (pure []) (\r -> editorServersAt (sessionId r) (Just token)) root
+            ownServers <- editorEndpointsAt (sessionId record) Nothing
+            orchestration <- maybe (pure []) (\r -> editorEndpointsAt (sessionId r) (Just token)) root
             let servers = ownServers++map renameServer orchestration
-                configured = launch {ACP.environment=("THC_EDIT_SESSION",sessionId record):filter ((/="THC_EDIT_SESSION").fst) (ACP.environment launch)}
+                configured = launch {environment=("THC_EDIT_SESSION",sessionId record):filter ((/="THC_EDIT_SESSION").fst) (environment launch)}
                 started = request {startSpec=spec {spawnDirectory=sessionDirectory record}}
                 event value = do
                   case value of ProviderClosed -> retire; _ -> pure ()
                   emit value
-            startACPDriver configured servers context (requestPermission state ident) started event
+            identity<-newProviderIdentity
+            case providerFactory of
+              Nothing->pure (Left "Agent provider plugin is unavailable.")
+              Just acquire->acquire ChildProvider identity configured servers context
+                (ProviderHost (requestPermission state ident) Nothing Nothing Nothing) started event
       started <- restore run `onException` retire
       case started of
         Left err -> retire >> pure (Left err)
@@ -619,8 +749,7 @@ startChild openEditor restoreEditor getLaunch root access state request emit = m
                       modifyMVar_ state $ \s -> pure s
                         {sessions=M.insert (startAgent request) record (sessions s),launches=M.insert (startAgent request) launch (launches s)}
                       pure (Right (record,launch,contextText context))
-    renameServer (Object fields) = Object (KM.insert "name" (String "agents") fields)
-    renameServer value = value
+    renameServer endpoint=endpoint {endpointName="agents"}
 
 contextText :: Value -> Text
 contextText value = T.intercalate "\n\n"
@@ -666,7 +795,7 @@ attachEditor resume record = do
 data RuntimeCheckpoint = RuntimeCheckpoint
   { savedHub :: Value, savedPrimary :: AgentId
   , savedSessions :: M.Map AgentId SessionRecord
-  , savedLaunches :: M.Map AgentId ACP.ProviderLaunch }
+  , savedLaunches :: M.Map AgentId ProviderLaunch }
 
 checkpointLimit :: Int
 checkpointLimit = 256*1024*1024
@@ -717,7 +846,7 @@ checkpointParser = withObject "agent runtime" $ \o -> do
     environment <- entry .: "environment"
     unless (ident `elem` identities && not (null executable) && valid executable && length arguments<=256 && all valid arguments &&
       length environment<=1024 && all (\(key,value) -> not (null key) && valid key && valid value && '=' `notElem` key && key/="THC_EDIT_MCP_TOKEN") environment) (fail "Provider")
-    pure (ident,ACP.ProviderLaunch executable arguments environment)) providerValues
+    pure (ident,ProviderLaunch executable arguments environment)) providerValues
   unless (M.size (M.fromList editors)==length editors && M.size (M.fromList providers)==length providers) (fail "Duplicate")
   -- Binding the human seat does not resume a provider, even when it had been
   -- explicitly ended before the editor crashed. Child ended states remain.
@@ -749,8 +878,8 @@ saveAgentCheckpoint runtime = case (checkpointFile runtime,rootSession runtime) 
           let value = object
                 ["schemaVersion" .= (1::Int),"primary" .= agentIdText (primaryAgent runtime),"hub" .= hub
                 ,"sessions" .= [object ["agent" .= agentIdText ident,"session" .= record] | (ident,record) <- M.toList (sessions state)]
-                ,"providers" .= [object ["agent" .= agentIdText ident,"executable" .= ACP.executable launch
-                  ,"arguments" .= ACP.arguments launch,"environment" .= filter ((/="THC_EDIT_MCP_TOKEN").fst) (ACP.environment launch)]
+                ,"providers" .= [object ["agent" .= agentIdText ident,"executable" .= executable launch
+                  ,"arguments" .= arguments launch,"environment" .= filter ((/="THC_EDIT_MCP_TOKEN").fst) (environment launch)]
                   | (ident,launch) <- M.toList (launches state)]]
               bytes = BL.take (fromIntegral checkpointLimit+1) (encode value)
           when (BL.length bytes>fromIntegral checkpointLimit) (ioError (userError "Agent checkpoint exceeds 256 MiB"))

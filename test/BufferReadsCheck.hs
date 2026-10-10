@@ -10,6 +10,7 @@
 
 module BufferReadsCheck (checks) where
 
+import AgentHubCheck (completedTurn)
 import MCPPermissionsCheck (settledTool,settleDialog)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket,onException)
@@ -173,7 +174,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
     check "cancelled read cannot be resurrected by later approval" . isLeft =<< cancelled
     let caps=AH.Capabilities False False False []
         driver=AH.AgentDriver directory "test-read-provider" caps (\_->pure (Right caps))
-          (\_->pure (Right Null)) (pure ()) (pure ()) (\_->pure (Left "unsupported"))
+          (\turn _ _ _->completedTurn turn (pure (Right Null))) (pure ()) (pure ()) (\_ _ _->pure (Left "unsupported"))
     bracket (AH.newAgentHub (AH.HubLimits 1 0) (\_ _->pure (Right driver))) AH.closeAgentHub $ \hub->do
       ident<-AH.registerAgent hub "Read actor" directory driver >>= either (error . T.unpack) pure
       access<-newAgentAccess

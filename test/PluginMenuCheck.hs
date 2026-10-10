@@ -16,6 +16,8 @@ import Control.Exception (ErrorCall,try)
 import Control.Monad (unless,void)
 import Data.Aeson
 import Data.IORef
+import qualified Data.Map.Strict as M
+import Hide.Plugin.Provider (ProviderLaunch(..))
 import System.Timeout (timeout)
 import Hide.Plugin.Command
 import Hide.Plugin.Menu
@@ -120,12 +122,14 @@ checks=do
       _<-retireCommand registry (commandRef command)
       current<-menuCurrent mapped composed
       unless (not current) (error "mapped menu lost its original command lifetime")
-  withMenus ["tools"] $ \menus->do
+  withMenus ["tools","options"] $ \menus->do
     let forms=Sidebar.Sidebar fst (const "") SessionForm SessionForm (\_->pure ()) (\_->pure ()) (\_ _->pure ())
         publisher=MenuPublisher (contributeMenu menus) (void . retireMenu menus)
         captured (_,receipt)=Right (ConversationTarget receipt True "private-resume-id")
+        originalLaunch=ProviderLaunch "codex-acp" ["--stdio"] [("TOKEN","private-value")]
+        operation (_,receipt)=Right (ConversationOperationTarget receipt originalLaunch (receipt/=10))
         check label condition=unless condition (error label)
-    ConversationMenus.withConversationMenus forms publisher captured SessionRequest $ do
+    ConversationMenus.withConversationMenus forms publisher captured operation SessionRequest cancelConversationAction $ do
       metadata<-menuSnapshot menus
       let reference name=case [menuReference item | item<-metadata,menuName (menuReference item)==name] of
             ref:_->ref; _->error "Missing declared session menu"
@@ -143,4 +147,53 @@ checks=do
         _->error "Declared Resume did not prepare its form"
       refused<-async (invokeMenu menus (reference "hide.agents.new") (AgentMenu,1)) >>= wait
       check "plugin New requires the human independently of menu metadata" (case refused of Left (MenuCommandError CommandRejected{})->True; _->False)
+      configured<-invokeMenu menus (reference "hide.agents.provider") (HumanMenu,3)
+      case configured of
+        Right (SessionForm prepared)->do
+          let initial=case Form.formSpec prepared of
+                Form.InputsFormSpec _ fields _->M.fromList [(Form.inputId field,Form.inputInitial field) | field<-fields]
+                _->error "Provider form must expose its three named inputs"
+          check "provider prefill is private"
+            (Form.formDisclosure (Form.formReference prepared)==Form.PrivateForm)
+          result<-Form.invokeFormAction prepared (HumanMenu,4) (Form.InputValues initial)
+          check "provider form roundtrips launch privately against its original receipt"
+            (case result of Right (SessionRequest (ConfigureConversation 3 launch))->launch==originalLaunch; _->False)
+          denied<-Form.invokeFormAction prepared (AgentMenu,3) (Form.InputValues initial)
+          check "agent cannot submit a retained provider form" (case denied of Left CommandRejected{}->True; _->False)
+          invalid<-Form.invokeFormAction prepared (HumanMenu,3)
+            (Form.InputValues (M.insert "environment" "{\"BAD=NAME\":\"value\"}" initial))
+          check "provider form rejects invalid process environment" (case invalid of Left InvalidArguments{}->True; _->False)
+        _->error "Declared provider menu did not prepare its form"
+      contextual<-invokeMenu menus (reference "hide.agents.context") (HumanMenu,5)
+      case contextual of
+        Right (SessionForm prepared)->do
+          check "context scope defaults to project and is readable"
+            (Form.formDisclosure (Form.formReference prepared)==Form.ReadableForm &&
+              case Form.formSpec prepared of Form.ChoiceFormSpec _ _ _ "project" _->True; _->False)
+          result<-Form.invokeFormAction prepared (HumanMenu,6) (Form.TextValue "global")
+          check "context form keeps the captured project/provider receipt"
+            (case result of Right (SessionRequest (OpenConversationContext 5 GlobalContext))->True; _->False)
+          denied<-Form.invokeFormAction prepared (AgentMenu,5) (Form.TextValue "project")
+          check "readable context form does not grant agent input" (case denied of Left CommandRejected{}->True; _->False)
+        _->error "Declared context menu did not prepare its form"
+      opened<-invokeMenu menus (reference "hide.agents.open") (HumanMenu,7)
+      copied<-invokeMenu menus (reference "hide.agents.copy") (HumanMenu,8)
+      check "Open and raw copy pass captured host receipts without a form"
+        (case (opened,copied) of
+          (Right (SessionRequest (OpenConversation 7)),Right (SessionRequest (CopyRawConversation 8)))->True
+          _->False)
+      busyProvider<-invokeMenu menus (reference "hide.agents.provider") (HumanMenu,10)
+      busyCopy<-invokeMenu menus (reference "hide.agents.copy") (HumanMenu,10)
+      check "busy conversation refuses provider settings while preserving raw copy"
+        (case (busyProvider,busyCopy) of
+          (Left (MenuCommandError CommandRejected{}),Right (SessionRequest (CopyRawConversation 10)))->True
+          _->False)
+      let cancelRef=reference "hide.agents.cancel"
+      immediate<-menuCancelsConversation menus cancelRef
+      queued<-invokeMenu menus cancelRef (HumanMenu,9)
+      check "Cancel is owned synchronously and cannot queue a later worker action"
+        (immediate && case queued of Left InvalidMenu{}->True; _->False)
+      _<-retireMenu menus cancelRef
+      retired<-menuCancelsConversation menus cancelRef
+      check "retired Cancel contribution cannot cancel a later turn" (not retired)
   putStrLn "plugin menu checks passed"

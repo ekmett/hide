@@ -49,7 +49,7 @@ import Hide.Syntax (Style(..),StyledText,StyledRow(..),MappedStyledRow(..),Sigil
 import Data.Text (Text)
 import Data.Set (Set)
 import System.Mem.StableName (StableName,makeStableName)
-import qualified Hide.ACP as A
+import Hide.Plugin.Provider (ProviderLaunch,ProviderIdentity)
 import qualified Hide.AgentHub as AH
 import qualified Hide.Plugin.Window as W
 import Hide.Plugin.Transcript (BodyItemId(..),Record(..),RecordContent(..),AgentHistory,HistoryPresenter,PrimaryTranscript,primaryTranscriptRecords)
@@ -446,7 +446,7 @@ data QuestionProjection = QuestionProjection
 
 -- Captured incarnation, never a reusable provider/session display label.
 data BodyProvider
-  = PrimaryBodyProvider !(StableName A.ProviderLaunch) !(Maybe (StableName A.Client,Maybe Text))
+  = PrimaryBodyProvider !(StableName ProviderLaunch) !(Maybe (ProviderIdentity,Maybe Text))
   | ChildBodyProvider !AH.AgentConfigRef
   | RecoveredBodyProvider !Unique
   deriving Eq

@@ -14,4 +14,4 @@ library
   hs-source-dirs: src
   exposed-modules: Hide.ACP, Hide.AgentACP, Hide.AutocompleteACP
   build-depends: base >=4.18 && <4.23, hide-agent-api ==0.1.0.0,
-    text >=2.0, containers, bytestring, directory, process, async, stm, aeson, vector
+    text >=2.0, containers, bytestring, directory, process, async, stm, aeson, vector, deepseq

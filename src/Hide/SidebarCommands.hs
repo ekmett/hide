@@ -57,6 +57,7 @@ import qualified Hide.Plugin.Sidebar as PluginSidebar
 import Hide.AgentSidebarTypes
 import Hide.ConversationSessionTypes
 import qualified Hide.Plugin.ConversationSession as Conversation
+import qualified Hide.Plugin.Provider as Provider
 import Hide.SessionSidebarTypes
 import qualified Hide.Recovery as Recovery
 import Hide.Sidebar
@@ -70,6 +71,7 @@ data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpenedImage :: !(Maybe (FilePath,Int,PluginWindow.WindowRef)), sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int, sidebarAttachment :: !Int
   , sidebarConversation :: !(Either Text (Conversation.ConversationTarget ConversationSessionReceipt))
+  , sidebarConversationOperation :: !(Either Text (Conversation.ConversationOperationTarget ConversationSessionReceipt))
   , sidebarSelectedAgent :: !(Either Text Hide.AgentHub.AgentId) }
 data SidebarReply = SidebarPopupForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
@@ -169,14 +171,14 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d) (Left "No captured conversation session.") (Left "No captured conversation agent.")
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d) (Left "No captured conversation session.") (Left "No captured conversation operation.") (Left "No captured conversation agent.")
 
 -- | Shallow immutable menu input for this same form owner. It retains no desktop,
 -- source contents or Undo. The menu owner supplies its captured session receipt.
 sidebarInvocationContext :: Menu.MenuOrigin -> Desktop -> SidebarContext
 sidebarInvocationContext origin d=SidebarContext origin workspace workspace Nothing []
   (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] 0 (sessionAttachment d)
-  (Left "No captured conversation session.") (Left "No captured conversation agent.")
+  (Left "No captured conversation session.") (Left "No captured conversation operation.") (Left "No captured conversation agent.")
   where workspace=startingDirectory d
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
@@ -1140,7 +1142,7 @@ submitForm host@(SidebarHost _ ref _ _ _ _) reference value origin d=do
   state<-readIORef ref
   case inputForm state of
     Just prepared | origin==Menu.HumanMenu,Form.formReference prepared==reference,formDialog reference d->
-      startFormSubmission host prepared value (context origin d) d
+      startFormSubmission host prepared value (sidebarInvocationContext origin d) d
     _->pure d {status="Input form expired."}
 
 startFormSubmission :: SidebarHost -> Form.PreparedForm SidebarContext SidebarReply -> Form.FormValue -> SidebarContext -> Desktop -> IO Desktop
@@ -1149,6 +1151,10 @@ startFormSubmission (SidebarHost _ ref _ _ _ _) prepared value captured d=mask $
   case actionJob state of
     Just _->pure d {status=case inputPopup state of Just _->"Sidebar worker is busy; reopen choices."; Nothing->"Sidebar worker is busy; submit again."}
     Nothing->do
+      -- Form actions retain their own original target; submission supplies only
+      -- shallow human context, detached before the action worker can retain it.
+      _<-evaluate captured
+      _<-evaluate (length (sidebarContextDirectory captured)+length (sidebarContextWorkspace captured))
       accepted<-Form.claimFormSubmission prepared
       let reference=Form.formReference prepared
       if not accepted then pure d {status="Input form expired."} else do
@@ -1183,8 +1189,15 @@ forceFormReply reply@(SidebarSession (SessionDeleted ident))
   | otherwise=ioError (userError "Invalid deleted session result.")
 forceFormReply reply@SidebarRename{}=evaluate reply
 forceFormReply reply@SidebarPopupForm{}=evaluate reply
-forceFormReply reply@(SidebarConversation Conversation.NewConversation{})=evaluate reply
-forceFormReply reply@(SidebarConversation (Conversation.ResumeConversation _ sid))=evaluate (T.length sid) >> evaluate reply
+forceFormReply reply@(SidebarConversation request)=do
+  case request of
+    Conversation.NewConversation{}->pure ()
+    Conversation.ResumeConversation _ sid->evaluate (T.length sid) >> pure ()
+    Conversation.OpenConversation{}->pure ()
+    Conversation.ConfigureConversation _ launch->evaluate (force (Provider.executable launch,Provider.arguments launch,Provider.environment launch)) >> pure ()
+    Conversation.OpenConversationContext _ scope->evaluate scope >> pure ()
+    Conversation.CopyRawConversation{}->pure ()
+  evaluate reply
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
 acceptedFormRequest :: AgentSidebarRequest -> Bool
 acceptedFormRequest CreateAgent{}=True

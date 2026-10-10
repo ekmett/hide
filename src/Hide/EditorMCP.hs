@@ -14,8 +14,10 @@
 -- Tool initiation and reply waiting are separate phases so HLS, DAP and human
 -- approvals can continue while a request is pending. Actor-bound routes expose
 -- only their supplied tools, with no fallback into ordinary desktop reads.
-module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, openEditorFiles, readMCPLine) where
+module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, debugTools, editorServers, editorServersFor, editorServersAt, editorEndpointsAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, openEditorFiles, readMCPLine) where
 
+import Hide.Plugin.Agent (ProviderEndpoint(..))
+import Hide.Plugin.Provider (ProviderLaunch(..))
 import Hide.Sidebar
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
 import Control.Concurrent.Async (Async, async, cancel, wait, withAsync, AsyncCancelled(..))
@@ -59,10 +61,17 @@ editorServersFor token = lookupEnv "THC_EDIT_SESSION" >>= maybe (pure []) (\iden
 -- An optional capability travels in the child environment, not argv.
 editorServersAt :: String -> Maybe T.Text -> IO [Value]
 editorServersAt ident token = do
-  executable <- getExecutablePath
-  pure [object ["name" .= ("editor"::T.Text),"command" .= executable,
-    "args" .= ["--mcp-editor",ident],"env" .=
-      [object ["name" .= ("THC_EDIT_MCP_TOKEN"::T.Text),"value" .= value] | Just value <- [token]]]]
+  endpoints<-editorEndpointsAt ident token
+  pure [object ["name" .= endpointName endpoint,"command" .= executable launch,"args" .= arguments launch,
+    "env" .= [object ["name" .= name,"value" .= value] | (name,value)<-environment launch]]
+    | endpoint<-endpoints,let launch=endpointLaunch endpoint]
+
+-- | The actual linked provider acquisition input for this private editor bridge.
+editorEndpointsAt :: String -> Maybe T.Text -> IO [ProviderEndpoint]
+editorEndpointsAt ident token=do
+  executablePath<-getExecutablePath
+  pure [ProviderEndpoint "editor" (ProviderLaunch executablePath ["--mcp-editor",ident]
+    [("THC_EDIT_MCP_TOKEN",T.unpack value) | Just value<-[token]])]
 
 runEditorMCP :: String -> IO ()
 runEditorMCP ident = do

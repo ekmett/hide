@@ -26,6 +26,8 @@ import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (linkSpans,styleLayoutMetadata,StyledText,StyledRow,styledContents)
 import qualified Data.Text as T
 import Hide.Model
+import Hide.ConversationSessionTypes (ConversationSessionReceipt(..))
+import qualified Hide.Plugin.ConversationSession as Conversation
 import Hide.ConversationBody (BodyRequest(..),BodyResult(..),BodyKey,ConversationCopy(..),prepareConversationCopy,copyReference,copyTarget,copyProvider,copySerial,capturedSourceProvider,logicalBodyProvider,prepareConversationBody)
 import qualified Hide.Plugin.Window as W
 import Hide.TextLayout (prepareTextLayout)
@@ -51,16 +53,11 @@ textPresentationEffects (TextPresentation _ _ requested) fallback original=foldM
     step (_,desktop) (CopyConversation copy)
       | copyCurrent desktop copy=writeIORef requested (Just copy) >> pure (False,desktop)
       | otherwise=pure (False,desktop)
-    step (_,desktop) (AgentAction "copy" [])
-      | Just view<-M.lookup (conversationTarget desktop) (conversationViews desktop)
-      , Just reference<-conversationBodyRef view
-      , let serial=fst (clipboardExport desktop)+1
-      , Just copy<-case conversationSource view of
-          Just source->Just (ConversationTranscriptCopy reference (conversationTarget desktop) source serial)
-          Nothing->(\logical->ConversationLogicalCopy reference (conversationTarget desktop) logical serial) <$> conversationLogical view =do
-          let updated=desktop {clipboardExport=(serial,Nothing),status="Preparing conversation copy."}
+    step (_,desktop) (ConversationSessionAction (Conversation.CopyRawConversation (ConversationOperationReceipt _ _ _ _ _ target (Just copy))))
+      | target==conversationTarget desktop,copySerial copy==fst (clipboardExport desktop)+1=do
+          let updated=desktop {clipboardExport=(copySerial copy,Nothing),status="Preparing conversation copy."}
           if copyCurrent updated copy then writeIORef requested (Just copy) >> pure (False,updated)
-          else pure (False,desktop)
+          else pure (False,desktop {status="Conversation copy expired; invoke it again."})
     step (_,desktop) effect=fallback desktop [effect]
 
 copyCurrent :: Desktop -> ConversationCopy -> Bool

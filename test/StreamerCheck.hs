@@ -32,7 +32,7 @@ checks=do
   check "disabling streamer restores visible values" (snapshot (hidden {streamerMode=False})==snapshot original)
   let statusOnly=(initialDesktop (80,25)) {status="Session private-session-key",streamerMode=True}
   check "streamer mode covers session status" (not ("private-session-key" `T.isInfixOf` snapshot statusOnly))
-  retained<-C.withConsoles $ \consoles -> withConversation Nothing Nothing Nothing consoles $ \runtime -> do
+  retained<-C.withConsoles $ \consoles -> withConversation Nothing Nothing Nothing Nothing consoles $ \runtime -> do
     let state=(initialDesktop (80,25)) {agentSettings=[AgentSetting "model" "Model" "model" "model-public" [("model-public","Public model")],AgentSetting "token" "API token" "private" "private-value" [("private-value","private-choice")]]}
     finish<-agentSettingsReply runtime state
     result<-finish

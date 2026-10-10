@@ -22,9 +22,9 @@ import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
 import Hide.Plugin.Completion (HintServices,CompletionProvider,CompletionServices)
 import Hide.Plugin.ConversationInput (PrimaryInputServices, ChildInputServices)
-import Hide.Plugin.ConversationSession (ConversationTarget,ConversationRequest)
-import Hide.Plugin.Menu (MenuPublisher)
-import Hide.Plugin.Agent (AgentId)
+import Hide.Plugin.ConversationSession (ConversationTarget,ConversationOperationTarget,ConversationRequest)
+import Hide.Plugin.Menu (MenuPublisher,MenuAction)
+import Hide.Plugin.Agent (AgentId,StartAgentProvider)
 import Data.Text (Text)
 import Hide.Plugin.Input (InputDeclaration)
 import Hide.Plugin.Request (RequestServices)
@@ -42,6 +42,11 @@ data Session c r settings completion receipt = Session
   , sessionMenus :: MenuPublisher c r
   , sessionConversation :: c -> Either Text (ConversationTarget receipt)
   , sessionConversationReply :: ConversationRequest receipt -> r
+  , sessionConversationOperation :: c -> Either Text (ConversationOperationTarget receipt)
+    -- ^ Original human target and private provider prefill.
+  , sessionConversationCancel :: MenuAction c r
+    -- ^ Fixed synchronous host cancellation. The plugin contributes presentation
+    -- only; this action never runs on the generic menu worker.
   , sessionSelectedAgent :: c -> Either Text AgentId
     -- ^ Small selected-agent identity captured at menu admission. It grants no
     -- authority and must never be recomputed from later focus on a worker.
@@ -89,6 +94,9 @@ data Plugin = Plugin
     -- ^ One command registration shared by child draft attachments. The host
     -- supplies only the captured human slot/target service on its existing
     -- worker; missing input leaves child output read-only and preserves drafts.
+  , pluginAgentProvider :: Maybe StartAgentProvider
+    -- ^ Actual linked acquisition implementation for both Primary and children.
+    -- Native host services and exact receipt lifetimes remain supplied by App.
   , pluginCompletionProvider :: Maybe CompletionProvider
     -- ^ Scoped provider implementation selected at startup and acquired only on
     -- the completion worker. Missing contribution starts no ACP fallback.

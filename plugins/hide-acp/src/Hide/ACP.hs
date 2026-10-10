@@ -16,9 +16,10 @@
 -- prepared responses separate expensive encoding from later authorization and
 -- sending. Session policy belongs to callers, not the transport.
 module Hide.ACP
-  ( ProviderLaunch(..), Client, Event(..), startClient, startClientWithEnvironment, stopClient, request, notify, respond, PreparedResponse, prepareResponse, respondPrepared, pollEvents ) where
+  ( ProviderLaunch(..), Client, Event(..), startClient, startClientWithEnvironment, stopClient, request, PreparedRequest, prepareRequest, requestPrepared, notify, respond, PreparedResponse, prepareResponse, respondPrepared, respondPreparedWhen, pollEvents ) where
 
 import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad (forever, unless, void, when)
 import Data.Aeson
@@ -48,7 +49,7 @@ data State = State
   , incoming :: Seq.Seq (Int,Event), incomingBytes :: Int
   , pending :: IS.IntSet, nextId :: Int, failure :: Maybe Text }
 -- | Opaque owner of the provider process and transport workers; stop it after use.
-data Client = Client { state :: MVar State, wakeWriter :: MVar (), disconnect :: Text -> IO (), closeClient :: IO () }
+data Client = Client { state :: TVar State, wakeWriter :: MVar (), disconnect :: Text -> IO (), closeClient :: IO () }
 
 -- Both queues and individual frames are bounded; a stalled peer cannot grow them indefinitely.
 frameLimit, queueLimit :: Int
@@ -85,7 +86,7 @@ startClientWithEnvironment launch root = mask_ $ do
       cleanupProcess = terminateProvider >> closeProcess
   (do
     mapM_ (`hSetBinaryMode` True) [input,output,errors]
-    shared <- newMVar (State Seq.empty 0 Seq.empty 0 IS.empty 1 Nothing)
+    shared <- newTVarIO (State Seq.empty 0 Seq.empty 0 IS.empty 1 Nothing)
     wake <- newEmptyMVar
     stopped <- newEmptyMVar
     finished <- newEmptyMVar
@@ -94,14 +95,14 @@ startClientWithEnvironment launch root = mask_ $ do
     let failClient reason = do
           tailBytes <- readMVar errorTail
           let message = reason <> if BS.null tailBytes then "" else "\n" <> TE.decodeUtf8With lenientDecode tailBytes
-          first <- modifyMVar shared $ \s -> case failure s of
+          first <- atomically $ modifyState shared $ \s -> case failure s of
             Just _ -> pure (s,False)
             Nothing -> pure (s { failure = Just message, outgoing = Seq.empty, outgoingBytes = 0, pending = IS.empty
               , incoming = incoming s Seq.>< Seq.fromList [(0,event) | event<-Disconnected message : [Response ident (Left (rpcError message)) | ident <- IS.toList (pending s)]] },True)
           when first (void (tryPutMVar stopped ()))
         failed (e :: IOException) = failClient ("ACP: " <> T.pack (displayException e))
         receive size event = do
-          accepted <- modifyMVar shared $ \s ->
+          accepted <- atomically $ modifyState shared $ \s ->
             if failure s /= Nothing then pure (s,True)
             else if incomingBytes s + size > queueLimit || Seq.length (incoming s) >= 4096 then pure (s,False)
             else pure (s { incoming = incoming s Seq.|> (size,event), incomingBytes = incomingBytes s + size
@@ -110,7 +111,7 @@ startClientWithEnvironment launch root = mask_ $ do
         writer = forever $ do
           takeMVar wake
           let drain = do
-                item <- modifyMVar shared $ \s -> case Seq.viewl (outgoing s) of
+                item <- atomically $ modifyState shared $ \s -> case Seq.viewl (outgoing s) of
                   Seq.EmptyL -> pure (s,Nothing)
                   (size,body) Seq.:< rest -> pure (s {outgoing = rest, outgoingBytes = outgoingBytes s - size},Just body)
                 case item of
@@ -151,21 +152,53 @@ rpcError message = object ["code" .= (-32603 :: Int), "message" .= message]
 -- | Queue a request and return its correlation ID. Local queue failures arrive
 -- as error Response events rather than a successful provider reply.
 request :: Client -> Text -> Value -> IO Int
-request client method params = do
-  ident <- modifyMVar (state client) $ \s -> do
-    let ident = nextId s
-        body = encode (object ["jsonrpc" .= ("2.0" :: Text), "id" .= ident, "method" .= method, "params" .= params])
-        size = fromIntegral (BL.length body)
-        problem = case failure s of
-          Just reason -> Just reason
-          Nothing | size > frameLimit || outgoingBytes s + size > queueLimit || IS.size (pending s) >= 1024 -> Just "ACP: outgoing request queue exceeded limit"
-                  | otherwise -> Nothing
-        updated = s { nextId = ident + 1 }
-    pure (case problem of
-      Just reason -> updated { incoming = incoming s Seq.|> (0,Response ident (Left (rpcError reason))) }
-      Nothing -> updated { outgoing = outgoing s Seq.|> (size,body), outgoingBytes = outgoingBytes s + size, pending = IS.insert ident (pending s) },ident)
-  void (tryPutMVar (wakeWriter client) ())
+request client method params=do
+  prepared<-prepareRequest client method params
+  let PreparedRequest _ ident _=prepared
+  result<-requestPrepared prepared (pure True)
+  case result of
+    Left reason->atomically $ modifyState (state client) $ \s->pure (s {incoming=incoming s Seq.|> (0,Response ident (Left (rpcError reason)))},())
+    _->pure ()
   pure ident
+
+-- | Encoding and byte counting happen before the final atomic send admission.
+-- Allocating a correlation ID grants no send authority.
+data PreparedRequest = PreparedRequest !Client !Int !PreparedResponse
+
+-- | Prepare one bounded request on its owning worker without enqueueing it.
+prepareRequest :: Client -> Text -> Value -> IO PreparedRequest
+prepareRequest client method params=do
+  ident<-atomically $ modifyState (state client) $ \s->pure (s {nextId=nextId s+1},nextId s)
+  frame<-prepareMessage (object ["jsonrpc" .= ("2.0"::Text),"id" .= ident,"method" .= method,"params" .= params])
+  pure (PreparedRequest client ident frame)
+
+-- | Atomically check the original submission and enqueue its prepared bytes.
+-- After retirement a request cannot commit. Success acknowledges local transport
+-- admission; provider response/completion is a later, separately owned event.
+requestPrepared :: PreparedRequest -> STM Bool -> IO (Either Text (Maybe Int))
+requestPrepared (PreparedRequest client ident (PreparedResponse size body)) current=do
+  admitted<-atomically $ modifyState (state client) $ \s->do
+    let problem=case failure s of
+          Just reason->Just reason
+          Nothing | size>frameLimit || outgoingBytes s+size>queueLimit || IS.size (pending s)>=1024->Just "ACP: outgoing request queue exceeded limit"
+                  | otherwise->Nothing
+    case problem of
+      Just reason->pure (s,Left reason)
+      Nothing->do
+        live<-current
+        if not live then pure (s,Right Nothing) else pure (s {outgoing=outgoing s Seq.|> (size,body),
+          outgoingBytes=outgoingBytes s+size,pending=IS.insert ident (pending s)},Right (Just ident))
+  case admitted of Right (Just _)->void (tryPutMVar (wakeWriter client) ()); _->pure ()
+  pure admitted
+
+-- Transport state transactions contain only small identities and bounded queue
+-- operations. Expensive framing and plugin work never execute in this owner.
+modifyState :: TVar State -> (State -> STM (State,a)) -> STM a
+modifyState shared update=do
+  previous<-readTVar shared
+  (next,result)<-update previous
+  writeTVar shared next
+  pure result
 
 notify :: Client -> Text -> Value -> IO ()
 notify client method params = enqueue client (object ["jsonrpc" .= ("2.0" :: Text), "method" .= method, "params" .= params])
@@ -194,16 +227,26 @@ enqueue client value = prepareMessage value >>= respondPrepared client
 
 -- | Enqueue a prepared response; queue overflow disconnects the transport.
 respondPrepared :: Client -> PreparedResponse -> IO ()
-respondPrepared client (PreparedResponse size body) = do
-  accepted <- modifyMVar (state client) $ \s ->
-    if failure s /= Nothing then pure (s,True)
-    else if size > frameLimit || outgoingBytes s + size > queueLimit || Seq.length (outgoing s) >= 4096 then pure (s,False)
-    else pure (s { outgoing = outgoing s Seq.|> (size,body), outgoingBytes = outgoingBytes s + size },True)
-  if accepted then void (tryPutMVar (wakeWriter client) ()) else disconnect client "ACP: outgoing message queue exceeded limit"
+respondPrepared client frame=void (respondPreparedWhen client frame (pure True))
+
+-- | Admit a prepared native response against its original host lifetime in the
+-- same transaction as transport enqueue. True means that exact frame committed;
+-- retirement or transport failure returns False without sending it.
+respondPreparedWhen :: Client -> PreparedResponse -> STM Bool -> IO Bool
+respondPreparedWhen client (PreparedResponse size body) current = do
+  accepted <- atomically $ modifyState (state client) $ \s ->do
+    live<-current
+    if not live || failure s /= Nothing then pure (s,Nothing)
+    else if size > frameLimit || outgoingBytes s + size > queueLimit || Seq.length (outgoing s) >= 4096 then pure (s,Just False)
+    else pure (s { outgoing = outgoing s Seq.|> (size,body), outgoingBytes = outgoingBytes s + size },Just True)
+  case accepted of
+    Just True->void (tryPutMVar (wakeWriter client) ()) >> pure True
+    Just False->disconnect client "ACP: outgoing message queue exceeded limit" >> pure False
+    Nothing->pure False
 
 -- | Drain a bounded event batch so a caller can return to other session work.
 pollEvents :: Client -> IO [Event]
-pollEvents client = modifyMVar (state client) $ \s -> do
+pollEvents client = atomically $ modifyState (state client) $ \s -> do
   -- The session consumes events while holding the desktop lock. Bound both
   -- count and bytes so a tool burst yields to keyboard/mouse between batches.
   -- A single legal frame may exceed this budget; it must still make progress.

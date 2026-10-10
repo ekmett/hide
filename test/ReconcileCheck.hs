@@ -99,10 +99,6 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   check "deleting a clean file prompts without erasing buffer" (contents (sourceBuffer deleted)==contents (sourceBuffer savedCopy))
   restored <- choose ReloadDisk deleted
   check "explicit reload of deletion preserves old content in undo" (contents (sourceBuffer restored)=="" && disk restored==Nothing && contents (undo (sourceBuffer restored))==contents (sourceBuffer savedCopy))
-  let commands = [(AgentOptions,"options"),(Conversation,"show"),(AgentCancel,"cancel"),(AgentCopyRaw,"copy")]
-  check "agent commands route generic effects" (all (\(command,action) -> snd (runCommand command restored)==[AgentAction action []]) commands)
-  let agentDialog = Dialog "Agent" (AgentDialog "permission") [Input "Value" "x" 1,CheckBox "Allowed" True,ListBox "Choice" ["a","b"] 1] 3 ["Allow","Deny"] []
-  check "agent dialog submits button and field values" (snd (handleEvent (V.EvKey V.KEnter []) restored {dialog=Just agentDialog})==[AgentAction "permission" ["0","x","true","1"]])
   binaryReload dir
   mapM_ (queuedSave dir) [False,True]
   putStrLn "external reconciliation checks passed"
@@ -160,7 +156,9 @@ queuedSave dir agent = withReconciliation $ \runtime -> do
       version=maybe (error "missing buffer") (revision . documentBuffer) (activeDocument edited)
       staleChoice=Conflict 1 version file (Just "stale external bytes\n")
   (_,registered)<-effects edited [ReviewExternal]
-  snapshot<-AgentFiles.captureFile dir path registered >>= either (error . T.unpack) pure
+  resolved<-AgentFiles.resolveFile dir path >>= either (error . T.unpack) pure
+  input<-AgentFiles.captureFileInput resolved registered >>= either (error . T.unpack) pure
+  snapshot<-AgentFiles.readFileInput input >>= either (error . T.unpack) pure
   threadDelay 100000
   savedDesktop<-if agent
     then AgentFiles.acceptWrite snapshot "new old baseline\n" registered >>= either (error . T.unpack) pure
