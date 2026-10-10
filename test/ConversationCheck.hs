@@ -472,7 +472,20 @@ draftReceiptChecks=withTextPresentation $ \presentation->
       untouched<-evaluate (newBuffer "stream")
       independent<-prompt runtime "stream" (draftBuffer untouched connected) >>= primaryDone runtime (scenario++" independent")
       check "independent prompt does not consume the composer" (contents (composerBuffer independent)=="stream")
-      active<-if steer then promptStarted runtime "wait" independent else pure independent
+      active<-if steer then do
+        -- Wire arrival can precede host adoption of the ProviderTurn. Consume
+        -- this Query's exact draft before testing Steer against its active turn.
+        waiting<-evaluate (newBuffer "wait")
+        waitingReceipt<-captureVersion waiting
+        submittedWait<-submit runtime QuerySubmit (draftAt waiting (Selection 4 4) independent)
+        admitted<-await runtime "wait input send admission" (\d->do
+          unchanged<-versionCurrent waitingReceipt (composerBuffer d)
+          pure (not unchanged && bufferLength (composerBuffer d)==0)) submittedWait
+        -- This callback belongs to the accepted Query; the next one must still
+        -- identify the Steer whose retained service is checked below.
+        _<-timeout 3000000 (takeMVar acknowledged) >>= maybe (error "Wait input command did not acknowledge") pure
+        pure admitted
+        else pure independent
       original<-evaluate (newBuffer (if steer then "direction" else "stream"))
       -- Preparation may finish off-thread, but only a later serialized tick adopts it.
       beforeSubmission<-readMessages (root </> "messages.jsonl")
