@@ -4,7 +4,6 @@ module HintComposerCheck (checks) where
 import EditorFixture (withEditorFixture,withAutocompleteFixture)
 import Control.Exception (bracket)
 import Control.Monad (unless)
-import qualified Data.ByteString as BS
 import Data.Maybe (fromJust)
 import qualified Data.Map.Strict as M
 import qualified Hide.Plugin.Editor as E
@@ -134,18 +133,22 @@ checks=withEditorFixture "" (initialDesktop (90,30)) $ \chatBase->
   let narrow=dialogFieldLayout 50 23 settings
   check "narrow autocomplete settings retain stacked scrolling layout" (all ((==3).left) narrow)
   bracket temporary removeFile $ \path->do
-    let secret=setComposerInput (newBuffer "EPHEMERAL-HINT-SECRET") (Selection 0 0) True filled
+    let secret=setComposerInput (newBuffer "UNSENT-HINT") (Selection 0 0) True filled
     writeCheckpoint path secret >>= either (error . T.unpack) pure
-    bytes<-BS.readFile path
-    check "checkpoint does not serialize hint text" (not (TE.encodeUtf8 "EPHEMERAL-HINT-SECRET" `BS.isInfixOf` bytes))
     restored<-readCheckpoint path secret >>= either (error . T.unpack) pure
-    check "recovery clears hint draft and runtime enablement"
+    let preserved=[(bid,doc) | (bid,doc)<-M.toList (buffers restored),contents (documentBuffer doc)=="UNSENT-HINT"]
+    check "recovery preserves an unsent hint as private editable input needing save"
+      (case preserved of
+        [(bid,doc)]->documentPrivate doc && documentFile doc==Nothing && documentLabel doc==Nothing &&
+          documentModified doc && sanitizedBuffer restored bid==Nothing
+        _->False)
+    check "recovery retires the hint mount and runtime enablement"
       (autocompleteWindow restored==Nothing && not (autocompleteACPEnabled restored) && activeEditorMount restored==Nothing && all ((/=E.mountDraft mount) . fst) (M.toList (editorDrafts restored)))
     check "recovery retains completion output only as an inert plugin view"
       (any ((=="completion trace\nresponse\n") . (\text->contentSlice text 0 (contentLength text)) . W.preparedWindowText) (pluginWindows restored) && not (activeAutocomplete restored))
     before<-checkpointKey base
     after<-checkpointKey typed
-    check "ephemeral hint edits do not invalidate the recovery checkpoint" (before==after)
+    check "unsent hint edits invalidate the recovery checkpoint" (before/=after)
   putStrLn "Hint composer checks passed"
 
 check :: String -> Bool -> IO ()

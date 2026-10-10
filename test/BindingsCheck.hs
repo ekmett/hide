@@ -358,7 +358,8 @@ verticalChecks=do
   check "explicit vertical unbind consumes arrow and WordStar fallbacks" (all (\(k,mods)->range (event k mods unbound)==range unbound)
     [(V.KUp,[]),(V.KUp,[V.MShift]),(V.KUp,[V.MCtrl,V.MAlt]),(V.KChar 'e',[V.MCtrl]),(V.KChar 'e',[V.MCtrl,V.MShift])])
   check "shifted WordStar vertical aliases remain non-extending" (range (event (V.KChar 'e') [V.MCtrl,V.MShift] star)==Just (Selection 1 1) && range (event (V.KChar 'x') [V.MCtrl,V.MShift] star)==Just (Selection 10 10))
-  check "WordStar earlier Alt owners retain Edit and Quit" (menu (event (V.KChar 'e') [V.MCtrl,V.MAlt] star)==Just (1,0) && snd (handleEvent (V.EvKey (V.KChar 'x') [V.MCtrl,V.MAlt]) star)==[Exit])
+  let savedExit=star {buffers=M.map (\doc->doc {documentFile=Just (FileState "Main.hs" Nothing)}) (buffers star)}
+  check "WordStar earlier Alt owners retain Edit and Quit" (menu (event (V.KChar 'e') [V.MCtrl,V.MAlt] star)==Just (1,0) && snd (handleEvent (V.EvKey (V.KChar 'x') [V.MCtrl,V.MAlt]) savedExit)==[Exit])
   let first=modifyActive (\w->w {selection=Selection 5 5}) base {keyBindings=defaults}
       down=event V.KDown [] first
   check "vertical motion retains short-row column reset and grapheme cells" (range down==Just (Selection 8 8) && range (event V.KDown [] down)==Just (Selection 10 10) && range (event V.KUp [V.MShift] down)==Just (Selection 8 1))
@@ -816,8 +817,9 @@ prefixChecks=do
       requested=runCommand Paste pending {browserFrontend=True}
   check "native browser paste and requested paste consume the active prefix"
     (sourceText pasted=="replacement" && prefix pasted==Nothing && prefix (fst requested)==Nothing && snd requested==[ReadBrowserClipboard])
+  let savedExit=started {buffers=M.map (\doc->doc {documentFile=Just (FileState "Main.hs" Nothing)}) (buffers started)}
   check "prefix cannot steal the earlier Ctrl Alt Exit owner"
-    (prefix (event (V.KChar 'x') [V.MCtrl,V.MAlt] started)==Nothing && snd (handleEvent (V.EvKey (V.KChar 'x') [V.MCtrl,V.MAlt]) started)==[Exit])
+    (prefix (event (V.KChar 'x') [V.MCtrl,V.MAlt] savedExit)==Nothing && snd (handleEvent (V.EvKey (V.KChar 'x') [V.MCtrl,V.MAlt]) savedExit)==[Exit])
   let noQuick=defaults {keyBindings=prepare TerminalPlatform (M.singleton "wordstar" (M.singleton "hide.wordstar.quick-prefix" []))}
       quick=event (V.KChar 'q') [V.MCtrl] defaults
   check "quick starter unbinding prevents the old alias and default quick edge remains semantic"

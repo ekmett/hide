@@ -41,6 +41,7 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Data.Maybe (listToMaybe, fromMaybe, isJust)
 import Data.List (find, findIndex, sortOn, mapAccumL, nub)
+import Data.Ord (Down(..))
 import Data.Char (toLower, isAlphaNum, chr, ord, toUpper, isHexDigit, digitToInt)
 import Text.Read (readMaybe)
 import System.FilePath ((</>), takeDirectory, takeFileName, takeExtension, isAbsolute, splitDirectories, joinPath, normalise)
@@ -1046,9 +1047,10 @@ focusWindow i d = revealWindowTab i $ d { bottomTerminal=if M.member i (dockedTe
   where members=windowTabMembers d i
 
 -- Stable window numbers make every member reachable even when selecting a tab
--- raises its whole group. MRU rotation would otherwise cycle inside that group.
+-- raises its whole group. Descending order retains next-window navigation from
+-- newer to older windows; MRU rotation would cycle inside the selected group.
 cycleEditorWindow :: Bool -> Desktop -> Desktop
-cycleEditorWindow backwards d=case sortOn windowNumber (windows d) of
+cycleEditorWindow backwards d=case sortOn (Down . windowNumber) (windows d) of
   []->d
   numbered->let index=fromMaybe 0 (activeWindow d >>= \w->findIndex ((==windowId w).windowId) numbered)
                 next=numbered !! ((index+if backwards then -1 else 1) `mod` length numbered)

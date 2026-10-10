@@ -18,6 +18,7 @@ import System.Environment (lookupEnv,setEnv,unsetEnv)
 import System.IO (openTempFile,hClose)
 import qualified Hide.App as App
 import Hide.Buffer
+import Hide.Files (FileState(..))
 import Hide.ControlMCP
 import Hide.MCPPermissions (readEditorDefaults,permissionConfigPath)
 import Hide.Model
@@ -134,7 +135,8 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
     checkUnchanged "raw input cannot open the permission configuration" blockedMenu openMenu (null menuEffects && either (const False) ((==Just (0::Int)).field "appliedEvents") blockedMenuReply)
     (unchanged,badEvents)<-input base [paste "must not happen",object ["type" .= ("menu"::T.Text),"command" .= ("AgentPermissions"::T.Text)]]
     checkUnchanged "all raw events validate before any event applies" unchanged base (rejected badEvents)
-    (quit,quitReply)<-input base [key "q" ["ctrl"],paste "after quit"]
+    let savedExit=base {buffers=M.map (\doc->doc {documentFile=Just (FileState "Main.hs" Nothing)}) (buffers base)}
+    (quit,quitReply)<-input savedExit [key "q" ["ctrl"],paste "after quit"]
     check "Exit stops remaining events and is reported" (activeText quit=="old" && either (const False) (\v -> field "exitRequested" v==Just True && field "appliedEvents" v==Just (1::Int)) quitReply)
     let modified=insertText "x" base
     (confirm,confirmReply)<-input modified [key "q" ["ctrl"]]
