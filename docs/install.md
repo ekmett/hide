@@ -47,6 +47,36 @@ Add that directory to `PATH` if it is not already there. All examples using
 `hide` also work from a checkout as `cabal run hide -- ...`, with the
 appropriate build flags before `hide`.
 
+## NixOS and Nix on Linux
+
+On x86-64 Linux, the flake builds the editor with terminal, Vulkan, browser and
+embedded-terminal support. It pins GHC 9.14.1 and the native dependencies,
+including Ghostty; no system development packages are needed.
+
+```sh
+nix build
+./result/bin/hide .
+./result/bin/hide --vulkan .
+```
+
+`nix develop` provides the matching compiler, Cabal and libraries for working on
+hide. Git, HLS, ACP providers and project compilers remain tools you choose for
+your workspace. hide does not need the THC runtime.
+
+`nix flake check` builds the package and boots a NixOS VM to check the installed
+launchers, browser assets, and remote editing with detach/reconnect and clean
+shutdown. The VM needs KVM. CI runs this check and publishes a Nix binary-cache
+artifact containing the executable and its runtime dependencies. After unpacking
+that artifact into `nix-cache`:
+
+```sh
+nix copy --from "file://$PWD/nix-cache" --no-check-sigs "$(cat nix-cache/package-path)"
+nix profile install "$(cat nix-cache/package-path)"
+```
+
+The downloaded artifact is unsigned; only import one from a workflow run you
+trust. The VM check does not exercise a physical GPU.
+
 ## Native window
 
 Native windows are enabled by default. Install SDL3 3.4 or newer. Packaged Metal and Vulkan shaders are included; DXC and SPIRV-Cross are needed only when regenerating the HLSL shader assets. On macOS:
