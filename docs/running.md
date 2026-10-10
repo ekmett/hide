@@ -389,6 +389,32 @@ available.
 In a [remote editor session](remote.md), loopback is the remote host, so the
 debugger stays beside the running program.
 
+## Assisted debugging
+
+Pause at a breakpoint, select a [System One supplier](configuration.md#system-1-decisions),
+then choose **Debug > Assisted debugging…**. Give it a concrete goal, such as
+“find where the accumulator first exceeds the expected total.” Start with a
+small step budget. The default is 20 steps and one minute; the limits are
+100 steps and five minutes.
+
+The supplier chooses among inspections and debugger actions offered for the
+current stop. Each decision sees bounded source, stack, eager locals, recent
+output and observations. The report keeps the source locations and runtime
+values behind the result. Missing source, unavailable adapter features and
+unevaluated lazy values stay explicit. A suggestion to investigate a hypothesis
+is a handoff to you or a conversational agent, not a claim that the bug is fixed.
+
+**Pause** and **Stop** revoke assistance and ask the running target to pause.
+They do not disconnect it. Any ordinary debugger control or frame selection
+immediately takes over; an answer still arriving from the supplier cannot resume
+stepping. Time, step and repeated-location limits end a run. **Reveal** brings
+its evidence and stopped source into view without replaying execution. Hidden
+runs use the same debugger and can be revealed this way.
+
+Assistance never forces a thunk or evaluates a generated expression. Use the
+ordinary watch controls when evaluation is needed. Inference runs away from the
+interaction thread, so the editor remains usable while it waits.
+
 ## Debugging with an agent
 
 The conversation agent uses the same DAP session as the Debug menu. Its tools

@@ -202,6 +202,7 @@ always wins. Other runners retain suite-level results without guessed cases.
 | `debug_launch` | X | `adapterConfig?`, `port?` | Configured THC target or general DAP JSON config; refuses an already active session |
 | `debug_attach` | X | `host?`, `port?` | Loopback adapter; defaults to `127.0.0.1:4711` |
 | `debug_control` | X | `generation`, `command` | `continue`, `next`, `stepIn`, `stepOut`, `pause`, `disconnect`; acceptance is not a stop |
+| `debug_assist` | X | `command`, `generation?`, `goal?`, `maxSteps?`, `budgetMs?` | `start`, `pause`, `stop`, `status`, `reveal`; bounded assisted investigation of the shared debugger |
 | `debug_set_breakpoints` | W | `generation`, `bufferId`, `lines` | Replace that buffer’s source breakpoint set; pending/verified state, `sourceModified` |
 | `debug_inspect` | R | `generation`, `request`, `threadId?`, `frameId?`, `variablesReference?`, `sourceReference?`, `start?`, `count?` | `threads`, `stackTrace`, `scopes`, `variables`, `source`; handles depend on request |
 
@@ -209,6 +210,17 @@ always wins. Other runners retain suite-level results without guessed cases.
 future stops. An explicit `view` requires current `generation`; source/stack/scopes
 require a stopped, configured session. Reveal a view without changing follow
 mode by omitting `follow`. This does not launch or resume a separate debugger.
+
+`debug_assist` starts only from a ready, paused generation. Supply `goal` and
+that `generation`; `maxSteps` defaults to 20 (1–100), `budgetMs` to 60000
+(1–300000). Mutations retain the exact initiating caller. Caller retirement,
+manual debugger input, stale state, provider failure and exhausted budgets end
+assistance. Pause/stop request a target pause without disconnecting; status reads
+progress and retained evidence, and reveal presents it without resuming.
+A successful start is acceptance, not evidence of investigation. Inspect the
+observations and reported limits before drawing a conclusion. The supplier
+cannot force lazy references or evaluate expressions. Use this tool rather than
+typing into the human assistance dialog, so the run retains your lifetime.
 
 Refresh generation after execution changes. Stack/variable inspection requires
 a stopped target. Inspection pages default to 100 entries, maximum 1000.

@@ -261,6 +261,7 @@ library
     , Hide.Consoles
     , Hide.DAP
     , Hide.Debugger
+  , Hide.DebugAssistance
     , Hide.DebuggerSidebar
     , Hide.DebuggerSidebarTypes
     , Hide.Hex
@@ -466,6 +467,7 @@ test-suite editor-tests
     , UnicodeCheck
     , HexCheck
     , DAPCheck
+  , DebuggerAssistanceCheck
     , DebuggerCheck
     , DebuggerSidebarCheck
     , DebuggerWatchesCheck

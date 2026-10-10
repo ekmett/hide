@@ -247,7 +247,9 @@ protectedPurpose p=case p of
 privateDebuggerAction :: Text -> Bool
 -- Frame chooser labels are adapter metadata, not prepared public semantic rows.
 -- Keep the host-owned chooser private until it carries canonical row provenance.
-privateDebuggerAction action=action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action
+-- Starting assistance through UI input would lose the initiating agent lifetime.
+-- Agents use debug_assist, which retains their exact caller capability.
+privateDebuggerAction action=action=="assist" || "assist-" `T.isPrefixOf` action || action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action
 privateFrameChooserAction :: Text -> Bool
 privateFrameChooserAction action=case T.splitOn ":" action of
   ["select",_,_,"frame"]->True

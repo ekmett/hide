@@ -19,7 +19,7 @@
 -- Independent session/publication receipts reject late content without inspecting
 -- unrelated Documents. Replacement freezes the prior snapshot until prepared
 -- content adopts into the same display slot; closing never reopens from output.
-module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDownloadsCommands, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, debuggerEffects, tickDebugger, tickPreparedDebug, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider) where
+module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDownloadsCommands, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, debuggerEffects, tickDebugger, tickPreparedDebug, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider, withDebuggerSystemOne, debuggerToolWithCaller) where
 
 import Hide.FileIO (withFileRead)
 
@@ -46,10 +46,15 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import qualified Hide.DebugAssistance as A
+import Hide.Plugin.SystemOne
+import System.Environment (getEnvironment)
+import Data.Unique (newUnique,hashUnique)
+import qualified Data.Text.Encoding as TE
 import Data.IORef
 import Data.List (find)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe, isJust, listToMaybe, maybeToList)
+import Data.Maybe (fromMaybe, isJust, listToMaybe, maybeToList, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector as V
@@ -59,7 +64,7 @@ import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExis
 import System.IO (openTempFile, hClose)
 import System.IO.Error (tryIOError)
 import Hide.PackageSidebar (packageBuildManifestCurrent)
-import System.FilePath (isAbsolute, takeFileName, takeExtension, takeDirectory, makeRelative, (</>))
+import System.FilePath (isAbsolute, takeFileName, takeExtension, takeDirectory, makeRelative, normalise, (</>))
 import System.Timeout (timeout)
 import System.Mem.StableName
 import Text.Read (readMaybe)
@@ -72,7 +77,7 @@ import qualified Hide.Terminal as Terminal
 import qualified Hide.DAP as D
 import Hide.Files (FileState(..),loadFile)
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
-import Hide.GuestAccess (protectedBuffer,protectedPath,protectedFilePath)
+import Hide.GuestAccess (protectedBuffer,protectedPath,protectedFilePath,sensitiveLabel)
 import qualified Hide.LSP as L
 import Hide.Model
 import Hide.BufferView (BufferView(..))
@@ -86,7 +91,7 @@ data OutputSlot = OutputSlot !Int !Int !(Maybe W.WindowRef) !Bool !Bool !(Maybe 
 -- Capping/concatenating output is deliberately lazy until the worker prepares
 -- a copied bounded report; request admission forces only the small receipt.
 -- Until that receipt returns, the existing bounded DAP inbox holds later events.
-data OutputRequest = OutputRequest !Int !Int !(Maybe W.WindowRef) !Bool Text
+data OutputRequest = OutputRequest !Int !Int !(Maybe W.WindowRef) !Bool Text !(Maybe Text)
 data OutputPublication = OutputPublication !Int !Int !(Maybe W.WindowRef)
   !(Either Text Text) !(Maybe (Either Text W.WindowUpdate))
 
@@ -99,7 +104,7 @@ newOutputOwner scope=mask_ $ do
   pure (OutputOwner scope slot desired latest worker)
   where
     loop desired latest=do
-      OutputRequest epoch revision target prepareView value<-atomically $ do
+      OutputRequest epoch revision target prepareView value supplement<-atomically $ do
         next<-readTVar desired
         maybe retry (\request->writeTVar desired Nothing >> pure request) next
       report<-(Right <$> evaluate (T.copy (T.takeEnd 16384 value))) `catch` synchronous "Debugger output preparation failed."
@@ -107,7 +112,9 @@ newOutputOwner scope=mask_ $ do
         Left _->pure Nothing
         Right _ | not prepareView->pure Nothing
         Right bounded->Just <$> ((do
-          prepared<-W.prepareRecoverableTextWindow "hide.debug-output" 1 W.PrivateWindow "Debugger output" bounded
+          let display=maybe bounded (\extra->T.copy (T.takeEnd 16384 (bounded<>"\n"<>extra))) supplement
+          _<-evaluate (T.length display)
+          prepared<-W.prepareRecoverableTextWindow "hide.debug-output" 1 W.PrivateWindow "Debugger output" display
           case prepared of
             Left err->pure (Left err)
             Right snapshot->do
@@ -149,12 +156,12 @@ resetOutputOwner (Debugger _ _ _ _ (OutputOwner _ slot desired latest _)) deskto
   obsolete<-atomically (writeTVar desired Nothing >> tryTakeTMVar latest)
   mapM_ retireOutputOpening obsolete
 
-queueOutput :: Debugger -> Bool -> Text -> IO ()
-queueOutput (Debugger ref _ _ _ (OutputOwner _ slot desired _ _)) opening value=do
+queueOutput :: Debugger -> Bool -> Maybe Text -> Text -> IO ()
+queueOutput (Debugger ref _ _ _ (OutputOwner _ slot desired _ _)) opening supplement value=do
   OutputSlot epoch revision target requested focus frozen<-readIORef slot
   let next=revision+1
       prepareView=opening || requested || isJust target
-      request=OutputRequest epoch next target prepareView value
+      request=OutputRequest epoch next target prepareView value supplement
   writeIORef slot (OutputSlot epoch next target (opening || requested) focus frozen)
   modifyIORef' ref (\state->state {outputPending=True})
   request `seq` atomically (writeTVar desired (Just request))
@@ -172,7 +179,7 @@ revealOutput runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ _ _)) desktop=do
     when (old==Nothing) (mapM_ W.retireWindowRef frozen)
     writeIORef slot (OutputSlot epoch revision Nothing True True old)
     accepted<-readIORef ref
-    unless (outputPending accepted) (queueOutput runtime True (output accepted))
+    unless (outputPending accepted) (queueOutput runtime True Nothing (output accepted))
     pure current
 
 -- Idle ticks inspect only the exact owned slot and a publication receipt; no
@@ -197,7 +204,7 @@ tickOutputOwner runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ latest _)) des
     pure desktop
   else do
     let prepareRequested report=when (requestedOpen && target==Nothing) $
-          forM_ (either (const Nothing) Just report) (queueOutput runtime False)
+          forM_ (either (const Nothing) Just report) (queueOutput runtime False Nothing)
     updated<-case next of
       Nothing->pure desktop
       Just publication@(OutputPublication issued version captured report result)
@@ -238,9 +245,11 @@ data Debugger = Debugger (IORef State) (IO Integer) HdbRuntime SidebarMailbox Ou
 data SidebarMailbox = SidebarMailbox !(TVar (Maybe (Int,Int,FilePath))) !(TBQueue SidebarIngress) !(TVar (Int,Maybe WatchFrame,M.Map Int DebuggerWatch))
 data DebugPageBody = AdapterPage !Value | CachedPage !Int !Value
 data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text DebugPageBody)) | CacheDebugPage !DebugPageRequest !Value
+  | ReadAssistance !AssistanceReceipt !Text !Value !(MVar (Either Text Value))
   | ReadDebugSource !Int !Int !Int !(Maybe FilePath) !(MVar (Either Text Value))
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
   | Stack Bool Int Int | Scopes Int | Variables Int | ExceptionDetails | Source Bool Int Int Value | Control Bool | Detach
+  | AssistedControl !Text !Int !Text !Bool
   | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text DebugPageBody))
   | WatchRequest !WatchOperation !(Maybe Text) !FilePath ![FilePath]
   deriving (Eq)
@@ -258,8 +267,24 @@ data LocalSourceTarget = ExistingSource !Int !Int !ContentVersion !Bool | NewSou
 data CapturedLocalSource = CapturedLocalSource !FilePath !Int !Int !ContentVersion !BufferContent !DirtySnapshot
 data SourceObservation = SourceObservation !Int !(Maybe FilePath)
 data Breakpoint = Breakpoint { bpLine :: Int, bpResult :: Value } deriving (Eq,Show)
+-- A receipt is small immutable authority, not an adapter-supplied identity.
+data AssistanceReceipt=AssistanceReceipt !Text !Int !Int !Int !Int deriving Eq
+-- A completed step needs both its correlated successful reply and stopped event.
+data AssistanceFlight=AssistanceFlight !Text !Int !Int !(Maybe Int) !Bool
+
+data Assistance=Assistance
+  { assistanceId :: !Text, assistanceGoal :: !Text, assistancePhase :: !Text, assistanceReason :: !(Maybe Text)
+  , assistanceSession :: !Int, assistanceSteps :: !Int, assistanceMaxSteps :: !Int, assistanceDeadline :: !Integer
+  , assistanceStalls :: !Int, assistanceLocation :: !(Maybe (Text,Int,Int)), assistanceDecisions :: !Int
+  , assistanceEvidence :: ![Value], assistanceReport :: Text, assistanceRevealPending :: !Bool
+  , assistanceCaller :: IO (Either Text ()), assistanceCancelled :: !(TVar Bool), assistanceTicket :: !(TVar (Maybe DecisionTicket))
+  , assistanceWorker :: !(Maybe (AssistanceReceipt,Async (Either Text A.AssistanceResult)))
+  , assistanceFlight :: !(Maybe AssistanceFlight)
+  }
+
 data State = State
-  { client :: Maybe D.Client, connected :: Bool, capabilities :: Value, ready :: Bool, configured :: Bool
+  { systemOne :: Maybe SystemOneServices, assistance :: Maybe Assistance
+  , client :: Maybe D.Client, connected :: Bool, capabilities :: Value, ready :: Bool, configured :: Bool
   , pending :: M.Map Int (Pending,Int,Integer), generation :: Int, frameRevision :: Int
   , stopped :: Bool, thread :: Maybe Int, frame :: Maybe Value, frames :: [Value], followSource :: Bool
   , exceptionFilters :: [Text]
@@ -282,7 +307,7 @@ data State = State
   }
 
 emptyState :: State
-emptyState = State {client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
+emptyState = State {systemOne=Nothing,assistance=Nothing,client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
   debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
@@ -322,6 +347,14 @@ withDebuggerHdbConsoles consoles clock prepare acquire action = Downloads.withDo
       readIORef ref >>= stopTransport debugger
       readIORef retired >>= mapM_ waitCatch) action
 
+-- | Borrow the session's selected System One service. Closing this scope revokes
+-- assistance before removing the service; late worker results cannot execute.
+withDebuggerSystemOne :: SystemOneServices -> Debugger -> IO a -> IO a
+withDebuggerSystemOne services runtime@(Debugger ref _ _ _ _) action=bracket
+  (modifyIORef' ref (\s->s {systemOne=Just services}))
+  (const (revokeAssistance runtime "finished" "service-retired" >> modifyIORef' ref (\s->s {systemOne=Nothing})))
+  (const action)
+
 -- | Register the human-only exact-row Cancel action for this manager lifetime.
 -- The existing menu worker prepares a closed request; only the Downloads owner
 -- can perform its side effect after contribution/window/modal revalidation.
@@ -347,16 +380,19 @@ debuggerEffects runtime fallback = foldM apply . (False,)
   where
     apply result@(True,_) _=pure result
     apply (_,d) (DebugAction action values) = do
+      unless (action=="assist" || "assist-" `T.isPrefixOf` action || action=="output") (revokeAssistance runtime "paused" "manual-takeover")
       next<-perform runtime action values d
       publishSidebarEpoch runtime
       pure (False,next)
-    apply (_,d) (PackageDebugAction target entry) = (False,) <$> queuePackageDebug runtime target entry d
+    apply (_,d) (PackageDebugAction target entry) = revokeAssistance runtime "paused" "manual-takeover" >> ((False,) <$> queuePackageDebug runtime target entry d)
     apply (_,d) (AdoptPreparedDebug target) = (False,) <$> adoptPackageDebug runtime target d
     apply (_,d) (DownloadCancelAction request) = (False,) <$> cancelDownloadRequest runtime request d
     apply (_,d) (DebugSourceAction request) = do
+      revokeAssistance runtime "paused" "manual-takeover"
       next<-sourceAction runtime request d
       pure (False,next)
     apply (_,d) (DebugSidebarAction request) = do
+      revokeAssistance runtime "paused" "manual-takeover"
       next<-sidebarAction runtime request d
       publishSidebarEpoch runtime
       pure (False,next)
@@ -471,6 +507,14 @@ drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue _) _) d=forM
     watchLive<-watchProviderCurrent s
     let current request@(DebugPageRequest _ target _)=validSidebarRequest s request && case target of DebugWatchVariables{}->watchLive; _->True
     case ingress of
+      ReadAssistance receipt command args reply
+        | not (assistanceReceiptCurrent s receipt) ->void (tryPutMVar reply (Left "Assisted debugger stop expired."))
+        | command=="admit" ->void (tryPutMVar reply (if any (protectedPath d) (fromMaybe [] (field "paths" args)) || any (protectedBuffer d) (fromMaybe [] (field "bufferIds" args))
+            then Left "Assisted observation became private." else Right Null))
+        | command=="variables" && M.lookup (integer "variablesReference" args) (variableRefs s)/=Just False ->void (tryPutMVar reply (Left "Lazy or expired variable handle."))
+        | command=="source" && not (M.member (integer "sourceReference" args) (sourceReferences s)) ->void (tryPutMVar reply (Left "Debugger source handle expired."))
+        | command `notElem` ["scopes","variables","source"] ->void (tryPutMVar reply (Left "Unsupported assisted inspection."))
+        | otherwise->send runtime (Inspection command reply) command args
       ReadDebugSource captured reference stamp origin reply
         | generation s/=captured || not (stopped s && ready s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing) || not (sourceStampCurrent s reference stamp) || maybe False (protectedPath d) origin ->void (tryPutMVar reply (Left "Debugger source is private or expired."))
         | length [() | (SourceInspection{},_,_)<-M.elems (pending s)]>=4 ->void (tryPutMVar reply (Left "Debugger source inspection is busy."))
@@ -716,7 +760,12 @@ selectSidebarFrame runtime@(Debugger ref _ _ _ _) epoch tid fid d=do
 -- | Initiate a tool under desktop serialization and return its outside-lock wait.
 -- Inspection handles must belong to the current stopped generation.
 debuggerTool :: Debugger -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
-debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
+debuggerTool=debuggerToolWithCaller (pure (Right ()))
+
+-- | Retain the initiating connection's currentness check for every later action.
+-- Tool JSON cannot provide or replace this capability.
+debuggerToolWithCaller :: IO (Either Text ()) -> Debugger -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
+debuggerToolWithCaller caller runtime@(Debugger ref _ _ _ _) d name arguments = do
   s<-readIORef ref
   case parseEither (parseTool s name) arguments of
     Left err -> pure (d,pure (Left (T.pack err)))
@@ -731,17 +780,25 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
       value<-debuggerStatus current
       pure (desktop,case failure current of
         Just err->pure (Left err)
-        Nothing->publicDebuggerStatus (root current) (privateFilePaths desktop) (merge (object ["accepted" .= True]) value))
+        Nothing->publicDebuggerStatus (root current) (privateFilePaths desktop) (protectedBuffer desktop) (merge (object ["accepted" .= True]) value))
     run ToolStatus=do
       current<-readIORef ref
       value<-debuggerStatus current
-      pure (d,publicDebuggerStatus (root current) (privateFilePaths d) value)
+      pure (d,publicDebuggerStatus (root current) (privateFilePaths d) (protectedBuffer d) value)
     run (ToolStart action values)=do
       desktop<-perform runtime action values d
       current<-readIORef ref
       starting<-hdbPending runtime
       if isJust (client current) || starting then snapshot desktop else immediate desktop (Left (status desktop))
-    run (ToolControl command)=perform runtime command [] d >>= snapshot
+    run (ToolControl command)=do
+      revokeAssistance runtime "paused" "manual-takeover"
+      perform runtime command [] d >>= snapshot
+    run (ToolAssist command goal steps budget)=do
+      before<-readIORef ref
+      desktop<-assistOperation caller runtime command goal steps budget d
+      after<-readIORef ref
+      if command=="start" && fmap assistanceId (assistance before)==fmap assistanceId (assistance after)
+        then immediate desktop (Left (status desktop)) else snapshot desktop
     run (ToolPresent following view)=do
       when (isJust view) (modifyIORef' ref (\state->state {sidebarVisible=True}))
       forM_ following (\enabled->modifyIORef' ref (\state->state {followSource=enabled}))
@@ -812,6 +869,7 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
           ["generation" .= generation s,"request" .= command,"body" .= body]))
 
 data ToolRequest = ToolStatus | ToolStart Text [Text] | ToolControl Text
+  | ToolAssist Text (Maybe Text) Int Int
   | ToolBreakpoints Int [Int] | ToolInspect Text Value | ToolPresent (Maybe Bool) (Maybe Text)
 
 parseTool :: State -> Text -> Value -> Parser ToolRequest
@@ -833,6 +891,22 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       required key selected=positive key >>= maybe (maybe (fail (T.unpack (K.toText key)<>" is required")) pure selected) pure
   case name of
     "debug_status" -> fieldsAllowed [] >> pure ToolStatus
+    "debug_assist" -> do
+      fieldsAllowed ["command","generation","goal","maxSteps","budgetMs"]
+      command<-o .: "command"
+      unless (command `elem` ["start","pause","stop","status","reveal"]) (fail "Unsupported assistance command")
+      goal<-o .:? "goal"
+      steps<-o .:? "maxSteps" .!= (20::Int)
+      budget<-o .:? "budgetMs" .!= (60000::Int)
+      unless (steps>=1 && steps<=100 && budget>=1 && budget<=300000) (fail "Assistance requires 1..100 steps and 1..300000 ms")
+      when (command=="start") $ do
+        epoch
+        live
+        unless (ready s && configured s && stopped s && isJust (thread s) && isJust (frame s)) (fail "Assistance requires a ready paused frame")
+        value<-maybe (fail "A debugging goal is required") pure goal
+        unless (not (T.null (T.strip value)) && T.compareLength value 4096/=GT && not (T.any (=='\0') value)) (fail "Goal requires 1..4096 characters without NUL")
+        unless (isJust (systemOne s)) (fail "System One is unavailable")
+      pure (ToolAssist command goal steps budget)
     "debug_present" -> do
       fieldsAllowed ["follow","view","generation"]
       following<-o .:? "follow"
@@ -933,7 +1007,7 @@ debuggerStatus s=do
       pure (if isJust result then "ready" else "preparing",object
         ["stage" .= phase,"worker" .= show ident,"threadStatus" .= show activity])
   pure $ object
-   ["sourcePreparation" .= preparation,"sourcePreparationDetail" .= detail,"generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
+   ["assistance" .= fmap assistanceStatus (assistance s),"session" .= sidebarSession s,"sourcePreparation" .= preparation,"sourcePreparationDetail" .= detail,"generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
    "finishing" .= (isJust (client s) && isJust (endedAt s)),"exitCode" .= programExitCode s,"connected" .= connected s,
    "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,"follow" .= followSource s,
    "threadId" .= thread s,"frame" .= frame s,"source" .= (frame s >>= (field "source" :: Value -> Maybe Value)),
@@ -945,17 +1019,27 @@ debuggerStatus s=do
 
 -- Public metadata is prepared on the waiting tool worker. Entire private rows
 -- are omitted: frame names and breakpoint messages can also reveal their source.
-publicDebuggerStatus :: FilePath -> [FilePath] -> Value -> IO (Either Text Value)
-publicDebuggerStatus base private value=case boundedResult value of
+publicDebuggerStatus :: FilePath -> [FilePath] -> (Int -> Bool) -> Value -> IO (Either Text Value)
+publicDebuggerStatus base private privateBuffer value=case boundedResult value of
   Left err->pure (Left err)
   Right (Object objectValue)->do
     visibleFrame<-visibleRow base private (fromMaybe Null (field "frame" value))
     visibleSource<-visibleBacking base private (fromMaybe Null (field "source" value))
     points<-filterM (visibleRow base private) (items "breakpoints" value)
-    pure (Right (Object (KM.insert "breakpoints" (toJSON points) $
+    publicAssistance<-case field "assistance" value of
+      Just (Object fields)->do
+        observations<-filterM publicObservation (fromMaybe [] (field "observations" (Object fields)))
+        pure (Object (KM.insert "observations" (toJSON observations) fields))
+      _->pure Null
+    pure (Right (Object (KM.insert "assistance" publicAssistance $ KM.insert "breakpoints" (toJSON points) $
       KM.insert "source" (if visibleSource then fromMaybe Null (field "source" value) else Null) $
       KM.insert "frame" (if visibleFrame then fromMaybe Null (field "frame" value) else Null) objectValue)))
   Right other->pure (Right other)
+  where
+    publicObservation observation=do
+      selected<-visibleRow base private (fromMaybe Null (field "location" observation))
+      stack<-mapM (visibleRow base private) (items "stack" observation)
+      pure (selected && and stack && not (maybe False privateBuffer (field "sourceBufferId" observation)))
 
 publicStack :: FilePath -> [FilePath] -> Value -> IO (Either Text Value)
 publicStack base private value=do
@@ -1019,6 +1103,21 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
   when (action `elem` ["launch","launch-config","connect","attach","disconnect"]) (invalidateHdb runtime)
   s<-readIORef ref
   case (action,values) of
+    ("assist",[]) -> pure d {dialog=Just (Dialog "Assisted debugging" (DebugDialog ("assist-start:"<>tshow (sidebarSession s)<>":"<>tshow (generation s)<>":"<>tshow (frameRevision s)))
+      [Input "Debugging goal" "" 0,Input "Maximum steps" "20" 2,Input "Time budget (ms)" "60000" 5] 0 ["Start","Pause","Stop","Reveal","Cancel"]
+      ["Uses the selected System One supplier and this exact paused stop.","Manual debugger actions take ownership; lazy values stay unevaluated."])}
+    (form,button:goal:steps:budget:_) | "assist-start:" `T.isPrefixOf` form ->
+      if button=="1" then assistOperation (pure (Right ())) runtime "pause" Nothing 20 60000 d
+      else if button=="2" then assistOperation (pure (Right ())) runtime "stop" Nothing 20 60000 d
+      else if button=="3" then assistOperation (pure (Right ())) runtime "reveal" Nothing 20 60000 d
+      else if button/="0" then pure d
+      else if form/="assist-start:"<>tshow (sidebarSession s)<>":"<>tshow (generation s)<>":"<>tshow (frameRevision s) then pure d {status="Debugger stop changed; reopen assistance."}
+      else case (readMaybe (T.unpack steps),readMaybe (T.unpack budget)) of
+        (Just count,Just duration)->assistOperation (pure (Right ())) runtime "start" (Just goal) count duration d
+        _->pure d {status="Enter valid step and time budgets."}
+    ("assist-pause",_) -> assistOperation (pure (Right ())) runtime "pause" Nothing 20 60000 d
+    ("assist-stop",_) -> assistOperation (pure (Right ())) runtime "stop" Nothing 20 60000 d
+    ("assist-reveal",_) -> assistOperation (pure (Right ())) runtime "reveal" Nothing 20 60000 d
     ("downloads",[]) -> showDownloads runtime d
     _ | "hdb-accept:" `T.isPrefixOf` action -> acceptHdb runtime action values d
     ("output",_) -> modifyIORef' ref (\state -> state {outputShown=True}) >> revealOutput runtime d
@@ -1095,6 +1194,220 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
     _ | Just (epoch,choice)<-parseToken action,epoch==generation s -> select runtime action choice values d
       | "select:" `T.isPrefixOf` action -> pure (clearDialog d) {status="Debugger selection expired."}
       | otherwise -> pure d {status="Debugger is not ready for this command."}
+
+-- Runs have one owner. Revocation publishes first, then cancels the exact
+-- ticket; cleanup waits only on retired workers, outside interaction handling.
+revokeAssistance :: Debugger -> Text -> Text -> IO ()
+revokeAssistance (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) phase reason=do
+  state<-readIORef ref
+  forM_ (assistance state) $ \run->when (assistancePhase run `elem` ["observing","deciding","running"]) $ do
+    modifyIORef' ref (\current->current {assistance=fmap (\a->a {assistancePhase=phase,assistanceReason=Just reason,assistanceWorker=Nothing,assistanceFlight=Nothing}) (assistance current)})
+    ticket<-atomically (writeTVar (assistanceCancelled run) True >> readTVar (assistanceTicket run))
+    mapM_ (void . cancelDecision) ticket
+    forM_ (assistanceWorker run) $ \(_,worker)->do
+      cleanup<-async (cancel worker >> void (waitCatch worker))
+      modifyIORef' retired (cleanup:)
+
+assistanceStatus :: Assistance -> Value
+assistanceStatus run=object ["runId" .= assistanceId run,"phase" .= assistancePhase run,"reason" .= assistanceReason run,
+  "session" .= assistanceSession run,"steps" .= assistanceSteps run,"maxSteps" .= assistanceMaxSteps run,
+  "decisions" .= assistanceDecisions run,"observations" .= assistanceEvidence run,
+  "omittedObservations" .= max 0 (assistanceDecisions run-length (assistanceEvidence run)),
+  "conclusion" .= (if assistanceReason run==Just "hypothesis" then "A conversational hypothesis is needed; inspect the retained evidence."
+    else "These are runtime observations; reaching a limit does not prove the debugging goal." :: Text)]
+
+assistanceReceipt :: State -> Assistance -> Maybe AssistanceReceipt
+assistanceReceipt state run=do
+  tid<-thread state
+  _<-frame state
+  pure (AssistanceReceipt (assistanceId run) (sidebarSession state) tid (generation state) (frameRevision state))
+
+assistanceReceiptCurrent :: State -> AssistanceReceipt -> Bool
+assistanceReceiptCurrent state receipt=ready state && configured state && stopped state && isJust (client state) &&
+  endedAt state==Nothing && disconnectAt state==Nothing && failure state==Nothing && case assistance state of
+    Just run->assistancePhase run `elem` ["observing","deciding"] && assistanceReceipt state run==Just receipt
+    _->False
+
+assistOperation :: IO (Either Text ()) -> Debugger -> Text -> Maybe Text -> Int -> Int -> Desktop -> IO Desktop
+assistOperation caller runtime@(Debugger ref clock _ _ _) command goal steps budget desktop=do
+  state<-readIORef ref
+  case command of
+    "start" | Just services<-systemOne state, Just target<-goal,
+      not (T.null (T.strip target)),T.compareLength target 4096/=GT,not (T.any (=='\0') target),
+      steps>=1 && steps<=100,budget>=1 && budget<=300000,
+      ready state && configured state && stopped state && isJust (client state) && isJust (thread state) && isJust (frame state),
+      endedAt state==Nothing && disconnectAt state==Nothing -> do
+        current<-caller
+        case current of
+          Left _->pure desktop {status="Assistance caller retired."}
+          Right ()->do
+            revokeAssistance runtime "finished" "superseded"
+            ident<-tshow . hashUnique <$> newUnique
+            now<-clock
+            cancelled<-newTVarIO False
+            ticket<-newTVarIO Nothing
+            let run=Assistance ("debug-assist-"<>ident) target "observing" Nothing (sidebarSession state) 0 steps
+                  (now+toInteger budget*1000000) 0 Nothing 0 [] "" False caller cancelled ticket Nothing Nothing
+            modifyIORef' ref (\s->s {assistance=Just run})
+            -- Starting admits a run; its first observation and supplier result
+            -- remain asynchronous and are visible through this exact run ID.
+            services `seq` pure (clearDialog desktop) {status="Assisted debugger started; waiting for observed evidence."}
+    "start"->pure desktop {status="Assistance requires a goal, valid budgets, System One and a ready paused frame."}
+    "pause"->revokeAssistance runtime "paused" "requested-pause" >> pauseAssistance runtime desktop
+    "stop"->revokeAssistance runtime "finished" "requested-stop" >> pauseAssistance runtime desktop
+    "reveal"->do
+      modifyIORef' ref (\s->s {sidebarVisible=True,followSource=True,
+        assistance=fmap (\run->run {assistanceRevealPending=True}) (assistance s)})
+      shown<-revealOutput runtime desktop
+      maybe (pure shown) (openFrame runtime True (Just (privateFilePaths desktop)) shown) (frame state)
+    _->pure desktop
+
+pauseAssistance :: Debugger -> Desktop -> IO Desktop
+pauseAssistance runtime@(Debugger ref _ _ _ _) desktop=do
+  state<-readIORef ref
+  if ready state && configured state && not (stopped state) && isJust (thread state) && isJust (client state) && endedAt state==Nothing && disconnectAt state==Nothing
+    then perform runtime "pause" [] desktop
+    else pure (clearDialog desktop) {status="Assistance stopped; debugger remains available."}
+
+-- Only scalar receipt/phase checks run on idle ticks. Immutable source/output
+-- preparation, credential checks, serialization and inference run on the worker.
+tickAssistance :: Debugger -> Desktop -> IO Desktop
+tickAssistance runtime@(Debugger ref clock _ _ _) desktop=do
+  state<-readIORef ref
+  now<-clock
+  -- A reveal waits for any already-owned output batch's real publication. It
+  -- cannot supersede that batch with an older accepted program-output value.
+  forM_ (assistance state) $ \run->when (assistanceRevealPending run && not (outputPending state)) $ do
+    modifyIORef' ref (\s->s {assistance=fmap (\a->a {assistanceRevealPending=False}) (assistance s)})
+    queueOutput runtime True (Just (assistanceReport run)) (output state)
+  case assistance state of
+    Just run | assistancePhase run `elem` ["observing","deciding","running"]->do
+      caller<-assistanceCaller run
+      if either (const True) (const False) caller then revokeAssistance runtime "finished" "caller-retired" >> pauseAssistance runtime desktop
+      else if now>=assistanceDeadline run then revokeAssistance runtime "finished" "time-budget" >> pauseAssistance runtime desktop
+      else if assistanceSession run/=sidebarSession state || not (isJust (client state)) || endedAt state/=Nothing || disconnectAt state/=Nothing then revokeAssistance runtime "finished" "session-ended" >> pure desktop
+      else case assistanceWorker run of
+        Just (receipt,worker)->do
+          completed<-poll worker
+          if not (assistanceReceiptCurrent state receipt) then revokeAssistance runtime "finished" "stop-expired" >> pure desktop
+          else case completed of
+            Nothing->pure desktop
+            Just result->do
+              modifyIORef' ref (\s->s {assistance=fmap (\a->a {assistanceWorker=Nothing}) (assistance s)})
+              case result of
+                Left _->revokeAssistance runtime "finished" "observation-failed" >> pure desktop
+                Right (Left reason)->revokeAssistance runtime "finished" reason >> pure desktop
+                Right (Right observed)->do
+                  supplier<-maybe (pure Nothing) currentDecisionSupplier (systemOne state)
+                  if isJust (A.assistedSupplier observed) && A.assistedSupplier observed/=fmap decisionSupplierId supplier then revokeAssistance runtime "finished" "supplier-expired" >> pure desktop
+                  else do
+                    modifyIORef' ref (\s->s {assistance=fmap (\a->a {assistanceEvidence=take 8 (A.assistedEvidence observed:assistanceEvidence a),
+                      assistanceReport=T.takeEnd 16000 (assistanceReport a<>A.assistedReport observed),assistanceDecisions=assistanceDecisions a+1}) (assistance s)})
+                    adoptAssistedAction runtime (A.assistedAction observed) desktop
+        Nothing->case assistanceFlight run of
+          Just (AssistanceFlight command owner issued (Just receipt) True)
+            | stopped state && thread state==Just owner && generation state==receipt && receipt>issued->do
+              modifyIORef' ref (\s->s {assistance=fmap (\a->a {assistanceFlight=Nothing,assistancePhase="observing",
+                assistanceSteps=assistanceSteps a+if command `elem` ["next","stepIn","stepOut"] then 1 else 0}) (assistance s)})
+              pure desktop
+          Just _->pure desktop
+          Nothing | stopped state,Just receipt<-assistanceReceipt state run,Just services<-systemOne state->do
+            let selected=fromMaybe Null (frame state)
+                source=fromMaybe Null (field "source" selected)
+                location=(T.take 512 (text "path" source),integer "sourceReference" source,integer "line" selected)
+                stalls=if assistanceLocation run==Just location then assistanceStalls run+1 else 0
+                forced=if assistanceSteps run>=assistanceMaxSteps run then Just "step-budget"
+                  else if stalls>=3 then Just "stall" else Nothing
+                candidate=find (\(bid,doc)->case documentFile doc of
+                  Just file->normalise (filePath file)==normalise (if isAbsolute (T.unpack (text "path" source)) then T.unpack (text "path" source) else root state </> T.unpack (text "path" source))
+                  Nothing->maybe False (\(epoch,stamp,src)->epoch==generation state && sourceStampCurrent state (integer "sourceReference" src) stamp &&
+                    integer "sourceReference" src==integer "sourceReference" source && integer "sourceReference" source>0) (M.lookup bid (sources state))) (M.toList (buffers desktop))
+                private=privateFilePaths desktop
+                sourceBuffer=case candidate of Just (bid,doc) | not (protectedBuffer desktop bid)->Just (bid,documentBuffer doc);_->Nothing
+                sourcePrivate=maybe False (protectedBuffer desktop . fst) candidate
+            atomically (writeTVar (assistanceTicket run) Nothing)
+            worker<-async (if sourcePrivate then pure (Left "private-source") else observeAssistance runtime services state run receipt sourceBuffer private forced (fromInteger (max 1 ((assistanceDeadline run-now) `div` 1000000))))
+            modifyIORef' ref (\s->s {assistance=fmap (\a->a {assistanceWorker=Just (receipt,worker),assistancePhase="deciding",assistanceStalls=stalls,assistanceLocation=Just location}) (assistance s)})
+            pure desktop
+          _->pure desktop
+    _->pure desktop
+
+adoptAssistedAction :: Debugger -> Text -> Desktop -> IO Desktop
+adoptAssistedAction runtime@(Debugger ref _ _ _ _) action desktop=do
+  state<-readIORef ref
+  case assistance state of
+    Just run | action `elem` ["next","stepIn","stepOut","continue"],Just owner<-thread state->do
+      modifyIORef' ref (\s->(invalidate s) {assistance=fmap (\a->a {assistancePhase="running",assistanceFlight=Just (AssistanceFlight action owner (generation state) Nothing False)}) (assistance s)})
+      send runtime (AssistedControl (assistanceId run) (sidebarSession state) action True) action (object ["threadId" .= owner])
+      pure desktop {status="Assisted debugger: "<>action<>" admitted; waiting for its stop."}
+    Just _ | action=="inspect"->pure desktop
+    Just _->revokeAssistance runtime "finished" (if action=="stop" then "supplier-stop" else action) >> pure desktop {status="Assisted debugger ended: "<>action<>". Reveal its observations to inspect the evidence."}
+    _->pure desktop
+
+observeAssistance :: Debugger -> SystemOneServices -> State -> Assistance -> AssistanceReceipt -> Maybe (Int,Buffer) -> [FilePath] -> Maybe Text -> Int -> IO (Either Text A.AssistanceResult)
+observeAssistance runtime services state run receipt opened private forced budget=do
+  environment<-getEnvironment
+  let selected=fromMaybe Null (frame state)
+      source=fromMaybe Null (field "source" selected)
+      path=T.unpack <$> (field "path" source :: Maybe Text)
+      secrets=[T.pack value | (name,value)<-environment++debugEnvironment state,sensitiveLabel (T.pack name),not (null value)]
+  origin<-canonicalSourcePath (root state) path
+  case origin of
+    Left _->pure (Left "source-unavailable")
+    Right canonical | maybe False (protectedFilePath private) canonical->pure (Left "private-source")
+    Right canonical->do
+      stack<-publicStack (root state) private (object ["stackFrames" .= take 8 (frames state)])
+      scopes<-readAssistance runtime run receipt "scopes" (object ["frameId" .= integer "id" selected])
+      let scopeRows=either (const []) (take 3 . items "scopes") scopes
+          eager row=integer "variablesReference" row>0 && not (flag "expensive" row) && not (maybe False (flag "lazy") (field "presentationHint" row)) && not (sensitiveLabel (text "name" row))
+      pages<-mapM (\scope->readAssistance runtime run receipt "variables" (object ["variablesReference" .= integer "variablesReference" scope,"start" .= (0::Int),"count" .= (8::Int)])) (filter eager scopeRows)
+      nearby<-case opened of
+        Just (_,buffer)->pure (A.sourceExcerpt secrets (integer "line" selected) buffer)
+        Nothing | integer "sourceReference" source>0->do
+          body<-readAssistance runtime run receipt "source" (object ["sourceReference" .= integer "sourceReference" source])
+          pure (body >>= \value->maybe (Left "Adapter source unavailable.") (A.sourceExcerpt secrets (integer "line" selected) . newBuffer) (field "content" value))
+        Nothing | Just file<-canonical->do
+          bytes<-tryIOError (withFileRead file (\handle->BS.hGet handle (1024*1024+1)))
+          pure $ case bytes of
+            Right value | BS.length value<=1024*1024->case TE.decodeUtf8' value of
+              Right content->A.sourceExcerpt secrets (integer "line" selected) (newBuffer content)
+              _->Left "Source is not UTF-8."
+            _->Left "Source unavailable within the 1 MiB read bound."
+        _->pure (Left "No adapter or local source.")
+      let selectedPublic=case (selected,field "source" selected,canonical) of
+            (Object selectedFields,Just (Object sourceFields),Just file)->Object (KM.insert "source" (Object (KM.insert "path" (toJSON file) sourceFields)) selectedFields)
+            _->selected
+          actions=["inspect","next","stepIn"]++["stepOut" | length (take 2 (frames state))>1]++["continue","stop","hypothesis"]
+          observation=object ["session" .= sidebarSession state,"threadId" .= thread state,"generation" .= generation state,"frameRevision" .= frameRevision state,
+            "sourceBufferId" .= fmap fst opened,"location" .= A.compactFrame selectedPublic,"source" .= either (\reason->object ["unavailable" .= reason]) id nearby,
+            "stack" .= either (const []) (map A.compactFrame . take 8 . items "stackFrames") stack,
+            "locals" .= concatMap (either (const []) (mapMaybe (A.compactVariable secrets) . take 8 . items "variables")) pages,
+            "output" .= T.copy (T.takeEnd 2048 (output state)),"outputExcerpt" .= True,"supportedActions" .= actions,
+            "limits" .= (["Lazy values are not evaluated or expanded.","Only bounded eager scope roots are inspected.","Missing source and adapter failures do not prove the goal."]::[Text]),
+            "inspectionFailures" .= [reason | Left reason<-scopes:pages]]
+          identity=assistanceId run<>":"<>tshow (sidebarSession state)<>":"<>tshow (generation state)<>":"<>tshow (fromMaybe 0 (thread state))<>":"<>tshow (frameRevision state)<>":"<>tshow (assistanceDecisions run)
+      current<-assistanceCaller run
+      let observationPaths value=mapMaybe (\row->field "source" row >>= field "path")
+            (fromMaybe Null (field "location" value):items "stack" value) :: [FilePath]
+          includedPaths=concatMap observationPaths (observation:take 4 (assistanceEvidence run))
+          privateRaw=A.hasPrivateText secrets (output state) || A.hasPrivateValue secrets selected ||
+            either (const False) (A.hasPrivateValue secrets) stack || any (either (const False) (A.hasPrivateValue secrets)) (scopes:pages)
+          includedBuffers=mapMaybe (field "sourceBufferId") (observation:take 4 (assistanceEvidence run)) :: [Int]
+      admission<-readAssistance runtime run receipt "admit" (object ["paths" .= includedPaths,"bufferIds" .= includedBuffers])
+      case (current,admission) of
+        (Left _,_)->pure (Left "caller-retired")
+        (_,Left _)->pure (Left "observation-expired-or-private")
+        (Right (),Right _) | privateRaw->pure (Left "private-observation")
+        (Right (),Right _) | (case nearby of Left reason->reason=="Nearby source contains a known private value.";_->False)->pure (Left "private-observation")
+        (Right (),Right _)->A.decideAssistance services identity (assistanceGoal run) secrets actions observation (assistanceEvidence run) forced budget (assistanceCancelled run) (assistanceTicket run)
+
+readAssistance :: Debugger -> Assistance -> AssistanceReceipt -> Text -> Value -> IO (Either Text Value)
+readAssistance (Debugger ref _ _ (SidebarMailbox _ queue _) _) run receipt@(AssistanceReceipt _ _ _ epoch _) command arguments=do
+  reply<-newEmptyMVar
+  result<-race (atomically (readTVar (assistanceCancelled run) >>= check)) (timeout 16000000 $ do
+    atomically (writeTBQueue queue (ReadAssistance receipt command arguments reply))
+    awaitInspection ref epoch reply)
+  pure $ case result of Left ()->Left "Assistance cancelled.";Right Nothing->Left "Assisted inspection timed out.";Right (Just answer)->answer
 
 data Transport = TCP Text Int | Stdio FilePath [String] | Server FilePath [String] Text Int
 data LaunchConfig = LaunchConfig Transport Text Value Text
@@ -1182,7 +1495,7 @@ initializeSession runtime@(Debugger ref _ _ _ _) directory c address requestName
   s<-readIORef ref
   stopTransport runtime s
   resetOutputOwner runtime d
-  writeIORef ref emptyState {client=Just c,generation=generation s+1,root=directory,endpoint=address,
+  writeIORef ref emptyState {systemOne=systemOne s,client=Just c,generation=generation s+1,root=directory,endpoint=address,
     watchProvider=watchProvider s,watchExpressions=watchExpressions s,watchCatalogueRevision=watchCatalogueRevision s,nextWatch=nextWatch s,choiceId=choiceId s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   -- Explicit session replacement retires the old dialog nonce.
   pure (if followSource s then clearDialog d else d) {status="Connecting debugger..."}
@@ -1194,6 +1507,7 @@ debuggerConsoles (Debugger _ _ (HdbRuntime _ _ _ _ consoles _ _) _ _) = consoles
 -- terminal still being prepared, so it cannot appear in a newer session.
 stopTransport :: Debugger -> State -> IO ()
 stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) s = mask $ \restore -> do
+  revokeAssistance runtime "finished" "disconnected"
   -- No old worker can publish into the replacement session. Process cleanup is
   -- joined only at daemon teardown, outside the desktop lock.
   modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing,debugCradle=Nothing})
@@ -1302,7 +1616,7 @@ tickDebugger runtime original = do
   updated<-tickDebuggerOwner runtime original
   publishSidebarEpoch runtime
   drainSidebarReads runtime updated
-  pure updated
+  tickAssistance runtime updated
 
 tickDebuggerOwner :: Debugger -> Desktop -> IO Desktop
 tickDebuggerOwner runtime@(Debugger ref clock _ _ _) original = do
@@ -1316,7 +1630,7 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _ _) original = do
   -- The pending payload lives only in this already-bounded transport batch and
   -- then the output worker. Public State.output is always the accepted copy.
   (receivedEvents,batch,changed,opening)<-foldM receiveBatch (reporting,accepted,False,False) events
-  when changed (queueOutput runtime opening batch)
+  when changed (queueOutput runtime opening Nothing batch)
   sourced<-tickSourcePreparation runtime receivedEvents
   received<-tickWatchPreparation runtime sourced
   updated<-tickOutputOwner runtime received
@@ -1392,7 +1706,10 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
       pure d
     D.Notification "stopped" body -> do
       let tid=field "threadId" body
-      modifyIORef' ref (\state -> (invalidate state) {stopped=True,thread=tid})
+      modifyIORef' ref (\state -> let fresh=(invalidate state) {stopped=True,thread=tid}
+        in fresh {assistance=fmap (\run->run {assistanceFlight=case assistanceFlight run of
+          Just (AssistanceFlight command owner issued _ accepted) | assistancePhase run=="running" && Just owner==tid && assistanceSession run==sidebarSession fresh->Just (AssistanceFlight command owner issued (Just (generation fresh)) accepted)
+          value->value}) (assistance fresh)})
       when (configured s) $ do
         send runtime (Threads False) "threads" (object [])
         forM_ tid (\ident -> sendStack runtime False ident)
@@ -1452,6 +1769,15 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
           completeInspection kind (Left "Debugger inspection expired; refresh debug_status.")
           pure d
         else case kind of
+          AssistedControl runId session command _ -> do
+            case assistance s of
+              Just run | assistanceId run==runId && assistanceSession run==session && assistancePhase run=="running"->case result of
+                Left _->revokeAssistance runtime "finished" "adapter-control-failed"
+                Right _->modifyIORef' ref (\state->state {assistance=fmap (\current->current {assistanceFlight=case assistanceFlight current of
+                  Just (AssistanceFlight sent owner issued receipt _) | sent==command->Just (AssistanceFlight sent owner issued receipt True)
+                  other->other}) (assistance state)})
+              _->pure ()
+            pure d
           WatchRequest operation backing base private->prepareWatch runtime operation backing base private result >> pure d
           SourceInspection _ _ _ reply->void (tryPutMVar reply result) >> pure d
           SidebarRead (DebugPageRequest _ target _) reply -> do
@@ -1623,6 +1949,7 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
           _->pure d {status="DAP source response is unavailable or expired."}
       where reference=integer "sourceReference" (fromMaybe Null (field "source" selected))
     Control _ -> pure d
+    AssistedControl{} -> pure d
     WatchRequest{}->pure d
     SourceInspection _ _ _ reply->void (tryPutMVar reply (Right body)) >> pure d
     Inspection command reply -> do
