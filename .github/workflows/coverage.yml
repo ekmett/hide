@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: coverage-${{ github.ref }}
+  group: coverage-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   # Let main finish saving its build cache; superseded PR runs may stop.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
