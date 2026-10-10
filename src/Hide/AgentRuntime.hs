@@ -36,6 +36,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import System.Directory (pathIsSymbolicLink, removeFile, renameFile)
 import System.Environment (lookupEnv)
+import qualified Hide.Terminal as Terminal
 import System.FilePath (isAbsolute, takeDirectory)
 import System.IO (IOMode(ReadMode), hClose, hFlush, openBinaryTempFile, withBinaryFile)
 import System.IO.Error (catchIOError, isDoesNotExistError)
@@ -217,8 +218,8 @@ primaryProviderHost runtime identity root=ProviderHost
   (call . AskProviderPermission)
   (Just (ProviderFiles (\path line limit->call (ReadProviderFile path line limit))
     (\path text->call (WriteProviderFile path text))))
-  (Just (ProviderTerminals (call . CreateProviderTerminal) (call . ReadProviderTerminal)
-    (call . WaitProviderTerminal) (call . KillProviderTerminal) (call . ReleaseProviderTerminal)))
+  (if Terminal.terminalAvailable then Just (ProviderTerminals (call . CreateProviderTerminal) (call . ReadProviderTerminal)
+    (call . WaitProviderTerminal) (call . KillProviderTerminal) (call . ReleaseProviderTerminal)) else Nothing)
   (Just (\turn content->publishContent identity turn content))
   where
     state=runtimeState runtime

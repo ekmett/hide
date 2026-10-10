@@ -8,7 +8,7 @@
 -- Stability   : experimental
 -- Portability : CPP, OverloadedStrings
 
-module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
+module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks, withConversationMenusFixture, humanMenuAction) where
 import AgentHubCheck (completedTurn)
 import qualified Hide.Plugin.ConversationSession as Session
 import qualified Hide.Plugin.Provider as Provider
@@ -120,11 +120,22 @@ sessionMenuAction runtime command value=humanMenuAction runtime command (fmap (:
 humanMenuAction :: ConversationState -> Command -> Maybe [T.Text] -> Desktop -> IO Desktop
 humanMenuAction runtime command value=withHumanMenuAction runtime command value (runCommand command)
 
-withHumanMenuAction :: ConversationState -> Command -> Maybe [T.Text] -> (Desktop -> (Desktop,[Effect])) -> Desktop -> IO Desktop
-withHumanMenuAction runtime command value invoke original=SidebarHost.withSidebarCommands $ \forms->withDocsCommands $ \docs->
-  MenuHost.withConversationMenuCommands docs runtime $ \menuOwner->
+-- Scope the actual first-party declarations for pure menu/protocol checks too.
+-- Nothing omits only the conversation interpreter; metadata still comes from
+-- the same live plugin registrations as the worker-backed action checks.
+withConversationMenusFixture :: Maybe ConversationState -> Desktop -> (Desktop -> IO a) -> IO a
+withConversationMenusFixture runtime original use=withConversationMenuOwners runtime $ \_ menuOwner->do
+  metadata<-HideMenu.menuSnapshot (MenuHost.menuContributions menuOwner)
+  use original {contributedMenus=metadata,menusActive=True,agentMenuRefs=MenuHost.menuAgentReferences menuOwner}
+
+withConversationMenuOwners :: Maybe ConversationState -> (SidebarHost.SidebarHost -> MenuHost.MenuHost -> IO a) -> IO a
+withConversationMenuOwners runtime use=SidebarHost.withSidebarCommands $ \forms->withDocsCommands $ \docs->
+  (maybe (MenuHost.withMenuCommands docs) (MenuHost.withConversationMenuCommands docs) runtime) $ \menuOwner->
   ConversationMenus.withConversationMenus (SidebarHost.sidebarCapabilities forms)
-    (MenuHost.menuSidebarCapabilities menuOwner forms) SidebarHost.sidebarConversation SidebarHost.sidebarConversationOperation SidebarHost.SidebarConversation HideMenu.cancelConversationAction $ do
+    (MenuHost.menuSidebarCapabilities menuOwner forms) SidebarHost.sidebarConversation SidebarHost.sidebarConversationOperation SidebarHost.SidebarConversation HideMenu.cancelConversationAction (use forms menuOwner)
+
+withHumanMenuAction :: ConversationState -> Command -> Maybe [T.Text] -> (Desktop -> (Desktop,[Effect])) -> Desktop -> IO Desktop
+withHumanMenuAction runtime command value invoke original=withConversationMenuOwners (Just runtime) $ \forms menuOwner->do
       result<-newIORef False
       let core d requests=do
             changed<-conversationEffects runtime (\desktop _->pure (False,desktop)) d requests

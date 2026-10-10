@@ -11,6 +11,7 @@
 module ProtocolCheck (checks) where
 import AllocationProfile (AllocationProfile, withinBudget)
 import EditorFixture (withEditorFixture)
+import ConversationCheck (withConversationMenusFixture)
 import Control.Exception (SomeException, bracket, try, evaluate, displayException)
 import Control.DeepSeq (force)
 import GHC.Conc (getAllocationCounter)
@@ -172,7 +173,8 @@ checks profile = withEditorFixture "" (initialDesktop (80,25)) $ \primary->do
   check "browser understands modern search and conversation commands" (and [parseEither parseInput (object ["type" .= ("command"::T.Text),"command" .= name])==Right (BrowserCommand cmd) | (name,cmd)<-[("hide.search.replace"::T.Text,Replace),("hide.agents.conversation",Conversation),("hide.agents.new",AgentNew)]])
   check "browser shortcut aliases are rejected" (all (either (const True) (const False) . parseEither parseInput . (\name->object ["type" .= ("command"::T.Text),"command" .= name])) (["copy","find","newConversation"]::[T.Text]))
   let unavailable=initialDesktop (80,25)
-  check "session Options actions remain available before opening a document" (all (menuCommandAvailable unavailable) [EditorOptions,EnvironmentOptions,ChatInputOptions,AgentOptions,AgentPermissions,AgentGuidance,AutocompleteCommand "settings",ReloadBindings,InspectBindings])
+  withConversationMenusFixture Nothing unavailable $ \registered->
+    check "session Options actions remain available before opening a document" (all (menuCommandAvailable registered) [EditorOptions,EnvironmentOptions,ChatInputOptions,AgentOptions,AgentPermissions,AgentGuidance,AutocompleteCommand "settings",ReloadBindings,InspectBindings])
   let optionsMenu command=case [(i,j) | (i,(_,_,items))<-zip [0..] menus,(j,MenuItem _ _ action)<-zip [0..] items,action==command] of
         position:_ -> unavailable {menu=Just position}
         [] -> error "binding command missing from Options menu"

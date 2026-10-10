@@ -575,7 +575,14 @@ applyConversationOperation runtime@(ConversationState directory ref _ _) request
   let receipt=case request of Session.NewConversation r->r;Session.ResumeConversation r _->r;Session.OpenConversation r->r;Session.ConfigureConversation r _->r;Session.OpenConversationContext r _->r;Session.CopyRawConversation r->r
   current<-operationCurrent receipt s d
   if not current then pure d {status="Conversation operation expired; invoke it again."} else case request of
-    Session.OpenConversation (ConversationOperationReceipt _ _ _ _ _ target _) | not (T.null target)->showAgentHistory runtime (AH.AgentId target) d
+    Session.OpenConversation (ConversationOperationReceipt _ _ _ _ _ target _)
+      | Just window<-find (\w->conversationTargetFor d w==Just target) (windows d)->do
+          -- Opening an already installed view only restores its input focus;
+          -- retain the original body and draft rather than refreshing history.
+          modifyIORef' ref (\state->state {deferredApproval=False})
+          let focused=focusWindow (windowId window) d
+          pure (setComposerInput (composerBuffer focused) (composerSelection focused) True focused)
+      | not (T.null target)->showAgentHistory runtime (AH.AgentId target) d
     Session.OpenConversation _->do
       shown<-ensureConversationEditor runtime "" "Primary" d
       ensureEditorWithState True s "" "Primary" (selectConversationView "" "Primary" shown)

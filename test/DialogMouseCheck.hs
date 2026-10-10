@@ -12,8 +12,13 @@ module DialogMouseCheck (checks) where
 import AllocationProfile (AllocationProfile, withinBudget)
 
 import EditorFixture (withEditorFixture, sameBufferVersions)
+import ConversationCheck (withConversationMenusFixture, humanMenuAction)
+import qualified Hide.Consoles as Consoles
+import qualified Hide.Conversation as Conversation
 import Control.Monad (unless, forM_)
-import Control.Exception (evaluate)
+import Control.Exception (evaluate, bracket)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Directory (getCurrentDirectory)
 import GHC.Conc (getAllocationCounter)
 import System.Timeout (timeout)
 import System.FilePath ((</>))
@@ -461,18 +466,27 @@ searchChecks=withEditorFixture "child" (initialDesktop (80,25)) $ \child->do
     (shortcut base Copy=="Ctrl+C" && shortcut base Cut=="Ctrl+X" && shortcut base Paste=="Ctrl+V" && shortcut base Replace=="Ctrl+H" &&
       shortcut base {nativeMac=True} Replace=="⌥⌘F" && shortcut base {nativeMac=True} Redo=="⇧⌘Z" &&
       nativeChordShortcut ["Cmd+,"]==(",",8) && nativeChordShortcut ["Cmd+Alt+F"]==("f",12) && nativeChordShortcut ["Cmd+Shift+G"]==("g",9))
-  let drafted=setComposerInput (newBuffer "keep draft") (Selection 10 10) True child
-      (focused,focusEffects)=runCommand Conversation drafted
+  let drafted=setComposerInput (newBuffer "keep draft") (Selection 10 10) False child
       (new,newEffects)=runCommand AgentNew drafted
-  sameFocused<-sameBufferVersions focused drafted
-  check "Conversation focuses the existing child view without repaint or replacing its draft"
-    (sameFocused && length (windows focused)==length (windows drafted) &&
-      conversationTarget focused=="child" && contents (composerBuffer focused)=="keep draft" && focusEffects==[AgentAction "focus" []])
-  check "Conversation opens through the existing runtime when absent" (snd (runCommand Conversation base)==[AgentAction "show" []])
+  directory<-getCurrentDirectory
+  bracket (lookupEnv "THC_EDIT_SESSION" <* unsetEnv "THC_EDIT_SESSION")
+    (maybe (unsetEnv "THC_EDIT_SESSION") (setEnv "THC_EDIT_SESSION")) $ \_->
+    Consoles.withConsoles $ \consoles->Conversation.withConversationAt Nothing Nothing Nothing Nothing consoles directory $ \runtime->do
+      focused<-humanMenuAction runtime Conversation Nothing drafted
+      sameFocused<-sameBufferVersions focused drafted
+      check "Conversation focuses the existing child view without repaint or replacing its draft"
+        (sameFocused && length (windows focused)==length (windows drafted) &&
+          fmap windowContent (activeWindow focused)==fmap windowContent (activeWindow drafted) &&
+          conversationTarget focused=="child" && contents (composerBuffer focused)=="keep draft" && composerFocused focused)
+      withConversationMenusFixture (Just runtime) base $ \registered->do
+        let opens=[reference | InvokeMenu reference PluginMenu.HumanMenu Nothing<-snd (runCommand Conversation registered)]
+        check "Conversation opens through the existing runtime when absent" (map PluginMenu.menuName opens==["hide.agents.open"])
+        check "conversation shortcuts require the current New contribution"
+          (snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl,V.MShift]) registered)==snd (runCommand Conversation registered) &&
+            null (snd (handleEvent (V.EvKey (V.KChar 'n') [V.MCtrl,V.MShift]) base)))
   check "missing New contribution preserves the child draft without a callable action"
     (null newEffects && conversationTarget new==conversationTarget drafted &&
-     contents (composerBuffer new)=="keep draft" && composerSelection new==Selection 10 10)
-  check "conversation shortcuts require the current New contribution" (snd (handleEvent (V.EvKey (V.KChar 'c') [V.MCtrl,V.MShift]) base)==[AgentAction "show" []] && null (snd (handleEvent (V.EvKey (V.KChar 'n') [V.MCtrl,V.MShift]) base)))
+      contents (composerBuffer new)=="keep draft" && composerSelection new==Selection 10 10)
   let terminal=addReadOnly "Terminal 1" "" base
   check "modern shortcuts do not consume PTY control bytes" (and [snd (handleEvent (V.EvKey (V.KChar c) mods) terminal)==[ServiceAction "terminal-input" ["1",text]] |
     (c,mods,text)<-[('h',[V.MCtrl],"\b"),('f',[V.MCtrl],"\x06"),('n',[V.MCtrl,V.MShift],"\x0e"),('c',[V.MCtrl,V.MShift],"\x03")]])
