@@ -11,7 +11,7 @@
 module MCPPermissionsCheck (checks,policyResponsivenessChecks,policyWakeChecks,settledTool,settleDialog) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (threadDelay,yield)
 import qualified Control.Concurrent.STM as STM
 import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
 import Control.Concurrent.Async (concurrently, withAsync, poll, wait, async, cancel)
@@ -50,11 +50,18 @@ import Hide.Render (snapshot, snapshotHtml)
 import Hide.GuestAccess (readableAt, guestKeyboardAllowed, guestEffectsAllowed)
 import Hide.RuntimeMCP (runtimeTools)
 import Hide.WorkspaceFilesMCP (fileTools)
+import qualified Hide.Plugin.Agent as Agent
+import qualified Hide.Plugin.Provider as Provider
+import qualified Hide.Plugin.SystemOne as Decision
+import qualified Hide.SystemOne as SystemOne
+import qualified Hide.Warden as Warden
+import qualified Hide.WardenRuntime as WardenRuntime
 
 checks :: IO ()
 checks=do
   policyResponsivenessChecks
   policyWakeChecks
+  wardenChecks
   reviewChecks
   configChecks
   keybindingConfigChecks
@@ -355,6 +362,121 @@ policyWakeChecks=bracket temporary removePathForcibly $ \directory->do
     pure reply
   check "shutdown resolves pending policy admission once" . either (const True) (const False) =<< pending
 
+-- One real supplier gate retains the exact permission ticket. Global owner
+-- ticks must honor its caller binding, without running inference on the UI.
+wardenChecks :: IO ()
+wardenChecks=bracket temporary removePathForcibly $ \directory->do
+  entered<-STM.newEmptyTMVarIO
+  release<-STM.newEmptyTMVarIO
+  retired<-STM.newEmptyTMVarIO
+  activities<-STM.newTVarIO (M.empty :: M.Map T.Text Value)
+  judged<-newIORef (0::Int)
+  executed<-newIORef []
+  let description=Decision.SupplierDescription "MCP Warden check" Decision.InProcess (Decision.ReportedModel "permission-check") Nothing 0
+      supplier=Decision.DecisionProvider description $ \_ use->use (Decision.DecisionDriver $ \input stopped->do
+        modifyIORef' judged (+1)
+        STM.atomically (STM.putTMVar entered input)
+        continue<-STM.atomically ((stopped >>= STM.check >> pure False) `STM.orElse` (STM.takeTMVar release >> pure True))
+        if continue then pure (Right (Decision.DecisionOutput (Decision.ReportedModel "permission-check")
+          [Decision.DecisionAnswer (Decision.questionName question) Decision.BinaryAnswer [0.01,0.99] Nothing | question<-Decision.decisionQuestions input] Nothing))
+        else STM.atomically (STM.putTMVar retired (Decision.decisionStateId input)) >> pure (Left Decision.DecisionCancelled))
+      agent=Agent.AgentId "permission-check"
+      request=Agent.StartRequest agent Agent.Human (Agent.SpawnSpec "Check" "Read the source" directory Agent.Shared Agent.Fresh Nothing Nothing) Nothing Nothing
+      host=Agent.ProviderHost (const (pure (finished (Right Nothing)))) Nothing Nothing (Just (\_ content->case content of
+        Agent.ProviderTool activity | Just ident<-field "toolCallId" activity->STM.atomically (STM.modifyTVar' activities (M.insert ident activity))
+        _->pure ()))
+      base=addDocument Nothing (newBuffer "source") (initialDesktop (80,25))
+      specs=[object ["name" .= ("read"::T.Text),"annotations" .= object ["readOnlyHint" .= True]]]
+      proposal=object ["operation" .= ("inspect"::T.Text)]
+      execute desktop name args=modifyIORef' executed (++[(name,args)]) >> pure (desktop,pure (Right Null))
+  SystemOne.withSystemOne $ \system->do
+    _<-SystemOne.selectDecisionProvider system (Just supplier) >>= require
+    WardenRuntime.withWarden (SystemOne.systemOneServices system) Warden.defaultWardenSettings {Warden.wardenMode=Warden.WardenEnforce}
+      (const (pure (Right ["Do not mutate the source."]))) $ \warden->do
+        identity<-Provider.newProviderIdentity
+        bracket (WardenRuntime.wardenProviderFactory warden fakeProvider Agent.PrimaryProvider identity
+          (Provider.ProviderLaunch "owned-permission-provider" [] []) [] "" host request (const (pure ())) >>= require)
+          Agent.driverStop $ \driver->do
+            deliver driver "Read the source without changing it."
+            withPermissionsAt (directory </> "permissions.toml") specs $ \owner->do
+              let guarded=guardPermissions (WardenRuntime.wardenAgent warden agent) owner
+                  call=requestPermission (pure (Right ())) guarded execute "read" proposal
+              completed<-withAsync call $ \worker->do
+                (paused,input)<-awaitOwned "Enforce supplier admission" owner (STM.atomically (STM.readTMVar entered)) base
+                _<-STM.atomically (STM.takeTMVar entered)
+                let facts=decodeStrict' (TE.encodeUtf8 (Decision.decisionState input)) :: Maybe Value
+                check "Warden judges the original permitted tool and exact arguments"
+                  ((facts >>= field "actionName")==Just ("read"::T.Text) && (facts >>= field "arguments")==Just proposal)
+                check "held judgment has not executed the permission callback" . null =<< readIORef executed
+                responsive<-timeout 3000000 (tickPermissions owner paused)
+                current<-maybe (error "permission tick waited for inference") pure responsive
+                STM.atomically (STM.putTMVar release ())
+                (after,result)<-awaitOwned "Enforce action completion" owner (wait worker) current
+                check "successful exact Warden judgment admits ordinary permission" (result==Right Null)
+                check "admitted callback receives the judged proposal once" . (==[("read",proposal)]) =<< readIORef executed
+                pure after
+              _<-WardenRuntime.setWardenSettings warden Warden.defaultWardenSettings {Warden.wardenMode=Warden.WardenObserve} >>= require
+              observed<-withAsync call $ \worker->do
+                (paused,input)<-awaitOwned "Observe supplier admission" owner (STM.atomically (STM.readTMVar entered)) completed
+                _<-STM.atomically (STM.takeTMVar entered)
+                (after,result)<-awaitOwned "Observe action completion" owner (wait worker) paused
+                held<-STM.atomically (STM.isEmptyTMVar release)
+                check "Observe completes the original action while supplier inference is held" (result==Right Null && held)
+                check "Observe preserves ordinary callback execution" . (==replicate 2 ("read",proposal)) =<< readIORef executed
+                STM.atomically (STM.putTMVar release ())
+                -- This exact transcript result follows terminal supplier
+                -- publication; the next case never races a draining inference.
+                (settled,_)<-awaitOwned "Observe activity result" owner (STM.atomically $ do
+                  reports<-STM.readTVar activities
+                  maybe STM.retry pure (M.lookup (Decision.decisionStateId input) reports)) after
+                pure settled
+              _<-WardenRuntime.setWardenSettings warden Warden.defaultWardenSettings {Warden.wardenMode=Warden.WardenEnforce} >>= require
+              -- Observe this call's actual queue wait before replacing its task;
+              -- policy and inference have not yet been advanced by the owner.
+              stale<-withAsync call $ \worker->do
+                awaitQueued worker
+                deliver driver "Now explain only the parser."
+                (after,result)<-awaitOwned "stale ingress refusal" owner (wait worker) observed
+                check "queued permission cannot be reinterpreted under a newer task" (either (const True) (const False) result)
+                check "expired ingress never reaches inference" . (==2) =<< readIORef judged
+                pure after
+              withAsync call $ \worker->do
+                (paused,input)<-awaitOwned "cancel supplier admission" owner (STM.atomically (STM.readTMVar entered)) stale
+                _<-STM.atomically (STM.takeTMVar entered)
+                cancel worker
+                (_,identityRetired)<-awaitOwned "canceled invocation retirement" owner (STM.atomically (STM.readTMVar retired)) paused
+                check "cancellation retires the same supplier invocation" (identityRetired==Decision.decisionStateId input)
+                check "canceled judgment cannot execute its callback" . (==replicate 2 ("read",proposal)) =<< readIORef executed
+  where
+    require :: Show e => Either e a -> IO a
+    require=either (error . show) pure
+    finished :: Either T.Text a -> Provider.ProviderReply a
+    finished result=Provider.ProviderReply (pure (Just result)) (pure result) (pure ())
+    fakeProvider :: Agent.StartAgentProvider
+    fakeProvider _ _ _ _ _ _ request _=pure (Right (Agent.AgentDriver
+      (Agent.spawnDirectory (Agent.startSpec request)) "private-permission-session" (Agent.Capabilities False False False [])
+      (const (pure (Right (Agent.Capabilities False False False []))))
+      (\turn _ _ submission->do
+        admitted<-STM.atomically (Provider.claimProviderSubmission submission)
+        pure (if admitted then Right (Provider.ProviderTurn turn (finished (Right Null)) (pure ())) else Left "Submission retired"))
+      (pure ()) (pure ()) (\_ _ _->pure (Left "Steering unavailable"))))
+    deliver driver text=do
+      turn<-Provider.newProviderTurnId
+      submission<-Provider.newProviderSubmission
+      _<-Agent.driverDeliver driver turn (Agent.HubMessage 0 Agent.Human text True) [] submission >>= require
+      pure ()
+    awaitQueued worker=do
+      let queued=threadStatus (Control.Concurrent.Async.asyncThreadId worker) >>= \state->case state of
+            ThreadBlocked BlockedOnMVar->pure ()
+            _->yield >> queued
+      timeout 3000000 queued >>= maybe (error "Warden permission did not enqueue") pure
+    awaitOwned :: String -> Hide.MCPPermissions.Permissions -> IO a -> Desktop -> IO (Desktop,a)
+    awaitOwned phase owner target desktop=do
+      let advance current=Control.Concurrent.Async.race target (STM.atomically (awaitPermissionWork owner)) >>= \event->case event of
+            Left result->pure (current,result)
+            Right ()->tickPermissions owner current >>= advance
+      timeout 3000000 (advance desktop) >>= maybe (error ("Warden permission "++phase++" did not settle")) pure
+
 reviewChecks :: IO ()
 reviewChecks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removePathForcibly $ \directory ->
   withPermissionsAt (directory </> "review.toml") (fileTools++Tool.toolDefinitions toolset) $ \runtime -> do
@@ -472,6 +594,8 @@ configChecks=bracket temporary removePathForcibly $ \directory -> do
     (edit (object ["mutate" .= ("disable"::T.Text)]) inline==T.replace "'prompt'" "\"disable\"" inline)
   check "unsafe new inline-table keys are refused without reprinting config"
     (case updateConfigTable namespace (object ["new_tool" .= ("enable"::T.Text)]) inline of Left _->True; _->False)
+  absentWarden<-readWardenAt path
+  check "absent config has empty Warden settings" (absentWarden==Right (object []))
   absent<-readEditorDefaultsAt path
   check "absent config has empty editor defaults" (absent==Right (object []))
   saved<-writeEditorDefaultsAt path (object ["backend" .= ("terminal"::T.Text),"scale" .= (1.5::Double),"wordStar" .= True])
@@ -488,6 +612,13 @@ configChecks=bracket temporary removePathForcibly $ \directory -> do
   (a,b)<-concurrently (writeEditorDefaultsAt path (object ["columns" .= (100::Int)])) (writeEditorDefaultsAt path (object ["rows" .= (40::Int)]))
   combined<-readEditorDefaultsAt path
   check "concurrent config writers reload and retain both changes" (a==Right () && b==Right () && case combined of Right value->field "columns" value==Just (100::Int) && field "rows" value==Just (40::Int); _->False)
+  let wardenValues=object ["mode" .= ("observe"::T.Text),"budgetMs" .= (6000::Int),"threshold" .= (0.8::Double)]
+  wardenSaved<-writeWardenAt path wardenValues
+  wardenLoaded<-readWardenAt path
+  wardenPreserved<-TIO.readFile path
+  check "Warden settings use the shared global TOML table" (wardenSaved==Right () && wardenLoaded==Right wardenValues)
+  check "Warden writes preserve permissions and compiler settings"
+    ("mutate = 'prompt' # keep this comment" `T.isInfixOf` wardenPreserved && "optimization = 3 # tuning" `T.isInfixOf` wardenPreserved)
   let malformed="[compiler\npassword = 'hidden'\n"
   TIO.writeFile path malformed
   refused<-writeEditorDefaultsAt path (object ["scale" .= (2::Int)])

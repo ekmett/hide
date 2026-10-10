@@ -22,11 +22,16 @@ import Hide.SidebarCommands
 import Hide.SystemOne
 import Hide.SystemOneBrowser
 import Hide.SystemOneMenu
+import Hide.Warden
+import Hide.WardenMenu
+import Hide.WardenRuntime
 
 checks :: IO ()
 checks=withSystemOne $ \owner->withSystemOneBrowser $ \browsers->
   withSidebarCommands $ \sidebar->withDocsCommands $ \docs->withMenuCommands docs $ \menus->
-  withSystemOneMenu menus sidebar owner (Just provider) browsers $ do
+  withSystemOneMenu menus sidebar owner (Just provider) browsers $
+  withWarden (systemOneServices owner) defaultWardenSettings (const (pure (Right []))) $ \warden->
+  withWardenMenu menus sidebar warden $ do
     metadata<-Menu.menuSnapshot (menuContributions menus)
     entry<-case filter ((=="hide.system-one.supplier") . Menu.menuName . Menu.menuReference) metadata of
       [value]->pure value
@@ -65,7 +70,18 @@ checks=withSystemOne $ \owner->withSystemOneBrowser $ \browsers->
     off<-open chosen >>= await tick formReady
     let (offRef,offRevision)=form off
     (_,stopping)<-core off [SubmitChoiceForm offRef offRevision 0 Menu.HumanMenu]
-    _<-await tick (const (not <$> selected)) stopping
+    finished<-await tick (const (not <$> selected)) stopping
+    wardenReference<-case filter ((=="hide.warden.mode") . Menu.menuName . Menu.menuReference) metadata of
+      [value]->pure (Menu.menuReference value)
+      _->fail "Missing Warden menu"
+    (_,wardenDenied)<-menuEffects menus core finished [InvokeMenu wardenReference Menu.AgentMenu Nothing]
+    check "agents cannot open Warden controls" (dialog wardenDenied==Nothing)
+    (_,wardenOpening)<-menuEffects menus core wardenDenied [InvokeMenu wardenReference Menu.HumanMenu Nothing]
+    wardenForm<-await tick formReady wardenOpening
+    check "Warden mode is human controlled" (not (guestKeyboardAllowed wardenForm))
+    let (wardenRef,wardenRevision)=form wardenForm
+    (_,wardenPending)<-core wardenForm [SubmitChoiceForm wardenRef wardenRevision 1 Menu.HumanMenu]
+    _<-await tick (const ((==WardenObserve) . wardenMode <$> getWardenSettings warden)) wardenPending
     pure ()
   where
     -- Selection must not acquire weights or start a network request.

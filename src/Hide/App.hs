@@ -44,6 +44,8 @@ import Hide.SystemOne (withSystemOne,selectDecisionProvider,systemOneServices)
 import Hide.SystemOneConfig (loadSystemOneProvider)
 import Hide.SystemOneBrowser (withSystemOneBrowser)
 import Hide.SystemOneMenu (withSystemOneMenu)
+import Hide.WardenMenu (parseWardenSettings,withWardenMenu)
+import Hide.WardenRuntime
 import Hide.MCPPermissions
 import Hide.ClipboardMCP
 import Hide.Links (followLink)
@@ -333,11 +335,22 @@ runEditor plugins args = do
               declarations=concatMap Plugin.pluginTools plugins
           systemOneJSON<-readSystemOne >>= either (die . T.unpack) pure
           systemOneProvider<-loadSystemOneProvider systemOneJSON >>= either (die . T.unpack) pure
+          wardenJSON<-readWardenAt configPath >>= either (die . T.unpack) pure
+          wardenSettings<-either (die . T.unpack) pure (parseWardenSettings wardenJSON)
+          let wardenRules root=do
+                guidance<-readAgentContexts root
+                pure $ guidance >>= \value->case parseMaybe (withObject "contexts" $ \o->do
+                  global<-o .: "global" >>= withObject "global" (.: "text")
+                  project<-o .: "project" >>= withObject "project" (.: "text")
+                  pure [global,project]) value of
+                    Nothing->Left "Could not read complete agent guidance."
+                    Just rules->Right rules
           withSystemOne $ \systemOne -> withSystemOneBrowser $ \systemOneBrowser -> do
             _<-selectDecisionProvider systemOne systemOneProvider >>= either (die . show) pure
-            PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
+            withWarden (systemOneServices systemOne) wardenSettings wardenRules $ \warden ->
+              PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
               PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.RequestTool tool<-declarations] $ \requestToolset ->
-              PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt agentProvider presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withSystemOneMenu menuHost sidebarHost systemOne systemOneProvider systemOneBrowser $ withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (Just (systemOneServices systemOne)) completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarConversationOperation PluginMenu.cancelConversationAction sidebarSelectedAgent (systemOneServices systemOne)) $ do
+              PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withGuardedConversationAt (Just warden) (fmap (wardenProviderFactory warden) agentProvider) presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withSystemOneMenu menuHost sidebarHost systemOne systemOneProvider systemOneBrowser $ withWardenMenu menuHost sidebarHost warden $ withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (Just (systemOneServices systemOne)) completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarConversationOperation PluginMenu.cancelConversationAction sidebarSelectedAgent (systemOneServices systemOne)) $ do
               contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
               let agentTools=PluginTool.toolDefinitions agentToolset
                   editorSpecs=specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset
@@ -393,24 +406,25 @@ runEditor plugins args = do
                       let agents=conversationAgents conversation
                           hub=AR.agentHub agents
                           reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
-                      let permitted questionBinding callback current name parameters
+                      let permitted callerIdentity questionBinding callback current name parameters
                             | PluginTool.hasTool requestToolset name = do
-                                context<-bufferRequestServices (bufferReader permissions currentCaller)
-                                  (bufferEditor permissions currentCaller) (windowReader permissions currentCaller) current name parameters
-                                terminals<-terminalServices permissions (sessionConsoles services) currentCaller (Build.buildStartDirectory current)
+                                context<-bufferRequestServices (bufferReader guarded currentCaller)
+                                  (bufferEditor guarded currentCaller) (windowReader guarded currentCaller) current name parameters
+                                terminals<-terminalServices guarded (sessionConsoles services) currentCaller (Build.buildStartDirectory current)
                                 pure (current,either (pure . Left)
                                   (\services'->PluginTool.callTool requestToolset
-                                    services' {PluginRequest.requestQuestions=fmap (\bound->questionServices conversation bound permissions currentCaller) questionBinding,
+                                    services' {PluginRequest.requestQuestions=fmap (\bound->questionServices conversation bound guarded currentCaller) questionBinding,
                                       PluginRequest.requestTerminals=Just terminals}
                                     name parameters) context)
-                            | name=="editor_input" = permissionBuildInputAs currentCaller permissions
+                            | name=="editor_input" = permissionBuildInputAs currentCaller guarded
                                 (\admission admittedDesktop admittedTool admittedArgs->withBuildAdmission services admission (controlTool guestCore admittedDesktop admittedTool admittedArgs)) current name parameters
-                            | otherwise = permissionCallAs currentCaller permissions callback current name parameters
+                            | otherwise = permissionCallAs currentCaller guarded callback current name parameters
+                            where guarded=guardPermissions (maybe (wardenAnonymous warden) (wardenAgent warden) callerIdentity) permissions
                           currentCaller=case token of
                             Nothing->pure (Right ())
                             Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
                       response<-case token of
-                        Nothing -> editorResponseWith editorSpecs (permitted Nothing inspectTool) d request
+                        Nothing -> editorResponseWith editorSpecs (permitted Nothing Nothing inspectTool) d request
                         Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly (autocompleteTools autocomplete) (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
                         Just secret -> do
                           bound<-resolveAgentAccess (AR.agentAccess agents) secret
@@ -428,7 +442,7 @@ runEditor plugins args = do
                                       -- Worktree agents reach this endpoint only for
                                       -- coordination. Their editor tools use their own session.
                                       visible=if ident==AR.primaryAgent agents then editorSpecs++agentTools else agentTools
-                                  editorResponseOnly visible (permitted (either (const Nothing) Just questionCaller) dispatch) d request
+                                  editorResponseOnly visible (permitted (Just ident) (either (const Nothing) Just questionCaller) dispatch) d request
                       let (updated,finish)=response
                       quit<-readIORef exiting
                       pure (quit,updated,finish)

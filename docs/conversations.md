@@ -157,6 +157,27 @@ file boundary does not sandbox that subprocess; configure those permissions in
 the provider. With the optional terminal build, ACP terminal requests also ask
 before running and use the editor's embedded terminals.
 
+## ACP Warden
+
+Choose **Options > ACP Warden…** to observe or hold proposed agent actions in
+this session. It is off by default. Select the decision supplier separately in
+**Tools > System One supplier…**; [configuration](configuration.md#acp-warden)
+describes the global defaults, budget and provisional threshold.
+
+Observe samples asynchronously and skips busy work without delaying or vetoing
+actions. Enforce checks the exact task, saved guidance and final action
+arguments before editor MCP and native ACP filesystem/terminal effects. Existing
+tool denials and human approval still apply. Failed, stale, private or oversized
+judgments, and an unavailable supplier, hold the action in Enforce.
+
+Expand a **Warden** tool activity to inspect task-alignment, rule-compliance and
+justified-action scores, supplier/model provenance and static failure reasons.
+These are recorded judgments, not model-written explanations or proof that the
+action is correct.
+
+The editor can gate only actions it owns. An agent's own shell or external tools
+run under that provider's permissions; ACP notifications cannot stop them.
+
 ## Continue later
 
 Detach the editor and use `hide --resume` to return to the running desktop,

@@ -24,13 +24,13 @@
 -- checked saving rather than reformatting unrelated tables and comments.
 -- Project agent limits may tighten global ceilings but cannot raise them.
 module Hide.MCPPermissions
-  ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, requestPermission, AdmittedBuild, permissionBuildInputAs, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild, policyEffects, tickPermissions, awaitPermissionWork
+  ( Permissions, withPermissions, withPermissionsAt, guardPermissions, permissionCall, permissionCallAs, requestPermission, AdmittedBuild, permissionBuildInputAs, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild, policyEffects, tickPermissions, awaitPermissionWork
   , ReadAdmission, permissionReadCall, bufferEditor, readReference, resolveReadReference, bufferReader, windowReader
   , terminalServices
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
   , readEnvironmentAt, writeEnvironmentAt, readKeybindingsAt, readKeybindingsFor
-  , readSystemOne, readAgentLimitsFor, updateConfigTable, readAutocompleteFor, writeAutocomplete, writeAutocompleteFor
+  , readSystemOne, readWardenAt, writeWardenAt, readAgentLimitsFor, updateConfigTable, readAutocompleteFor, writeAutocomplete, writeAutocompleteFor
   ) where
 
 import Control.Concurrent (MVar, newEmptyMVar, newMVar, readMVar, tryReadMVar, tryPutMVar, withMVar)
@@ -76,6 +76,7 @@ import qualified Hide.Consoles as Consoles
 import qualified Hide.Terminal as NativeTerminal
 import qualified Hide.Build as Build
 import Hide.Model
+import Hide.WardenRuntime (WardenBinding,WardenReceipt,captureWardenBinding,wardenEnforces,runWarden,checkWarden)
 
 type Tool = Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
 type Core = Desktop -> [Effect] -> IO (Bool,Desktop)
@@ -83,7 +84,8 @@ data Mode = Enable | Prompt | Disable deriving (Eq,Show)
 data Waiting = Waiting
   { ticket :: Int, toolName :: Text, arguments :: Value, operation :: WaitingOperation
   , active :: IORef Bool
-  , approvalRequired :: Bool, patchCaller :: IO (Either Text ()), patchAttempt :: IORef (Maybe DiffAttempt), patchSources :: Maybe [PatchSource], requestClaim :: MVar (), policyStage :: IORef PolicyStage }
+  , approvalRequired :: Bool, patchCaller :: IO (Either Text ()), patchAttempt :: IORef (Maybe DiffAttempt), patchSources :: Maybe [PatchSource], requestClaim :: MVar (), policyStage :: IORef PolicyStage
+  , wardenBinding :: !(Maybe WardenBinding), wardenReceipt :: IORef (Maybe WardenReceipt) }
 type DiffReview = Maybe [(Text,ContentVersion)]
 data DiffAttempt = DiffAttempt DiffReview (Async (Either Text [PreparedPatch]))
 data WaitingOperation = WireOperation Tool (MVar (IO (Either Text Value)))
@@ -111,9 +113,9 @@ data PreparedTerminal = PreparedTerminalConsole !Consoles.PreparedConsole | Prep
 data TerminalSubmission = TerminalSubmission !Consoles.Consoles !FilePath !TerminalRequest
   (IO (Either Text ())) (MVar (Either Text TerminalResult)) (IORef Bool) (MVar ())
   (IORef (Maybe (Async (Either Text PreparedTerminal))))
-data RequestSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
-  | SubmitTerminal TerminalSubmission
-  | WireSubmission !Text !Value Tool (IO (Either Text ())) (MVar (IO (Either Text Value))) (IORef Bool) (MVar ())
+data RequestSubmission = ReadSubmission !(Maybe WardenBinding) CaptureSubmission | EditSubmission !(Maybe WardenBinding) DiffSubmission
+  | SubmitTerminal !(Maybe WardenBinding) TerminalSubmission
+  | WireSubmission !(Maybe WardenBinding) !Text !Value Tool (IO (Either Text ())) (MVar (IO (Either Text Value))) (IORef Bool) (MVar ())
 data RequestIngress = RequestIngress (STM.TBQueue RequestSubmission) (STM.TVar Bool)
 -- A request retains its policy phase while worker IO is pending. The queue is
 -- transport only: Waiting remains the one request/cancellation owner.
@@ -122,6 +124,7 @@ data PolicyUse = AdmitPolicy | BuildAdoptPolicy | TerminalAdoptPolicy | AllowPol
   | AdoptPolicy DiffReview (Either Text [PreparedPatch])
 data PolicyStage = PolicyReady | PolicyPending PolicyUse (Maybe (Int,STM.TMVar Policies))
   | TerminalPreparing | TerminalPrepared
+  | WardenPreparing PolicyUse (Async ()) (STM.TMVar (Either SomeException WardenReceipt))
 data PolicyTask = LoadPolicy (STM.TMVar Policies)
   | SavePolicy Text Mode (STM.TMVar Policies)
 data SettingsUse = ListPolicies | EditPolicy Text Bool | SaveSetting Text Mode
@@ -131,7 +134,14 @@ data PolicyOwner = PolicyOwner
   , policyWorker :: Async (), policyWake :: STM.TMVar (), policyEpoch :: IORef Int
   , settingsGeneration :: IORef Int, settingsJob :: IORef (Maybe SettingsJob) }
 data PermissionState = PermissionState { waiting :: [Waiting], nextTicket :: Int, displayed :: Maybe Text }
-data Permissions = Permissions FilePath (M.Map Text Bool) (IORef PermissionState) BufferNamespace (IORef [MVar ()]) RequestIngress PolicyOwner
+data Permissions = Permissions FilePath (M.Map Text Bool) (IORef PermissionState) BufferNamespace (IORef [MVar ()]) RequestIngress PolicyOwner !(Maybe WardenBinding)
+
+-- | /O(1)/. Bind subsequent calls to this host-issued Warden context without
+-- changing the shared permission owner. Unguarded ticks retain each request's
+-- original binding; the view grants no human approval or policy authority.
+guardPermissions :: WardenBinding -> Permissions -> Permissions
+guardPermissions binding (Permissions path registry state namespace retired ingress policy _)=
+  Permissions path registry state namespace retired ingress policy (Just binding)
 
 permissionConfigPath :: IO FilePath
 permissionConfigPath=do
@@ -150,9 +160,9 @@ withPermissionsAt path specs=bracket acquire release
   where
     acquire=do
       owner<-newPolicyOwner path registry
-      Permissions path registry <$> newIORef (PermissionState [] 1 Nothing) <*> newBufferNamespace <*> newIORef [] <*> (RequestIngress <$> STM.newTBQueueIO 32 <*> STM.newTVarIO False) <*> pure owner
+      Permissions path registry <$> newIORef (PermissionState [] 1 Nothing) <*> newBufferNamespace <*> newIORef [] <*> (RequestIngress <$> STM.newTBQueueIO 32 <*> STM.newTVarIO False) <*> pure owner <*> pure Nothing
     registry=M.fromList [(name,fromMaybe False (field "annotations" spec >>= field "readOnlyHint")) | spec<-specs,Just name<-[field "name" spec]]
-    release runtime@(Permissions _ _ ref _ retired (RequestIngress inbox closed) policy)=do
+    release runtime@(Permissions _ _ ref _ retired (RequestIngress inbox closed) policy _)=do
       incoming<-STM.atomically $ do
         STM.writeTVar closed True
         STM.writeTVar (policyClosed policy) True
@@ -186,21 +196,23 @@ permissionBuildInputAs caller runtime callback desktop name args
   | otherwise=queueWirePermission caller runtime (BuildInputOperation callback) desktop name args
 
 queueWirePermission :: IO (Either Text ()) -> Permissions -> (MVar (IO (Either Text Value)) -> WaitingOperation) -> Tool
-queueWirePermission caller runtime@(Permissions _ registry ref _ _ _ _) operationFor desktop name args=do
+queueWirePermission caller runtime@(Permissions _ registry ref _ _ _ _ binding) operationFor desktop name args=do
   closed<-sessionClosed runtime
   case M.lookup name registry of
     Nothing->denied "Unknown MCP tool"
     Just _ | closed->denied "Editor session closed"
     Just _->do
       s<-readIORef ref
-      live<-filterMActive (waiting s)
+      live<-filterMActive runtime (waiting s)
       if length live>=32 then denied "Too many MCP requests are awaiting permission" else do
+        captured<-traverse captureWardenBinding binding
         promise<-newEmptyMVar
         enabled<-newIORef True
         attempt<-newIORef Nothing
         claim<-newMVar ()
         stage<-newIORef (PolicyPending AdmitPolicy Nothing)
-        let request=Waiting (nextTicket s) name args (operationFor promise) enabled False caller attempt Nothing claim stage
+        judgment<-newIORef Nothing
+        let request=Waiting (nextTicket s) name args (operationFor promise) enabled False caller attempt Nothing claim stage captured judgment
         writeIORef ref s {waiting=live++[request],nextTicket=nextTicket s+1}
         shown<-tickPermissions runtime desktop
         pure (shown,(readMVar promise >>= id) `onException` finish runtime request (Left "MCP permission request cancelled"))
@@ -211,11 +223,12 @@ queueWirePermission caller runtime@(Permissions _ registry ref _ _ _ _) operatio
 -- under the owner; its returned continuation runs on this worker. No plugin
 -- callback, Desktop or reusable approval crosses the public capability boundary.
 requestPermission :: IO (Either Text ()) -> Permissions -> Tool -> Text -> Value -> IO (Either Text Value)
-requestPermission caller (Permissions _ _ _ _ _ (RequestIngress inbox closed) owner) callback name args=mask $ \restore->do
+requestPermission caller runtime@(Permissions _ _ _ _ _ (RequestIngress inbox closed) owner binding) callback name args=mask $ \restore->do
+  captured<-traverse captureWardenBinding binding
   promise<-newEmptyMVar
   enabled<-newIORef True
   claim<-newMVar ()
-  let submission=WireSubmission name args callback caller promise enabled claim
+  let submission=WireSubmission captured name args callback caller promise enabled claim
   accepted<-STM.atomically $ do
     stopped<-STM.readTVar closed
     full<-STM.isFullTBQueue inbox
@@ -225,7 +238,8 @@ requestPermission caller (Permissions _ _ _ _ _ (RequestIngress inbox closed) ow
   case accepted of
     Left err->pure (Left err)
     Right ()->restore (readMVar promise >>= id) `onException`
-      withMVar claim (\()->finishWireSubmissionOwned promise enabled "MCP permission request cancelled")
+      (withMVar claim (\()->finishWireSubmissionOwned promise enabled "MCP permission request cancelled")
+        `finally` signalPermissionWork runtime)
 
 finishWireSubmissionOwned :: MVar (IO (Either Text Value)) -> IORef Bool -> Text -> IO ()
 finishWireSubmissionOwned promise enabled reason=mask_ $ do
@@ -289,9 +303,10 @@ terminalArguments request=case request of
   StopTerminalRequest ident->("terminal_stop",object ["terminalId" .= Terminal.terminalIdText ident])
 
 requestTerminal :: Permissions -> Consoles.Consoles -> FilePath -> IO (Either Text ()) -> TerminalRequest -> IO (Either Text TerminalResult)
-requestTerminal (Permissions _ _ _ _ retired (RequestIngress inbox closed) owner) consoles directory caller request=case validateTerminalRequest request of
+requestTerminal runtime@(Permissions _ _ _ _ retired (RequestIngress inbox closed) owner binding) consoles directory caller request=case validateTerminalRequest request of
   Left err->pure (Left err)
   Right ()->mask $ \restore->do
+    captured<-traverse captureWardenBinding binding
     promise<-newEmptyMVar
     enabled<-newIORef True
     claim<-newMVar ()
@@ -302,11 +317,12 @@ requestTerminal (Permissions _ _ _ _ retired (RequestIngress inbox closed) owner
       full<-STM.isFullTBQueue inbox
       if stopped then pure (Left "Editor session closed before terminal admission")
       else if full then pure (Left "Too many requests are awaiting admission")
-      else STM.writeTBQueue inbox (SubmitTerminal submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+      else STM.writeTBQueue inbox (SubmitTerminal captured submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
     case accepted of
       Left err->pure (Left err)
       Right ()->restore (readMVar promise) `onException`
-        withMVar claim (\()->finishTerminalSubmissionOwned retired submission (Left "Terminal request cancelled"))
+        (withMVar claim (\()->finishTerminalSubmissionOwned retired submission (Left "Terminal request cancelled"))
+          `finally` signalPermissionWork runtime)
 
 terminalLifetime :: TerminalSubmission -> (IORef Bool,MVar (),IO (Either Text ()))
 terminalLifetime (TerminalSubmission _ _ _ caller _ enabled claim _)=(enabled,claim,caller)
@@ -349,7 +365,7 @@ reserveAdmittedBuild (AdmittedBuild runtime _ _ _ _ state)=do
 -- A modal deferral drops the fresh check and queues another after the hold. The
 -- filesystem read-to-adoption interval is finite, not atomic external revocation.
 stepAdmittedBuild :: AdmittedBuild -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO (Maybe Desktop)
-stepAdmittedBuild admission@(AdmittedBuild runtime@(Permissions _ _ ref _ _ _ owner) name args _ caller state) core desktop=do
+stepAdmittedBuild admission@(AdmittedBuild runtime@(Permissions _ _ ref _ _ _ owner _) name args _ caller state) core desktop=do
   current<-readIORef state
   if dialog desktop/=Nothing || questionActive desktop then do
     -- A modal hold ends this fresh-check lifetime, not the original intent.
@@ -363,7 +379,7 @@ stepAdmittedBuild admission@(AdmittedBuild runtime@(Permissions _ _ ref _ _ _ ow
     BuildReserved->do
       closed<-sessionClosed runtime
       requests<-readIORef ref
-      live<-filterMActive (waiting requests)
+      live<-filterMActive runtime (waiting requests)
       if closed || length live>=32 then do
         atomicModifyIORef' state (\fresh->((case fresh of BuildReserved->BuildRejected (if closed then "Editor session closed" else "Too many MCP requests are awaiting permission"); _->fresh),()))
         stepAdmittedBuild admission core desktop
@@ -372,7 +388,8 @@ stepAdmittedBuild admission@(AdmittedBuild runtime@(Permissions _ _ ref _ _ _ ow
         attempt<-newIORef Nothing
         claim<-newMVar ()
         stage<-newIORef (PolicyPending BuildAdoptPolicy Nothing)
-        let request=Waiting (nextTicket requests) name args (BuildAdoptionOperation admission) enabled False caller attempt Nothing claim stage
+        judgment<-newIORef Nothing
+        let request=Waiting (nextTicket requests) name args (BuildAdoptionOperation admission) enabled False caller attempt Nothing claim stage Nothing judgment
         reserved<-atomicModifyIORef' state (\fresh->case fresh of BuildReserved->(BuildChecking request,True); _->(fresh,False))
         when reserved (writeIORef ref requests {waiting=live++[request],nextTicket=nextTicket requests+1})
         pure Nothing
@@ -443,35 +460,36 @@ cancelAdmittedBuild admission@(AdmittedBuild runtime _ _ _ _ state)=do
 -- No receipt exists while a request waits for approval. Work returned by the
 -- callback runs later and can consume its snapshot, but cannot capture again.
 permissionReadCall :: Permissions -> (ReadAdmission -> Tool) -> Tool
-permissionReadCall runtime@(Permissions _ _ _ namespace _ _ _) callback desktop name args
+permissionReadCall runtime@(Permissions _ _ _ namespace _ _ _ _) callback desktop name args
   | name/="read_buffer" = pure (desktop,pure (Left "Read admission requires read_buffer"))
   | otherwise = permissionCall runtime admitted desktop name args
   where admitted d tool parameters=withReadAdmission namespace (sessionClosed runtime)
           (\receipt->callback receipt d tool parameters)
 
 sessionClosed :: Permissions -> IO Bool
-sessionClosed (Permissions _ _ _ _ _ (RequestIngress _ closed) _)=STM.readTVarIO closed
+sessionClosed (Permissions _ _ _ _ _ (RequestIngress _ closed) _ _)=STM.readTVarIO closed
 
 -- | Host-bound session reader. It requests fresh policy for every capture and
 -- grants no Human provenance or reusable approval. Linked handlers only enqueue
 -- and await; the owning tick admits the fixed operation under serialization.
 bufferReader :: Permissions -> IO (Either Text ()) -> BufferReader
-bufferReader (Permissions _ _ _ namespace _ ingress owner) caller=newBufferReader namespace
-  (\reference->queueCapture ingress owner (CaptureSubmission reference caller))
-  (queueCapture ingress owner (ListingSubmission caller))
+bufferReader runtime@(Permissions _ _ _ namespace _ ingress owner binding) caller=newBufferReader namespace
+  (\reference->queueCapture runtime binding ingress owner (CaptureSubmission reference caller))
+  (queueCapture runtime binding ingress owner (ListingSubmission caller))
 
 -- | Same fixed ingress/claim/policy owner as buffer reads. The target retains
 -- exact immutable body identity, never a Desktop or a live input capability.
 windowReader :: Permissions -> IO (Either Text ()) -> Reads.WindowReadTarget -> IO (Either Text Reads.CapturedWindowRead)
-windowReader (Permissions _ _ _ _ _ ingress owner) caller target=
-  queueCapture ingress owner (WindowCaptureSubmission target caller)
+windowReader runtime@(Permissions _ _ _ _ _ ingress owner binding) caller target=
+  queueCapture runtime binding ingress owner (WindowCaptureSubmission target caller)
 
 -- The existing fixed capture operation owns acceptance and reply cancellation;
 -- the factory only binds one host submission to its new promise and claim.
-queueCapture :: RequestIngress -> PolicyOwner
+queueCapture :: Permissions -> Maybe WardenBinding -> RequestIngress -> PolicyOwner
   -> (MVar (Either Text a) -> IORef Bool -> MVar () -> CaptureSubmission)
   -> IO (Either Text a)
-queueCapture (RequestIngress inbox closed) owner submissionFor=mask $ \restore->do
+queueCapture runtime binding (RequestIngress inbox closed) owner submissionFor=mask $ \restore->do
+  captured<-traverse captureWardenBinding binding
   promise<-newEmptyMVar
   enabled<-newIORef True
   claim<-newMVar ()
@@ -480,10 +498,11 @@ queueCapture (RequestIngress inbox closed) owner submissionFor=mask $ \restore->
     full<-STM.isFullTBQueue inbox
     if stopped then pure (Left "Editor session closed before capture")
     else if full then pure (Left "Too many captures are awaiting admission")
-    else STM.writeTBQueue inbox (ReadSubmission (submissionFor promise enabled claim)) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+    else STM.writeTBQueue inbox (ReadSubmission captured (submissionFor promise enabled claim)) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
   case accepted of
     Left err->pure (Left err)
-    Right ()->restore (readMVar promise) `onException` finishCapture enabled claim promise (Left "Capture cancelled")
+    Right ()->restore (readMVar promise) `onException`
+      (finishCapture enabled claim promise (Left "Capture cancelled") `finally` signalPermissionWork runtime)
 
 finishCapture :: IORef Bool -> MVar () -> MVar (Either Text a) -> Either Text a -> IO ()
 finishCapture enabled claim promise result=withMVar claim (\()->finishCaptureOwned enabled promise result)
@@ -507,13 +526,14 @@ rejectCaptureOwned (WindowCaptureSubmission _ _ promise enabled _) err=finishCap
 -- | Host-only fixed actor binding. Public callers submit exact read versions;
 -- this transport grants neither Human authority nor reusable approval.
 bufferEditor :: Permissions -> IO (Either Text ()) -> BufferEditor
-bufferEditor (Permissions _ _ _ namespace retired (RequestIngress inbox closed) owner) caller=newBufferEditor namespace $ \patches->mask $ \restore->do
+bufferEditor runtime@(Permissions _ _ _ namespace retired (RequestIngress inbox closed) owner binding) caller=newBufferEditor namespace $ \patches->mask $ \restore->do
   let bounded=take 17 patches
       targets=[reference | BufferDiff reference _ _<-bounded]
       size=sum [toInteger (T.length patch) | BufferDiff _ _ patch<-bounded]
   if null bounded || length bounded>16 then pure (Left "Diff batch requires 1..16 targets")
   else if length (nub targets)/=length targets then pure (Left "Duplicate diff targets; no buffers changed")
   else if size>1048576 then pure (Left "Diff batch exceeds 1 MiB characters") else do
+    captured<-traverse captureWardenBinding binding
     promise<-newEmptyMVar
     enabled<-newIORef True
     claim<-newMVar ()
@@ -530,10 +550,11 @@ bufferEditor (Permissions _ _ _ namespace retired (RequestIngress inbox closed) 
       full<-STM.isFullTBQueue inbox
       if stopped then pure (Left "Editor session closed before diff admission")
       else if full then pure (Left "Too many buffer requests are awaiting admission")
-      else STM.writeTBQueue inbox (EditSubmission submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+      else STM.writeTBQueue inbox (EditSubmission captured submission) >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
     case accepted of
       Left err->pure (Left err)
-      Right ()->restore (readMVar promise) `onException` finishDiffSubmission retired submission (Left "Buffer diff cancelled")
+      Right ()->restore (readMVar promise) `onException`
+        (finishDiffSubmission retired submission (Left "Buffer diff cancelled") `finally` signalPermissionWork runtime)
 
 finishDiffSubmission :: IORef [MVar ()] -> DiffSubmission -> Either Text [DiffResult] -> IO ()
 finishDiffSubmission retired submission@(DiffSubmission _ _ _ _ _ claim attempt) result=withMVar claim $ \()->do
@@ -568,19 +589,19 @@ diffTargetsCurrent namespace targets desktop=and <$> mapM current targets
           (referenceId namespace reference >>= (`M.lookup` buffers desktop))
 
 finishRequestSubmission :: Permissions -> RequestSubmission -> Text -> IO ()
-finishRequestSubmission _ (ReadSubmission submission) err=let (_,claim,_)=captureLifetime submission
+finishRequestSubmission _ (ReadSubmission _ submission) err=let (_,claim,_)=captureLifetime submission
   in withMVar claim (\()->rejectCaptureOwned submission err)
-finishRequestSubmission (Permissions _ _ _ _ retired _ _) (EditSubmission submission) err=finishDiffSubmission retired submission (Left err)
-finishRequestSubmission (Permissions _ _ _ _ retired _ _) (SubmitTerminal submission) err=
+finishRequestSubmission (Permissions _ _ _ _ retired _ _ _) (EditSubmission _ submission) err=finishDiffSubmission retired submission (Left err)
+finishRequestSubmission (Permissions _ _ _ _ retired _ _ _) (SubmitTerminal _ submission) err=
   let (_,claim,_)=terminalLifetime submission
   in withMVar claim (\()->finishTerminalSubmissionOwned retired submission (Left err))
-finishRequestSubmission _ (WireSubmission _ _ _ _ promise enabled claim) err=
+finishRequestSubmission _ (WireSubmission _ _ _ _ _ promise enabled claim) err=
   withMVar claim (\()->finishWireSubmissionOwned promise enabled err)
 
 -- Fixed bounded transport only; PermissionState still has one serialized owner.
 -- An interrupted extracted batch resolves every accepted reply before unwinding.
 drainRequests :: Permissions -> Desktop -> IO Desktop
-drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress inbox _) _) desktop=mask_ $ do
+drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress inbox _) _ _) desktop=mask_ $ do
   incoming<-STM.atomically (STM.flushTBQueue inbox)
   foldM admitSafely desktop incoming `onException`
     mapM_ (\submission->finishRequestSubmission runtime submission "Request owner interrupted") incoming
@@ -590,23 +611,29 @@ drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress i
         Just _->throwIO err
         Nothing->finishRequestSubmission runtime submission "Request admission failed" >> pure current
     admit current submission=do
-      let (enabled,claim,caller)=case submission of
-            ReadSubmission capture->captureLifetime capture
-            EditSubmission (DiffSubmission _ _ c _ e k _)->(e,k,c)
-            SubmitTerminal terminal->terminalLifetime terminal
-            WireSubmission _ _ _ c _ e k->(e,k,c)
+      let binding=case submission of
+            ReadSubmission captured _->captured
+            EditSubmission captured _->captured
+            SubmitTerminal captured _->captured
+            WireSubmission captured _ _ _ _ _ _ _->captured
+          (enabled,claim,caller)=case submission of
+            ReadSubmission _ capture->captureLifetime capture
+            EditSubmission _ (DiffSubmission _ _ c _ e k _)->(e,k,c)
+            SubmitTerminal _ terminal->terminalLifetime terminal
+            WireSubmission _ _ _ _ c _ e k->(e,k,c)
           target=case submission of
-            WireSubmission name args callback _ promise _ _->Right (name,args,WireOperation callback promise)
-            SubmitTerminal terminal@(TerminalSubmission _ _ request _ _ _ _ _)->
+            WireSubmission _ name args callback _ promise _ _->Right (name,args,WireOperation callback promise)
+            SubmitTerminal _ terminal@(TerminalSubmission _ _ request _ _ _ _ _)->
               let (name,args)=terminalArguments request in Right (name,args,TerminalOperation terminal)
-            ReadSubmission capture@ListingSubmission{}->Right ("list_buffers",object [],CaptureOperation capture)
-            ReadSubmission capture@(CaptureSubmission reference _ _ _ _)->bufferTarget reference $ \ident->
+            ReadSubmission _ capture@ListingSubmission{}->Right ("list_buffers",object [],CaptureOperation capture)
+            ReadSubmission _ capture@(CaptureSubmission reference _ _ _ _)->bufferTarget reference $ \ident->
               ("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
-            ReadSubmission capture@(WindowCaptureSubmission reference _ _ _ _)->Right
+            ReadSubmission _ capture@(WindowCaptureSubmission reference _ _ _ _)->Right
               ("read_window",object ["windowId" .= Reads.windowReadIdentifier reference],CaptureOperation capture)
-            EditSubmission diff@(DiffSubmission targets _ _ _ _ _ _)->do
+            EditSubmission _ diff@(DiffSubmission targets _ _ _ _ _ _)->do
               patches<-mapM (\(BufferDiff reference _ patch)->bufferTarget reference $ \ident->
-                object ["bufferId" .= ident,"revision" .= maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current)),"diff" .= patch]) targets
+                let version=maybe 0 (revision.documentBuffer) (M.lookup ident (buffers current))
+                in version `seq` object ["bufferId" .= ident,"revision" .= version,"diff" .= patch]) targets
               pure ("buffer_apply_diff",packDiffArguments patches,DiffOperation diff)
           bufferTarget reference build=maybe (Left "Buffer reference belongs to another editor session") (Right . build) (referenceId namespace reference)
       withMVar claim $ \()->do
@@ -615,15 +642,15 @@ drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress i
           Left err->finishRequestSubmissionOwned submission err
           Right (name,args,op)->do
             original<-readIORef state
-            liveRequests<-filterMActive (waiting original)
+            liveRequests<-filterMActive runtime (waiting original)
             if length liveRequests>=32 then finishRequestSubmissionOwned submission "Too many MCP requests are awaiting permission" else do
-              attempt<-case submission of EditSubmission (DiffSubmission _ _ _ _ _ _ a)->pure a; _->newIORef Nothing
+              attempt<-case submission of EditSubmission _ (DiffSubmission _ _ _ _ _ _ a)->pure a; _->newIORef Nothing
               stage<-newIORef (PolicyPending AdmitPolicy Nothing)
               captured<-case submission of
-                ReadSubmission _->pure (Right Nothing)
+                ReadSubmission _ _->pure (Right Nothing)
                 WireSubmission{}->pure (Right Nothing)
                 SubmitTerminal{}->pure (Right Nothing)
-                EditSubmission (DiffSubmission targets _ _ _ _ _ _)->do
+                EditSubmission _ (DiffSubmission targets _ _ _ _ _ _)->do
                   matches<-diffTargetsCurrent namespace targets current
                   if not matches then pure (Left "Buffer identity or revision changed; read the buffer again") else
                     case mapM (capturePatchSource current) (diffArguments args) of
@@ -632,18 +659,19 @@ drainRequests runtime@(Permissions _ _ state namespace retired (RequestIngress i
               case captured of
                 Left err->finishRequestSubmissionOwned submission err
                 Right source->do
-                  let request=Waiting (nextTicket original) name args op enabled False caller attempt source claim stage
+                  judgment<-newIORef Nothing
+                  let request=Waiting (nextTicket original) name args op enabled False caller attempt source claim stage binding judgment
                   writeIORef state original {waiting=liveRequests++[request],nextTicket=nextTicket original+1}
         pure current
-    finishRequestSubmissionOwned (ReadSubmission submission) err=rejectCaptureOwned submission err
-    finishRequestSubmissionOwned (EditSubmission submission) err=finishDiffSubmissionOwned submission (Left err)
-    finishRequestSubmissionOwned (SubmitTerminal submission) err=finishTerminalSubmissionOwned retired submission (Left err)
-    finishRequestSubmissionOwned (WireSubmission _ _ _ _ promise enabled _) err=finishWireSubmissionOwned promise enabled err
+    finishRequestSubmissionOwned (ReadSubmission _ submission) err=rejectCaptureOwned submission err
+    finishRequestSubmissionOwned (EditSubmission _ submission) err=finishDiffSubmissionOwned submission (Left err)
+    finishRequestSubmissionOwned (SubmitTerminal _ submission) err=finishTerminalSubmissionOwned retired submission (Left err)
+    finishRequestSubmissionOwned (WireSubmission _ _ _ _ _ promise enabled _) err=finishWireSubmissionOwned promise enabled err
 
 -- Caller holds the same short request claim used by cancellation. Only known
 -- host capture/actor operations run here; no extension handler or reply wait.
 captureSubmissionOwned :: Permissions -> CaptureSubmission -> Desktop -> IO ()
-captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _) submission desktop=do
+captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _ _) submission desktop=do
   let (_,_,caller)=captureLifetime submission
   actor<-caller
   case actor of
@@ -660,16 +688,34 @@ captureSubmissionOwned runtime@(Permissions _ _ _ namespace _ _ _) submission de
         outcome<-if closed then pure (Left "Editor session closed before capture") else Reads.captureWindow desktop target
         finishCaptureOwned enabled promise outcome
 
-filterMActive :: [Waiting] -> IO [Waiting]
-filterMActive requests=fmap (map fst . filter snd) (mapM (\request->(request,) <$> readIORef (active request)) requests)
+filterMActive :: Permissions -> [Waiting] -> IO [Waiting]
+filterMActive runtime requests=fmap concat $ mapM (\request->withMVar (requestClaim request) $ \()->do
+  live<-readIORef (active request)
+  if live then pure [request] else stopWardenAttempt runtime request >> pure []) requests
 
 finish :: Permissions -> Waiting -> Either Text Value -> IO ()
 finish runtime request result=withMVar (requestClaim request) (\()->finishOwned runtime request result)
 
+-- A typed wait retires active through its original shared claim. Filtering
+-- claims that same cell and retires its worker before removing the ticket.
+-- Cancellation joins remain outside the desktop/request claim.
+stopWardenAttempt :: Permissions -> Waiting -> IO ()
+stopWardenAttempt (Permissions _ _ _ _ retired _ _ _) request=mask_ $ do
+  stage<-readIORef (policyStage request)
+  case stage of
+    WardenPreparing _ worker _->do
+      writeIORef (policyStage request) PolicyReady
+      done<-newEmptyMVar
+      _<-forkIOWithUnmask (\unmask->unmask (cancel worker >> waitCatch worker >> pure ())
+        `finally` (tryPutMVar done () >> pure ()))
+      atomicModifyIORef' retired (\current->(done:current,()))
+    _->pure ()
+
 -- Caller holds requestClaim. Result publication and cancellation are linearized.
 finishOwned :: Permissions -> Waiting -> Either Text Value -> IO ()
-finishOwned runtime@(Permissions _ _ _ _ retired _ _) request result=mask_ $ do
+finishOwned runtime@(Permissions _ _ _ _ retired _ _ _) request result=mask_ $ do
   atomicModifyIORef' (active request) (const (False,()))
+  stopWardenAttempt runtime request
   stopDiffAttempt runtime request
   case operation request of
     WireOperation _ promise->tryPutMVar promise (pure result) >> pure ()
@@ -684,7 +730,7 @@ finishOwned runtime@(Permissions _ _ _ _ retired _ _) request result=mask_ $ do
 -- joins run on their own thread; neither tick nor dialog submission waits for a
 -- worker's cancellation/finalizer while holding the desktop lock.
 stopDiffAttempt :: Permissions -> Waiting -> IO ()
-stopDiffAttempt (Permissions _ _ _ _ retired _ _) request=stopAttempt retired (patchAttempt request)
+stopDiffAttempt (Permissions _ _ _ _ retired _ _ _) request=stopAttempt retired (patchAttempt request)
 
 -- The transport and Waiting ticket share this single attempt cell from birth.
 stopAttempt :: IORef [MVar ()] -> IORef (Maybe DiffAttempt) -> IO ()
@@ -740,9 +786,9 @@ diffFailureOwned runtime request err desktop
   | otherwise = finishOwned runtime request (Left err) >> pure desktop {status="Diff not applied: "<>err}
 
 drainDiffAttempts :: Permissions -> Desktop -> IO Desktop
-drainDiffAttempts runtime@(Permissions _ _ ref _ retired _ _) initial=do
+drainDiffAttempts runtime@(Permissions _ _ ref _ retired _ _ _) initial=do
   s<-readIORef ref
-  live<-filterMActive (waiting s)
+  live<-filterMActive runtime (waiting s)
   result<-foldM step initial live
   observed<-readIORef retired >>= mapM (\done->(done,) <$> tryReadMVar done)
   let completed=[done | (done,Just ())<-observed]
@@ -773,21 +819,30 @@ drainDiffAttempts runtime@(Permissions _ _ ref _ retired _ _) initial=do
 
 startTerminalAttemptOwned :: Permissions -> Waiting -> TerminalSubmission -> Desktop -> IO Desktop
 startTerminalAttemptOwned runtime request (TerminalSubmission consoles directory terminal _ _ _ _ attempt) desktop=mask_ $ do
-  worker<-asyncWithUnmask (\_->mask_ (prepareTerminal consoles directory terminal `finally` signalPermissionWork runtime))
+  receipt<-readIORef (wardenReceipt request)
+  let admission=do
+        live<-readIORef (active request)
+        stopped<-sessionClosed runtime
+        caller<-patchCaller request
+        case caller of
+          Left err->pure (Left err)
+          Right () | not live || stopped->pure (Left "Terminal request expired before execution")
+                   | otherwise->maybe (pure (Right ())) checkWarden receipt
+  worker<-asyncWithUnmask (\_->mask_ (prepareTerminal admission consoles directory terminal `finally` signalPermissionWork runtime))
   writeIORef attempt (Just worker)
   writeIORef (policyStage request) TerminalPreparing
   pure (closeReview request desktop)
 
 -- Preparation owns a launch until the masked Async publication hands it to the
 -- ticket's attempt cell. All process, directory and exact-ID IO stays here.
-prepareTerminal :: Consoles.Consoles -> FilePath -> TerminalRequest -> IO (Either Text PreparedTerminal)
-prepareTerminal consoles directory request=case request of
+prepareTerminal :: IO (Either Text ()) -> Consoles.Consoles -> FilePath -> TerminalRequest -> IO (Either Text PreparedTerminal)
+prepareTerminal admission consoles directory request=case request of
   StartTerminal launch->do
     root<-maybe (Build.resolveBuildRootFrom directory) canonicalizePath (Terminal.terminalDirectory launch)
     let config=NativeTerminal.TerminalConfig (T.unpack (Terminal.terminalCommand launch))
           (map T.unpack (Terminal.terminalArguments launch)) [] root 80 24
-    fmap PreparedTerminalConsole <$> Consoles.prepareConsole [] config (Terminal.terminalOutputByteLimit launch)
-  ListTerminals->do
+    admitted (fmap PreparedTerminalConsole <$> Consoles.prepareConsole [] config (Terminal.terminalOutputByteLimit launch))
+  ListTerminals->admitted $ do
     entries<-Consoles.listConsoles consoles
     summaries<-mapM (\(ident,bid,code)->do
       _<-evaluate (T.length ident)
@@ -795,7 +850,7 @@ prepareTerminal consoles directory request=case request of
       evaluate (Terminal.TerminalSummary (Terminal.TerminalId ident) bid code)) entries
     reply<-evaluate (PreparedTerminalReply (ListedTerminals (Terminal.TerminalListing NativeTerminal.terminalAvailable summaries)))
     pure (Right reply)
-  OutputTerminal ident offset limit->do
+  OutputTerminal ident offset limit->admitted $ do
     result<-Consoles.consoleOutput consoles (Terminal.terminalIdText ident)
     case result of
       Left err->pure (Left err)
@@ -804,16 +859,18 @@ prepareTerminal consoles directory request=case request of
         reply<-evaluate (PreparedTerminalReply (OutputTerminalPage (Terminal.TerminalPage ident offset
           (BS.length bytes) truncated code (BS.copy (BS.take limit (BS.drop offset bytes))))))
         pure (Right reply)
-  InputTerminal ident text->fmap (const (PreparedTerminalReply AcceptedTerminal)) <$>
+  InputTerminal ident text->admitted $ fmap (const (PreparedTerminalReply AcceptedTerminal)) <$>
     Consoles.inputConsole consoles (Terminal.terminalIdText ident) (TE.encodeUtf8 text)
-  StopTerminalRequest ident->fmap (const (PreparedTerminalReply AcceptedTerminal)) <$>
+  StopTerminalRequest ident->admitted $ fmap (const (PreparedTerminalReply AcceptedTerminal)) <$>
     Consoles.killConsole consoles (Terminal.terminalIdText ident)
+  where
+    admitted action=admission >>= either (pure . Left) (const action)
 
 -- A modal hold ends a fresh policy lifetime. Prepared resources remain with the
 -- same request, and only queue a new final check when that hold has ended.
 drainTerminalAttempts :: Permissions -> Desktop -> IO Desktop
-drainTerminalAttempts runtime@(Permissions _ _ ref _ _ _ _) desktop=do
-  requests<-readIORef ref >>= filterMActive . waiting
+drainTerminalAttempts runtime@(Permissions _ _ ref _ _ _ _ _) desktop=do
+  requests<-readIORef ref >>= filterMActive runtime . waiting
   foldM step desktop requests
   where
     step current request=case operation request of
@@ -848,7 +905,7 @@ terminalWindowHeld request desktop=case operation request of
 -- Removing the attempt after successful adoption prevents the retire reaper
 -- from closing the transferred process. Exception paths still retain ownership.
 adoptTerminalOwned :: Permissions -> Waiting -> Desktop -> IO Desktop
-adoptTerminalOwned runtime@(Permissions _ _ _ _ retired _ _) request desktop=case operation request of
+adoptTerminalOwned runtime@(Permissions _ _ _ _ retired _ _ _) request desktop=case operation request of
   TerminalOperation submission@(TerminalSubmission consoles _ _ _ _ _ _ attempt)->mask_ $ do
     worker<-readIORef attempt
     outcome<-maybe (pure Nothing) poll worker
@@ -868,10 +925,10 @@ adoptTerminalOwned runtime@(Permissions _ _ _ _ retired _ _) request desktop=cas
 
 -- | Display the oldest live approval and withdraw stale or cancelled prompts.
 tickPermissions :: Permissions -> Desktop -> IO Desktop
-tickPermissions runtime@(Permissions _ _ ref _ _ _ _) original=do
+tickPermissions runtime@(Permissions _ _ ref _ _ _ _ _) original=do
   desktop<-drainSettings runtime original >>= drainRequests runtime >>= drainDiffAttempts runtime >>= drainTerminalAttempts runtime >>= drainPolicies runtime
   s<-readIORef ref
-  live<-filterMActive (waiting s)
+  live<-filterMActive runtime (waiting s)
   let staleApproval=case dialog desktop of
         Just dg | PermissionDialog action<-purpose dg,"approve:" `T.isPrefixOf` action -> all ((/=action).approvalAction) live
         _ -> False
@@ -930,7 +987,7 @@ policyEffects runtime fallback desktop effects=foldM apply (False,desktop) effec
     apply (_,d) effect=fallback d [effect]
 
 permissionAction :: Permissions -> Text -> [Text] -> Desktop -> IO Desktop
-permissionAction runtime@(Permissions _ registry ref _ _ _ owner) action values desktop=do
+permissionAction runtime@(Permissions _ registry ref _ _ _ owner _) action values desktop=do
   s<-readIORef ref
   generation<-readIORef (settingsGeneration owner)
   let settingsAction="settings:"<>T.pack (show generation)
@@ -960,6 +1017,8 @@ permissionAction runtime@(Permissions _ registry ref _ _ _ owner) action values 
                 when live $ do
                   -- A newly accepted review supersedes the old worker attempt.
                   -- Its completion must not overwrite this fresh Allow phase.
+                  stopWardenAttempt runtime request
+                  writeIORef (wardenReceipt request) Nothing
                   stopDiffAttempt runtime request
                   review<-reviewVersion request desktop
                   writeIORef (policyStage request) (PolicyPending (AllowPolicy edited review) Nothing)
@@ -999,7 +1058,7 @@ filterMReady requests=fmap (map fst . filter snd) (mapM (\request->(request,) . 
 -- and no policy decision adopts while the write is pending. Queue submission is
 -- nonblocking; a full worker mailbox leaves this fixed phase for a later tick.
 drainSettings :: Permissions -> Desktop -> IO Desktop
-drainSettings runtime@(Permissions _ registry ref _ _ _ owner) desktop=do
+drainSettings runtime@(Permissions _ registry ref _ _ _ owner _) desktop=do
   job<-readIORef (settingsJob owner)
   case job of
     Nothing->pure desktop
@@ -1040,8 +1099,8 @@ policyWriting owner=do
   pure (case job of Just (SettingsJob _ (SaveSetting _ _) _)->True; _->False)
 
 drainPolicies :: Permissions -> Desktop -> IO Desktop
-drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=do
-  requests<-readIORef ref >>= filterMActive . waiting
+drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner _) original=do
+  requests<-readIORef ref >>= filterMActive runtime . waiting
   foldM stepSafely original requests `onException` mapM_ (\request->finish runtime request (Left "Permission request owner interrupted")) requests
   where
     stepSafely desktop request=step desktop request `catch` \(err::SomeException)->
@@ -1056,6 +1115,18 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
         PolicyReady->pure desktop
         TerminalPreparing->pure desktop
         TerminalPrepared->pure desktop
+        WardenPreparing use _ result->STM.atomically (STM.tryReadTMVar result) >>= \ready->case ready of
+          Nothing->pure desktop
+          Just outcome->withMVar (requestClaim request) $ \()->do
+            live<-readIORef (active request)
+            if not live then stopWardenAttempt runtime request >> pure desktop else case outcome of
+              Left _->finishOwned runtime request (Left "Warden judgment interrupted; action not admitted.") >> pure (closeReview request desktop)
+              Right receipt->do
+                writeIORef (wardenReceipt request) (Just receipt)
+                writeIORef (policyStage request) (PolicyPending use Nothing)
+                -- The judgment wake has been consumed. Queue its fresh policy
+                -- read now so this phase owns the next completion wake.
+                step desktop request
         PolicyPending use pending | writing->pure desktop
                                   | otherwise->case pending of
           Nothing->do
@@ -1096,7 +1167,7 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
           let polling=toolName request=="ask_user" && case arguments request of Object fields->KM.keys fields==["questionId"]; _->False
               approved=request {approvalRequired=mode==Prompt && not polling,patchSources=source}
           replaceRequest approved
-          if approvalRequired approved then pure desktop else execute desktop approved (arguments request)
+          if approvalRequired approved then pure desktop else execute desktop approved AdmitPolicy (arguments request)
     applyPolicy desktop request BuildAdoptPolicy mode=case operation request of
       BuildAdoptionOperation (AdmittedBuild _ _ _ approved _ state)
         | mode==Prompt && not approved->finishOwned runtime request (Left "This MCP tool now requires approval; submit again") >> pure desktop
@@ -1108,12 +1179,12 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
     applyPolicy desktop request TerminalAdoptPolicy mode
       | mode==Prompt && not (approvalRequired request)=finishOwned runtime request (Left "This MCP tool now requires approval; submit again") >> pure desktop
       | terminalWindowHeld request desktop=writeIORef (policyStage request) TerminalPrepared >> pure desktop
-      | otherwise=adoptTerminalOwned runtime request desktop
+      | otherwise=guarded desktop request (adoptTerminalOwned runtime request desktop)
     applyPolicy desktop request (AllowPolicy edited review) _=do
       current<-reviewCurrent request review desktop
       let owns=case dialog desktop of Just dg->purpose dg==PermissionDialog (approvalAction request); _->False
       if not current || not owns then pure desktop {status="Permission review changed; approve the current review."}
-      else execute desktop request edited
+      else execute desktop request (AllowPolicy edited review) edited
     applyPolicy desktop request (AdoptPolicy review prepared) mode=do
       current<-reviewCurrent request review desktop
       if not current then pure desktop {status="Diff review changed; approve the current review."}
@@ -1121,7 +1192,7 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
         finishOwned runtime request (Left "This MCP tool now requires approval; submit again") >> pure desktop {status="Diff now requires approval."}
       else case prepared of
         Left err->diffFailureOwned runtime request err desktop
-        Right patch->do
+        Right patch->guarded desktop request $ do
           adopted<-commitPatches patch desktop
           case adopted of
             Left err->diffFailureOwned runtime request err desktop
@@ -1131,14 +1202,51 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
                 DiffOperation submission->finishDiffSubmissionOwned submission (Right response)
                 _->finishOwned runtime request (Left "Invalid diff operation")
               pure (closeReview request updated) {status="Applied exact buffer diff."}
-    execute desktop request edited=case operation request of
+    execute desktop request use edited=case wardenBinding request of
+      Nothing->executeOwned desktop request edited
+      Just binding->do
+        receipt<-readIORef (wardenReceipt request)
+        case receipt of
+          Just _->guarded desktop request (executeOwned desktop request edited)
+          Nothing->do
+            enforces<-wardenEnforces binding
+            if not enforces then do
+              -- Off/Observe do not add a worker round trip or policy reload.
+              -- Only bounded observation admission runs here, never inference.
+              issued<-runWarden binding (toolName request) edited
+              writeIORef (wardenReceipt request) (Just issued)
+              guarded desktop request (executeOwned desktop request edited)
+            else mask_ $ do
+              name<-evaluate (toolName request)
+              result<-STM.newEmptyTMVarIO
+              worker<-asyncWithUnmask $ \unmask->do
+                outcome<-try (unmask (runWarden binding name edited))
+                -- Publish the owned result before waking tick; Async's own
+                -- completion is later and cannot be the wake readiness receipt.
+                STM.atomically $ do
+                  STM.putTMVar result outcome
+                  _<-STM.tryPutTMVar (policyWake owner) ()
+                  pure ()
+              writeIORef (policyStage request) (WardenPreparing use worker result)
+              pure desktop
+    guarded desktop request action=do
+      admitted<-checkRequestWarden request
+      case admitted of
+        Left err->finishOwned runtime request (Left err) >> pure (closeReview request desktop)
+        Right ()->action
+    executeOwned desktop request edited=case operation request of
       CaptureOperation submission->captureSubmissionOwned runtime submission desktop >> pure (closeReview request desktop)
       DiffOperation _->startDiffAttemptOwned runtime request edited desktop
       TerminalOperation submission->startTerminalAttemptOwned runtime request submission desktop
       BuildAdoptionOperation _->finishOwned runtime request (Left "Invalid build admission phase") >> pure desktop
       BuildInputOperation callback promise->do
         state<-newIORef BuildUnused
-        let admission=AdmittedBuild runtime (toolName request) edited (approvalRequired request) (patchCaller request) state
+        receipt<-readIORef (wardenReceipt request)
+        let caller=patchCaller request
+            checkedCaller=caller >>= \live->case live of
+              Left err->pure (Left err)
+              Right ()->maybe (pure (Right ())) checkWarden receipt
+            admission=AdmittedBuild runtime (toolName request) edited (approvalRequired request) checkedCaller state
         result<-try (callback admission (closeReview request desktop) (toolName request) edited
           `onException` cancelAdmittedBuild admission)
           `finally` atomicModifyIORef' state (\current->((case current of BuildUnused->BuildConsumed; _->current),()))
@@ -1153,6 +1261,14 @@ drainPolicies runtime@(Permissions _ registry ref namespace _ _ owner) original=
         _<-tryPutMVar promise continuation
         pure updated
     replaceRequest request=modifyIORef' ref (\state->state {waiting=map (\old->if ticket old==ticket request then request else old) (waiting state)})
+
+-- Only a retained result for this exact proposal can cross final admission.
+-- Human edits explicitly reset it; no large argument comparison runs on UI.
+checkRequestWarden :: Waiting -> IO (Either Text ())
+checkRequestWarden request=case wardenBinding request of
+  Nothing->pure (Right ())
+  Just _->readIORef (wardenReceipt request) >>= maybe
+    (pure (Left "Warden judgment missing; action not admitted.")) checkWarden
 
 reviewCurrent :: Waiting -> DiffReview -> Desktop -> IO Bool
 reviewCurrent request Nothing _=pure (not (approvalRequired request) || null (diffFields request))
@@ -1226,10 +1342,10 @@ newPolicyOwner path registry=mask_ $ do
 -- no desktop lock; a completion published before its waiter is retained. Taking
 -- the signal consumes it once, so an idle worker cannot make the owner spin.
 awaitPermissionWork :: Permissions -> STM.STM ()
-awaitPermissionWork (Permissions _ _ _ _ _ _ owner)=STM.takeTMVar (policyWake owner)
+awaitPermissionWork (Permissions _ _ _ _ _ _ owner _)=STM.takeTMVar (policyWake owner)
 
 signalPermissionWork :: Permissions -> IO ()
-signalPermissionWork (Permissions _ _ _ _ _ _ owner)=STM.atomically (STM.tryPutTMVar (policyWake owner) () >> pure ())
+signalPermissionWork (Permissions _ _ _ _ _ _ owner _)=STM.atomically (STM.tryPutTMVar (policyWake owner) () >> pure ())
 
 resolvePolicy :: Policies -> PolicyTask -> STM.STM ()
 resolvePolicy result task=do
@@ -1338,6 +1454,22 @@ readEnvironmentAt path=configIO $ do
 
 writeEnvironmentAt :: FilePath -> Value -> IO (Either Text ())
 writeEnvironmentAt path=writeTable path ["editor","environment"]
+
+-- | Read a human-owned Warden table at the host-selected global path. Project
+-- rule text cannot select a supplier or replace this admission configuration.
+readWardenAt :: FilePath -> IO (Either Text Value)
+readWardenAt path=configIO $ do
+  config<-readConfig path
+  pure $ do
+    (_,_,table)<-config
+    selected<-lookupTable ["editor","warden"] table
+    values<-traverse (primitive . snd) (maybe M.empty tableMap selected)
+    pure (object [K.fromText key .= value | (key,value)<-M.toList values])
+
+-- | Update only [editor.warden], preserving unrelated TOML tokens/comments with
+-- the existing checked writer. Validation of supported settings is host-owned.
+writeWardenAt :: FilePath -> Value -> IO (Either Text ())
+writeWardenAt path=writeTable path ["editor","warden"]
 
 -- | Read only the global human-owned inference destination. A project override
 -- must not silently move admitted context to an endpoint or attached browser.

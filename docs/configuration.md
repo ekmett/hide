@@ -472,6 +472,37 @@ read-to-adoption interval rather than atomic revocation.
 
 The editor preserves unrelated settings and comments when saving its own entries. Additional compiler sections can share this file as they are introduced.
 
+## ACP Warden
+
+The optional Warden checks proposed agent actions against the current task and
+global/project [agent context](#agent-context) loaded at task delivery. Changed
+guidance applies with the next query or steer. Set startup defaults in the
+**global** configuration; project configuration cannot override them:
+
+```toml
+[editor.warden]
+mode = "off" # off, observe or enforce
+budgetMs = 6000 # 1..30000 milliseconds
+threshold = 0.8 # provisional
+```
+
+These are the defaults. The threshold accepts a finite value from 0 to 1;
+`0.8` is provisional, not a calibrated correctness guarantee.
+**Options > ACP Warden…** changes the running session's mode. Select its
+inference destination separately through **Tools > System One supplier…**;
+see [System-1 decisions](#system-1-decisions). Agents cannot change either choice.
+
+**Off** does no inference. **Observe** takes one bounded asynchronous sample at
+a time and skips busy work, without delaying or vetoing the action.
+**Enforce** requires a current judgment for the exact task, rules and action
+before editor MCP or native ACP filesystem/terminal effects. It cannot enable a
+disabled tool or replace human approval.
+
+Task, rule text and action arguments go to the human-selected supplier. Known
+private values and oversized inputs refuse judgment. Enforce holds failed or
+stale judgments and requests without a supplier. See
+[conversations](conversations.md#acp-warden) for the activity display and limits.
+
 ## Autocomplete
 
 Completion settings are independent of the main conversation. Choose them in

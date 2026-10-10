@@ -21,6 +21,9 @@ import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as Vec
 import Hide.TextPresentation (withTextPresentation,textPresentationEffects,tickTextPresentation,TextPresentation)
 import qualified Hide.Conversation as Conversation
+import qualified Hide.Warden as Warden
+import qualified Hide.WardenRuntime as WardenRuntime
+import qualified Hide.Plugin.SystemOne as SystemOne
 import qualified Hide.Plugin.Menu as HideMenu
 import qualified Hide.Plugin.Editor as Editor
 import Hide.AgentSidebarTypes (DirectoryRequest(..))
@@ -1142,6 +1145,48 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     (secondFile,secondBuffer)<-loadFile secondSource >>= either error pure
     (file,b)<-loadFile source >>= either error pure
     let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (emptySidebar root 20 False)})
+    -- Each guarded peer owns its request log and source. Its protocol responses
+    -- identify admission; HUD text and another scenario's replies are irrelevant.
+    forM_ [Warden.WardenObserve,Warden.WardenEnforce] $ \mode->do
+      let nativeRoot=root </> (if mode==Warden.WardenObserve then "warden-observe" else "warden-enforce")
+          nativeSource=nativeRoot </> "Source.hs"
+          nativeLog=nativeRoot </> "messages.jsonl"
+          config=Warden.defaultWardenSettings {Warden.wardenMode=mode}
+          unavailable=SystemOne.SystemOneServices (pure Nothing) (\_ _ _->error "Unselected Warden supplier invoked")
+          nativeEnvironment=object ["THC_LOG" .= nativeLog,"THC_SOURCE" .= nativeSource,"THC_SECOND" .= nativeSource,"THC_RESUME" .= ("yes"::T.Text)]
+          nativeResponse ident=findResponse ident <$> readMessages nativeLog
+      createDirectory nativeRoot
+      BS.writeFile nativeSource "Warden source\n"
+      (nativeFile,nativeBuffer)<-loadFile nativeSource >>= either error pure
+      let nativeDesktop=insertText "unsaved " (addDocument (Just nativeFile) nativeBuffer (initialDesktop (90,28)))
+            {defaultDirectory=Just nativeRoot,sideTree=Just (emptySidebar nativeRoot 20 False)}
+      WardenRuntime.withWarden unavailable config (\_->pure (Right ["Preserve files unless their exact edit is approved."])) $ \warden->
+        C.withConsoles $ \consoles->
+          withGuardedConversationAt (Just warden) (WardenRuntime.wardenProviderFactory warden <$> ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin)
+            (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles nativeRoot $ \runtime->do
+              configured<-send runtime "configure" ["0","python3",json [server],json nativeEnvironment] nativeDesktop
+              started<-prompt runtime "write" configured
+              if mode==Warden.WardenEnforce then do
+                settled<-done runtime started
+                readReply<-nativeResponse "read-1"
+                writeReply<-nativeResponse "write-1"
+                check "enforced native read and write without judgment return their exact errors"
+                  (maybe False hasError readReply && maybe False hasError writeReply && dialog settled==Nothing)
+                when terminalAvailable $ do
+                  _<-prompt runtime "terminal-reject" settled >>= done runtime
+                  terminalReply<-nativeResponse "terminal-create-1"
+                  check "enforced native terminal creation is held before human approval or launch" (maybe False hasError terminalReply)
+                  check "held native terminal never executes" . not =<< doesFileExist (nativeRoot </> "should-not-exist")
+              else do
+                approval<-modal runtime started
+                readReply<-nativeResponse "read-1"
+                check "observe retains the ordinary captured source read"
+                  ((readReply >>= field "result" >>= field "content")==Just ("unsaved Warden source\n"::T.Text))
+                _<-WardenRuntime.setWardenSettings warden config {Warden.wardenMode=Warden.WardenEnforce} >>= either (error . T.unpack) pure
+                _<-actDialog runtime 0 approval >>= done runtime
+                writeReply<-nativeResponse "write-1"
+                check "switching Observe to Enforce requires a fresh judgment before retained native Write approval" (maybe False hasError writeReply)
+              check "held or expired native writes preserve disk" . (=="Warden source\n") =<< BS.readFile nativeSource
     -- Provider acquisition completes independently of UI ticks. Holding adoption
     -- gives Cancel a deterministic completed-but-unowned client to retire.
     forM_ [False,True] $ \cancelled->C.withConsoles $ \consoles->withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->do

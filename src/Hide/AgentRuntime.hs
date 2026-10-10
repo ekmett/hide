@@ -15,7 +15,7 @@
 -- activate only after the session lifetime lock is held. Invalid recovery data is
 -- retained and disables spawning rather than being silently replaced.
 module Hide.AgentRuntime
-  ( AgentRuntime, AgentRequest(..), ProviderCall(..), primaryProviderHost, publishProviderEvent, retireProviderCalls, PrimaryDelivery, admitPrimaryDelivery, rejectPrimaryDelivery, completePrimaryDelivery, primaryDeliveryActive, acknowledgePrimaryDelivery, deliveryTurn, deliverySubmission, PrimaryControl(..), requestPrimaryQuery, primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
+  ( AgentRuntime, AgentRequest(..), ProviderCall(..), primaryProviderHost, publishProviderEvent, retireProviderCalls, PrimaryDelivery, deliveryMessage, admitPrimaryDelivery, rejectPrimaryDelivery, completePrimaryDelivery, primaryDeliveryActive, acknowledgePrimaryDelivery, deliveryTurn, deliverySubmission, PrimaryControl(..), requestPrimaryQuery, primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
   , syncPrimary, recordPrimaryEvent, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentCreation, requestAgentReconnect
   ) where

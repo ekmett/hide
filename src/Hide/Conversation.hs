@@ -20,7 +20,7 @@
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, captureConversationOperation, captureConversationChoices, withConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, captureConversationOperation, captureConversationChoices, withConversationAt, withGuardedConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
 import Hide.ConversationBody
@@ -91,6 +91,7 @@ import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import System.Environment (lookupEnv)
 import Hide.Syntax (Style(..),styledText)
+import Hide.WardenRuntime (WardenRuntime,WardenBinding,WardenReceipt,wardenProvider,captureWardenBinding,wardenEnforces,runWarden,checkWarden)
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Prompting | CancellingPrompt deriving Eq
@@ -142,31 +143,54 @@ toggleExpansion target item state=state {toolExpansions=if S.member key expanded
 data Approval
   = ChildPermission AH.AgentId ProviderPermission (MVar (Either Text (Maybe Text)))
   | Permission !ProviderIdentity !ProviderPermission (MVar (Either Text (Maybe Text)))
-  | Write !ProviderIdentity (MVar (Either Text ())) !Snapshot !Text
-  | Execute !ProviderIdentity (MVar (Either Text Text)) !Terminal.TerminalConfig !Int
+  | Write !ProviderIdentity (MVar (Either Text ())) !Snapshot !Text !(Maybe WardenReceipt)
+  | Execute !ProviderIdentity (MVar (Either Text Text)) !Terminal.TerminalConfig !Int !(Maybe WardenReceipt)
 
 data FileRequest
   = ReadFile !Int !(Maybe Int) (MVar (Either Text Text))
   | WriteFile !Text (MVar (Either Text ()))
 data FileCapture
-  = ResolvingFile !ProviderIdentity !FileRequest !(Maybe SourceIdentity) !(Async (Either Text ResolvedFile))
-  | ReadingFile !ProviderIdentity !FileRequest !(Maybe SourceIdentity) !(Async (Either Text Snapshot))
-  | SlicingFile !ProviderIdentity (MVar (Either Text Text)) !Snapshot !(Maybe SourceIdentity) !(Async (Either Text Text))
-  | CheckingTerminal !ProviderIdentity (MVar (Either Text Text)) !Int !(Async (Either Text Terminal.TerminalConfig))
-  | PreparingTerminal !ProviderIdentity (MVar (Either Text Text)) !(Async (Either Text C.PreparedConsole))
-  | forall a. TerminalOperation !ProviderIdentity (MVar (Either Text a)) !(Async (Either Text a))
+  = ResolvingFile !ProviderIdentity !FileRequest !(Maybe WardenBinding) !(Maybe SourceIdentity) !(Async (Either Text ResolvedFile))
+  | JudgingFile !ProviderIdentity !FileRequest !FilePath !FileInput !(Async (Either Text (Maybe WardenReceipt)))
+  | ReadingFile !ProviderIdentity !FileRequest !(Maybe WardenReceipt) !(Maybe SourceIdentity) !(Async (Either Text Snapshot))
+  | SlicingFile !ProviderIdentity (MVar (Either Text Text)) !(Maybe WardenReceipt) !Snapshot !(Maybe SourceIdentity) !(Async (Either Text Text))
+  | CheckingTerminal !ProviderIdentity (MVar (Either Text Text)) !Int !(Async (Either Text (Terminal.TerminalConfig,Maybe WardenReceipt)))
+  | PreparingTerminal !ProviderIdentity (MVar (Either Text Text)) !(Maybe WardenReceipt) !(Async (Either Text C.PreparedConsole))
+  | forall a. JudgingTerminal !ProviderIdentity !Text !(AR.ProviderCall a) (MVar (Either Text a)) !(Async (Either Text (Maybe WardenReceipt)))
+  | forall a. TerminalOperation !ProviderIdentity (MVar (Either Text a)) !(Maybe WardenReceipt) !(Async (Either Text a))
+  | ReleasingTerminal !ProviderIdentity !Text (MVar (Either Text ())) !(Maybe WardenReceipt) !(Async (Either Text ()))
 
 captureCancel :: FileCapture -> IO ()
-captureCancel (ResolvingFile _ request _ worker)=finishFile (Left "File request cancelled.") request >> cancel worker
-captureCancel (ReadingFile _ request _ worker)=finishFile (Left "File request cancelled.") request >> cancel worker
-captureCancel (SlicingFile _ reply _ _ worker)=void (tryPutMVar reply (Left "File request cancelled.")) >> cancel worker
+captureCancel (ResolvingFile _ request _ _ worker)=finishFile (Left "File request cancelled.") request >> cancel worker
+captureCancel (JudgingFile _ request _ _ worker)=finishFile (Left "File request cancelled.") request >> cancel worker
+captureCancel (ReadingFile _ request _ _ worker)=finishFile (Left "File request cancelled.") request >> cancel worker
+captureCancel (SlicingFile _ reply _ _ _ worker)=void (tryPutMVar reply (Left "File request cancelled.")) >> cancel worker
 captureCancel (CheckingTerminal _ reply _ worker)=void (tryPutMVar reply (Left "Terminal request cancelled.")) >> cancel worker
-captureCancel (PreparingTerminal _ reply worker)=do
+captureCancel (PreparingTerminal _ reply _ worker)=do
   void (tryPutMVar reply (Left "Terminal request cancelled."))
   cancel worker
   ready<-poll worker
   case ready of Just (Right (Right console))->C.closePreparedConsole console; _->pure ()
-captureCancel (TerminalOperation _ reply worker)=void (tryPutMVar reply (Left "Terminal request cancelled.")) >> cancel worker
+captureCancel (JudgingTerminal _ _ _ reply worker)=void (tryPutMVar reply (Left "Terminal request cancelled.")) >> cancel worker
+captureCancel (TerminalOperation _ reply _ worker)=void (tryPutMVar reply (Left "Terminal request cancelled.")) >> cancel worker
+captureCancel (ReleasingTerminal _ _ reply _ worker)=void (tryPutMVar reply (Left "Terminal request cancelled.")) >> cancel worker
+
+-- Enforcement judgment belongs only to an existing native request worker;
+-- observation returns without waiting for inference. The receipt delegates
+-- mode/freshness policy to checkWarden at later side effects and publication.
+judgeNative :: Maybe WardenBinding -> Text -> Value -> IO (Maybe WardenReceipt)
+judgeNative binding name arguments=traverse (\owner->runWarden owner name arguments) binding
+
+checkNative :: Maybe WardenReceipt -> IO (Either Text ())
+checkNative=maybe (pure (Right ())) checkWarden
+
+admitNative :: Maybe WardenReceipt -> IO (Either Text a) -> IO (Either Text a)
+admitNative receipt action=checkNative receipt >>= either (pure . Left) (const action)
+
+fileJudgment :: Maybe WardenBinding -> FilePath -> FileRequest -> IO (Maybe WardenReceipt)
+fileJudgment binding path request=case request of
+  ReadFile line limit _->judgeNative binding "fs/read_text_file" (object ["path" .= path,"line" .= line,"limit" .= limit])
+  WriteFile text _->judgeNative binding "fs/write_text_file" (object ["path" .= path,"content" .= text])
 
 fileWaiting :: FileRequest -> IO Bool
 fileWaiting (ReadFile _ _ reply)=isEmptyMVar reply
@@ -192,14 +216,15 @@ data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 data SettingsCapture = SettingsCapture !Bool !FilePath !Settings.SettingsSnapshot
 
 data State = State
-  { sessionIdentity :: !Unique
+  { conversationWarden :: Maybe WardenRuntime
+  , sessionIdentity :: !Unique
   , provider :: ProviderLaunch, connection :: Maybe AH.AgentDriver, connectionIdentity :: Maybe ProviderIdentity, providerFactory :: Maybe StartAgentProvider,
     currentTurn :: Maybe ProviderTurnId, completedTurn :: Maybe ProviderTurnId, activeTurn :: Maybe ProviderTurn, queuedDelivery :: Maybe AR.PrimaryDelivery, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe AR.PrimaryControl), transcript :: !Transcript.PrimaryTranscript, nextRecord :: !Int
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
   , queuedQueries :: [QueuedQuery]
   , ownedTerminals :: S.Set Text
-  , terminalWaiters :: M.Map Text [MVar (Either Text Int)]
+  , terminalWaiters :: M.Map Text [(Maybe WardenReceipt,MVar (Either Text Int))]
   , terminalPoll :: Maybe (Async [(Text,Either Text (BS.ByteString,Bool,Maybe Int))])
   , lastMessageAt :: Maybe UTCTime
   , lastSession :: Maybe (ProviderLaunch,FilePath,Text)
@@ -235,7 +260,12 @@ withConversation factory presenter primary child consoles action = getCurrentDir
 
 -- | Load conversation configuration and scope only provider and agent workers.
 withConversationAt :: Maybe StartAgentProvider -> Maybe ConversationPresenter -> Maybe (InputDeclaration PrimaryInputServices) -> Maybe (InputDeclaration ChildInputServices) -> C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
-withConversationAt factory presenter primary child consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->Command.withRegistry $ \childRegistry->Command.withRegistry $ \settingsRegistry->do
+withConversationAt=withGuardedConversationAt Nothing
+
+-- | Scope native ACP admission through the optional session Warden. Judgment
+-- runs only on request workers; absent runtime preserves ordinary admission.
+withGuardedConversationAt :: Maybe WardenRuntime -> Maybe StartAgentProvider -> Maybe ConversationPresenter -> Maybe (InputDeclaration PrimaryInputServices) -> Maybe (InputDeclaration ChildInputServices) -> C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
+withGuardedConversationAt warden factory presenter primary child consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->Command.withRegistry $ \childRegistry->Command.withRegistry $ \settingsRegistry->do
   settingsRead<-Command.registerCommand settingsRegistry (Command.CommandDef "hide.agent-settings.read" "Read public conversation settings"
     (Command.Codec Null (const (Right ())) (const Null))
     (Command.Codec Null (const (Left "Host-captured settings only.")) toJSON)
@@ -260,7 +290,7 @@ withConversationAt factory presenter primary child consoles root action = W.with
   editors<-newIORef M.empty
   identity<-newUnique
   ref<-newIORef State
-    { sessionIdentity=identity,provider=launch,connection=Nothing,connectionIdentity=Nothing,providerFactory=factory,currentTurn=Nothing,completedTurn=Nothing,activeTurn=Nothing,queuedDelivery=Nothing,session=Nothing,project=root
+    { conversationWarden=warden,sessionIdentity=identity,provider=launch,connection=Nothing,connectionIdentity=Nothing,providerFactory=factory,currentTurn=Nothing,completedTurn=Nothing,activeTurn=Nothing,queuedDelivery=Nothing,session=Nothing,project=root
     , pending=M.empty,queuedPrompt=Nothing,transcript=Transcript.emptyPrimaryTranscript,nextRecord=0,reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,terminalPoll=Nothing,lastMessageAt=Nothing
@@ -774,13 +804,16 @@ pollPromptPreparation runtime@(ConversationState _ ref _ agents) d=do
               _->newProviderSubmission
             if steering then case control of
               Just request->do
-                sending<-async (AH.driverSteer driver (AH.HubMessage 0 AH.Human query True) extra submission)
+                let original=case request of AR.SteerPrimary _ _ originalMessage _ _->originalMessage;_->AH.HubMessage 0 AH.Human query True
+                sending<-async (AH.driverSteer driver (original {AH.messageText=query}) extra submission)
                 modifyIORef' ref (\state->state {promptPreparation=Just (SteeringPrompt submission text context request sending)})
                 pure d {status="Steering request sent; draft kept until accepted."}
               Nothing->retireProviderSubmission submission >> pure d
             else do
               turn<-maybe newProviderTurnId (pure . AR.deliveryTurn) (queuedDelivery s)
-              sending<-async (AH.driverDeliver driver turn (AH.HubMessage 0 AH.Human query True) extra submission)
+              -- Prepared context changes text, never the original Hub author or seat.
+              let original=maybe (AH.HubMessage 0 AH.Human query True) AR.deliveryMessage (queuedDelivery s)
+              sending<-async (AH.driverDeliver driver turn (original {AH.messageText=query}) extra submission)
               modifyIORef' ref (\state->state {promptPreparation=Just (SendingPrompt turn submission text context control sending),
                 currentTurn=Just turn,completedTurn=Nothing})
               pure d {status="Sending agent query...",agentReplying=True}
@@ -1165,42 +1198,62 @@ incomingProvider runtime@(ConversationState _ ref consoles _) owner root operati
   waiting<-isEmptyMVar reply
   if connectionIdentity s/=Just owner || not waiting || questionsClosed s
     then void (tryPutMVar reply (Left "Provider request expired.")) >> pure d
-    else case operation of
-      AR.AskProviderPermission request->enqueueApproval runtime (Permission owner request reply) >> pure d
-      AR.ReadProviderFile path line limit
-        | line>=1,maybe True (>=0) limit->queueFileCapture ref owner (ReadFile line limit reply) root path d
-        | otherwise->refuse "Invalid line range."
-      AR.WriteProviderFile path text->queueFileCapture ref owner (WriteFile text reply) root path d
-      AR.CreateProviderTerminal request | Terminal.terminalAvailable->queueBridge ref reply $ do
-        worker<-async (checkTerminal root request)
-        pure (CheckingTerminal owner reply (providerTerminalLimit request) worker)
-      AR.CreateProviderTerminal _->refuse "Native terminals are unavailable."
-      AR.ReadProviderTerminal tid->owned tid $ queueBridge ref reply $ do
-        worker<-async $ do
-          result<-C.consoleOutput consoles tid
-          case result of
-            Left err->pure (Left err)
-            Right (bytes,truncated,exited)->do
-              copied<-evaluate (BS.copy bytes)
-              pure (Right (ProviderTerminalOutput copied truncated exited))
-        pure (TerminalOperation owner reply worker)
-      AR.WaitProviderTerminal tid->owned tid $ do
-        modifyIORef' ref (\state->state {terminalWaiters=M.insertWith (++) tid [reply] (terminalWaiters state)})
-        pure d
-      AR.KillProviderTerminal tid->owned tid $ terminalJob (C.killConsole consoles tid)
-      AR.ReleaseProviderTerminal tid->owned tid $ do
-        modifyIORef' ref (\state->state {ownedTerminals=S.delete tid (ownedTerminals state),terminalWaiters=M.delete tid (terminalWaiters state)})
-        forM_ (M.findWithDefault [] tid (terminalWaiters s)) (\waiter->void (tryPutMVar waiter (Left "Terminal released.")))
-        terminalJob (C.releaseConsole consoles tid)
+    else do
+      binding<-traverse (captureWardenBinding . (\warden->wardenProvider warden owner)) (conversationWarden s)
+      case operation of
+        AR.AskProviderPermission request->enqueueApproval runtime (Permission owner request reply) >> pure d
+        AR.ReadProviderFile path line limit
+          | line>=1,maybe True (>=0) limit->queueFileCapture ref owner binding (ReadFile line limit reply) root path d
+          | otherwise->refuse "Invalid line range."
+        AR.WriteProviderFile path text->queueFileCapture ref owner binding (WriteFile text reply) root path d
+        AR.CreateProviderTerminal request | Terminal.terminalAvailable->queueBridge ref reply $ do
+          worker<-async $ do
+            checked<-checkTerminal root request
+            case checked of
+              Left err->pure (Left err)
+              Right config->do
+                receipt<-judgeNative binding "terminal/create" (object
+                  ["command" .= Terminal.terminalCommand config,"args" .= Terminal.terminalArguments config
+                  ,"env" .= [object ["name" .= name,"value" .= value] | (name,value)<-Terminal.terminalEnvironment config]
+                  ,"cwd" .= Terminal.terminalDirectory config,"outputByteLimit" .= providerTerminalLimit request])
+                pure (Right (config,receipt))
+          pure (CheckingTerminal owner reply (providerTerminalLimit request) worker)
+        AR.CreateProviderTerminal _->refuse "Native terminals are unavailable."
+        AR.ReadProviderTerminal tid->terminalRequest binding tid "terminal/output"
+        AR.WaitProviderTerminal tid->terminalRequest binding tid "terminal/wait_for_exit"
+        AR.KillProviderTerminal tid->terminalRequest binding tid "terminal/kill"
+        AR.ReleaseProviderTerminal tid->terminalRequest binding tid "terminal/release"
   where
     refuse :: Text -> IO Desktop
     refuse err=void (tryPutMVar reply (Left err)) >> pure d
-    owned :: Text -> IO Desktop -> IO Desktop
-    owned tid action=do
+    terminalRequest :: Maybe WardenBinding -> Text -> Text -> IO Desktop
+    terminalRequest binding tid name=mask_ $ do
       current<-readIORef ref
-      if S.member tid (ownedTerminals current) then action else refuse "Unknown terminal ID for this session."
-    terminalJob :: IO (Either Text a) -> IO Desktop
-    terminalJob action=queueBridge ref reply $ TerminalOperation owner reply <$> async action
+      enforces<-maybe (pure False) wardenEnforces binding
+      -- Wait registration was a direct lightweight owner operation. Observing
+      -- it must not add a capture slot or reject an otherwise admitted wait.
+      let needsSlot=enforces || case operation of AR.WaitProviderTerminal _->False;_->True
+      if not (S.member tid (ownedTerminals current)) then refuse "Unknown terminal ID for this session."
+      else if needsSlot && length (fileCaptures current)+sum (map fst (retiringRequests current))>=4
+        then refuse "Too many pending native requests."
+      else do
+        prepared<-if enforces then do
+          worker<-async (Right <$> judgeNative binding name (object ["terminalId" .= tid]))
+          pure (Right (Just (JudgingTerminal owner tid operation reply worker)))
+        else do
+          -- The frozen Off/Observe mode makes this bounded: any observation
+          -- inference belongs to the runtime's separate, non-queueing slot.
+          receipt<-judgeNative binding name (object ["terminalId" .= tid])
+          checked<-checkNative receipt
+          case checked of
+            Left err->pure (Left err)
+            Right ()->Right <$> prepareTerminalOperation ref consoles owner tid operation reply receipt
+        case prepared of
+          Left err->refuse err
+          Right capture->do
+            forM_ capture $ \value->modifyIORef' ref (\next->next {fileCaptures=fileCaptures next++[value]})
+            pure d
+
     queueBridge :: IORef State -> MVar (Either Text b) -> IO FileCapture -> IO Desktop
     queueBridge state cell prepare=mask_ $ do
       current<-readIORef state
@@ -1211,10 +1264,34 @@ incomingProvider runtime@(ConversationState _ ref consoles _) owner root operati
           modifyIORef' state (\next->next {fileCaptures=fileCaptures next++[capture]})
           pure d
 
+-- A judged wait owns a lightweight receipt until exit; other operations retain
+-- it through their existing worker. Console cleanup on host retirement is not
+-- an agent operation and never consults the Warden.
+prepareTerminalOperation :: forall a. IORef State -> C.Consoles -> ProviderIdentity -> Text -> AR.ProviderCall a -> MVar (Either Text a) -> Maybe WardenReceipt -> IO (Maybe FileCapture)
+prepareTerminalOperation ref consoles owner tid operation reply receipt=case operation of
+  AR.ReadProviderTerminal _->operationWorker $ do
+    result<-C.consoleOutput consoles tid
+    case result of
+      Left err->pure (Left err)
+      Right (bytes,truncated,exited)->do
+        copied<-evaluate (BS.copy bytes)
+        pure (Right (ProviderTerminalOutput copied truncated exited))
+  AR.WaitProviderTerminal _->do
+    modifyIORef' ref (\state->state {terminalWaiters=M.insertWith (++) tid [(receipt,reply)] (terminalWaiters state)})
+    pure Nothing
+  AR.KillProviderTerminal _->operationWorker (C.killConsole consoles tid)
+  AR.ReleaseProviderTerminal _->do
+    worker<-async (admitNative receipt (C.releaseConsole consoles tid))
+    pure (Just (ReleasingTerminal owner tid reply receipt worker))
+  _->void (tryPutMVar reply (Left "Invalid native terminal operation.")) >> pure Nothing
+  where
+    operationWorker :: IO (Either Text a) -> IO (Maybe FileCapture)
+    operationWorker action=Just . TerminalOperation owner reply receipt <$> async (admitNative receipt action)
+
 -- Resolve on the worker, capture the single immutable source on the owner,
 -- then read/slice on the worker. Every stage occupies the same bounded slot.
-queueFileCapture :: IORef State -> ProviderIdentity -> FileRequest -> FilePath -> FilePath -> Desktop -> IO Desktop
-queueFileCapture ref owner request root path d=mask_ $ do
+queueFileCapture :: IORef State -> ProviderIdentity -> Maybe WardenBinding -> FileRequest -> FilePath -> FilePath -> Desktop -> IO Desktop
+queueFileCapture ref owner binding request root path d=mask_ $ do
   s<-readIORef ref
   if length (fileCaptures s)+sum (map fst (retiringRequests s))>=4
     then finishFile (Left "Too many pending file requests.") request
@@ -1224,7 +1301,7 @@ queueFileCapture ref owner request root path d=mask_ $ do
       -- the same final path/privacy/content-identity checks.
       expected<-sourceIdentity path d >>= traverse evaluate
       worker<-async (resolveFile root path)
-      modifyIORef' ref (\state->state {fileCaptures=fileCaptures state++[ResolvingFile owner request expected worker]})
+      modifyIORef' ref (\state->state {fileCaptures=fileCaptures state++[ResolvingFile owner request binding expected worker]})
   pure d
 
 checkTerminal :: FilePath -> ProviderTerminal -> IO (Either Text Terminal.TerminalConfig)
@@ -1277,7 +1354,7 @@ retireProviderResources :: ConversationState -> Text -> IO State
 retireProviderResources (ConversationState _ ref consoles agents) reason=do
   current<-readIORef ref
   mapM_ (cancelApproval . snd) (approvals current)
-  forM_ (concat (M.elems (terminalWaiters current))) (\reply->void (tryPutMVar reply (Left reason)))
+  forM_ (concat (M.elems (terminalWaiters current))) (\(_,reply)->void (tryPutMVar reply (Left reason)))
   mapM_ (AR.retireProviderCalls agents) (connectionIdentity current)
   retired<-retireRequests ref
   tids<-evaluate (force (S.toList (ownedTerminals retired)))
@@ -1306,81 +1383,147 @@ pollFileCaptures runtime@(ConversationState _ ref consoles _) original=do
               alive owner waiting=(connectionIdentity s==Just owner && not (questionsClosed s) && waiting)
               failed result=either (const (Left "Native request failed.")) id result
           case capture of
-            ResolvingFile owner request expected worker->poll worker >>= \ready->case ready of
+            ResolvingFile owner request binding expected worker->poll worker >>= \ready->case ready of
               Nothing->pure d
               Just outcome->do
                 waiting<-fileWaiting request
                 case failed outcome of
                   Right resolved | alive owner waiting->do
-                    current<-sourceIdentity (resolvedFilePath resolved) d
+                    let path=resolvedFilePath resolved
+                    current<-sourceIdentity path d
                     selected<-if maybe False (const (current/=expected)) expected
                       then pure (Left "File changed in the editor during path resolution; request a fresh read.")
                       else captureFileInput resolved d
                     case selected of
                       Left err->finishFile (Left err) request >> replace rest >> drain d
                       Right input->do
-                        worker'<-async (readFileInput input)
-                        replace (ReadingFile owner request (fileInputIdentity input) worker':rest)
-                        pure d
+                        enforces<-maybe (pure False) wardenEnforces binding
+                        if enforces then do
+                          next<-JudgingFile owner request path input <$> async (Right <$> fileJudgment binding path request)
+                          replace (next:rest)
+                          pure d
+                        else do
+                          receipt<-fileJudgment binding path request
+                          checked<-checkNative receipt
+                          case checked of
+                            Left err->finishFile (Left err) request >> replace rest >> drain d {status=err}
+                            Right ()->do
+                              worker'<-async (admitNative receipt (readFileInput input))
+                              replace (ReadingFile owner request receipt (fileInputIdentity input) worker':rest)
+                              pure d
                   result->finishFile (either Left (const (Left "File request expired.")) result) request >> replace rest >> drain d
-            ReadingFile owner request expected worker->poll worker >>= \ready->case ready of
+            JudgingFile owner request path input worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just outcome->do
+                waiting<-fileWaiting request
+                current<-sourceIdentity path d
+                judged<-case failed outcome of Left err->pure (Left err);Right receipt->fmap (const receipt) <$> checkNative receipt
+                case judged of
+                  Right receipt | alive owner waiting && current==fileInputIdentity input && filePublic path d->do
+                    worker'<-async (admitNative receipt (readFileInput input))
+                    replace (ReadingFile owner request receipt (fileInputIdentity input) worker':rest)
+                    pure d
+                  result->do
+                    let err=either id (const "File changed while awaiting judgment; request a fresh read.") result
+                    finishFile (Left err) request
+                    replace rest
+                    drain d {status=err}
+            ReadingFile owner request receipt expected worker->poll worker >>= \ready->case ready of
               Nothing->pure d
               Just outcome->do
                 replace rest
                 waiting<-fileWaiting request
-                case failed outcome of
+                checked<-admitNative receipt (pure (failed outcome))
+                case checked of
                   Right snap | alive owner waiting->do
                     current<-sourceIdentity (snapshotPath snap) d
                     if current/=expected || not (filePublic (snapshotPath snap) d) then finishFile (Left "File changed in the editor during capture; request a fresh read.") request
                     else case request of
                       ReadFile line limit reply->do
-                        -- Slice the immutable read on the worker before publication.
-                        worker'<-async (sliceFile snap line limit)
-                        replace (SlicingFile owner reply snap expected worker':rest)
-                      WriteFile text reply->enqueueApproval runtime (Write owner reply (M.findWithDefault snap (snapshotPath snap) (reads s)) text)
+                        worker'<-async (admitNative receipt (sliceFile snap line limit))
+                        replace (SlicingFile owner reply receipt snap expected worker':rest)
+                      WriteFile text reply->enqueueApproval runtime (Write owner reply (M.findWithDefault snap (snapshotPath snap) (reads s)) text receipt)
                   result->finishFile (either Left (const (Left "File request expired.")) result) request
-                drain d
-            SlicingFile owner reply snap expected worker->poll worker >>= \ready->case ready of
+                drain (either (\err->d {status=err}) (const d) checked)
+            SlicingFile owner reply receipt snap expected worker->poll worker >>= \ready->case ready of
               Nothing->pure d
               Just outcome->do
                 replace rest
                 waiting<-isEmptyMVar reply
                 current<-sourceIdentity (snapshotPath snap) d
                 let admitted=alive owner waiting && current==expected && filePublic (snapshotPath snap) d
-                    result=if admitted then failed outcome else Left "File changed during read preparation; request a fresh read."
+                result<-admitNative receipt (pure (if admitted then failed outcome else Left "File changed during read preparation; request a fresh read."))
                 void (tryPutMVar reply result)
                 case result of Right _->modifyIORef' ref (\state->state {reads=M.insert (snapshotPath snap) snap (reads state)}); _->pure ()
-                drain d
+                drain (either (\err->d {status=err}) (const d) result)
             CheckingTerminal owner reply limit worker->poll worker >>= \ready->case ready of
               Nothing->pure d
               Just outcome->do
                 replace rest
                 waiting<-isEmptyMVar reply
-                case failed outcome of
-                  Right config | alive owner waiting->enqueueApproval runtime (Execute owner reply config limit)
+                checked<-case failed outcome of Left err->pure (Left err);Right pair@(_,receipt)->fmap (const pair) <$> checkNative receipt
+                case checked of
+                  Right (config,receipt) | alive owner waiting->enqueueApproval runtime (Execute owner reply config limit receipt)
                   result->void (tryPutMVar reply (either Left (const (Left "Terminal request expired.")) result))
-                drain d
-            PreparingTerminal owner reply worker->poll worker >>= \ready->case ready of
+                drain (either (\err->d {status=err}) (const d) checked)
+            PreparingTerminal owner reply receipt worker->poll worker >>= \ready->case ready of
               Nothing->pure d
-              Just (Right (Right _)) | dialog d/=Nothing || chatQuestion d/=Nothing->pure d
               Just outcome->do
-                replace rest
                 waiting<-isEmptyMVar reply
-                case failed outcome of
-                  Right prepared | alive owner waiting->do
+                judgment<-checkNative receipt
+                case (failed outcome,judgment) of
+                  (Right _,Right ()) | alive owner waiting && (dialog d/=Nothing || chatQuestion d/=Nothing)->pure d
+                  (Right prepared,Right ()) | alive owner waiting->do
+                    replace rest
                     (tid,next)<-C.adoptConsole consoles prepared d `onException` C.closePreparedConsole prepared
                     modifyIORef' ref (\state->state {ownedTerminals=S.insert tid (ownedTerminals state)})
                     void (tryPutMVar reply (Right tid))
                     drain next
-                  Right prepared->C.closePreparedConsole prepared >> drain d
-                  Left err->void (tryPutMVar reply (Left err)) >> drain d
-            TerminalOperation owner reply worker->poll worker >>= \ready->case ready of
+                  (Right prepared,result)->do
+                    replace rest
+                    C.closePreparedConsole prepared
+                    let err=either id (const "Terminal request expired.") result
+                    void (tryPutMVar reply (Left err))
+                    drain d {status=err}
+                  (Left err,_)->replace rest >> void (tryPutMVar reply (Left err)) >> drain d {status=err}
+            JudgingTerminal owner tid operation reply worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just outcome->do
+                waiting<-isEmptyMVar reply
+                checked<-case failed outcome of Left err->pure (Left err);Right receipt->fmap (const receipt) <$> checkNative receipt
+                case checked of
+                  Right receipt | alive owner waiting && S.member tid (ownedTerminals s)->do
+                    next<-prepareTerminalOperation ref consoles owner tid operation reply receipt
+                    replace (maybe rest (:rest) next)
+                    pure d
+                  result->do
+                    let err=either id (const "Terminal request expired.") result
+                    void (tryPutMVar reply (Left err))
+                    replace rest
+                    drain d {status=err}
+            TerminalOperation owner reply receipt worker->poll worker >>= \ready->case ready of
               Nothing->pure d
               Just outcome->do
                 replace rest
                 waiting<-isEmptyMVar reply
-                void (tryPutMVar reply (if alive owner waiting then failed outcome else Left "Native request expired."))
-                drain d
+                result<-admitNative receipt (pure (if alive owner waiting then failed outcome else Left "Native request expired."))
+                void (tryPutMVar reply result)
+                drain (either (\err->d {status=err}) (const d) result)
+            ReleasingTerminal owner tid reply receipt worker->poll worker >>= \ready->case ready of
+              Nothing->pure d
+              Just outcome->do
+                replace rest
+                -- The actual release owns cleanup even if its caller expires
+                -- afterward. A held or stale request never starts this worker.
+                case failed outcome of
+                  Right ()->do
+                    modifyIORef' ref (\state->state {ownedTerminals=S.delete tid (ownedTerminals state),terminalWaiters=M.delete tid (terminalWaiters state)})
+                    forM_ (M.findWithDefault [] tid (terminalWaiters s)) (\(_,waiter)->void (tryPutMVar waiter (Left "Terminal released.")))
+                  _->pure ()
+                waiting<-isEmptyMVar reply
+                result<-admitNative receipt (pure (if alive owner waiting then failed outcome else Left "Native request expired."))
+                void (tryPutMVar reply result)
+                drain (either (\err->d {status=err}) (const d) result)
 
 -- Only metadata for this path participates in final immutable source admission.
 filePublic :: FilePath -> Desktop -> Bool
@@ -1413,9 +1556,9 @@ present (ConversationState _ ref _ _) d=do
       pure $ case approval of
         ChildPermission ident request _->d {dialog=permissionDialog ("Agent permission: "<>AH.agentIdText ident) request ["Choose","Reject"]}
         Permission _ request _->d {dialog=permissionDialog "Agent permission" request ["Choose","Review","Cancel"]}
-        Execute _ _ config _->d {dialog=Just (Dialog "Run agent command" (AgentDialog action) [] 0 ["Run","Reject"]
+        Execute _ _ config _ _->d {dialog=Just (Dialog "Run agent command" (AgentDialog action) [] 0 ["Run","Reject"]
           (take 7 (wrapMessage (T.pack (Terminal.terminalCommand config))++wrapMessage (TE.decodeUtf8 (BL.toStrict (encode (Terminal.terminalArguments config))))++wrapMessage (T.pack (Terminal.terminalDirectory config)))))}
-        Write _ _ snap text->(addReadOnly "Proposed agent edit" ("CURRENT BUFFER\n"<>snapshotText snap<>"\n\nPROPOSED CONTENT\n"<>text) d)
+        Write _ _ snap text _->(addReadOnly "Proposed agent edit" ("CURRENT BUFFER\n"<>snapshotText snap<>"\n\nPROPOSED CONTENT\n"<>text) d)
           {dialog=Just (Dialog "Apply agent edit" (AgentDialog action) [] 0 ["Apply","Review","Reject"]
             ["The proposed edit is open behind this dialog.","Apply saves it and preserves the old buffer in Undo."])}
     _->pure d
@@ -1424,8 +1567,8 @@ approvalCurrent :: State -> Approval -> IO Bool
 approvalCurrent state approval=case approval of
   ChildPermission _ _ reply->isEmptyMVar reply
   Permission owner _ reply->(connectionIdentity state==Just owner &&) <$> isEmptyMVar reply
-  Write owner reply _ _->(connectionIdentity state==Just owner &&) <$> isEmptyMVar reply
-  Execute owner reply _ _->(connectionIdentity state==Just owner &&) <$> isEmptyMVar reply
+  Write owner reply _ _ _->(connectionIdentity state==Just owner &&) <$> isEmptyMVar reply
+  Execute owner reply _ _ _->(connectionIdentity state==Just owner &&) <$> isEmptyMVar reply
 
 decide :: ConversationState -> Int -> [Text] -> Desktop -> IO Desktop
 decide (ConversationState _ ref _ _) token values d=do
@@ -1439,7 +1582,7 @@ decide (ConversationState _ ref _ _) token values d=do
         modifyIORef' ref (\state->state {presented=Nothing,deferredApproval=True})
         let detail=case approval of
               Permission _ request _->permissionDetails request
-              Write _ _ snap text->"FILE: "<>T.pack (snapshotPath snap)<>"\n\nCURRENT BUFFER\n"<>snapshotText snap<>"\n\nPROPOSED CONTENT\n"<>text
+              Write _ _ snap text _->"FILE: "<>T.pack (snapshotPath snap)<>"\n\nCURRENT BUFFER\n"<>snapshotText snap<>"\n\nPROPOSED CONTENT\n"<>text
               _->""
         pure (addReadOnly "Agent request" detail d) {status="Tools > Conversation returns to the pending approval."}
       else do
@@ -1447,18 +1590,22 @@ decide (ConversationState _ ref _ _) token values d=do
         case approval of
           ChildPermission _ request reply->selectPermission request reply >> pure d
           Permission _ request reply->selectPermission request reply >> pure d
-          Write _ reply snap text | take 1 values==["0"]->do
-            result<-acceptWrite snap text d
+          Write _ reply snap text receipt | take 1 values==["0"]->do
+            result<-admitNative receipt (acceptWrite snap text d)
             case result of
               Left err->void (tryPutMVar reply (Left err)) >> pure (message "Agent edit rejected" (wrapMessage err) d)
               Right changed->do
                 void (tryPutMVar reply (Right ()))
                 modifyIORef' ref (\state->state {reads=maybe (reads state) (\fresh->M.insert (snapshotPath fresh) fresh (reads state)) (M.lookup (snapshotPath snap) (sourceSnapshots changed))})
                 pure changed
-          Execute owner reply config limit | take 1 values==["0"]->mask_ $ do
-            worker<-async (C.prepareConsole [] config limit)
-            modifyIORef' ref (\state->state {fileCaptures=fileCaptures state++[PreparingTerminal owner reply worker]})
-            pure d {status="Starting approved agent command..."}
+          Execute owner reply config limit receipt | take 1 values==["0"]->mask_ $ do
+            admitted<-checkNative receipt
+            case admitted of
+              Left err->void (tryPutMVar reply (Left err)) >> pure d {status=err}
+              Right ()->do
+                worker<-async (admitNative receipt (C.prepareConsole [] config limit))
+                modifyIORef' ref (\state->state {fileCaptures=fileCaptures state++[PreparingTerminal owner reply receipt worker]})
+                pure d {status="Starting approved agent command..."}
           _->cancelApproval approval >> pure d
   where
     reviewable Permission{}=True
@@ -1473,8 +1620,8 @@ cancelApproval :: Approval -> IO ()
 cancelApproval approval=case approval of
   ChildPermission _ _ reply->void (tryPutMVar reply (Right Nothing))
   Permission _ _ reply->void (tryPutMVar reply (Right Nothing))
-  Execute _ reply _ _->void (tryPutMVar reply (Left "User rejected the command."))
-  Write _ reply _ _->void (tryPutMVar reply (Left "User rejected the edit."))
+  Execute _ reply _ _ _->void (tryPutMVar reply (Left "User rejected the command."))
+  Write _ reply _ _ _->void (tryPutMVar reply (Left "User rejected the edit."))
 
 isApprovalDialog :: Int -> Desktop -> Bool
 isApprovalDialog token d = case dialog d of Just dg -> purpose dg==AgentDialog ("approval:"<>T.pack (show token)); _ -> False
@@ -1563,10 +1710,23 @@ field name=parseMaybe (withObject "object" (.: K.fromText name))
 flushTerminalWaiters :: ConversationState -> IO ()
 flushTerminalWaiters (ConversationState _ ref consoles _)=do
   s<-readIORef ref
+  -- Expiry settles this exact waiter without waiting for process exit. A task
+  -- change cannot keep a stale wait alive merely because its terminal is busy.
+  kept<-forM (M.toList (terminalWaiters s)) $ \(tid,waiters)->do
+    live<-filterM (\(receipt,cell)->do
+      waiting<-isEmptyMVar cell
+      checked<-checkNative receipt
+      case checked of
+        Left err->void (tryPutMVar cell (Left err)) >> pure False
+        Right ()->pure waiting) waiters
+    pure (tid,live)
+  let currentWaiters=M.fromList [(tid,waiters) | (tid,waiters)<-kept,not (null waiters)]
+  modifyIORef' ref (\state->state {terminalWaiters=currentWaiters})
   case terminalPoll s of
-    Nothing | not (M.null (terminalWaiters s))->do
-      let tids=M.keys (terminalWaiters s)
-      worker<-async (mapM (\tid->(tid,) <$> C.consoleOutput consoles tid) tids)
+    Nothing | not (M.null currentWaiters)->do
+      worker<-async $ fmap (mapMaybe id) $ forM (M.toList currentWaiters) $ \(tid,waiters)->do
+        admitted<-filterM (fmap (either (const False) (const True)) . checkNative . fst) waiters
+        if null admitted then pure Nothing else Just . (tid,) <$> C.consoleOutput consoles tid
       modifyIORef' ref (\state->state {terminalPoll=Just worker})
     Just worker->poll worker >>= \ready->case ready of
       Nothing->pure ()
@@ -1576,7 +1736,9 @@ flushTerminalWaiters (ConversationState _ ref consoles _)=do
           current<-readIORef ref
           let completed=case result of Left err->Just (Left err); Right (_,_,Just code)->Just (Right code); _->Nothing
           forM_ completed $ \reply->do
-            mapM_ (\cell->void (tryPutMVar cell reply)) (M.findWithDefault [] tid (terminalWaiters current))
+            forM_ (M.findWithDefault [] tid (terminalWaiters current)) $ \(receipt,cell)->do
+              checked<-admitNative receipt (pure reply)
+              void (tryPutMVar cell checked)
             modifyIORef' ref (\state->state {terminalWaiters=M.delete tid (terminalWaiters state)})
     _->pure ()
 

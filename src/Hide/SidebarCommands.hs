@@ -19,6 +19,8 @@ module Hide.SidebarCommands
   ) where
 
 import Hide.FileIO (withFileRead)
+import Hide.Warden (WardenMode(..))
+import Hide.WardenRuntime (WardenSettingsRef,chooseWardenMode)
 import Hide.SystemOne (SystemOne,selectDecisionProvider)
 import Hide.Plugin.SystemOne (DecisionProvider,DecisionSupplier(..),SupplierDescription(..))
 import qualified Hide.SystemOneBrowser as SystemOneBrowser
@@ -81,7 +83,7 @@ data SidebarContext = SidebarContext
 data SystemOneChoice = ConfiguredSystemOne !SystemOne !(Maybe DecisionProvider)
   | BrowserSystemOne !SystemOne !SystemOneBrowser.BrowserOffer
 
-data SidebarReply = SidebarSystemOne !SystemOneChoice | SidebarPopupForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+data SidebarReply = SidebarWarden !WardenSettingsRef !WardenMode | SidebarSystemOne !SystemOneChoice | SidebarPopupForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -794,6 +796,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarForm{})->d {status="Sidebar form expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right SidebarPopupForm{})->d {status="Popup form requires its captured menu owner."}
+              Right (Right SidebarWarden{})->d {status="Warden settings require their submitted human form."}
               Right (Right SidebarSystemOne{})->d {status="Supplier selection requires its submitted human form."}
               Right (Right SidebarConversation{})->d {status="Conversation session result requires its menu owner."}
               Right (Right SidebarRename{})->d {status="Sidebar result expired."}
@@ -1196,6 +1199,7 @@ forceFormReply reply@(SidebarAgent request)=case request of
 forceFormReply reply@(SidebarSession (SessionDeleted ident))
   | T.length ident==48=evaluate (T.length ident) >> evaluate reply
   | otherwise=ioError (userError "Invalid deleted session result.")
+forceFormReply reply@(SidebarWarden reference mode)=evaluate reference >> evaluate mode >> evaluate reply
 forceFormReply reply@(SidebarSystemOne choice)=evaluate choice >> evaluate reply
 forceFormReply reply@SidebarRename{}=evaluate reply
 forceFormReply reply@SidebarPopupForm{}=evaluate reply
@@ -1246,6 +1250,12 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
         Right (Right (SidebarAgent request)) | consumed,acceptedFormRequest request->snd <$> core adopted [AgentSidebarAction request]
         Right (Right (SidebarSession request@SessionDeleted{})) | consumed->snd <$> core d [SessionSidebarAction request]
         Right (Right (SidebarConversation request)) | consumed->snd <$> core d [ConversationSessionAction request]
+        Right (Right (SidebarWarden settingsRef mode)) | consumed->do
+          selected<-chooseWardenMode settingsRef mode
+          pure d {status=either id (const (case mode of
+            WardenOff->"ACP Warden off for this session."
+            WardenObserve->"ACP Warden observing editor-owned actions."
+            WardenEnforce->"ACP Warden enforcing editor-owned action judgments.")) selected}
         Right (Right (SidebarSystemOne choice)) | consumed->do
           selected<-case choice of
             ConfiguredSystemOne owner provider->selectDecisionProvider owner provider
