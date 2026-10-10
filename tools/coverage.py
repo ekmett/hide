@@ -4,7 +4,7 @@
 
 hpc-codecov owns the HPC format. This wrapper scopes its result to Hide modules,
 normalizes Windows paths, and retains native HPC HTML with column-level detail.
-Both test profiles and the exact toolchain accompany the reports.
+The representative test results and exact toolchain accompany the reports.
 It never turns a failed or interrupted test process into a successful run.
 """
 
@@ -100,7 +100,7 @@ def main():
 
     # Missing/malformed JUnit is an error, never a synthetic passing report.
     profiles = {}
-    for name, filename in (("instrumented", "tests.xml"), ("optimized", "allocation-tests.xml")):
+    for name, filename in (("representative", "tests.xml"),):
         cases = ET.parse(output / filename).findall(".//testcase")
         if not cases:
             raise ValueError(f"{name} JUnit report contains no test cases")
@@ -113,7 +113,7 @@ def main():
         "architecture": platform.machine(),
         "ghc": subprocess.check_output(["ghc", "--numeric-version"], text=True).strip(),
         "cabal": subprocess.check_output(["cabal", "--numeric-version"], text=True).strip(),
-        "configuration": "-f-window -f-terminal -O1 (web enabled); HPC semantics and normal allocation limits",
+        "configuration": "-f-window -f-terminal -O0 (web enabled); representative HPC paths; correctness and allocation in CI",
         "column_coverage": "hpc-html/hpc_index.html and matching raw .mix/.tix; Codecov receives LCOV",
         "scope": "Haskell Hide modules; no C, shaders, native-window or embedded-terminal backend",
         "source_files": len(source_files), "test_profiles": profiles,

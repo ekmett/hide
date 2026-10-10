@@ -17,7 +17,7 @@ import qualified Data.Text.IO as TIO
 import GHC.Conc (getAllocationCounter,threadStatus,ThreadStatus(..),BlockReason(..))
 import System.Directory
 import System.FilePath
-import System.IO (hClose)
+import System.IO (hClose,openTempFile)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.KeyMap as KM
@@ -52,9 +52,13 @@ ownerUntil owner desktop worker=do
 
 checks :: AllocationProfile -> IO ()
 checks profile=do
-  temporary<-getTemporaryDirectory
-  let root=temporary </> "hide-typed-buffer-read-check"
-      path=root </> "config.toml"
+  let temporary=do
+        directory<-getTemporaryDirectory
+        (path,h)<-openTempFile directory "hide-typed-buffer-read-check"
+        hClose h
+        removeFile path
+        createDirectory path
+        pure path
       base=addDocument Nothing (newBuffer "original\n") (initialDesktop (80,25))
       ident=maybe (error "missing read target") sourceFixtureBuffer (activeWindow base)
       check label ok=unless ok (error label)
@@ -67,7 +71,8 @@ checks profile=do
               _->threadDelay 1000 >> observe
         timeout 3000000 observe >>= maybe (error "typed read did not enqueue") pure
       text image=P.readText (P.capturedContent image) (P.TextRange (P.CharOffset 0) (P.CharOffset (P.readLength (P.capturedContent image))))
-  bracket (createDirectoryIfMissing True root) (const (removePathForcibly root)) $ \_->do
+  bracket temporary removePathForcibly $ \root->do
+    let path=root </> "config.toml"
     listingChecks path
     windowReadChecks path
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'enable'\n"
