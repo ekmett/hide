@@ -12,10 +12,10 @@ frontends:
 | `hide-plugin-api` | Scoped commands, tools, forms, menus, trees and session composition |
 | `hide-agent-api` | Provider contracts, directory metadata and attributed orchestration services |
 | `hide-acp` | ACP transport and provider adapter |
-| `hide-agents` | Agents sidebar, its forms and the nine agent-coordination tools |
+| `hide-agents` | Agents sidebar/forms, child transcripts, coordination and documentation tools |
 
 Buffer, window and multiline-editor APIs still live in the main `hide` library.
-Conversation presentation, input bindings and the broader editor-tool surface
+Primary conversation presentation, input bindings and the remaining editor tools
 are the next package boundaries. The sections below distinguish implemented APIs
 from proposed contracts; proposed signatures are design sketches, not compilable
 SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
@@ -755,6 +755,20 @@ operation still checks live Hub authority; retaining the record cannot keep an
 ended agent alive. Hub ancestry, limits, tickets, worktree isolation and rollback
 are unchanged. The plugin receives no human approval or settings capability.
 
+`Hide.DocsTools` declares the three offline documentation tools over
+`EditorServices`. Its checked request types and codecs live in
+`Hide.Plugin.Documentation`; the host retains corpus selection, path confinement,
+native file access and read/search budgets. Help invokes the same session-scoped
+read registration. List, search and read all reject deferred calls after their
+owner retires, before any filesystem discovery.
+
+`PluginTool` distinguishes `EditorTool` and `CoordinationTool` with different
+context types. Anonymous/primary editor connections expose editor tools; only
+authenticated primary/child agents expose coordination tools. Child coordination
+connections retain their restricted catalog. The executable checks collisions
+across the two sets before installing permissions. Scope is not authorization:
+the same host policy and caller checks still admit each invocation.
+
 The broader registration shape below remains proposed:
 
 ```haskell
@@ -877,10 +891,10 @@ package in `plugins/hide-acp`. Its only Hide dependency is `hide-agent-api` in
 requests, attributed messages, public capabilities/events and a driver lifetime.
 The adapter does not import the hub, Model, Render or Conversation. Capability
 decoding belongs to ACP; the hub decodes its own checkpoint representation.
-The linked `hide-agents` package separately supplies the Agents sidebar and
-coordination tools through `hide-plugin-api`. Conversation presentation and the
-broader editor tools still use host types; those consumers define the remaining
-public boundaries.
+The linked `hide-agents` package supplies the Agents sidebar, child transcripts,
+coordination tools and documentation tools through `hide-plugin-api`. Primary
+conversation presentation and the remaining editor tools still use host types;
+those consumers define the remaining public boundaries.
 
 The hub remains the owner of agent IDs, ancestry, limits, workspaces, task tickets
 and message attribution. A provider plugin supplies a driver; a conversation

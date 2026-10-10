@@ -4,6 +4,7 @@ module DocsMCPCheck (checks) where
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
+import Data.IORef
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -17,13 +18,17 @@ import System.IO.Error (tryIOError)
 #ifndef mingw32_HOST_OS
 import qualified System.Posix.Files as Posix
 #endif
-import qualified Hide.Documentation as Docs
+import qualified Hide.Documentation as Host
+import qualified Hide.Plugin.Documentation as Docs
+import qualified Hide.Plugin.Tool as Tool
+import Hide.Plugin.Services (EditorServices(..))
+import qualified Hide.DocsTools as DocsTools
 import qualified Hide.Plugin.Command as Commands
-import Hide.DocsMCP
+import Hide.DocumentationHost
 import Hide.Model
 
 checks :: IO ()
-checks=withDocsCommands $ \commands->bracket temporary removePathForcibly $ \root->do
+checks=Tool.withTools [] DocsTools.tools $ \tools->withDocsCommands $ \commands->bracket temporary removePathForcibly $ \root->do
   let editor=root </> "editor"
       compiler=root </> "compiler"
       configuration=root </> "config"
@@ -31,8 +36,8 @@ checks=withDocsCommands $ \commands->bracket temporary removePathForcibly $ \roo
       d=(initialDesktop (80,25)) {defaultDirectory=Just project}
       check label condition=unless condition (error label)
       run name arguments=do
-        (_,result)<-docsTool commands d name (object arguments)
-        result
+        context<-captureDocsContext d
+        Tool.callTool tools (EditorServices (docsServices commands context)) name (object arguments)
       value name reply=case reply of Right object'->parseMaybe (withObject "reply" (.: name)) object'; _->Nothing
       failed (Left _)=True
       failed _=False
@@ -54,23 +59,30 @@ checks=withDocsCommands $ \commands->bracket temporary removePathForcibly $ \roo
     setEnv "hide_datadir" editor
     setEnv "THC_ROOT" compiler
     setEnv "XDG_CONFIG_HOME" configuration
-    check "documentation tool schemas match dispatch names" (length docsTools==3 && docsToolNames==["docs_list","docs_search","docs_read"])
+    check "editor documentation tools cannot expose agent coordination" (not (Tool.hasTool tools "agent_spawn"))
+    check "documentation tool schemas match dispatch names" (length (Tool.toolDefinitions tools)==3 && all (Tool.hasTool tools) ["docs_list","docs_search","docs_read"])
     listed<-run "docs_list" []
     check "packaged docs include README and nested documents" (case listed of Right v->all (`T.isInfixOf` rendered v) ["README.md","docs/guide.md","docs/nested/extra.md","Unicode λ"] && not ("ignored.json" `T.isInfixOf` rendered v); _->False)
     check "fenced code is excluded from heading metadata" (case listed of Right v->not ("Not a heading" `T.isInfixOf` rendered v); _->False)
     readRange<-run "docs_read" ["path" .= ("docs/guide.md"::T.Text),"startLine" .= (2::Int),"lineCount" .= (3::Int)]
     check "read returns the requested one-based range" ((value "text" readRange::Maybe T.Text)==Just "Needle first\n## Navigation\na.*b literal" && (value "lineCount" readRange::Maybe Int)==Just 3)
     Commands.withRegistry $ \registry->do
-      command<-either (error . show) id <$> Commands.registerCommand registry Docs.readCommand
+      command<-either (error . show) id <$> Commands.registerCommand registry Host.readCommand
       let arguments=either (error . T.unpack) id (Docs.readArguments "editor" "docs/guide.md" 2 3)
       typed<-Commands.invoke registry command (\_->pure editor) arguments
       check "typed docs command reads the same bounded page as MCP" (case typed of
         Right page->Docs.pageText page=="Needle first\n## Navigation\na.*b literal" && Right (Commands.codecEncode Docs.readOutput page)==readRange
         _->False)
       check "typed docs arguments reject traversal before IO" (case Docs.readArguments "editor" "../README.md" 1 10 of Left _->True; _->False)
-    deferred<-withDocsCommands $ \scoped->snd <$> docsTool scoped d "docs_read" (object ["path" .= ("README.md"::T.Text)])
-    closed<-deferred
-    check "deferred docs reads cannot outlive their command scope" (failed closed)
+    resolutions<-newIORef (0::Int)
+    deferred<-withDocsCommands $ \scoped->do
+      let context _=modifyIORef' resolutions (+1) >> pure editor
+          services=EditorServices (docsServices scoped context)
+      pure [Tool.callTool tools services name (object arguments) | (name,arguments)<-
+        [("docs_read",["path" .= ("README.md"::T.Text)]),("docs_list",[]),("docs_search",["query" .= ("Needle"::T.Text)])]]
+    closed<-sequence deferred
+    resolved<-readIORef resolutions
+    check "deferred docs read/list/search cannot outlive their command scope" (all failed closed && resolved==0)
     pastEnd<-run "docs_read" ["path" .= ("docs/guide.md"::T.Text),"startLine" .= (maxBound::Int)]
     check "extreme read offsets cannot overflow" ((value "text" pastEnd::Maybe T.Text)==Just "" && (value "lineCount" pastEnd::Maybe Int)==Just 0)
     literal<-run "docs_search" ["query" .= ("a.*b"::T.Text)]

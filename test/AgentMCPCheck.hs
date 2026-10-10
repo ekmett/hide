@@ -19,7 +19,8 @@ import qualified Hide.Plugin.Session as Plugin
 import qualified Hide.Plugin.Tool as Tool
 
 checks :: IO ()
-checks=Tool.withTools [] (Plugin.pluginAgentTools Hide.AgentUI.plugin) $ \tools->do
+checks=Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTools Hide.AgentUI.plugin] $ \tools->do
+  unless (not (Tool.hasTool tools "docs_read")) (error "Child coordination must not expose editor documentation tools")
   directory<-getTemporaryDirectory >>= canonicalizePath
   launched<-newIORef []
   configured<-newIORef []

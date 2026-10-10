@@ -1,20 +1,22 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Bounded offline documentation access for editor and compiler corpora.
+-- SPDX-License-Identifier: BSD-3-Clause
+-- | Module      : Hide.Documentation
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-3-Clause
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
 --
--- The documentation command depends only on a corpus-root resolver, not on
--- Desktop or an MCP dispatcher. File validation and read budgets live here;
--- callers run this IO on their owning worker. Truncated searches report limits.
-module Hide.Documentation
-  ( docsTools, docsToolNames, DocsContext, ReadArguments, readArguments, ReadPage(..), Heading(..)
-  , readCommand, readInput, readOutput, prepareDocs
-  ) where
+-- Bounded offline document operations for host-selected corpora.
+-- The public API supplies checked arguments and codecs; this module owns path
+-- confinement, native file reads and traversal budgets. All IO runs on the
+-- invoking worker. Help and plugin tools use the same scoped operations.
+module Hide.Documentation (DocsContext, readCommand, listCommand, searchCommand) where
 
 import Hide.FileIO (withFileRead)
 
 import Control.Monad (unless, when)
 import Data.Aeson
-import Data.Aeson.Types (Parser, parseEither)
-import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import Data.List (sort)
 import Data.Text (Text)
@@ -28,158 +30,56 @@ import System.Timeout (timeout)
 import qualified System.Posix.Files as Posix
 #endif
 import Hide.Plugin.Command
+import Hide.Plugin.Documentation
 
-docsToolNames :: [Text]
-docsToolNames=["docs_list","docs_search","docs_read"]
-
--- | Schemas for listing, literal searching and reading documentation by line range.
-docsTools :: [Value]
-docsTools=[descriptor "docs_list" "List offline documentation with titles and Markdown headings. Paths are relative to the selected corpus; default corpus is editor." []
-    [("offset",integer),("limit",integer)],
-  descriptor "docs_search" "Search literal text in offline documentation, with line numbers and enclosing headings. Searches at most 256 files and 16 MiB; partial results are marked. No regex or network access." ["query"]
-    [("query",string),("path",string),("offset",integer),("limit",integer),("caseSensitive",object ["type" .= ("boolean"::Text)])],
-  descriptor "docs_read" "Read a line range from an offline document. Files must be UTF-8 and at most 1 MiB. Responses are capped at 128 Ki characters. Lines start at 1." ["path"]
-    [("path",string),("startLine",integer),("lineCount",integer)]]
-  where
-    integer=object ["type" .= ("integer"::Text)]
-    string=object ["type" .= ("string"::Text)]
-    descriptor name description required properties=object ["name" .= (name::Text),"description" .= (description::Text),
-      "inputSchema" .= (if name=="docs_read" then codecSchema readInput else documentationSchema required properties),
-      "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]]
-
-documentationSchema :: [Text] -> [(Key,Value)] -> Value
-documentationSchema required properties=object ["type" .= ("object"::Text),"required" .= required,"additionalProperties" .= False,
-  "properties" .= Object (KM.fromList (("corpus",object ["type" .= ("string"::Text),"enum" .= (["editor","thc"]::[Text]),"default" .= ("editor"::Text)]):properties))]
-
-readSchema :: Value
-readSchema=documentationSchema ["path"] [("path",object ["type" .= ("string"::Text)]),
-  ("startLine",object ["type" .= ("integer"::Text)]),("lineCount",object ["type" .= ("integer"::Text)])]
-
--- | Host-granted capability for locating the selected documentation corpus.
--- Resolve on the calling worker; it may read project configuration.
+-- | Host-selected corpus roots. Resolve on the calling worker, never on input.
 type DocsContext = Text -> IO FilePath
 
-data ReadArguments = ReadArguments Text FilePath Int Int
-
-data ReadPage = ReadPage
-  { pageCorpus :: Text, pagePath :: FilePath, pageBytes :: Int
-  , pageStart :: Int, pageCount :: Int, pageTotal :: Int, pageText :: Text
-  , pageTruncated :: Bool, pageHasMore :: Bool
-  , pageHeadings :: [Heading], pageHeadingsTruncated :: Bool
-  }
-
--- | Read a bounded UTF-8 document range using only the granted corpus resolver.
+-- | The same scoped read is used by Help and plugin tools.
 readCommand :: CommandDef DocsContext ReadArguments ReadPage
-readCommand=CommandDef "hide.docs.read" "Read documentation" readInput readOutput $ \resolve (ReadArguments corpus path start count)->do
+readCommand=CommandDef "hide.docs.read" "Read documentation" readInput readOutput $ \resolve arguments->do
+  root<-resolve (readCorpus arguments)
+  result<-readDocument root (readPath arguments)
+  pure (either (Left . CommandRejected)
+    (Right . \(bytes,text)->readPage (readCorpus arguments) (readPath arguments) bytes text
+      (readStartLine arguments) (readLineCount arguments)) result)
+
+-- | Listing has the same registration lifetime as reading. The index retains
+-- its traversal and metadata budgets; a partial index is reported explicitly.
+listCommand :: CommandDef DocsContext ListArguments Value
+listCommand=CommandDef "hide.docs.list" "List documentation" listInput listOutput $ \resolve arguments->do
+  let corpus=listCorpus arguments
+      offset=listOffset arguments
+      limit=listLimit arguments
   root<-resolve corpus
-  result<-readDocument root path
-  pure (either (Left . CommandRejected) (Right . \(bytes,text)->readPage corpus path bytes text start count) result)
-
--- | Validated documentation path and one-based range, with explicit wire schema.
-readInput :: Codec ReadArguments
-readInput=Codec readSchema (either (Left . T.pack) Right . parseEither parseArguments) encodeArguments
+  (paths,indexTruncated)<-indexDocs root corpus
+  documents<-mapM (metadata root) (take limit (drop offset paths))
+  pure (Right (object ["corpus" .= corpus,"documents" .= documents,"offset" .= offset,
+    "indexedCount" .= length paths,"indexTruncated" .= indexTruncated,"hasMore" .= (offset+limit<length paths)]))
   where
-    parseArguments=withObject "documentation read" $ \o->do
-      corpus<-parseCorpus ["corpus","path","startLine","lineCount"] o
-      path<-o .: "path"
-      start<-o .:? "startLine" .!= 1
-      count<-o .:? "lineCount" .!= 200
-      checkedArguments corpus path start count
-    encodeArguments (ReadArguments corpus path start count)=object
-      ["corpus" .= corpus,"path" .= path,"startLine" .= start,"lineCount" .= count]
+    metadata root path=do
+      loaded<-readDocument root path
+      pure $ case loaded of
+        Left err -> object ["path" .= path,"error" .= T.take 1024 err]
+        Right (bytes,text) -> let marks=headings text in object ["path" .= path,"bytes" .= bytes,
+          "title" .= maybe (T.pack (takeFileName path)) headingText (case marks of mark:_->Just mark; _->Nothing),
+          "lineCount" .= length (docLines text),"headings" .= map headingValue (take 64 marks),"headingsTruncated" .= (length marks>64)]
 
--- | Construct the same checked arguments without passing through JSON.
-readArguments :: Text -> FilePath -> Int -> Int -> Either Text ReadArguments
-readArguments corpus path start count=either (Left . T.pack) Right
-  (parseEither (const (checkedArguments corpus path start count)) ())
-
-checkedArguments :: Text -> FilePath -> Int -> Int -> Parser ReadArguments
-checkedArguments corpus path start count=do
-  unless (corpus `elem` ["editor","thc"]) (fail "corpus must be editor or thc.")
-  validPath corpus path
-  unless (start>=1 && count>=1 && count<=500) (fail "Use startLine >= 1 and lineCount 1..500.")
-  pure (ReadArguments corpus path start count)
-
--- | Typed reply shared by native callers and the MCP adapter.
-readOutput :: Codec ReadPage
-readOutput=Codec schema (either (Left . T.pack) Right . parseEither parsePage) encodePage
-  where
-    schema=object ["type" .= ("object"::Text),"required" .= map fst fields,
-      "additionalProperties" .= False,"properties" .= Object (KM.fromList fields)]
-    fields=[("corpus",string),("path",string),("bytes",integer),("startLine",integer),
-      ("lineCount",integer),("totalLines",integer),("text",string),("truncated",boolean),
-      ("hasMore",boolean),("headings",object ["type" .= ("array"::Text),"items" .= object
-        ["type" .= ("object"::Text),"required" .= (["line","level","title"]::[Text]),
-         "properties" .= object ["line" .= integer,"level" .= integer,"title" .= string]]]),
-      ("headingsTruncated",boolean)]
-    integer=object ["type" .= ("integer"::Text)]
-    string=object ["type" .= ("string"::Text)]
-    boolean=object ["type" .= ("boolean"::Text)]
-    parsePage=withObject "documentation page" $ \o->ReadPage <$> o .: "corpus" <*> o .: "path" <*> o .: "bytes"
-      <*> o .: "startLine" <*> o .: "lineCount" <*> o .: "totalLines" <*> o .: "text"
-      <*> o .: "truncated" <*> o .: "hasMore" <*> (o .: "headings" >>= mapM (withObject "heading" $ \h->
-        Heading <$> h .: "line" <*> h .: "level" <*> h .: "title")) <*> o .: "headingsTruncated"
-    encodePage page=object ["corpus" .= pageCorpus page,"path" .= pagePath page,"bytes" .= pageBytes page,
-      "startLine" .= pageStart page,"lineCount" .= pageCount page,"totalLines" .= pageTotal page,"text" .= pageText page,
-      "truncated" .= pageTruncated page,"hasMore" .= pageHasMore page,
-      "headings" .= map headingValue (pageHeadings page),"headingsTruncated" .= pageHeadingsTruncated page]
-
-data Request = ListDocs Int Int | SearchDocs Text (Maybe FilePath) Int Int Bool
-
--- | Listing and search retain their bounded implementation while read goes
--- through the typed registry. Perform all resolution and IO outside UI locks.
-prepareDocs :: DocsContext -> Text -> Value -> IO (Either Text Value)
-prepareDocs resolve name arguments=case parseEither (parseRequest name) arguments of
-  Left err -> pure (Left (T.pack err))
-  Right (corpus,request) -> do
-    result<-tryIOError (execute resolve corpus request)
-    pure (either (Left . T.pack . show) id result)
-
-parseCorpus :: [Key] -> Object -> Parser Text
-parseCorpus allowed o=do
-  unless (all (`elem` allowed) (KM.keys o)) (fail "Unknown documentation argument.")
-  corpus<-o .:? "corpus" .!= "editor"
-  unless (corpus `elem` ["editor","thc"]) (fail "corpus must be editor or thc.")
-  pure corpus
-
-parseRequest :: Text -> Value -> Parser (Text,Request)
-parseRequest name=withObject "documentation arguments" $ \o->do
-  let allowed=case name of
-        "docs_list" -> ["corpus","offset","limit"]
-        _ -> ["corpus","query","path","offset","limit","caseSensitive"]
-  unless (name `elem` ["docs_list","docs_search"]) (fail "Unknown documentation tool.")
-  corpus<-parseCorpus allowed o
-  request<-case name of
-    "docs_list" -> do
-      offset<-o .:? "offset" .!= 0
-      limit<-o .:? "limit" .!= 50
-      page offset limit
-      pure (ListDocs offset limit)
-    _ -> do
-      query<-o .: "query"
-      unless (not (T.null query) && T.length query<=256 && not (T.any (`elem` ['\0','\r','\n']) query)) (fail "query must be 1..256 characters on one line.")
-      path<-o .:? "path"
-      mapM_ (validPath corpus) path
-      offset<-o .:? "offset" .!= 0
-      limit<-o .:? "limit" .!= 20
-      page offset limit
-      SearchDocs query path offset limit <$> o .:? "caseSensitive" .!= False
-  pure (corpus,request)
-  where
-    page offset limit=unless (offset>=0 && offset<=10000 && limit>=1 && limit<=100)
-      (fail "Use offset 0..10000 and limit 1..100.")
-
-validPath :: Text -> FilePath -> Parser ()
-validPath corpus path=unless (safeRelative path && allowedPath corpus path) (fail "Use a listed documentation path without traversal, absolute paths, or backslashes.")
-
-safeRelative :: FilePath -> Bool
-safeRelative path=not (null path) && length path<=4096 && not (isAbsolute path) &&
-  not (any (`elem` ['\0','\\',':']) path) && all (`notElem` ["",".",".."]) (T.splitOn "/" (T.pack path))
-
-allowedPath :: Text -> FilePath -> Bool
-allowedPath corpus path=path=="README.md" || documentation "docs/" ||
-  (corpus=="thc" && (path=="compiler/README.md" || documentation "compiler/docs/"))
-  where documentation prefix=prefix `T.isPrefixOf` T.pack path && takeExtension path `elem` [".md",".txt",".rst"]
+-- | Literal search with bounded files, bytes and returned matches. Retiring the
+-- registration rejects a queued request before resolving or reading a corpus.
+searchCommand :: CommandDef DocsContext SearchArguments Value
+searchCommand=CommandDef "hide.docs.search" "Search documentation" searchInput searchOutput $ \resolve arguments->do
+  let corpus=searchCorpus arguments
+      query=searchQuery arguments
+      offset=searchOffset arguments
+      limit=searchLimit arguments
+  root<-resolve corpus
+  (paths,indexTruncated)<-maybe (indexDocs root corpus) (\path->pure ([path],False)) (searchPath arguments)
+  (found,scanned,skipped,cut)<-searchFiles root query (searchCaseSensitive arguments) (offset+limit+1)
+    (take 256 paths) (16*maxFileBytes) [] 0 0
+  pure (Right (object ["corpus" .= corpus,"query" .= query,"matches" .= take limit (drop offset found),"offset" .= offset,
+    "hasMore" .= (length found>offset+limit),"scannedFiles" .= scanned,"skippedFiles" .= skipped,
+    "searchTruncated" .= (indexTruncated || length paths>256 || cut)]))
 
 insideRoot :: FilePath -> FilePath -> Bool
 insideRoot root path=let relative=makeRelative root path in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
@@ -237,36 +137,12 @@ indexDocs root corpus=do
           pure (Left [path++"/"++name | name<-take (budget-1) names],length names>=budget)
         else do
           exists<-doesFileExist absolute
-          pure (Right (exists && allowedPath corpus path),False)
+          pure (Right (exists && either (const False) (const True) (readArguments corpus path 1 1)),False)
       case checked of
         Left _ -> walk (budget-1) found truncated rest
         Right (Right eligible,_) -> walk (budget-1) ([path | eligible]++found) truncated rest
         Right (Left children,cut) | depth>=16 -> walk (budget-1) found (truncated || not (null children)) rest
                                   | otherwise -> walk (budget-1) found (truncated || cut) ([(child,depth+1) | child<-children]++rest)
-
-execute :: DocsContext -> Text -> Request -> IO (Either Text Value)
-execute resolve corpus request=do
-  root<-resolve corpus
-  case request of
-    ListDocs offset limit -> do
-      (paths,indexTruncated)<-indexDocs root corpus
-      documents<-mapM (metadata root) (take limit (drop offset paths))
-      pure (Right (object ["corpus" .= corpus,"documents" .= documents,"offset" .= offset,
-        "indexedCount" .= length paths,"indexTruncated" .= indexTruncated,"hasMore" .= (offset+limit<length paths)]))
-    SearchDocs query selected offset limit caseSensitive -> do
-      (paths,indexTruncated)<-maybe (indexDocs root corpus) (\path->pure ([path],False)) selected
-      (found,scanned,skipped,cut)<-searchFiles root query caseSensitive (offset+limit+1) (take 256 paths) (16*maxFileBytes) [] 0 0
-      pure (Right (object ["corpus" .= corpus,"query" .= query,"matches" .= take limit (drop offset found),"offset" .= offset,
-        "hasMore" .= (length found>offset+limit),"scannedFiles" .= scanned,"skippedFiles" .= skipped,
-        "searchTruncated" .= (indexTruncated || length paths>256 || cut)]))
-  where
-    metadata root path=do
-      loaded<-readDocument root path
-      pure $ case loaded of
-        Left err -> object ["path" .= path,"error" .= T.take 1024 err]
-        Right (bytes,text) -> let marks=headings text in object ["path" .= path,"bytes" .= bytes,
-          "title" .= maybe (T.pack (takeFileName path)) headingText (case marks of mark:_->Just mark; _->Nothing),
-          "lineCount" .= length (docLines text),"headings" .= map headingValue (take 64 marks),"headingsTruncated" .= (length marks>64)]
 
 readPage :: Text -> FilePath -> Int -> Text -> Int -> Int -> ReadPage
 readPage corpus path bytes text start count=ReadPage corpus path bytes start
@@ -283,7 +159,6 @@ readPage corpus path bytes text start count=ReadPage corpus path bytes start
 docLines :: Text -> [Text]
 docLines text=if T.null text then [] else T.splitOn "\n" text
 
-data Heading = Heading { headingLine :: Int, headingLevel :: Int, headingText :: Text }
 headingValue :: Heading -> Value
 headingValue mark=object ["line" .= headingLine mark,"level" .= headingLevel mark,"title" .= headingText mark]
 

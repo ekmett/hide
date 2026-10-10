@@ -26,7 +26,7 @@ import qualified Hide.Consoles as C
 import Hide.Conversation (withConversationAt, conversationEffects, tickConversation, renderReply)
 import Hide.Debugger (withDebugger, debuggerEffects, tickDebugger, hdbOfferDialog, debuggerTool)
 import Hide.DebuggerSidebar (withDebuggerSidebar,tickDebuggerSidebar)
-import Hide.DocsMCP (withDocsCommands)
+import Hide.DocumentationHost (withDocsCommands)
 import Hide.MenuCommands (withMenuCommands,menuEffects,tickMenus,menuContributions,menuAgentReferences)
 import Hide.Sidebar (emptySidebar,treeRows,treeScroll,treeWidth,rowInfo,rowHit,rowDepth,rowExpanded,rowAt,treeSelected)
 import Hide.PackageSidebar (withPackageSidebar,tickPackageSidebar)

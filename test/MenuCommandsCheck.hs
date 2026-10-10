@@ -15,7 +15,7 @@ import Hide.Commands (configuredBindings, contributedBindingCommands)
 import qualified Hide.Bindings as Bindings
 import qualified Data.Map.Strict as M
 import Hide.Buffer (contents)
-import Hide.DocsMCP
+import Hide.DocumentationHost
 import System.FilePath ((</>))
 import System.IO (openTempFile,hClose)
 import qualified Data.Text.IO as TIO

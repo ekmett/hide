@@ -163,9 +163,12 @@ automatically expose an MCP tool.
 
 `hide.docs.read` in `Hide.Documentation` is a small working example. Its context only
 resolves a documentation corpus root; it neither imports nor receives `Desktop`.
-`Hide.DocsMCP` owns the session registration and adapts the explicit `docs_read`
-tool to it, retaining permission checks and deferred filesystem work. Listing and
-search are not yet registered commands.
+`Hide.DocumentationHost` scopes read, list and search registrations together.
+`Hide.Plugin.Documentation` supplies checked requests, codecs and the public
+`DocsServices` capability. `Hide.DocsTools` in the linked agent plugin exposes
+those operations through the same permission wrapper. Help calls the same read
+registration; filesystem discovery and bounded reads stay on the invoking worker.
+Deferred calls after session retirement fail before resolving a corpus.
 
 ## Plugin tool exposure
 
@@ -190,11 +193,19 @@ before reservation, and the Hub rechecks caller liveness on each operation.
 Ancestry, limits, provider lifetime, worktree isolation and task tickets remain
 Hub-owned. These tools receive no human approval or settings capability.
 
+Plugin declarations distinguish `EditorTool` from `CoordinationTool`, including
+their service context. Editor tools receive `EditorServices`; coordination tools
+receive an authenticated `AgentServices`. Anonymous editor connections cannot
+manufacture an agent context, and child coordination connections do not acquire
+editor tools. The host checks name collisions across both sets. The docs plugin
+uses `mapToolContext editorDocumentation` to select its narrow capability;
+context mapping preserves schemas, command identity and retirement behavior.
+
 The executable's plugin list determines discovery and permission registration.
-The primary route exposes editor tools plus these declarations; a child's
-coordination route exposes only these declarations. Autocomplete keeps its
-separate restricted route. Conversation presentation and the broader editor-tool
-surface remain in the editor.
+The primary route exposes editor and coordination tools; a child's coordination
+route exposes only coordination tools. Autocomplete keeps its separate restricted
+route. Primary conversation presentation and the remaining editor tools still
+use host types.
 
 ## Immutable plugin buffer reads
 

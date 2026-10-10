@@ -26,7 +26,7 @@ import Hide.Commands (configuredBindings)
 import Hide.Debugger (withDebugger,debuggerEffects,debuggerTool)
 import Hide.DebuggerSidebarTypes
 import Hide.Plugin.BufferHost (captureVersion)
-import Hide.DocsMCP
+import Hide.DocumentationHost
 import Hide.Files (FileState(..))
 import Hide.GuestAccess (beginGuestInput,validateGuestEffects)
 import Hide.MenuCommands

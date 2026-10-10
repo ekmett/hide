@@ -26,7 +26,7 @@ import System.IO.Unsafe (unsafePerformIO)
 import Hide.App (applyEffects)
 import Hide.Buffer (newBuffer,contents,contentSlice,contentLength,undo,redo,Selection(..))
 import Hide.Commands (configuredBindings,contributedBindingCommands)
-import Hide.DocsMCP
+import Hide.DocumentationHost
 import Hide.GuestAccess (guestKeyboardAllowed,pointerAllowedAt,readableAt,protectedBuffer)
 import Hide.Debugger (withDebugger,withDownloadsCommands)
 import Hide.MenuCommands

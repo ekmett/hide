@@ -11,7 +11,7 @@
 -- exact invocation identity and retirement; this adapter adds wire metadata and
 -- bounded arguments/results. Permission decisions remain in the host.
 module Hide.Plugin.Tool
-  ( Tool(..), Tools, withTools, toolDefinitions, hasTool, callTool ) where
+  ( Tool(..), mapToolContext, Tools, withTools, toolDefinitions, hasTool, callTool ) where
 
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
@@ -37,6 +37,19 @@ import Hide.Plugin.Command
 -- transport. The host supplies the context after policy admission; arguments
 -- cannot supply or replace it.
 data Tool c = forall a b. Tool Text Bool (CommandDef c a b)
+
+-- | Project a host-granted context without changing tool names, schemas,
+-- exposure or registration lifetime. The projection runs only when the command
+-- handler executes; metadata discovery never evaluates it.
+--
+-- @mapToolContext id tool = tool@
+--
+-- @mapToolContext f (mapToolContext g tool) = mapToolContext (g . f) tool@
+mapToolContext :: (d -> c) -> Tool c -> Tool d
+mapToolContext project (Tool name readonly definition)=Tool name readonly
+  (CommandDef (commandName definition) (commandTitle definition)
+    (commandInput definition) (commandOutput definition)
+    (\context->commandRun definition (project context)))
 
 data Tools c = Tools !(Registry c) !(M.Map Text (Value,CommandRef))
 

@@ -28,7 +28,7 @@ import Hide.Plugin.Command (withRegistry)
 import qualified Hide.Plugin.Tree as P
 import Data.List (isPrefixOf)
 import Hide.MenuCommands
-import Hide.DocsMCP (withDocsCommands)
+import Hide.DocumentationHost (withDocsCommands)
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Window as W
 import Hide.Downloads

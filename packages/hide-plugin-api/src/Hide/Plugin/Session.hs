@@ -13,6 +13,7 @@
 module Hide.Plugin.Session
   ( Plugin(..)
   , Session(..)
+  , PluginTool(..)
   , withPlugins
   ) where
 
@@ -20,6 +21,7 @@ import Hide.Plugin.AgentDirectory (AgentDirectory,DirectoryRequest)
 import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
 import Hide.Plugin.Tool (Tool)
+import Hide.Plugin.Services (EditorServices)
 import Hide.Plugin.Transcript (HistoryPresenter)
 
 -- | Capabilities for the concrete first-party directory workflow. Providers and
@@ -31,17 +33,25 @@ data Session c r settings completion = Session
   , sessionAgentReply :: DirectoryRequest settings completion -> r
   }
 
+-- | Endpoint visibility carries its actual service context. Editor tools are
+-- available on anonymous and primary editor connections; coordination tools
+-- require the host-attributed actor and are available to primary/child agents.
+-- Visibility never replaces permission or caller checks.
+data PluginTool
+  = EditorTool (Tool EditorServices)
+  | CoordinationTool (Tool AgentServices)
+
 -- | Scope registrations and workers around the supplied session action.
 -- Activation runs before the event loop, never beneath its desktop lock.
 -- Teardown must cancel/join owned workers and retire registrations, on success
 -- or exception; it must not stop session-owned agents or other shared services.
 -- Plugins publish prepared results through host queues instead of UI callbacks.
--- Agent tools are declared explicitly; the host registers their policies and
+-- Tools are declared explicitly; the host registers their policies and
 -- supplies actor-bound services only after caller and permission admission.
 data Plugin = Plugin
   { withPlugin :: forall c r settings completion a. Eq completion =>
       Session c r settings completion -> IO a -> IO a
-  , pluginAgentTools :: [Tool AgentServices]
+  , pluginTools :: [PluginTool]
   , pluginAgentHistory :: Maybe HistoryPresenter
     -- ^ Pure presentation selected at startup and evaluated only on the host
     -- preparation/checkpoint workers. This contribution owns no input lifetime.

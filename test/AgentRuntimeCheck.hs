@@ -28,7 +28,7 @@ import Hide.AgentRuntime
 import Hide.Session
 
 checks :: IO ()
-checks = Tool.withTools [] (Plugin.pluginAgentTools Hide.AgentUI.plugin) $ \tools -> bracket temporary removePathForcibly $ \root -> do
+checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTools Hide.AgentUI.plugin] $ \tools -> bracket temporary removePathForcibly $ \root -> do
   let config = root </> "config"
       project = root </> "project"
       policy = config </> "thc" </> "config.toml"

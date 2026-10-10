@@ -16,7 +16,8 @@ import Hide.SessionSidebar
 import Hide.SidebarCommands
 import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
-import Hide.DocsMCP
+import Hide.DocumentationHost
+import qualified Hide.Plugin.Services as PluginServices
 import Hide.GuestAccess (validateGuestEffects)
 import Hide.Autocomplete
 import qualified Hide.AutocompleteACP as CompletionACP
@@ -294,10 +295,14 @@ runEditor plugins args = do
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
-          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          PluginTool.withTools [name | spec<-specs,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]] (concatMap Plugin.pluginAgentTools plugins) $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
+          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++[screenTool]
+          let names definitions=[name | spec<-definitions,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]]
+              declarations=concatMap Plugin.pluginTools plugins
+          PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
+            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let agentTools=PluginTool.toolDefinitions agentToolset
+                editorSpecs=specs++PluginTool.toolDefinitions editorToolset
                 liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
             let liveDesktop=liveBase {keyBindings=keymap}
@@ -324,6 +329,10 @@ runEditor plugins args = do
                     adoptConversationBodies conversation completed prepared
                   tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
                   inspectTool d name parameters
+                    | PluginTool.hasTool editorToolset name = do
+                        context<-captureDocsContext d
+                        pure (d,PluginTool.callTool editorToolset
+                          (PluginServices.EditorServices (docsServices docsCommands context)) name parameters)
                     | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
                     | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
@@ -334,7 +343,6 @@ runEditor plugins args = do
                     | name `elem` runtimeToolNames = runtimeTool services d name parameters
                     | name `elem` gitToolNames = gitTool gitOperations d name parameters
                     | name=="clipboard_write" = clipboardTool d parameters
-                    | name `elem` docsToolNames = docsTool docsCommands d name parameters
                     | name `elem` environmentToolNames = pure (d,environmentTool (startingDirectory d) name parameters)
                     | name `elem` controlToolNames = controlTool guestCore d name parameters
                     | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
@@ -359,7 +367,7 @@ runEditor plugins args = do
                           Nothing->pure (Right ())
                           Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
                     response<-case token of
-                      Nothing -> editorResponseWith specs (permitted inspectTool) d request
+                      Nothing -> editorResponseWith editorSpecs (permitted inspectTool) d request
                       Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
                       Just secret -> do
                         bound<-resolveAgentAccess (AR.agentAccess agents) secret
@@ -379,7 +387,7 @@ runEditor plugins args = do
                                       | otherwise = inspectTool current name parameters
                                     -- Worktree agents reach this endpoint only for
                                     -- coordination. Their editor tools use their own session.
-                                    visible=if ident==AR.primaryAgent agents then specs++agentTools else agentTools
+                                    visible=if ident==AR.primaryAgent agents then editorSpecs++agentTools else agentTools
                                 editorResponseOnly visible (permitted dispatch) d request
                     let (updated,finish)=response
                     quit<-readIORef exiting

@@ -47,7 +47,7 @@ library
     other-modules: Hide.BrowserServer
     build-depends: wai, warp, wai-websockets, websockets >=0.13, http-types
   cpp-options: -DWITH_REMOTE
-  exposed-modules: Hide.Links, Hide.Environment, Hide.GuestAccess, Hide.Privacy, Hide.ClipboardMCP, Hide.DocsMCP, Hide.MenuCommands, Hide.Defaults, Hide.ControlMCP, Hide.MCPPermissions, Hide.RemoteEndpoint, Hide.EditorMCP, Hide.WorkspaceFilesMCP, Hide.TestsMCP, Hide.HistoryMCP, Hide.RuntimeMCP, Hide.ScreenCapture, Hide.WorkspaceMCP, Hide.Session, Hide.Recovery, Hide.Font, Hide.RemoteTerminal
+  exposed-modules: Hide.Links, Hide.Environment, Hide.GuestAccess, Hide.Privacy, Hide.ClipboardMCP, Hide.DocumentationHost, Hide.MenuCommands, Hide.Defaults, Hide.ControlMCP, Hide.MCPPermissions, Hide.RemoteEndpoint, Hide.EditorMCP, Hide.WorkspaceFilesMCP, Hide.TestsMCP, Hide.HistoryMCP, Hide.RuntimeMCP, Hide.ScreenCapture, Hide.WorkspaceMCP, Hide.Session, Hide.Recovery, Hide.Font, Hide.RemoteTerminal
   build-depends: zlib
   if os(windows)
     build-depends: Win32

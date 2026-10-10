@@ -29,9 +29,9 @@ import System.FilePath (takeDirectory)
 import Hide.DebuggerSidebarTypes
 import Hide.DownloadsWindowTypes
 import qualified Hide.Plugin.Tree as Tree
-import Hide.DocsMCP (DocsCommands, readDocs)
+import Hide.DocumentationHost (DocsCommands, readDocs)
 import qualified Hide.LSP as L
-import Hide.Documentation
+import Hide.Plugin.Documentation
 import Hide.Links (LinkResult, applyLink, prepareMarkdown)
 import Hide.BufferView (BufferView(..))
 import qualified Hide.Plugin.EditorHost as Editor
