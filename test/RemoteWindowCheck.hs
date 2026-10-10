@@ -75,6 +75,17 @@ checks = do
     (maybe False (\scene'->canvasMask scene'==mask && map canvasWindow (canvasSurfaces scene')==[91]) (canvasOf validScene))
   check "canvas semantics omit opaque resource IDs and wholly covered surfaces"
     (maybe False (\scene'->not (TE.encodeUtf8 resource `BS.isInfixOf` canvasAccessibility scene') && TE.encodeUtf8 "safe λ <script>.png" `BS.isInfixOf` canvasAccessibility scene') (canvasOf validScene))
+  let controls anchor=object ["id" .= (91::Int),"view" .= ("7"::T.Text),"resource" .= resource,"anchor" .= (anchor::[Int])]
+      controlled anchor=case surface 1 [0,0,2,2] of
+        Object fields->Object (KM.insert "controls" (controls anchor) fields)
+        _->error "surface must be an object"
+  check "image controls retain their receipt only for their own visible stencil cell"
+    (case canvasOf (scene [controlled [0,0]] mask) of
+      Just value->TE.encodeUtf8 resource `BS.isInfixOf` canvasAccessibility value && "\"view\":\"7\"" `BS.isInfixOf` canvasAccessibility value
+      _->False)
+  check "image controls cannot claim covered or foreign cells"
+    (all (either (const True) (const False) . frame)
+      [scene [controlled [2,0]] mask,scene [controlled [0,0]] (BS.replicate (80*25*2) 0)])
   check "canvas empty scene shorthand clears ownership without a zero grid"
     (maybe False (\scene'->BS.null (canvasMask scene') && null (canvasSurfaces scene')) (canvasOf (scene [] BS.empty)) &&
      either (const True) (const False) (frame (scene [surface 1 [0,0,2,2]] BS.empty)))

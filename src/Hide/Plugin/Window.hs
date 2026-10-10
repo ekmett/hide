@@ -16,7 +16,7 @@
 -- saved baseline, Undo history or editable source document.
 module Hide.Plugin.Window
   ( WindowRef, WindowScope, WindowUpdate, withWindowScope, openWindow, refreshWindow
-  , updateWindowRef, admitWindowUpdate, windowRefCurrent, windowScopeCurrent, retireWindowRef
+  , windowRefIdentity, updateWindowRef, admitWindowUpdate, windowRefCurrent, windowScopeCurrent, retireWindowRef
   , EditorWindowUpdate, openEditorWindow, editorWindowBody, editorWindowEditor, admitEditorWindowUpdate
   , PreparedWindow, prepareImageWindow, preparedWindowImage, retirePreparedImage, prepareTextWindow, prepareMarkdownWindow, prepareStyledTextWindow, prepareStyledRowsWindow, prepareSemanticTextWindow, prepareSemanticRowsWindow, prepareRecoverableTextWindow
   , WindowDisclosure(..), TextCopy(..), MessageAttribution(..), TextSemantics(..), preparedWindowSemantics, preparedWindowDisclosure, preparedWindowMessages, copyPreparedSelection
@@ -52,6 +52,11 @@ instance Ord WindowRef where
   compare (WindowRef a _ _ _) (WindowRef b _ _ _)=compare a b
 instance Show WindowRef where
   show (WindowRef ident _ _ _)="WindowRef "++show (hashUnique ident)
+
+-- | /O(1)/. Public instance receipt, never a credential or permission grant.
+-- Closing/reopening a view allocates a fresh identity even with the same pixels.
+windowRefIdentity :: WindowRef -> Text
+windowRefIdentity (WindowRef ident _ _ _)=T.pack (show (hashUnique ident))
 
 -- | Fully prepared immutable text and styled display rows. Equality observes
 -- the unique prepared identity only, never text or styled payloads.

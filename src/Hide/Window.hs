@@ -31,7 +31,9 @@ import qualified Hide.Plugin.Menu as PluginMenu
 import Data.List (elemIndex)
 import Data.IORef
 import qualified Data.Map.Strict as M
-import Data.Aeson (object,(.=),encode)
+import qualified Data.IntMap.Strict as IM
+import Data.Aeson (object,(.=),encode,eitherDecodeStrict')
+import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as BL
 import qualified Hide.Plugin.Canvas as Canvas
 import Hide.RemoteEndpoint (randomIdentity)
@@ -252,14 +254,10 @@ updateNativeCanvas (NativeCanvasOwner epoch ref) modal size scene=do
   installNativeCanvas epoch size (Canvas.canvasMask scene)
     [(Canvas.imageResourceId (Canvas.canvasImage entry),Canvas.canvasSlot entry,Canvas.canvasRect entry,Canvas.canvasTarget entry) | entry<-Canvas.canvasSurfaces scene]
   unless modal $ do
-    let (columns,rows)=size
-        scan !index !found
-          | index==columns*rows=found
-          | otherwise=let slot=Canvas.canvasOwnerAt scene index .&. 32767
-                      in scan (index+1) (if slot==0 then found else found Bits..|. Bits.bit (slot-1))
-        visible=if null (Canvas.canvasSurfaces scene) then 0 else scan 0 (0::Word64)
-        imagesAX=[object ["id" .= Canvas.canvasId entry,"name" .= Canvas.canvasName entry,"description" .= Canvas.canvasDescription entry,"bounds" .= Canvas.canvasRect entry]
-          | entry<-Canvas.canvasSurfaces scene,Bits.testBit visible (Canvas.canvasSlot entry-1)]
+    let visible=Canvas.canvasVisibleCells scene (fst size)
+        imagesAX=[object ["id" .= Canvas.canvasId entry,"name" .= Canvas.canvasName entry,"description" .= Canvas.canvasDescription entry,"bounds" .= Canvas.canvasRect entry,
+                   "controls" .= Canvas.canvasControls visible entry]
+          | entry<-Canvas.canvasSurfaces scene,IM.member (Canvas.canvasSlot entry) visible]
         bytes=BL.toStrict (encode (object ["images" .= imagesAX,"size" .= size]))
     BS.useAsCStringLen bytes $ \(ptr,len)->check "Update local image accessibility" (c_accessibility ptr (fromIntegral len))
 
@@ -434,6 +432,11 @@ runWindow backend scale effects tick initial = do
       | otherwise = case decodeKey key mods of
           Nothing -> pure (d,[])
           Just ev -> dispatchKey ev d
+    dispatch (18:_) d = do
+      bytes<-c_text >>= BS.packCString
+      pure $ case if BS.length bytes<=1024 then eitherDecodeStrict' bytes >>= parseEither Canvas.parseImageActionPacket else Left "Oversized image action" of
+        Right (target,action)->(applyImageAction target action d,[])
+        Left _->(d,[])
     dispatch (14:_) d = do
       path <- c_text >>= BS.packCString
       pure (d,[OpenFile PluginMenu.HumanMenu (T.unpack (TE.decodeUtf8 path))])

@@ -41,7 +41,7 @@ import Hide.Commands (commandIdentifier)
 import Hide.Unicode (Script(..), CellSpan(..), clusterWidth)
 
 data WebInput = Key T.Text [V.Modifier] | Paste T.Text | PasteReply T.Text T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
-              | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
+              | ImageControlAction ImageControl ImageAction | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 -- | The gesture receipt belongs to the prepared offer, not the later send frame.
 fileExportHeader :: FileExport -> Value
@@ -85,6 +85,7 @@ parseInput = withObject "browser event" $ \o -> do
           unless (not (T.null name) && T.length name<=128 && T.all (>= ' ') name && value>0 && toInteger value<=9007199254740991 &&
             T.length registry==48 && T.all (`elem` ("0123456789abcdef"::String)) registry) (fail "Invalid contributed menu lifetime")
           pure (ContributedMenu name registry (toInteger value))
+    "canvas-action" -> uncurry ImageControlAction <$> parseImageActionPacket (Object o)
     "focus-window" -> do
       ident<-o .: "id"
       unless (ident>0 && ident<=2147483647) (fail "Invalid window identity")
@@ -168,6 +169,7 @@ applyGuestInput input d
 applyInputUnchecked :: WebInput -> Desktop -> (Desktop,[Effect])
 applyInputUnchecked input d = case input of
   SuspendSession -> (d,[]) -- The session owner checkpoints and stops, not the UI model.
+  ImageControlAction target action -> (applyImageAction target action d,[])
   FocusWindow ident -> (activateEditorWindow ident d,[])
   SystemTheme value -> (d {systemDark=value},[])
   BrowserCommand cmd | dialogCommandAllowed cmd d ->
@@ -287,13 +289,15 @@ data CanvasSender = CanvasSender !T.Text !(M.Map T.Text Int)
 canvasReset :: T.Text -> Value
 canvasReset epoch=object ["type" .= ("canvas-reset"::T.Text),"epoch" .= epoch]
 
-canvasMetadata :: T.Text -> CanvasScene -> Pair
-canvasMetadata epoch scene="canvas" .= object
+canvasMetadata :: T.Text -> Int -> CanvasScene -> Pair
+canvasMetadata epoch columns scene="canvas" .= object
   ["epoch" .= epoch,"mask" .= TE.decodeUtf8 (B64.encode (canvasMask scene)),
    "surfaces" .= [object ["id" .= canvasId surface,"slot" .= canvasSlot surface,
      "resource" .= imageResourceId (canvasImage surface),"rect" .= canvasRect surface,
-     "target" .= canvasTarget surface,"name" .= canvasName surface,"description" .= canvasDescription surface]
+     "target" .= canvasTarget surface,"name" .= canvasName surface,"description" .= canvasDescription surface,
+     "controls" .= canvasControls visible surface]
      | surface<-canvasSurfaces scene]]
+  where visible=canvasVisibleCells scene columns
 
 -- | Send at most one 256 KiB chunk after the current interactive frame. Release
 -- obsolete resources first; a late chunk cannot survive removal from this scene.

@@ -98,7 +98,7 @@ runWeb scale effects tick initial = do
             (freshRows,freshScene)=frameRowsAndCanvas current
             scene=case previous of Just (_,_,_,_,cached) | sameFrame->cached; _->freshScene
             rows=if sameFrame then oldRows else freshRows
-            metadata=if sameFrame then oldMetadata else canvasMetadata canvasEpoch scene : frameMetadata cwd current
+            metadata=if sameFrame then oldMetadata else canvasMetadata canvasEpoch (fst (screenSize current)) scene : frameMetadata cwd current
             reset=maybe True (\(_,old,_,_,_)->old/=resetKey) previous
         when (reset || (not sameFrame && (rows/=oldRows || metadata/=oldMetadata))) $
           WS.sendBinaryData conn (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMetadata) metadata))

@@ -111,7 +111,9 @@ Linked Markdown and transferred images/PDFs are limited to 8 MiB each.
 Open an image from Files, the file dialog or the command line, or drop it into
 the editor. PNG and JPEG files open in an image window, fitted to its size.
 JPEGs follow their EXIF orientation. Press **F** to fit again, **1** for actual
-size, or **+** / **−** to zoom. The wheel zooms; arrow keys and dragging pan. Resize or tile it like a source window.
+size, or **+** / **−** to zoom. Screen readers in the browser and on macOS expose
+**Fit Image**, **Actual Size**, **Zoom In** and **Zoom Out** on the image. The
+wheel zooms; arrow keys and dragging pan. Resize or tile it like a source window.
 
 Metal, Vulkan and browser frontends keep the image crisp over the optional CRT
 filter. Other windows, menus and dialogs cover it normally. In a text terminal,

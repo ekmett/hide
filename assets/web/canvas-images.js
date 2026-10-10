@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Immutable RGBA resources and the complete, policy-filtered character-grid scene.
 class CanvasImages {
- constructor(gl,access){
-  this.gl=gl;this.access=access;this.epoch=null;this.resources=new Map();
+ constructor(gl,access,send){
+  this.gl=gl;this.access=access;this.send=send;this.epoch=null;this.resources=new Map();this.nodes=new Map();
   this.upload=null;this.chunk=null;this.bytes=0;this.scene=null;this.gpu=null;
  }
  clear(){
   for(const resource of this.resources.values())if(resource.texture)this.gl.deleteTexture(resource.texture);
   this.resources.clear();this.upload=this.chunk=this.scene=null;this.epoch=null;this.bytes=0;
-  this.access.replaceChildren();this.access.hidden=true;
+  this.nodes.clear();this.access.replaceChildren();this.access.hidden=true;
  }
  control(message){
   const integer=n=>Number.isSafeInteger(n)&&n>=0,id=n=>typeof n==='string'&&/^[0-9a-f]{48}$/.test(n);
@@ -57,6 +57,11 @@ class CanvasImages {
      !Array.isArray(surface.target)||surface.target.length!==4||!surface.target.every(n=>Number.isFinite(n)&&Math.abs(n)<=1000000)||surface.target[2]<=0||surface.target[3]<=0||
      typeof surface.name!=='string'||Array.from(surface.name).length>256||typeof surface.description!=='string'||Array.from(surface.description).length>1024)invalid();
    slots.add(surface.slot);ids.add(surface.id);
+   const controls=surface.controls;
+   if(controls!=null&&(!controls||typeof controls!=='object'||Array.isArray(controls)||controls.id!==surface.id||controls.resource!==surface.resource||
+     typeof controls.view!=='string'||!/^[1-9][0-9]{0,19}$/.test(controls.view)||
+     !Array.isArray(controls.anchor)||controls.anchor.length!==2||!controls.anchor.every(Number.isInteger)||
+     controls.anchor[0]<0||controls.anchor[0]>=cols||controls.anchor[1]<0||controls.anchor[1]>=lines))invalid();
   }
   const mask=new Uint32Array(cols*lines),visible=new Set();
   for(let i=0;i<mask.length;i++){
@@ -64,13 +69,42 @@ class CanvasImages {
    if(slot&&!slots.has(slot))invalid();
    mask[i]=cell;if(slot)visible.add(slot);
   }
+  for(const surface of value.surfaces)if(surface.controls!=null){
+   const [x,y]=surface.controls.anchor;if((mask[y*cols+x]&32767)!==surface.slot)invalid();
+  }
   this.scene={surfaces:value.surfaces,mask,visible,cols,lines};this.mask();this.describe();
  }
  describe(){
-  this.access.replaceChildren();
+  const retained=new Set();
   for(const surface of this.scene?.surfaces||[])if(this.scene.visible.has(surface.slot)){
-   const item=document.createElement('div');item.setAttribute('role','img');item.setAttribute('aria-label',surface.name);item.setAttribute('aria-description',surface.description);item.textContent=surface.name;this.access.append(item);
+   const controls=surface.controls,key=JSON.stringify([surface.id,controls?.view??null,surface.resource]);
+   retained.add(key);let entry=this.nodes.get(key);
+   if(!entry){
+    const item=document.createElement('div'),image=document.createElement('div'),buttons=[];
+    item.setAttribute('role','group');image.setAttribute('role','img');item.append(image);
+    if(controls)for(const [action,label] of [['fit','Fit Image'],['actual-size','Actual Size'],['zoom-in','Zoom In'],['zoom-out','Zoom Out']]){
+     const button=document.createElement('button');button.type='button';button.textContent=label;item.append(button);buttons.push([button,action]);
+    }
+    entry={item,image,buttons};this.nodes.set(key,entry);this.access.append(item);
+   }
+   entry.item.setAttribute('aria-label',surface.name);entry.image.setAttribute('aria-label',surface.name);entry.image.setAttribute('aria-description',surface.description);
+   if(entry.image.textContent!==surface.name)entry.image.textContent=surface.name;
+   if(controls){
+    const target={id:controls.id,view:controls.view,resource:controls.resource,anchor:[...controls.anchor]};
+    // Keep the buttons mounted across placement/name changes. Each new handler
+    // captures its own target, so an older callback cannot adopt a later anchor.
+    for(const [button,action] of entry.buttons)button.onclick=()=>{
+     if(this.nodes.get(key)!==entry||!this.access.contains(button))return;
+     for(let node=button;node;node=node.parentElement)if(node.hidden||node.getAttribute('aria-hidden')==='true')return;
+     const current=this.scene?.surfaces.find(value=>value.id===target.id),live=current?.controls;
+     if(!live||live.id!==target.id||live.view!==target.view||live.resource!==target.resource||
+       live.anchor[0]!==target.anchor[0]||live.anchor[1]!==target.anchor[1]||!this.scene.visible.has(current.slot)||
+       (this.scene.mask[target.anchor[1]*this.scene.cols+target.anchor[0]]&32767)!==current.slot)return;
+     this.send({type:'canvas-action',target,action});
+    };
+   }
   }
+  for(const [key,entry] of this.nodes)if(!retained.has(key)){entry.item.remove();this.nodes.delete(key);}
   this.access.hidden=!this.access.children.length;
  }
  texture(resource){

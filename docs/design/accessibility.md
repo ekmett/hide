@@ -1,9 +1,9 @@
 # Accessibility for the native and browser frontends
 
-Status: the visible sidebar, image descriptions, current modal dialogs and the
-focused ordinary source view have read-only projections for browser ARIA and
-macOS accessibility. `editor_screen` uses the same host projections with the
-agent privacy policy. These snapshots carry no input authority. The wider desktop
+Status: the visible sidebar, current modal dialogs and focused ordinary source
+view have read-only projections for browser ARIA and macOS accessibility. Image
+views also expose Fit Image, Actual Size, Zoom In and Zoom Out actions.
+`editor_screen` uses the same host projections with the agent privacy policy. These snapshots carry no input authority. The wider desktop
 bridge, offscreen text requests and Windows/Linux adapters remain proposed.
 
 `semanticSidebar` carries at most 256 viewport rows and 512 nodes, including
@@ -46,6 +46,14 @@ previous text. An explicit absent snapshot clears the source; ordinary frame
 deltas retain unchanged semantics. Owner displays obey Streamer Mode; agent
 captures always apply protected-buffer policy before reading a title or source
 text.
+
+Image controls carry the window instance, immutable image resource and a visible
+cell anchor from the same ownership mask used to draw it. Browser buttons and
+macOS custom actions retain reading focus across ordinary viewport updates. The
+host checks the exact target and current hit geometry when consuming the action;
+closed, replaced, covered or modal-blocked images cannot receive it. These four
+operations use the existing image viewport model. They grant no source editing
+or command execution, and agent input does not accept their packets.
 
 The [plugin design](haskell-plugins.md#semantic-tree-and-accessibility-transport)
 uses the same retained tree for standard widgets and canvas descriptions. Track

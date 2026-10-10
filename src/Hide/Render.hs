@@ -364,6 +364,8 @@ desktopCanvases d=zipWith surface [1..64] eligible
       (T.take 256 (PluginWindow.preparedWindowTitle prepared))
       (imageFormat image<>" "<>T.pack (show (imageWidth image))<>" × "<>T.pack (show (imageHeight image))<>
        ". F: fit; 1: actual size; plus/minus or wheel: zoom; arrows or drag: pan.")
+      (case windowContent w of PluginContent reference->PluginWindow.windowRefIdentity reference; _->"0")
+      (dialog d==Nothing && menu d==Nothing && contextMenu d==Nothing && drag d==Nothing)
 
 -- | Cursor from the same scene, without projecting its cell grid into an image.
 renderCursor :: Desktop -> V.Cursor

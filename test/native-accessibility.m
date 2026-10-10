@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 
 static NSDictionary *node(NSArray *ident,NSArray *parent,NSString *role,NSString *name,id rectangle,id expanded,int index,int level) {
     return @{@"id":ident,@"parent":parent ?: (id)NSNull.null,@"role":role,@"name":name,@"bounds":rectangle,
@@ -46,6 +47,19 @@ static id sourceExcerpt(NSWindow *window) {
 static unsigned hapticRequests;
 static void countHapticRequest(id receiver,SEL selector) { (void)receiver;(void)selector;++hapticRequests; }
 static void near(double x,double y) { if (fabs(x-y)>0.000001) { fprintf(stderr,"Expected %.6f, got %.6f\n",y,x); abort(); } }
+static NSDictionary *canvasActionReceipt(void) {
+    Uint64 deadline=SDL_GetTicks()+1000;
+    while (SDL_GetTicks()<deadline) {
+        int32_t event[6];assert(thc_wait(event));
+        if (event[0]==18) {
+            const char *json=thc_text();
+            NSDictionary *value=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:json length:strlen(json)] options:0 error:nil];
+            assert([value isKindOfClass:NSDictionary.class]);return value;
+        }
+    }
+    assert(!"Canvas action did not deliver its own SDL receipt");return nil;
+}
+static bool rejectCanvasActionPush(void *context,SDL_Event *event) { (void)context;return event->type<SDL_EVENT_USER; }
 int main(int argc,char **argv) {
  @autoreleasepool {
     assert(SDL_SetEnvironmentVariable(SDL_GetEnvironment(),"THC_EDIT_CAPTURE_EXIT","1",true));
@@ -138,6 +152,47 @@ int main(int argc,char **argv) {
     assert(!findRole(window,NSAccessibilityImageRole,[NSMutableSet new]) && !findRole(window,NSAccessibilityOutlineRole,[NSMutableSet new]));
     assert(publish(snapshot));assert(publish(canvas));
     id firstResponder=window.firstResponder;
+    NSDictionary *controls=@{@"id":@91,@"view":@"1",@"resource":[@"a" stringByPaddingToLength:48 withString:@"a" startingAtIndex:0],@"anchor":@[@1,@3]};
+    NSMutableDictionary *actionPicture=[picture mutableCopy];actionPicture[@"controls"]=controls;
+    NSDictionary *actionCanvas=@{@"size":@[@(cols),@(rows)],@"images":@[actionPicture]};
+    assert(publish(actionCanvas));id actionImage=findRole(window,NSAccessibilityImageRole,[NSMutableSet new]);assert(actionImage);
+    NSArray<NSAccessibilityCustomAction *> *actions=[actionImage accessibilityCustomActions];assert(actions.count==4);
+    NSArray *actionNames=@[@"fit",@"actual-size",@"zoom-in",@"zoom-out"],*actionLabels=@[@"Fit Image",@"Actual Size",@"Zoom In",@"Zoom Out"];
+    assert([actionImage isAccessibilitySelectorAllowed:@selector(setAccessibilityFocused:)]);
+    [actionImage setAccessibilityFocused:YES];assert([actionImage isAccessibilityFocused] && window.firstResponder==firstResponder);
+    for (NSUInteger i=0;i<actions.count;++i) {
+        assert([actions[i].name isEqual:actionLabels[i]] && actions[i].handler());
+        NSDictionary *reply=canvasActionReceipt();
+        assert(reply.count==3 && [reply[@"type"] isEqual:@"canvas-action"] && [reply[@"target"] isEqual:controls] && [reply[@"action"] isEqual:actionNames[i]]);
+    }
+    actionPicture[@"description"]=@"refreshed viewport description";
+    assert(publish(actionCanvas));assert(findRole(window,NSAccessibilityImageRole,[NSMutableSet new])==actionImage && [actionImage isAccessibilityFocused]);
+    assert([actionImage accessibilityCustomActions][0]==actions[0]);
+    NSMutableDictionary *nextControls=[controls mutableCopy];nextControls[@"view"]=@"2";actionPicture[@"controls"]=nextControls;
+    assert(publish(actionCanvas));assert(findRole(window,NSAccessibilityImageRole,[NSMutableSet new])==actionImage && [actionImage isAccessibilityFocused]);
+    assert(!actions[0].handler());
+    NSArray<NSAccessibilityCustomAction *> *nextActions=[actionImage accessibilityCustomActions];assert(nextActions.count==4 && nextActions[0].handler());
+    assert([canvasActionReceipt()[@"target"] isEqual:nextControls]);
+    actionPicture[@"controls"]=controls;assert(publish(actionCanvas));assert(!actions[0].handler()); // Returning fields cannot revive a retired action lifetime.
+    NSArray<NSAccessibilityCustomAction *> *currentActions=[actionImage accessibilityCustomActions];
+    NSView *canvasView=[actionImage accessibilityParent];canvasView.hidden=YES;assert(!currentActions[0].handler());canvasView.hidden=NO;
+    actionPicture[@"controls"]=NSNull.null;assert(publish(actionCanvas));assert(!currentActions[0].handler() && ![[actionImage accessibilityCustomActions] count]);
+    actionPicture[@"controls"]=controls;assert(publish(actionCanvas));assert(!currentActions[0].handler());
+    currentActions=[actionImage accessibilityCustomActions];
+    nextControls=[controls mutableCopy];nextControls[@"resource"]=[@"b" stringByPaddingToLength:48 withString:@"b" startingAtIndex:0];actionPicture[@"controls"]=nextControls;
+    assert(publish(actionCanvas));assert(findRole(window,NSAccessibilityImageRole,[NSMutableSet new])!=actionImage && ![actionImage isAccessibilityElement] && !currentActions[0].handler());
+    for (NSDictionary *invalidControls in @[@{ @"id":@92 },@{ @"view":@"0" },@{ @"view":@"01" },@{ @"resource":@"bad" },@{ @"anchor":@[@(cols),@3] }]) {
+        actionPicture[@"controls"]=controls;assert(publish(actionCanvas));id previous=findRole(window,NSAccessibilityImageRole,[NSMutableSet new]);
+        NSArray<NSAccessibilityCustomAction *> *previousActions=[previous accessibilityCustomActions];
+        NSMutableDictionary *invalid=[controls mutableCopy];[invalid addEntriesFromDictionary:invalidControls];actionPicture[@"controls"]=invalid;
+        assert(!publish(actionCanvas));assert(![previous isAccessibilityElement] && !previousActions[0].handler());
+    }
+    assert(!thc_post_canvas_action(NULL,1) && !thc_post_canvas_action("x",1025));
+    actionPicture[@"controls"]=controls;assert(publish(actionCanvas));
+    NSArray<NSAccessibilityCustomAction *> *failedPushActions=[findRole(window,NSAccessibilityImageRole,[NSMutableSet new]) accessibilityCustomActions];
+    SDL_EventFilter previousFilter;void *previousFilterContext;bool hadFilter=SDL_GetEventFilter(&previousFilter,&previousFilterContext);
+    SDL_SetEventFilter(rejectCanvasActionPush,NULL);assert(!failedPushActions[0].handler());SDL_SetEventFilter(hadFilter?previousFilter:NULL,hadFilter?previousFilterContext:NULL);
+    assert(publish(canvas));assert(!failedPushActions[0].handler());
     NSMutableDictionary *source=[@{@"present":@YES,@"readOnly":@YES,@"id":@[@"source",@"7",@"9007199254740992"],
         @"revision":@1,@"name":@"safe λ <script>.hs",@"bounds":@[@1,@3,@22,@1],@"firstLine":@4,@"firstColumn":@0,
         @"lineCount":@1,@"value":@"visible λ <script> text",@"truncated":@NO} mutableCopy];
@@ -220,7 +275,9 @@ int main(int argc,char **argv) {
     NSMutableDictionary *modal=[@{@"present":@YES,@"readOnly":@YES,@"truncated":@NO,
         @"nodes":@[modalRoot,input,tick,list,choice,radioGroup,radio,combo,popup,button,multiline,bodyText]} mutableCopy];
     NSDictionary *modalWrapper=@{@"size":@[@(cols),@(rows)],@"dialog":modal};
-    assert(publish(modalWrapper));
+    assert(publish(actionCanvas));
+    NSArray<NSAccessibilityCustomAction *> *coveredActions=[findRole(window,NSAccessibilityImageRole,[NSMutableSet new]) accessibilityCustomActions];assert(coveredActions.count==4);
+    assert(publish(modalWrapper));assert(!coveredActions[0].handler());
     assert(![coveredSource isAccessibilityElement] && ![coveredSource accessibilityValue] && ![coveredSource accessibilityParent]);
     id dialogHost=nil;for (NSView *view in window.contentView.subviews) if ([view isKindOfClass:NSClassFromString(@"HideAXDialog")]) dialogHost=view;
     assert(dialogHost && [[dialogHost accessibilitySubrole] isEqual:NSAccessibilityDialogSubrole]);
@@ -307,9 +364,11 @@ int main(int argc,char **argv) {
     assert(thc_accessibility(NULL,0));assert(![closingSource isAccessibilityElement] && ![closingSource accessibilityValue]);
     assert(!window.visible && !window.keyWindow);
     assert(publish(sourceWrapper));id windowClosingSource=sourceExcerpt(window);assert(windowClosingSource);
-    thc_close();
+    assert(publish(actionCanvas));
+    NSArray<NSAccessibilityCustomAction *> *closingActions=[findRole(window,NSAccessibilityImageRole,[NSMutableSet new]) accessibilityCustomActions];assert(closingActions.count==4 && closingActions[0].handler());
+    thc_close();assert(!closingActions[0].handler() && !thc_post_canvas_action("{}",2));
     assert(![windowClosingSource isAccessibilityElement] && ![windowClosingSource accessibilityValue] && ![windowClosingSource accessibilityParent]);
-    printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only sidebar/image/source/modal selectors and retirement checks passed\n",backend,(double)pw/ww);
+    printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only sidebar/source/modal selectors, exact image action receipts and retirement checks passed\n",backend,(double)pw/ww);
  }
  return 0;
 }

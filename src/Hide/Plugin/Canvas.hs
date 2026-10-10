@@ -5,7 +5,9 @@
 -- authority; a surface may retain a resource while every cell is occluded.
 module Hide.Plugin.Canvas
   ( PreparedImage, imageContentFormat, isImageContent, prepareImage, imageResourceId, imageFormat, imageWidth, imageHeight, imageRGBA, imageEncoded
+  , ImageAction(..), ImageControl(..), imageActionPacket, parseImageActionPacket
   , CanvasView(..), fitCanvasView, canvasImageTarget
+  , canvasVisibleCells, canvasControls
   , CanvasSurface(..), CanvasScene(..), canvasOwnerAt, canvasPixel
   ) where
 
@@ -13,6 +15,9 @@ import Codec.Picture (decodePng, decodeJpeg, convertRGBA8, imageData)
 import qualified Codec.Picture as P
 import Control.Exception (SomeException,SomeAsyncException,evaluate,fromException,throwIO,try)
 import Control.Monad (unless,guard)
+import Data.Aeson (Value,FromJSON(..),ToJSON(..),object,withObject,(.:),(.=))
+import Data.Aeson.Types (Parser)
+import qualified Data.IntMap.Strict as IM
 import Data.Bits ((.|.),(.&.),shiftL)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
@@ -230,6 +235,46 @@ orientImage orientation source
       8->(w-1-y,x)
       _->(x,y)
 
+-- | Closed image-view operations. They grant no file, source-editor or shell access.
+data ImageAction = FitImage | ActualImageSize | ZoomImageIn | ZoomImageOut deriving (Eq,Show)
+
+-- | An exact displayed image instance and one visible cell. This is a stale-action
+-- receipt, not authority. The host checks current geometry, visibility and origin.
+data ImageControl = ImageControl
+  { controlWindow :: !Int, controlView :: !Text, controlResource :: !Text
+  , controlAnchor :: !(Int,Int)
+  } deriving (Eq,Show)
+
+instance ToJSON ImageControl where
+  toJSON target=object ["id" .= controlWindow target,"view" .= controlView target,
+    "resource" .= controlResource target,"anchor" .= controlAnchor target]
+instance FromJSON ImageControl where
+  parseJSON=withObject "image control" $ \o->do
+    ident<-o .: "id"; view<-o .: "view"; resource<-o .: "resource"; anchor@(x,y)<-o .: "anchor"
+    unless (ident>0 && ident<=2147483647 && not (T.null view) && T.length view<=20 &&
+      T.all (\c->c>='0' && c<='9') view && T.head view/='0' &&
+      T.length resource==48 && T.all (`elem` ("0123456789abcdef"::String)) resource &&
+      x>=0 && x<512 && y>=0 && y<256) (fail "Invalid image control target")
+    pure (ImageControl ident view resource anchor)
+
+-- | The same bounded packet travels through browser, native and SSH input.
+imageActionPacket :: ImageControl -> ImageAction -> Value
+imageActionPacket target action=object ["type" .= ("canvas-action"::Text),"target" .= target,"action" .= name]
+  where name=case action of FitImage->"fit"; ActualImageSize->"actual-size"; ZoomImageIn->"zoom-in"; ZoomImageOut->"zoom-out" :: Text
+
+-- | Decode only the four viewport actions. No generic command dispatch is exposed.
+parseImageActionPacket :: Value -> Parser (ImageControl,ImageAction)
+parseImageActionPacket=withObject "image action" $ \o->do
+  kind<-o .: "type"
+  unless (kind==("canvas-action"::Text)) (fail "Invalid image action type")
+  target<-o .: "target"
+  name<-o .: "action"
+  action<-case (name::Text) of
+    "fit"->pure FitImage; "actual-size"->pure ActualImageSize
+    "zoom-in"->pure ZoomImageIn; "zoom-out"->pure ZoomImageOut
+    _->fail "Unknown image action"
+  pure (target,action)
+
 -- | Host interaction in editor logical pixels. Nothing means fit the viewport;
 -- explicit zoom is source pixels to logical pixels. Pan offsets the centered image.
 data CanvasView = CanvasView !(Maybe Double) !Double !Double deriving (Eq,Show)
@@ -258,10 +303,31 @@ data CanvasSurface = CanvasSurface
   { canvasId :: !Int, canvasSlot :: !Int, canvasImage :: !PreparedImage
   , canvasRect :: !(Int,Int,Int,Int), canvasTarget :: !(Double,Double,Double,Double)
   , canvasName :: !Text, canvasDescription :: !Text
+  , canvasViewIdentity :: !Text, canvasInteractive :: !Bool
   } deriving (Eq,Show)
 -- | Cells and this scene must come from the same composition. Mask bytes are
 -- little-endian uint16 per cell: low 15 bits slot, high bit half-intensity shadow.
 data CanvasScene = CanvasScene {canvasSurfaces :: ![CanvasSurface], canvasMask :: !BS.ByteString} deriving (Eq,Show)
+
+-- | /O(visible grid cells)/, at most 64 retained anchors. The same ownership mask
+-- drives paint and controls; covered surfaces have no action target.
+canvasVisibleCells :: CanvasScene -> Int -> IM.IntMap (Int,Int)
+canvasVisibleCells scene columns
+  | columns<=0=IM.empty
+  | otherwise=go 0 IM.empty
+  where
+    count=BS.length (canvasMask scene) `div` 2
+    go !index !found
+      | index>=count=found
+      | otherwise=let slot=canvasOwnerAt scene index .&. 32767
+        in go (index+1) (if slot==0 || IM.member slot found then found else IM.insert slot (index `mod` columns,index `div` columns) found)
+
+-- | Constant-size action receipt for a visible, currently interactive surface.
+canvasControls :: IM.IntMap (Int,Int) -> CanvasSurface -> Maybe ImageControl
+canvasControls visible surface=do
+  guard (canvasInteractive surface)
+  anchor<-IM.lookup (canvasSlot surface) visible
+  pure (ImageControl (canvasId surface) (canvasViewIdentity surface) (imageResourceId (canvasImage surface)) anchor)
 
 -- | O(1). Read a valid cell index; absent/out-of-range ownership is background.
 canvasOwnerAt :: CanvasScene -> Int -> Int

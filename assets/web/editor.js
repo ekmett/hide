@@ -14,7 +14,7 @@ const sourceText = document.querySelector('#semantic-source-text');
 const imageAccess = document.querySelector('#semantic-images');
 const gl = canvas.getContext('webgl2', {alpha:false, antialias:false, preserveDrawingBuffer:true});
 if (!gl) {status.textContent='WebGL2 is unavailable in this browser.';throw new Error(status.textContent);}
-const images = new CanvasImages(gl,imageAccess);
+const images = new CanvasImages(gl,imageAccess,send);
 let contextLost=false;
 const vertex = `#version 300 es
 in vec2 position; out highp vec2 vertexUV;
@@ -633,7 +633,7 @@ canvas.addEventListener('wheel',e=>{e.preventDefault();mouseEvent(e.deltaY<0?'wh
 function release(){send({type:'blur'});leftDown=false;mouse=[-1,-1];dirty=true;}
 window.addEventListener('blur',release);document.addEventListener('visibilitychange',()=>{if(document.hidden)release();});
 window.addEventListener('resize',resize);new ResizeObserver(resize).observe(screen);
-function semanticReadingTarget(target){return sidebarAccess.contains(target)||dialogAccess.contains(target)||sourceAccess.contains(target);}
+function semanticReadingTarget(target){return sidebarAccess.contains(target)||dialogAccess.contains(target)||sourceAccess.contains(target)||imageAccess.contains(target);}
 window.addEventListener('keydown',e=>{
  if(semanticReadingTarget(e.target))return;
  if(sessionFrontend&&e.key===']'&&e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey){

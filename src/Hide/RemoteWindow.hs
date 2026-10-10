@@ -27,6 +27,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Graphics.Vty as V
+import qualified Hide.Plugin.Canvas as Canvas
 import Hide.Frontend
 import Hide.TextStyle
 import Hide.Model (Command(..), MenuItem(..), menus, menuContributionSlots)
@@ -284,7 +285,7 @@ parseRemoteDialog size@(cols,rows) haptics value=withObject "dialog semantics" (
 data RemoteCanvasSurface = RemoteCanvasSurface
   { canvasWindow :: !Int, canvasResource :: !T.Text, canvasSlot :: !Int
   , canvasViewport :: !(Int,Int,Int,Int), canvasDestination :: !(Double,Double,Double,Double)
-  , canvasName :: !T.Text, canvasDescription :: !T.Text
+  , canvasName :: !T.Text, canvasDescription :: !T.Text, canvasControls :: !(Maybe Canvas.ImageControl)
   } deriving (Eq,Show)
 data RemoteCanvas = RemoteCanvas
   { canvasEpoch :: !T.Text, canvasSurfaces :: [RemoteCanvasSurface], canvasMask :: !BS.ByteString
@@ -318,8 +319,17 @@ parseRemoteCanvas (cols,rows)=withObject "canvas scene" $ \o->do
               _->Left "Canvas mask has no owning viewport"
       merge (a,b,c,d) (e,f,g,h)=(min a e,min b f,max c g,max d h)
   visible<-if BS.null mask then pure IM.empty else either fail pure (scan 0 IM.empty)
+  mapM_ (\entry->case canvasControls entry of
+    Nothing->pure ()
+    Just target->do
+      let (x,y)=Canvas.controlAnchor target; index=y*cols+x
+          owner=if x>=0 && x<cols && y>=0 && y<rows && not (BS.null mask)
+            then (fromIntegral (BS.index mask (index*2)) .|. (fromIntegral (BS.index mask (index*2+1)) `shiftL` 8)) .&. (32767::Int)
+            else 0
+      unless (Canvas.controlWindow target==canvasWindow entry && Canvas.controlResource target==canvasResource entry && owner==canvasSlot entry)
+        (fail "Image control does not own its published anchor")) surfaces
   let images=[object ["id" .= canvasWindow entry,"name" .= canvasName entry,"description" .= canvasDescription entry,
-              "bounds" .= (x,y,z-x+1,w-y+1)] | entry<-surfaces, Just (x,y,z,w)<-[IM.lookup (canvasSlot entry) visible]]
+              "bounds" .= (x,y,z-x+1,w-y+1),"controls" .= canvasControls entry] | entry<-surfaces, Just (x,y,z,w)<-[IM.lookup (canvasSlot entry) visible]]
       accessibility=BL.toStrict (encode (object ["images" .= images,"size" .= (cols,rows)]))
   pure (RemoteCanvas epoch surfaces mask accessibility)
   where
@@ -328,11 +338,12 @@ parseRemoteCanvas (cols,rows)=withObject "canvas scene" $ \o->do
       viewport@(x,y,w,h)<-o .: "rect"
       target@(a,b,c,d)<-o .: "target"
       name<-o .: "name"; description<-o .: "description"
+      controls<-o .:? "controls"
       unless (ident>0 && ident<=2147483647 && validCanvasIdentity resource && slot>=1 && slot<=64 &&
         x>=0 && y>=0 && w>0 && h>0 && x<cols && y<rows && w<=cols-x && h<=rows-y &&
         all (\n->not (isNaN n || isInfinite n) && abs n<=1000000) [a,b,c,d] && c>0 && d>0 &&
         T.length name<=256 && T.length description<=1024 && not (T.any (=='\0') (name<>description))) (fail "Invalid canvas surface")
-      pure (RemoteCanvasSurface ident resource slot viewport target name description)
+      pure (RemoteCanvasSurface ident resource slot viewport target name description controls)
 
 -- | Fixed receive cursor over one image upload. Bytes are not retained here;
 -- the existing bounded incoming queue lends each chunk to the SDL owner.
@@ -765,6 +776,11 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
             Right text -> do
               forM_ (T.unpack text) $ \c -> sendEvent [1,fromEnum c,0]
             Left _ -> pure ()
+        18:_ -> when connected $ do
+          bytes<-c_text >>= BS.packCString
+          case if BS.length bytes<=1024 then eitherDecodeStrict' bytes >>= parseEither Canvas.parseImageActionPacket else Left "Oversized image action" of
+            Right (target,action)->sendJSON (Canvas.imageActionPacket target action)
+            Left _->pure ()
         17:_ -> check "Present typing animation" c_present
         11:i:_ -> do
 #ifdef darwin_HOST_OS

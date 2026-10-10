@@ -79,7 +79,7 @@ static bool suppress_option_text;
 static bool blink_cursor = true, cursor_present, cursor_drawn;
 static int cursor_x = -1, cursor_y = -1;
 static Uint64 cursor_epoch;
-static Uint32 command_event, wake_event, dock_event;
+static Uint32 command_event, wake_event, dock_event, canvas_action_event;
 static double wheel_remainder;
 static void pointer(float x, float y, int32_t *event);
 
@@ -291,6 +291,13 @@ void thc_title(const char *s) { SDL_SetWindowTitle(window, s); }
 void thc_set_clipboard(const char *s) { SDL_SetClipboardText(s); }
 
 void thc_close(void) {
+    /* Accessibility callbacks and SDL admission share this thread. Closing the
+     * event type first prevents retained callbacks from enqueueing another copy. */
+    Uint32 closing_canvas_event=canvas_action_event;canvas_action_event=0;
+    if (closing_canvas_event) {
+        SDL_Event event;
+        while (SDL_PeepEvents(&event,1,SDL_GETEVENT,closing_canvas_event,closing_canvas_event)==1) SDL_free(event.user.data1);
+    }
 #ifdef __APPLE__
     thc_accessibility_close();
     thc_dock_close();
@@ -384,9 +391,11 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     power_enabled=power_shake || (power_option && !strcmp(power_option,"1"));
     power_eligible=power_drawn=false; power_state=(struct HidePowerMode){0};
     blink_cursor = true; cursor_epoch = SDL_GetTicks();
-    command_event = SDL_RegisterEvents(3);
+    command_event = SDL_RegisterEvents(4);
+    if (!command_event || command_event==(Uint32)-1) return 0;
     wake_event = command_event + 1;
     dock_event = command_event + 2;
+    canvas_action_event = command_event + 3;
     wheel_remainder = 0;
     /* Documentation captures use the real Metal renderer without showing a window. */
     const char *capture_exit = SDL_getenv("THC_EDIT_CAPTURE_EXIT");
@@ -944,6 +953,17 @@ void thc_post_command(int command, int generation) {
 void thc_post_window(int ident, int generation) {
     SDL_Event e; SDL_zero(e); e.type = dock_event; e.user.code = ident; e.user.data1 = (void *)(intptr_t)generation; SDL_PushEvent(&e);
 }
+int thc_post_canvas_action(const char *json,size_t length) {
+    if (!window || !canvas_action_event || !json || !length || length>1024 || memchr(json,0,length))
+        return SDL_SetError("Invalid or unavailable canvas action");
+    char *copy=SDL_malloc(length+1);
+    if (!copy) return SDL_SetError("Cannot allocate canvas action");
+    memcpy(copy,json,length);copy[length]=0;
+    SDL_Event event;SDL_zero(event);event.type=canvas_action_event;
+    event.user.windowID=SDL_GetWindowID(window);event.user.data1=copy;
+    if (!SDL_PushEvent(&event)) { SDL_free(copy);return 0; }
+    return 1;
+}
 void thc_raise(void) {
 #ifdef __APPLE__
     thc_dock_raise(SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, NULL));
@@ -995,6 +1015,11 @@ int thc_wait(int32_t *out) {
         if (e.type == wake_event) return delivered(&e,out);
         if (e.type == command_event) { out[0] = 11; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return delivered(&e,out); }
         if (e.type == dock_event) { out[0] = 16; out[1] = e.user.code; out[2] = (int32_t)(intptr_t)e.user.data1; return delivered(&e,out); }
+        if (canvas_action_event && e.type==canvas_action_event) {
+            if (e.user.windowID!=SDL_GetWindowID(window)) { SDL_free(e.user.data1);continue; }
+            SDL_free(input_text);input_text=e.user.data1;
+            out[0]=18;return delivered(&e,out);
+        }
         switch (e.type) {
         case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: out[0] = 6; return delivered(&e,out);
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:

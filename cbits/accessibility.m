@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-3-Clause */
 #import <Cocoa/Cocoa.h>
 #include "accessibility.h"
+#include "window.h"
 #include <math.h>
 
 static BOOL integer(id value, double maximum) {
@@ -109,27 +110,95 @@ static BOOL readOnlySelector(SEL selector) {
 - (BOOL)isAccessibilitySelectorAllowed:(SEL)selector { return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector]; }
 @end
 
-/* Images share the renderer's clipped cell ownership, with no action or focus
- * selectors. Resource IDs and pixels never enter the accessibility adapter. */
+/* Images expose only four closed viewport actions. Copied controls identify an
+ * exact current image view; no pixels, source edits or executable commands enter
+ * the accessibility adapter. AX focus never changes SDL's first responder. */
 @class HideAXCanvas;
 @interface HideAXImage : NSAccessibilityElement
 @property(weak) HideAXCanvas *host;
 @property(copy) NSDictionary *record;
+@property(copy) NSArray<NSAccessibilityCustomAction *> *actions;
+@property(strong) NSObject *actionLifetime;
+@property BOOL focused;
+- (BOOL)current;
+- (void)updateRecord:(NSDictionary *)record;
+- (void)retire;
 @end
 @interface HideAXCanvas : NSView
 @property(copy) NSArray<HideAXImage *> *images;
 @property(copy) NSDictionary<NSNumber *,HideAXImage *> *nodes;
 @end
 static HideAXCanvas *canvasHost;
+static BOOL dialogPresent;
+static NSDictionary *imageControls(NSDictionary *record) {
+    id value=record[@"controls"];return [value isKindOfClass:NSDictionary.class] ? value : nil;
+}
+static BOOL decimalIdentity(id value) {
+    if (!text(value,20,YES) || [value characterAtIndex:0]=='0') return NO;
+    for (NSUInteger i=0;i<[value length];++i) {
+        unichar c=[value characterAtIndex:i];if (c<'0' || c>'9') return NO;
+    }
+    return YES;
+}
+static BOOL imageControlsValid(NSDictionary *record,NSInteger cols,NSInteger rows) {
+    id value=record[@"controls"];
+    if (!value || value==NSNull.null) return YES;
+    if (![value isKindOfClass:NSDictionary.class] || [value count]!=4) return NO;
+    NSDictionary *controls=value;id resource=controls[@"resource"],anchor=controls[@"anchor"];
+    if (!integer(controls[@"id"],2147483647) || ![controls[@"id"] isEqual:record[@"id"]] ||
+        !decimalIdentity(controls[@"view"]) || !text(resource,48,YES) || [resource length]!=48 ||
+        [resource rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location!=NSNotFound ||
+        ![anchor isKindOfClass:NSArray.class] || [anchor count]!=2 || !integer(anchor[0],cols-1) || !integer(anchor[1],rows-1)) return NO;
+    NSArray *rectangle=record[@"bounds"];
+    NSInteger x=[anchor[0] integerValue],y=[anchor[1] integerValue];
+    return x>=[rectangle[0] integerValue] && x<[rectangle[0] integerValue]+[rectangle[2] integerValue] &&
+           y>=[rectangle[1] integerValue] && y<[rectangle[1] integerValue]+[rectangle[3] integerValue];
+}
 @implementation HideAXImage
+- (BOOL)current {
+    return NSThread.isMainThread && self.record && self.host==canvasHost && self.host.window &&
+        !self.host.isHiddenOrHasHiddenAncestor && !dialogPresent && self.host.nodes[self.record[@"id"]]==self;
+}
 - (BOOL)isAccessibilityElement { return self.record!=nil; }
 - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityImageRole; }
 - (NSString *)accessibilityLabel { return self.record[@"name"]; }
 - (NSString *)accessibilityHelp { return self.record[@"description"]; }
 - (id)accessibilityParent { return self.host; }
 - (NSRect)accessibilityFrame { return screenFrame(self.host,self.record[@"bounds"]); }
-- (BOOL)isAccessibilityFocused { return NO; }
-- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector { return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector]; }
+- (BOOL)isAccessibilityFocused { return self.focused && [self current]; }
+- (void)setAccessibilityFocused:(BOOL)focused {
+    if (![self current] || !self.actionLifetime) return;
+    for (HideAXImage *image in self.host.images) image.focused=focused && image==self;
+    if (focused) NSAccessibilityPostNotification(self,NSAccessibilityFocusedUIElementChangedNotification);
+}
+- (NSArray<NSAccessibilityCustomAction *> *)accessibilityCustomActions { return [self current] ? self.actions : nil; }
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
+    if (selector==@selector(setAccessibilityFocused:)) return [self current] && self.actionLifetime && [super isAccessibilitySelectorAllowed:selector];
+    return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector];
+}
+- (void)updateRecord:(NSDictionary *)record {
+    NSDictionary *previous=imageControls(self.record),*controls=imageControls(record);
+    self.record=record;
+    if (self.actionLifetime && [previous isEqual:controls]) return;
+    self.actions=nil;self.actionLifetime=nil;
+    if (!controls) { self.focused=NO;return; }
+    NSObject *lifetime=[NSObject new];self.actionLifetime=lifetime;
+    NSDictionary *target=[controls copy];__weak HideAXImage *weakImage=self;
+    NSArray *labels=@[@"Fit Image",@"Actual Size",@"Zoom In",@"Zoom Out"];
+    NSArray *names=@[@"fit",@"actual-size",@"zoom-in",@"zoom-out"];
+    NSMutableArray *actions=[NSMutableArray new];
+    for (NSUInteger i=0;i<names.count;++i) {
+        NSString *name=names[i];
+        [actions addObject:[[NSAccessibilityCustomAction alloc] initWithName:labels[i] handler:^BOOL {
+            HideAXImage *image=weakImage;
+            if (![image current] || image.actionLifetime!=lifetime || ![imageControls(image.record) isEqual:target]) return NO;
+            NSData *json=[NSJSONSerialization dataWithJSONObject:@{@"type":@"canvas-action",@"target":target,@"action":name} options:0 error:nil];
+            return json && json.length<=1024 && thc_post_canvas_action(json.bytes,json.length);
+        }]];
+    }
+    self.actions=actions;
+}
+- (void)retire { self.record=nil;self.actions=nil;self.actionLifetime=nil;self.focused=NO;self.host=nil; }
 @end
 @implementation HideAXCanvas
 - (BOOL)isFlipped { return YES; }
@@ -143,7 +212,7 @@ static HideAXCanvas *canvasHost;
 @end
 static void clearCanvasAccessibility(void) {
     NSView *parent=canvasHost.superview;
-    for (HideAXImage *image in canvasHost.images) { image.record=nil; image.host=nil; }
+    for (HideAXImage *image in canvasHost.images) [image retire];
     canvasHost.images=nil; canvasHost.nodes=nil; [canvasHost removeFromSuperview]; canvasHost=nil;
     if (parent) NSAccessibilityPostNotification(parent,NSAccessibilityLayoutChangedNotification);
 }
@@ -156,7 +225,8 @@ static int updateCanvasAccessibility(void *native_window,NSDictionary *snapshot)
         for (NSDictionary *entry in values) {
             if (![entry isKindOfClass:NSDictionary.class] || !integer(entry[@"id"],2147483647) || ![entry[@"id"] integerValue] ||
                 !text(entry[@"name"],256,NO) || !text(entry[@"description"],1024,NO) || entry[@"bounds"]==NSNull.null ||
-                !bounds(entry[@"bounds"],[size[0] integerValue],[size[1] integerValue]) || [identities containsObject:entry[@"id"]]) goto invalid;
+                !bounds(entry[@"bounds"],[size[0] integerValue],[size[1] integerValue]) || !imageControlsValid(entry,[size[0] integerValue],[size[1] integerValue]) ||
+                [identities containsObject:entry[@"id"]]) goto invalid;
             [identities addObject:entry[@"id"]];
         }
         if (!values.count) { clearCanvasAccessibility(); return 1; }
@@ -169,10 +239,13 @@ static int updateCanvasAccessibility(void *native_window,NSDictionary *snapshot)
         }
         NSMutableDictionary *nodes=[NSMutableDictionary new]; NSMutableArray *images=[NSMutableArray new];
         for (NSDictionary *entry in values) {
-            HideAXImage *image=canvasHost.nodes[entry[@"id"]] ?: [HideAXImage new];
-            image.record=entry;image.host=canvasHost;nodes[entry[@"id"]]=image;[images addObject:image];
+            HideAXImage *image=canvasHost.nodes[entry[@"id"]];
+            NSDictionary *previous=imageControls(image.record),*next=imageControls(entry);
+            if (previous && next && ![previous[@"resource"] isEqual:next[@"resource"]]) { [image retire];image=nil; }
+            if (!image) image=[HideAXImage new];
+            [image updateRecord:entry];image.host=canvasHost;nodes[entry[@"id"]]=image;[images addObject:image];
         }
-        for (NSNumber *ident in canvasHost.nodes) if (!nodes[ident]) { canvasHost.nodes[ident].record=nil; canvasHost.nodes[ident].host=nil; }
+        for (NSNumber *ident in canvasHost.nodes) if (!nodes[ident]) [canvasHost.nodes[ident] retire];
         canvasHost.nodes=nodes;canvasHost.images=images;
         NSAccessibilityPostNotification(canvasHost,NSAccessibilityLayoutChangedNotification);
         return 1;
@@ -301,7 +374,6 @@ static void clearSidebarAccessibility(void) {
 - (void)requestHapticFeedback;
 @end
 static HideAXDialog *dialogHost;
-static BOOL dialogPresent;
 static NSArray *dialogRoles(void) { return @[@"dialog",@"text",@"textbox",@"checkbox",@"radiogroup",@"radio",@"listbox",@"option",@"combobox",@"button"]; }
 static BOOL dialogIdentity(id value) {
     if (![value isKindOfClass:NSArray.class] || ![value count] || [value count]>5 || ![value[0] isEqual:@"dialog"]) return NO;

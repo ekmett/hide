@@ -616,9 +616,11 @@ terminals receive a useful named fallback with image metadata and Open Externall
 not an empty source buffer pretending to display pixels.
 
 The first PNG slice uses the shared window ownership contract. It includes
-resources, clipping, identity/lifecycle, basic image semantics and the
-shared wire path. Enrich accessibility and add backend-specific rendering
-extensions with concrete consumers afterward. Keep the accessibility work
+resources, clipping, identity/lifecycle and the shared wire path. Image semantics
+include Fit Image, Actual Size, Zoom In and Zoom Out through browser buttons and
+macOS accessibility actions. The host checks their exact view/resource target and
+current visible anchor before using its viewport operations. Add backend-specific
+rendering extensions with concrete consumers. Keep the accessibility work
 independently useful for ordinary windows throughout.
 
 ## Sidebar contributions

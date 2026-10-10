@@ -4,6 +4,10 @@
 #include <stdint.h>
 void thc_post_command(int command, int generation);
 void thc_post_window(int ident, int generation);
+/* SDL-thread admission of checked canvas-action JSON, 1..1024 bytes. Copies the
+ * payload on success; failed push and shutdown release owned copies. Kind 18
+ * delivers the exact bytes through thc_text until the next text-bearing event. */
+int thc_post_canvas_action(const char *json, size_t length);
 void thc_raise(void);
 #ifdef __APPLE__
 void thc_dock_close(void);
@@ -58,6 +62,7 @@ void thc_power_mode_burst(void);
 int thc_present(void);
 /* Six integers; kind 0 is a 100ms idle wake, kind 8 requests a redraw (also blink),
  * kind 17 requests only presentation of retained glyph/cell storage,
+ * kind 18 carries a closed image viewport action as JSON via thc_text,
  * kind 12 is hover at cell x,y, and kind 13 carries held modifier bits in slot 1.
  * Wheel kind 9 carries signed detents in slot 3, including coalesced travel.
  * Button-down kind 3 has click count in slot 3 and SDL button number in slot 5.

@@ -433,7 +433,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                     scene=case previous of Just (_,_,_,_,cached) | sameFrame->cached; _->freshScene
                     rows=if sameFrame then oldRows else freshRows
                     metadata=if sameFrame then oldMeta else
-                      canvasMetadata canvasEpoch scene : [if name=="title" then (name,String (applicationTitle cwd d<>" ["<>label<>"]")) else (name,value) | (name,value)<-frameMetadata cwd d]
+                      canvasMetadata canvasEpoch (fst (screenSize d)) scene : [if name=="title" then (name,String (applicationTitle cwd d<>" ["<>label<>"]")) else (name,value) | (name,value)<-frameMetadata cwd d]
                     reset=maybe True (\(_,old,_,_,_)->old/=resetKey) previous
                 case clipboardExport d of
                   (serial,Just text) | not (stopped s || suspending s) -> do

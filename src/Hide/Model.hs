@@ -877,6 +877,26 @@ imageKey key mods d=do
       _->Nothing
     pure (modifyActive (\current->current {imageViewport=view}) d)
 
+-- | /O(windows)/. Admit an image control against current host hit geometry and
+-- exact window/resource lifetime. No rendering or document content is evaluated.
+-- Commands received during another gesture or under modal/menu UI are inert.
+applyImageAction :: Canvas.ImageControl -> Canvas.ImageAction -> Desktop -> Desktop
+applyImageAction target action d=fromMaybe d $ do
+  guard (dialog d==Nothing && menu d==Nothing && contextMenu d==Nothing && drag d==Nothing)
+  let (x,y)=Canvas.controlAnchor target; (columns,rows)=screenSize d
+  guard (x>=treeWidthOf d && x<columns && y>=1 && y<rows-1-problemsHeight d)
+  w<-find (\window->windowVisible d window && inside (bounds window) x y) (windows d)
+  guard (windowId w==Canvas.controlWindow target && inside (pluginTextRect d w) x y)
+  PluginContent reference<-pure (windowContent w)
+  guard (PluginWindow.windowRefIdentity reference==Canvas.controlView target)
+  image<-windowImage d w
+  guard (Canvas.imageResourceId image==Canvas.controlResource target)
+  prepared<-windowPluginText d w
+  guard (not (streamerMode d) || not (privatePreparedWindow d prepared))
+  let key=V.KChar (case action of Canvas.FitImage->'f'; Canvas.ActualImageSize->'1'; Canvas.ZoomImageIn->'+'; Canvas.ZoomImageOut->'-')
+      focused=focusWindow (windowId w) d {sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d),problemsFocused=False}
+  imageKey key [] focused
+
 -- The same reserved body extent feeds paint, hit maps and scrollbar limits.
 pluginBodyRows :: Desktop -> Window -> Int
 pluginBodyRows d w=max 0 (height (bounds w)-2-reserved)

@@ -648,6 +648,31 @@ imageChecks=do
         surface=case Canvas.canvasSurfaces initial of value:_->value; _->error "missing canvas surface"
         (tx,ty,tw,th)=Canvas.canvasTarget surface
         owner x y=Canvas.canvasOwnerAt initial (y*40+x)
+    let control=maybe (error "image control missing") id (Canvas.canvasControls (Canvas.canvasVisibleCells initial 40) surface)
+        actual=applyImageAction control Canvas.ActualImageSize opened
+        enlarged=applyImageAction control Canvas.ZoomImageIn actual
+        reduced=applyImageAction control Canvas.ZoomImageOut enlarged
+        views=map imageViewport . windows
+        unchanged desktop target=views (applyImageAction target Canvas.ZoomImageIn desktop)==views desktop
+    check "accessible image operations share keyboard fit and zoom behavior"
+      (views actual==[Canvas.CanvasView (Just 1) 0 0] && views enlarged==[Canvas.CanvasView (Just 1.25) 0 0] &&
+       views reduced==views actual && views (applyImageAction control Canvas.FitImage enlarged)==views opened)
+    check "image actions reject stale instance, resource and hit geometry"
+      (unchanged opened (control {Canvas.controlView="99999999"}) &&
+       unchanged opened (control {Canvas.controlResource=T.replicate 48 "f"}) &&
+       unchanged opened (control {Canvas.controlAnchor=(0,0)}) &&
+       unchanged (message "Approval" ["Continue?"] actual) control)
+    check "covered or modal images publish no semantic control"
+      (Canvas.canvasControls (Canvas.canvasVisibleCells (initial {Canvas.canvasMask=BS.replicate (40*18*2) 0}) 40) surface==Nothing &&
+       all (not . Canvas.canvasInteractive) (Canvas.canvasSurfaces (scene (message "Approval" ["Continue?"] actual))))
+#ifdef WITH_PROTOCOL
+    let request=Canvas.imageActionPacket control Canvas.ActualImageSize
+        parsed=either error id (parseEither parseInput request)
+    check "native/browser/remote image packet decodes to the same exact action"
+      (parseEither Canvas.parseImageActionPacket request==Right (control,Canvas.ActualImageSize) && views (fst (applyInput parsed opened))==views actual)
+    denied<-applyGuestInput parsed opened
+    check "semantic image controls do not grant agent input authority" (case denied of Left _->True; _->False)
+#endif
     check "image owns content cells but never host chrome" (owner 3 3==1 && owner 2 2==0 && BS.length (Canvas.canvasMask initial)==40*18*2)
     check "canvas preserves source aspect in logical pixels" (abs (tw*8-th*16)<0.00001)
     check "software image sample composites straight alpha onto black"
@@ -719,6 +744,11 @@ imageChecks=do
     newInstance<-W.openWindow scope replacementImage >>= maybe (fail "image replacement expired") pure
     let (replacementDrag,_)=handleEvent (V.EvMouseDown 3 7 V.BLeft []) changedImage
     replacedImage<-replaceWindowUpdate P.HumanMenu reference newInstance replacementDrag
+    let changedScene=scene changedImage
+        changedSurface=case Canvas.canvasSurfaces changedScene of value:_->value; _->error "changed image control missing"
+        changedControl=maybe (error "replacement control missing") id (Canvas.canvasControls (Canvas.canvasVisibleCells changedScene 40) changedSurface)
+    check "queued image controls cannot affect a replacement view even with the same resource"
+      (unchanged changedImage control && unchanged replacedImage changedControl)
     check "new instance cancels panning even when it shares the same image bytes"
       (drag replacementDrag/=Nothing && drag replacedImage==Nothing)
   retired<-W.withWindowScope $ \scope->open scope public (initialDesktop (40,18))
