@@ -15,7 +15,8 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Let main finish saving its build cache; superseded PR runs may stop.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -107,3 +108,34 @@ jobs:
             build/allocation/cache/plan.json
           retention-days: 7
           if-no-files-found: error
+
+  nixos:
+    name: NixOS / installed editor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24
+        with:
+          extra_nix_config: |
+            keep-outputs = true
+      - uses: nix-community/cache-nix-action@b16f249a0248efec86dd9d4224cb75f1ffa48bcc
+        with:
+          primary-key: nixos-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/package.nix', 'hide.cabal', 'packages/**/*.cabal', 'plugins/**/*.cabal') }}
+          restore-prefixes-first-match: nixos-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+      - name: Build all default frontends and run the NixOS session check
+        run: nix flake check --print-build-logs --max-jobs 2 --cores 2
+      - name: Export the installable package and its runtime closure
+        run: |
+          nix build --print-build-logs
+          nix copy --to "file://$PWD/nix-cache" ./result
+          nix path-info ./result > nix-cache/package-path
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hide-nixos-x86_64-linux
+          path: nix-cache/
+          compression-level: 0
+          retention-days: 7

@@ -17,6 +17,20 @@ checks = do
       edited=replaceSelection (Selection 0 1) "changed" b
   check "text offsets count characters and preserve line endings"
     (P.readText captured (P.TextRange (P.CharOffset 1) (P.CharOffset 4))==Right "😀\r\n")
+  check "row ranges use absolute character offsets and exclude terminators"
+    (map (P.lineRange captured . P.LineNumber) [0,1,2]==map Right
+      [P.TextRange (P.CharOffset 0) (P.CharOffset 2),
+       P.TextRange (P.CharOffset 4) (P.CharOffset 10),
+       P.TextRange (P.CharOffset 11) (P.CharOffset 11)])
+  check "row ranges project exactly the existing editor-row reads"
+    (all (\row->(P.lineRange captured row >>= P.readText captured)==P.readLine captured row)
+      (map P.LineNumber [-1,0,1,2,3,maxBound]))
+  check "row ranges retain the captured image after edits"
+    (P.lineRange captured (P.LineNumber 1)==Right (P.TextRange (P.CharOffset 4) (P.CharOffset 10))
+      && P.lineRange (Host.captureRead edited) (P.LineNumber 1)==Right (P.TextRange (P.CharOffset 10) (P.CharOffset 16)))
+  check "row ranges preserve stripping of repeated trailing carriage returns"
+    (P.lineRange (Host.captureRead (newBuffer "λ\r\r\n")) (P.LineNumber 0)
+      ==Right (P.TextRange (P.CharOffset 0) (P.CharOffset 1)))
   check "line reads preserve original CRLF and LF terminators"
     (P.readLines captured (P.LineNumber 0) 2==Right "λ😀\r\nsecond\n")
   check "retained content stays immutable after edits"
@@ -35,6 +49,7 @@ checks = do
     (P.readText changed (P.TextRange (P.CharOffset 0) (P.CharOffset 4))==Right "a\nλ\n" &&
       P.readLines changed (P.LineNumber 1) 2==Right "λ\n" &&
       P.readLine changed (P.LineNumber 1)==Right "λ" &&
+      P.lineRange changed (P.LineNumber 1)==Right (P.TextRange (P.CharOffset 2) (P.CharOffset 3)) &&
       bufferLineChanges replaced/=(0,0))
   let raw=BS.pack [0,127,128,255,10]
       bytes=Host.captureRead (newByteBuffer raw)
@@ -43,6 +58,7 @@ checks = do
   check "text and byte readers reject the other representation"
     (isLeft (P.readText bytes (P.TextRange (P.CharOffset 0) (P.CharOffset 1))) &&
       isLeft (P.readLines bytes (P.LineNumber 0) 1) &&
+      P.lineRange bytes (P.LineNumber 0)==Left P.WrongRepresentation &&
       isLeft (P.readBytes captured (P.ByteRange (P.ByteOffset 0) (P.ByteOffset 1))))
   let opaque=b {saved=error "read forced saved baseline",undoStack=error "read forced Undo",redoStack=error "read forced Redo"}
   _<-evaluate (Host.captureRead opaque)

@@ -14,7 +14,7 @@ module Hide.Plugin.Buffer
   , capturedRedacted, capturedMetadata, BufferMetadata, bufferIdentifier, displayName, path, modified, editRevision
   , BufferRef, BufferRead, ContentVersion, CharOffset(..), ByteOffset(..), LineNumber(..)
   , TextRange(..), ByteRange(..), RangeError(..), BufferRepresentation(..)
-  , representation, readLength, readLineCount, readText, readBytes, readLines, readLine
+  , representation, readLength, readLineCount, lineRange, readText, readBytes, readLines, readLine
   ) where
 
 import Data.ByteString (ByteString)
@@ -72,6 +72,23 @@ readLines b (LineNumber row) count=do
     let a=B.contentLineOffset b row
         z=B.contentLineOffset b (row+count)
     pure (B.contentSlice b a (z-a))
+
+-- | Locate one editor row without reading its text, excluding trailing CR/LF.
+-- Uses cached tree measures; rejects missing rows and byte buffers. Offsets are
+-- absolute Unicode character positions in this immutable read, including a
+-- zero-length range for the final empty row after a newline.
+--
+-- @(lineRange b row >>= readText b) == readLine b row@
+--
+-- A bounded reader can shorten the returned end before calling 'readText'; it
+-- need not flatten a long row to discover or limit its extent.
+lineRange :: BufferRead -> LineNumber -> Either RangeError TextRange
+lineRange b (LineNumber row)=do
+  total<-readLineCount b
+  if row<0 || row>=total then Left InvalidRange else do
+    let start=B.contentLineOffset b row
+        size=B.sourceLineLength (B.contentSourceLineAt b row)
+    pure (TextRange (CharOffset start) (CharOffset (start+size)))
 
 -- | Read one editor row without its LF/CRLF terminator; rejects missing rows.
 readLine :: BufferRead -> LineNumber -> Either RangeError Text

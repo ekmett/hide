@@ -63,6 +63,10 @@ capture worker and do not replace admission checks.
 
 [CI](https://github.com/ekmett/hide/actions/workflows/ci.yml) builds the optimized
 editor checks and runs correctness and allocation checks once.
+Its NixOS job also builds the installed editor and checks sessions, aliases and
+browser assets in a NixOS VM. Nix uses the upstream binary cache and a restored
+GitHub Actions store; dependency tests, Haddocks and profiling libraries are not
+part of this production build.
 [Coverage](https://github.com/ekmett/hide/actions/workflows/coverage.yml) builds a
 small HPC driver covering editing, file I/O, display transport, Markdown,
 settings, plugin commands and recovery. It reuses inexpensive bounded contract

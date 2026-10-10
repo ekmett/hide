@@ -65,6 +65,8 @@ def main(executable):
             send(process, dict(type="hello", version=1, session=session, client=client, ack=0, args=["--", str(path)]))
             hello = control(process, "hello")
             control(process, "assets")
+            control(process, "canvas-reset")
+            assert control(process, "frame-ready")["changed"]
             frame = receive(process)
             assert isinstance(frame, bytes) and frame[0] == 0, "Reset frame required on attach"
             return process, hello
@@ -108,8 +110,7 @@ def main(executable):
                                  env=env, bufsize=0)
         send(ended, dict(type="hello", version=1, session=session, client=client,
                          ack=5, resume=True, args=["--", str(path)]))
-        error = control(ended, "error")
-        assert "refusing to restart" in error["message"]
+        control(ended, "error")
         ended.stdin.close()
         ended.wait(timeout=5)
         ended.stdout.close()

@@ -15,7 +15,8 @@ on:
 
 concurrency:
   group: coverage-${{ github.ref }}
-  cancel-in-progress: true
+  # Let main finish saving its build cache; superseded PR runs may stop.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
