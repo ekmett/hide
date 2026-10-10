@@ -6,7 +6,7 @@
 -- activate only after the session lifetime lock is held. Invalid recovery data is
 -- retained and disables spawning rather than being silently replaced.
 module Hide.AgentRuntime
-  ( AgentRuntime, AgentRequest(..), PrimaryDelivery, admitPrimaryDelivery, rejectPrimaryDelivery, completePrimaryDelivery, primaryDeliveryActive, PrimaryControl(..), primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
+  ( AgentRuntime, AgentRequest(..), PrimaryDelivery, admitPrimaryDelivery, rejectPrimaryDelivery, completePrimaryDelivery, primaryDeliveryActive, PrimaryControl(..), requestPrimaryQuery, primaryControlCurrent, rejectPrimaryControl, failPrimaryControl, withAgentRuntime, withAgentRuntimeUsing
   , agentHub, agentAccess, primaryAgent, primaryServers, drainAgentRequests
   , syncPrimary, recordPrimaryEvent, failPendingPrimary, agentSession, checkpointAgents, activateAgentCheckpoint, runtimeNotice, requestAgentCreation, requestAgentReconnect
   ) where
@@ -38,6 +38,7 @@ import System.Posix.Files (setFileMode)
 import qualified Hide.ACP as ACP
 import Hide.AgentACP (ACPPermission, startACPDriver)
 import Hide.AgentAccess
+import Hide.Plugin.EditorHost (SubmissionIdentity)
 import Hide.AgentHub
 import qualified Hide.AgentWorkspace as Workspace
 import Hide.EditorMCP (editorServersAt)
@@ -67,11 +68,13 @@ instance Eq PrimaryDelivery where
 data PrimaryControl
   = ConfigurePrimary !(StableName ACP.Client) !Text ![(Text,Text)] !(MVar (Either Text Capabilities))
   | SteerPrimary !(StableName ACP.Client) !Text !HubMessage !(MVar (Either Text Value))
+  | QueryPrimary !SubmissionIdentity !(StableName ACP.Launch) !(Maybe (StableName ACP.Client)) !(Maybe Text) !(Maybe AgentConfigRef) !Text !(MVar (Either Text ()))
 
 -- Reply identity is the control lifetime; never compare prompt/config payloads.
 instance Eq PrimaryControl where
   ConfigurePrimary _ _ _ a == ConfigurePrimary _ _ _ b=a==b
   SteerPrimary _ _ _ a == SteerPrimary _ _ _ b=a==b
+  QueryPrimary _ _ _ _ _ _ a == QueryPrimary _ _ _ _ _ _ b=a==b
   _ == _=False
 
 data AgentRuntime = AgentRuntime
@@ -216,8 +219,14 @@ syncPrimary runtime directory client key caps busy = do
       case loaded of
         Left (_::IOException) -> pure (Left "Could not read configured agent provider.")
         Right launch -> do
+          launchIdentity<-makeStableName =<< evaluate launch
           modifyMVar_ (runtimeState runtime) $ \state->do
-            retired<-retireDeliveries "Primary provider changed." state
+            -- A human query may own the original disconnected -> client ->
+            -- session startup. Advance only missing pieces of that binding;
+            -- an acquired client/session never rebinds to a replacement. All
+            -- explicit reset/cancel paths reject its reply before this sync.
+            let retained=primaryControl state >>= bindPrimaryQuery launchIdentity connection (if T.null key then Nothing else Just key)
+            retired<-retireDeliveries retained "Primary provider changed." state
             pure retired {primaryState=Nothing,primaryEvents=Nothing}
           updated <- updateExternalAgent (agentHub runtime) (primaryAgent runtime)
             (primaryDriver (runtimeState runtime) (agentAccess runtime) (pure (Just (primaryAgent runtime))) connection directory key caps)
@@ -407,29 +416,66 @@ primaryDriver state access identity connection directory key caps = AgentDriver
       failDeliveries state "Primary agent ended."
       enqueue state EndPrimary }
 
+-- | Submit one already captured human query to the existing control mailbox.
+-- The caller owns its declaration worker and original input lifetime. A query
+-- acknowledges queue admission or prompt submission, never the terminal answer.
+-- Initial missing client/session identities bind once; later replacements fail.
+-- Connected submissions keep their captured configuration receipt. Only original
+-- disconnected startup omits it, because acquiring that provider changes the Hub
+-- incarnation itself. The submission identity retains no draft source payload.
+requestPrimaryQuery :: AgentRuntime -> SubmissionIdentity -> StableName ACP.Launch -> Maybe (StableName ACP.Client,Text) -> Maybe AgentConfigRef -> Text -> IO (Either Text ())
+requestPrimaryQuery runtime submitted launch provider config text=do
+  reply<-newEmptyMVar
+  requestPrimaryControl (runtimeState runtime)
+    (QueryPrimary submitted launch (fst <$> provider) (snd <$> provider) config text reply) reply
+
+-- Missing identity pieces describe only the original startup. Binding is
+-- monotone: once present, a client/session can only compare equal, never change.
+bindPrimaryQuery :: StableName ACP.Launch -> Maybe (StableName ACP.Client) -> Maybe Text -> PrimaryControl -> Maybe PrimaryControl
+bindPrimaryQuery launch client session (QueryPrimary submitted expected original key config text reply)
+  | launch==expected,maybe True (\value->Just value==client) original,maybe True (\value->Just value==session) key=
+      Just (QueryPrimary submitted expected client session config text reply)
+bindPrimaryQuery _ _ _ _=Nothing
+
 -- | Admission checks the live provider object, not its reusable session key.
 -- Cancellation before this check refuses the request without protocol IO.
+-- Query's canonical binding lives in the existing control slot; retained copies
+-- share only reply identity and cannot restore an earlier unbound startup phase.
 primaryControlCurrent :: AgentRuntime -> PrimaryControl -> Maybe ACP.Client -> Maybe Text -> IO Bool
-primaryControlCurrent runtime control client session=do
-  reserved<-agentControlPending (agentHub runtime) (primaryAgent runtime)
-  waiting<-primaryControlWaiting control
-  case (client,session) of
-    (Just current,Just key) | reserved && waiting->do
-      owner<-makeStableName =<< evaluate current
-      pure $ case control of
-        ConfigurePrimary expected sid _ _->owner==expected && key==sid
-        SteerPrimary expected sid _ _->owner==expected && key==sid
-    _->pure False
+primaryControlCurrent runtime control client session=case control of
+  QueryPrimary{}->do
+    launch<-makeStableName =<< (configuredLaunch runtime >>= evaluate)
+    owner<-traverse (\value->makeStableName =<< evaluate value) client
+    modifyMVar (runtimeState runtime) $ \state->do
+      waiting<-primaryControlWaiting control
+      case primaryControl state of
+        Just current@(QueryPrimary _ _ _ _ config _ _) | current==control,not (closed state),waiting,
+          Just bound<-bindPrimaryQuery launch owner session current->do
+            configured<-maybe (pure True) (agentConfigurationCurrent (agentHub runtime)) config
+            pure (if configured then state {primaryControl=Just bound} else state,configured)
+        _->pure (state,False)
+  _->do
+    reserved<-agentControlPending (agentHub runtime) (primaryAgent runtime)
+    waiting<-primaryControlWaiting control
+    case (client,session) of
+      (Just current,Just key) | reserved && waiting->do
+        owner<-makeStableName =<< evaluate current
+        pure $ case control of
+          ConfigurePrimary expected sid _ _->owner==expected && key==sid
+          SteerPrimary expected sid _ _->owner==expected && key==sid
+      _->pure False
 
 primaryControlWaiting :: PrimaryControl -> IO Bool
 primaryControlWaiting (ConfigurePrimary _ _ _ reply)=isEmptyMVar reply
 primaryControlWaiting (SteerPrimary _ _ _ reply)=isEmptyMVar reply
+primaryControlWaiting (QueryPrimary _ _ _ _ _ _ reply)=isEmptyMVar reply
 
 -- | Terminally refuse one retained control. Repeated retirement preserves its
 -- first result and cannot turn a cancelled reply into success.
 rejectPrimaryControl :: Text -> PrimaryControl -> IO ()
 rejectPrimaryControl reason (ConfigurePrimary _ _ _ reply)=void (tryPutMVar reply (Left reason))
 rejectPrimaryControl reason (SteerPrimary _ _ _ reply)=void (tryPutMVar reply (Left reason))
+rejectPrimaryControl reason (QueryPrimary _ _ _ _ _ _ reply)=void (tryPutMVar reply (Left reason))
 
 -- | Resolve the primary's outstanding control without completing its running
 -- prompt. Provider cancellation still waits for that prompt's real outcome.
@@ -454,13 +500,13 @@ matchingDelivery delivery (DeliverPrimary other) = delivery==other
 matchingDelivery _ _ = False
 
 failDeliveries :: MVar RuntimeState -> Text -> IO ()
-failDeliveries state reason=modifyMVar_ state (retireDeliveries reason)
+failDeliveries state reason=modifyMVar_ state (retireDeliveries Nothing reason)
 
-retireDeliveries :: Text -> RuntimeState -> IO RuntimeState
-retireDeliveries reason s=do
-  mapM_ (rejectPrimaryControl reason) (primaryControl s)
+retireDeliveries :: Maybe PrimaryControl -> Text -> RuntimeState -> IO RuntimeState
+retireDeliveries retained reason s=do
+  forM_ (primaryControl s) $ \control->unless (Just control==retained) (rejectPrimaryControl reason control)
   mapM_ (settleDelivery (Left reason)) (deliveries s)
-  pure s {requests=filter keep (requests s),admittedPrimary=Nothing}
+  pure s {requests=filter keep (requests s),admittedPrimary=Nothing,primaryControl=case retained of Just control->Just control; Nothing->primaryControl s}
   where keep DeliverPrimary{}=False
         keep CancelPrimary=False
         keep _=True

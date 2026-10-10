@@ -12,12 +12,12 @@ frontends:
 | `hide-plugin-api` | Scoped commands, tools, forms, input declarations, menus, trees and session composition |
 | `hide-agent-api` | Provider contracts, conversation input delivery, directory metadata and attributed orchestration services |
 | `hide-acp` | ACP transport and provider adapter |
-| `hide-agents` | Agents sidebar/forms, conversation transcripts, child input, completion hints and editor tools |
+| `hide-agents` | Agents sidebar/forms, conversation input and transcripts, completion hints and editor tools |
 
 Buffer/window ownership and the multiline-editor interpreter still live in the
-main `hide` library. ACP completion and child conversations declare their input
-and acknowledged commands through the public API. Primary conversation input
-and the remaining editor tools are the next package boundaries. The sections below distinguish implemented APIs
+main `hide` library. ACP completion and primary/child conversations declare their
+input and acknowledged commands through the public API. The remaining editor
+tools are the next package boundaries. The sections below distinguish implemented APIs
 from proposed contracts; proposed signatures are design sketches, not compilable
 SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
 navigation model.
@@ -950,10 +950,9 @@ requests, attributed messages, public capabilities/events and a driver lifetime.
 The adapter does not import the hub, Model, Render or Conversation. Capability
 decoding belongs to ACP; the hub decodes its own checkpoint representation.
 The linked `hide-agents` package supplies the Agents sidebar, primary and child
-transcripts, child Query/Steer input, completion hints, coordination, documentation
-and environment tools through `hide-plugin-api`. Primary conversation input and
-the remaining editor tools still use host types; those consumers define the
-remaining public boundaries.
+transcripts, Query/Steer input, completion hints, coordination, documentation and
+environment tools through `hide-plugin-api`. The remaining editor tools still use
+host types; those consumers define the remaining public boundaries.
 
 The hub remains the owner of agent IDs, ancestry, limits, workspaces, task tickets
 and message attribution. A provider plugin supplies a driver; a conversation
@@ -1130,8 +1129,33 @@ limit still applies at admission. Both checks run on the worker.
 
 A missing child-input contribution leaves the transcript readable and the unsent
 draft preserved, with no callable input attachment. Recovery restores content,
-not authority. Primary chat still owns its prepare/connect/queue path; moving its
-validation alone would not move the operation.
+not authority.
+
+### Primary conversation input
+
+The same `Hide.ConversationInput` plugin supplies the primary **Query/Steer**
+declaration. `PrimaryInputServices.submitPrimaryInput` binds each invocation to
+its original input slot and provider identity. It grants no source-buffer access
+and cannot redirect the operation to another conversation.
+
+Query acknowledgement means either admission into the existing ordered query
+queue, or successful submission of the ACP prompt after connection and context
+preparation. Steer retains the active provider's acknowledgement. The command
+runs in the existing control worker; context preparation keeps its own worker
+slot. A command cannot occupy the preparation slot while waiting for that slot
+to finish the same request.
+
+Provider startup, context capture and redaction remain host operations. Their
+control receipt survives the original connection startup. Once connected, an
+invocation also keeps the captured model/configuration receipt; cancellation or
+replacement invalidates it. The plugin returns its prepared draft update
+through ordinary control adoption; later typing and hidden drafts retain the
+same exact-version protection as child input. Missing input preserves the
+transcript and unsent draft without a callable attachment.
+
+Primary input retains the existing buffer-size domain; it does not acquire the
+child Hub's 65,536-character message limit. Both declarations validate on their
+worker before calling the captured service.
 
 ## Cabal navigation as a second example
 

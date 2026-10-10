@@ -21,7 +21,7 @@ import Hide.Plugin.AgentDirectory (AgentDirectory,DirectoryRequest)
 import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
 import Hide.Plugin.Completion (HintServices)
-import Hide.Plugin.ConversationInput (ChildInputServices)
+import Hide.Plugin.ConversationInput (PrimaryInputServices, ChildInputServices)
 import Hide.Plugin.Input (InputDeclaration)
 import Hide.Plugin.Request (RequestServices)
 import Hide.Plugin.Tool (Tool)
@@ -67,6 +67,9 @@ data Plugin = Plugin
   , pluginConversation :: Maybe ConversationPresenter
     -- ^ Pure presentation selected at startup and evaluated only on the host
     -- preparation/checkpoint workers. This contribution owns no input lifetime.
+  , pluginPrimaryInput :: Maybe (InputDeclaration PrimaryInputServices)
+    -- ^ Primary Query/Steer executes on the host's existing control worker.
+    -- Missing input leaves its transcript and recovered draft read-only.
   , pluginChildInput :: Maybe (InputDeclaration ChildInputServices)
     -- ^ One command registration shared by child draft attachments. The host
     -- supplies only the captured human slot/target service on its existing

@@ -881,7 +881,7 @@ code-input behavior, a character bound, a typed command and its argument/reply
 adapters. The host checks cached length before reading submitted text on the
 worker and binds `KeepInput`, `ClearInput` or `ReplaceInput` to the original
 submission. Plugins receive no Buffer, Undo or content-version identity.
-`hide-agents` uses this for ACP completion's **Send hint** action and child
+`hide-agents` uses this for ACP completion's **Send hint** action and primary/child
 conversation **Query/Steer**. Each uses its existing worker and captured provider
 or child receipt. The host registers a declaration once, then attaches it to
 each draft; command registration does not duplicate per-window input ownership.

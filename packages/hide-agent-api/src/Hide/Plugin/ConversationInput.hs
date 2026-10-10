@@ -6,10 +6,10 @@
 -- Stability   : experimental
 -- Portability : Haskell2010
 --
--- An acknowledged human input operation bound to one captured child and slot.
+-- Acknowledged human input operations bound to a captured conversation slot.
 -- Provider identities, drafts, configuration receipts and queues remain private
 -- to the host; plugins cannot select a different target or operation.
-module Hide.Plugin.ConversationInput (ChildInputServices(..)) where
+module Hide.Plugin.ConversationInput (PrimaryInputServices(..), ChildInputServices(..)) where
 
 import Data.Text (Text)
 
@@ -25,3 +25,13 @@ import Data.Text (Text)
 -- queue and never exposes source files, private buffers or the Desktop.
 newtype ChildInputServices = ChildInputServices
   { submitInput :: Text -> IO (Either Text ()) }
+
+-- | The captured human primary slot. Query acknowledges admission to the
+-- existing conversation queue or successful provider prompt submission; Steer
+-- acknowledges the provider's acceptance. It never waits for a query's answer.
+-- The original launch/provider/configuration lifetime remains authoritative, including an
+-- initial connection acquired for this query. Cancellation/replacement and calls
+-- after invocation completion reject. Admitted calls drain before revocation.
+-- No draft, source snapshot, provider object or queue crosses this boundary.
+newtype PrimaryInputServices = PrimaryInputServices
+  { submitPrimaryInput :: Text -> IO (Either Text ()) }

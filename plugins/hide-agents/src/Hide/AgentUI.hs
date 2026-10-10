@@ -51,6 +51,7 @@ plugin=Plugin
   , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (DocsTools.tools++EnvironmentTools.tools)
       ++map RequestTool BufferTools.tools
   , pluginConversation=Just AgentTranscript.presentConversation
+  , pluginPrimaryInput=Just ConversationInput.primaryInput
   , pluginChildInput=Just ConversationInput.childInput
   , pluginCompletionInput=Just CompletionInput.completionInput
   }

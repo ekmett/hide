@@ -59,7 +59,7 @@ checks=bracket temporary removePathForcibly $ \root->
     writeFile (root </> "thc.toml") (unlines ["[editor.autocomplete]","provider = 'acp'","executable = 'python3'","arguments = '"++show [script]++"'","debug = false"])
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
-    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Plugin.pluginChildInput Hide.AgentUI.plugin) consoles root $ \conversation->
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Plugin.pluginPrimaryInput Hide.AgentUI.plugin) (Plugin.pluginChildInput Hide.AgentUI.plugin) consoles root $ \conversation->
       withAutocomplete (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
         createRequests<-newIORef []
         agentRequests<-newIORef []

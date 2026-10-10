@@ -22,7 +22,7 @@ module Hide.Plugin.EditorHost
   , EditorSpec(..), EditorSlot(..), EditorAction, editorAction
   , PreparedEditor, prepareEditorBuffer, DeclaredInput, registerDeclaredInput, attachDeclaredInput, remountEditor, editorMount, editorInitialBuffer
   , installedEditor, editorCurrent, editorBindingCurrent, claimEditorMount
-  , DraftSubmission, captureDraftSubmission, submissionDraft, submissionMount
+  , DraftSubmission, SubmissionIdentity, submissionIdentity, captureDraftSubmission, submissionDraft, submissionMount
   , submissionVersion, submissionContent, submissionAction, submissionSlot, sameDraftSubmission, submissionAccepted, abortEditorSubmission
   , invokeEditorAction, EditorUpdate, clearEditorDraft, replacementEditorDraft
   , updateSubmission, updateReplacement, consumeEditorUpdate
@@ -221,6 +221,13 @@ instance Eq DraftSubmission where
   DraftSubmission _ _ _ _ _ a==DraftSubmission _ _ _ _ _ b=a==b
 instance Show DraftSubmission where
   show submitted="DraftSubmission "++show (submissionMount submitted)++" "++show (submissionSlot submitted)
+-- | The existing one-shot submission claim without its immutable source read.
+-- Equality distinguishes separate submissions even at the same draft/version.
+-- It grants no action or update authority and retains no BufferContent or Undo.
+newtype SubmissionIdentity = SubmissionIdentity (TVar SubmissionPhase) deriving Eq
+-- | /O(1)/. Project the existing claim identity for host mailbox admission.
+submissionIdentity :: DraftSubmission -> SubmissionIdentity
+submissionIdentity (DraftSubmission _ _ _ _ _ phase)=SubmissionIdentity phase
 -- | Capture after exact active/focused mount and human policy checks. Only an
 -- action declared on this mount is admissible. This never encodes the draft.
 captureDraftSubmission :: EditorMount -> EditorSlot -> Buffer -> IO (Maybe DraftSubmission)

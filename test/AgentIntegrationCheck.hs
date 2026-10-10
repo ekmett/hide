@@ -28,7 +28,7 @@ import qualified Hide.AgentHub as AH
 import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffer,sanitizedPreparedContent,guestTransitionAllowed)
 import qualified Data.Map.Strict as M
 import Data.IORef
-import Hide.Buffer (contents,newBuffer,contentSlice,contentLength,Selection(..))
+import Hide.Buffer (bufferLength, contents,newBuffer,contentSlice,contentLength,Selection(..))
 import Hide.AgentSidebarTypes (DirectoryRequest(ShowAgent))
 import Hide.Recovery (writeCheckpoint,readCheckpoint,checkpointKey)
 import Hide.BufferReadServices (windowPage)
@@ -104,7 +104,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     let unprepared=ConversationPresenter
           { primaryTranscript= \_ _->error "primary presenter evaluated during owner capture"
           , agentHistory= \_->error "child presenter evaluated during owner capture" }
-    C.withConsoles $ \consoles->withConversationAt (Just unprepared) (Just ConversationInput.childInput) consoles root $ \conversation->do
+    C.withConsoles $ \consoles->withConversationAt (Just unprepared) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \conversation->do
       let hub=AR.agentHub (conversationAgents conversation)
           caps=AH.Capabilities False False False []
       child<-AH.registerAgent hub "Unprepared" root
@@ -121,7 +121,7 @@ checks=bracket temporary removePathForcibly $ \root ->
         (not (null requests) && maybe False (maybe False (const True) . conversationSource) (M.lookup "" (conversationViews primaryCaptured)))
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
-    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \conversation -> withTextPresentation $ \presentation->do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
           primary=AR.primaryAgent agents
@@ -138,6 +138,10 @@ checks=bracket temporary removePathForcibly $ \root ->
           submit action d=let (prepared,effects)=runCommand (SubmitChat action) d in apply prepared effects
           draft text selected d=setComposerInput (newBuffer text) selected True d
           send text d=submit QuerySubmit (draft text (Selection (T.length text) (T.length text)) d)
+          primarySettled marker d=do
+            (_,reply)<-chatTool conversation d "agent_settings" (object [])
+            value<-reply >>= right
+            pure (field "replying" value==Just False && bufferLength (composerBuffer d)==0 && marker `T.isInfixOf` activeText d)
           tickUntil :: HasCallStack => (Desktop -> IO Bool) -> Desktop -> IO Desktop
           tickUntil=testUntil "provider/body"
           testUntil :: HasCallStack => String -> (Desktop -> IO Bool) -> Desktop -> IO Desktop
@@ -146,7 +150,7 @@ checks=bracket temporary removePathForcibly $ \root ->
             maybe (error ("Agent conversation integration timed out: "++label++"\n"++prettyCallStack callStack)) pure answer
             where loop current=do next<-tickBody presentation conversation current; ok<-test next; if ok then pure next else threadDelay 10000 >> loop next
       shown<-ui "show" [] initial
-      connected<-send "Hello" shown >>= tickUntil (pure . (\d->status d=="Agent: end_turn" && "Hello" `T.isInfixOf` activeText d))
+      connected<-send "Hello" shown >>= tickUntil (primarySettled "Hello")
       servers<-AR.primaryServers agents
       let tokens=[value | server<-servers, entry<-maybe [] id (field "env" server :: Maybe [Value]),Just value<-[field "value" entry :: Maybe T.Text]]
       let publicSafe desktop=do
@@ -172,9 +176,9 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "primary provider context usage reaches the shared status API"
         ((field "contextUsage" primaryStatus >>= field "used")==Just (120::Int) &&
          (field "contextUsage" primaryStatus >>= field "size")==Just (1000::Int))
-      split<-send "split-private" connected >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "split-private" `T.isInfixOf` activeText desktop))
+      split<-send "split-private" connected >>= tickUntil (\desktop->publicSafe desktop >> primarySettled "split-private" desktop)
       publicSafe split
-      nested<-send "nested-private" split >>= tickUntil (\desktop->publicSafe desktop >> pure (status desktop=="Agent: end_turn" && "nested-private" `T.isInfixOf` activeText desktop))
+      nested<-send "nested-private" split >>= tickUntil (\desktop->publicSafe desktop >> primarySettled "nested-private" desktop)
       nestedHistory<-AH.historyAgent hub AH.Human primary 0 100 >>= right
       let nestedEvents=AH.historyEvents nestedHistory
       ensure "primary tools and plans use public provider events"
@@ -394,7 +398,26 @@ checks=bracket temporary removePathForcibly $ \root ->
       _<-tickBody presentation conversation finished
       invalid<-AH.statusAgent hub (AH.Agent primary) primary
       ensure "ended primary loses orchestration authority" (case invalid of Left _->True; _->False)
-    C.withConsoles $ \consoles->withConversationAt Nothing Nothing consoles root $ \conversation->do
+    C.withConsoles $ \consoles->withConversationAt (Just AgentTranscript.presentConversation) Nothing (Just ConversationInput.childInput) consoles root $ \conversation->withTextPresentation $ \presentation->do
+      recovered<-readCheckpoint (root </> "conversation-views.checkpoint") (initialDesktop (80,25)) >>= right
+      (_,shown)<-conversationEffects conversation (\d _->pure (False,d)) recovered [AgentAction "show" []]
+      expected<-canonicalWindowText shown
+      let awaitBody current=do
+            next<-tickBody presentation conversation current
+            text<-canonicalWindowText next
+            if not (T.null (activeText next)) && text==expected then pure next
+              else threadDelay 10000 >> awaitBody next
+      readonly<-timeout 5000000 (awaitBody shown) >>= maybe (fail "Read-only primary body preparation timed out") pure
+      ensure "missing primary input preserves its recovered transcript without a callable attachment"
+        (not (T.null expected) && activeEditorMount readonly==Nothing)
+      version<-captureVersion (composerBuffer readonly)
+      forM_ [QuerySubmit,SteerSubmit] $ \slot->do
+        let (requested,effects)=runCommand (SubmitChat slot) readonly
+        (_,denied)<-conversationEffects conversation (\d _->pure (False,d)) requested effects
+        sameDraft<-versionCurrent version (composerBuffer denied)
+        ensure "unavailable primary input cannot consume the recovered draft or create a submission"
+          (null effects && sameDraft && composerSelection denied==composerSelection readonly)
+    C.withConsoles $ \consoles->withConversationAt Nothing (Just ConversationInput.primaryInput) Nothing consoles root $ \conversation->do
       recovered<-readCheckpoint (root </> "conversation-views.checkpoint") (initialDesktop (80,25)) >>= right
       let apply desktop effects=snd <$> conversationEffects conversation (\d _->pure (False,d)) desktop effects
       shown<-apply recovered [AgentAction "show" []]
@@ -433,7 +456,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     let recoveredPath=root </> "newer-child.checkpoint"
         fakeDriver=AH.AgentDriver root "private-recovery-child" (AH.Capabilities False False False [])
           (\_ ->pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (pure ()) (pure ()) (\_ ->pure (Left "unsupported"))
-    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \conversation -> withTextPresentation $ \presentation->do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
       child<-AH.registerAgent hub "Recovered child" root fakeDriver >>= right
@@ -468,7 +491,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       AR.activateAgentCheckpoint agents
       AR.checkpointAgents agents >>= right
       pure child
-    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) Nothing consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) Nothing consoles root $ \conversation -> withTextPresentation $ \presentation->do
       recovered<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
       (_,shown)<-conversationEffects conversation (\d _->pure (False,d)) recovered
         [AgentSidebarAction (ShowAgent recoveredChild)]
@@ -486,7 +509,7 @@ checks=bracket temporary removePathForcibly $ \root ->
         sameDraft<-versionCurrent version (composerBuffer denied)
         ensure "unavailable child input cannot consume the recovered draft or create a submission"
           (null effects && sameDraft && composerSelection denied==composerSelection readonly && agentQueued denied==0)
-    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \conversation -> withTextPresentation $ \presentation->do
       recovered<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
       closedRetained<-tickBody presentation conversation recovered
       ensure "a hidden recovered child catalogue stays closed before explicit show"
@@ -548,7 +571,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     rememberSession corrupt
     checkpoint<-(++".agents.json") <$> checkpointPath (sessionId corrupt)
     writeFile checkpoint "{incomplete"
-    environment "THC_EDIT_SESSION" (Just (sessionId corrupt)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    environment "THC_EDIT_SESSION" (Just (sessionId corrupt)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \conversation -> withTextPresentation $ \presentation->do
       noticed<-tickBody presentation conversation (initialDesktop (80,25))
       ensure "agent checkpoint failures reach the status line" ("checkpoint" `T.isInfixOf` status noticed && "retained" `T.isInfixOf` status noticed)
       consumed<-tickBody presentation conversation noticed {status="ordinary status"}

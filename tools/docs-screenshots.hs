@@ -85,7 +85,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           Driver.await label pump predicate d
         chat d = case agentConfig of
           Nothing -> recordedChat d
-          Just _ -> C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \conversation -> do
+          Just _ -> C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \conversation -> do
             let liveEffects=conversationEffects conversation effects
             shown <- snd <$> liveEffects d [AgentAction "show" []]
             sent <- snd <$> liveEffects shown [AgentAction "send" ["0",
@@ -107,7 +107,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
         -- Visible messages transcribed from the original real capture's
         -- build/docs-capture/conversation.txt. Tool output was truncated there,
         -- so replay only the complete exchange, model and rounded usage.
-        recordedChat d = C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.childInput) consoles root $ \conversation -> do
+        recordedChat d = C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles root $ \conversation -> do
           let resized=fst (handleEvent (V.EvResize 100 21) d {sideTree=Nothing})
           opened <- snd <$> conversationEffects conversation effects resized [AgentAction "show" []]
           full <- command Zoom opened
