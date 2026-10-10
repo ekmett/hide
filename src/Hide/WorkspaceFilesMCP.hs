@@ -151,8 +151,10 @@ fileOperation core desktop operation raw target
         directory<-doesDirectoryExist path
         if directory then removeDirectory path else removeFile path
         let ids=[bid | (bid,_,_)<-affected]
+            retained=filter (maybe True (`notElem` ids) . bufferId) (windows desktop)
             keepDirectory value=if within path value then root else value
-        pure desktop {buffers=foldr M.delete (buffers desktop) ids,windows=filter (maybe True (`notElem` ids) . bufferId) (windows desktop),
+        pure desktop {buffers=foldr M.delete (buffers desktop) ids,windows=retained,
+          windowTabs=retainWindowTabs (map windowId retained) (windowTabs desktop),
           defaultDirectory=fmap keepDirectory (defaultDirectory desktop),sideTree=fmap (\tree->tree {treeRoot=keepDirectory (treeRoot tree)}) (sideTree desktop)}
       _ -> ioError (userError "Unknown file operation")
     refreshed<-case sideTree updated of Nothing -> pure updated; Just tree -> catchIOError (snd <$> core updated [ReadTree (treeRoot tree)]) (\err->pure updated {status="Filesystem operation completed; tree refresh failed: "<>T.pack (show err)})

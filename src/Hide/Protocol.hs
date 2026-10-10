@@ -189,7 +189,7 @@ applyInputUnchecked input d = case input of
   OpenPath path -> (d,[OpenFile Plugin.HumanMenu path])
   Resize w h -> handleEvent (V.EvResize w h) d
   Blur -> let (released,effects)=cancelTerminalDrag d
-              (blurred,hoverEffects)=hoverAt (-1) (-1) released {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[],pendingFileExport=(fst (pendingFileExport d)+1,Nothing)}
+              (blurred,hoverEffects)=hoverAt (-1) (-1) released {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[],pendingFileExport=(fst (pendingFileExport d)+1,Nothing)}
           in (blurred,effects++hoverEffects)
   Modifiers mods -> (d {heldModifiers=mods},[])
   Wheel x y steps mods -> wheelEvent x y steps mods d

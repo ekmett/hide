@@ -368,7 +368,7 @@ beginGuestInput d=(clearGestures d) {clipboard="",clipboardCode=Nothing}
 endGuestInput :: Desktop -> Desktop -> Desktop
 endGuestInput original updated=(clearGestures updated) {clipboard=clipboard original,clipboardCode=clipboardCode original}
 clearGestures :: Desktop -> Desktop
-clearGestures d=d {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,heldModifiers=[],buttonPressed=Nothing,buttonHover=Nothing,blockStart=Nothing}
+clearGestures d=d {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,prefix=Nothing,heldModifiers=[],buttonPressed=Nothing,buttonHover=Nothing,blockStart=Nothing}
 
 cellAccess :: Desktop -> Int -> Int -> CellAccess
 cellAccess d=cellAccessWith (privateFilePaths d) d
@@ -501,7 +501,11 @@ onScreen d=inside (uncurry (Rect 0 0) (screenSize d))
 overlayAt :: Desktop -> Int -> Int -> Bool
 overlayAt d x y=y==0 || y==snd (screenSize d)-1 || (messagesDisplayed d && inside (problemsRect d) x y) || maybe False (\tree->x<treeWidth tree) (sideTree d) || maybe False (\(r,_)->inside r x y) (contextMenu d) || maybe False (\(index,_)->inside (menuRect d index) x y) (menu d)
 topWindow :: Desktop -> Int -> Int -> Maybe Window
-topWindow d x y=find (\w->windowVisible d w && inside (bounds w) x y) (windows d)
+topWindow d x y=do
+  frame<-find (\w->windowVisible d w && inside (bounds w) x y) (windows d)
+  case find (\(rect,_,_)->inside rect x y) (windowTabStrip d frame) of
+    Just (_,ident,_)->find ((==ident).windowId) (windows d)
+    Nothing->Just frame
 -- Mask any grapheme intersecting a hidden logical interval, including a
 -- private zero-width scalar joined to a public base. Layout receipts expose
 -- exact original extents; ordinary rows use the same bounded Unicode cursor.

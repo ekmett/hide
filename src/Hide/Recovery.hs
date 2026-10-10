@@ -184,7 +184,7 @@ readCheckpoint path baseline=do
 -- | Validated source documents and their views, without process, plugin or draft
 -- ownership. Split views share one document. The constructor is private so only
 -- checkpoint validation can produce an import; no payload equality is provided.
-data RecoveredSources = RecoveredSources !(M.Map Int Document) ![Window]
+data RecoveredSources = RecoveredSources !(M.Map Int Document) ![Window] ![WindowTabs]
 
 -- | Read a bounded checkpoint on the sidebar worker, using the same schema
 -- validation as 'readCheckpoint'. Prepare only source documents and views;
@@ -205,7 +205,7 @@ readSourceCheckpoint path=do
               Nothing->window
         documents<-traverse prepare (M.restrictKeys (buffers recovered) referenced)
         mapM_ evaluate views
-        pure (RecoveredSources <$> sequence documents <*> pure views)
+        pure (RecoveredSources <$> sequence documents <*> pure views <*> pure (retainWindowTabs (map windowId views) (windowTabs recovered)))
       pure (result >>= id)
   where
     prepare doc=do
@@ -226,13 +226,13 @@ readSourceCheckpoint path=do
 -- be retained, or checkpoint count/identity limits would be exceeded, refuse the
 -- whole import by setting status without adopting any documents or windows.
 adoptRecoveredSources :: RecoveredSources -> Desktop -> Desktop
-adoptRecoveredSources (RecoveredSources incoming views) desktop
+adoptRecoveredSources (RecoveredSources incoming views groups) desktop
   | M.null incoming=desktop {status="The saved session has no source buffer windows to recover."}
   | M.size incoming+M.size (buffers desktop)>2048 || length views+length (windows desktop)>4096 ||
       toInteger (nextId desktop)+toInteger (M.size incoming)+toInteger (length views)>1073741823=
       desktop {status="Recovered windows exceed this session's checkpoint limits."}
   | any ambiguous prepared=desktop {status="A generated file has two privacy origins; Recover that saved session instead."}
-  | otherwise=desktop {buffers=combined,windows=map fitted imported++windows desktop,nextId=after,
+  | otherwise=desktop {buffers=combined,windows=map fitted imported++windows desktop,windowTabs=map remapGroup groups++windowTabs desktop,nextId=after,
       problemsFocused=False,sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree desktop),
       status="Recovered "<>T.pack (show (length views))<>" source windows ("<>T.pack (show (M.size incoming))<>" buffers)."}
   where
@@ -249,6 +249,8 @@ adoptRecoveredSources (RecoveredSources incoming views) desktop
     assigned=zip prepared [nextId desktop..]
     identities=M.fromList [(old,fresh) | ((old,_,_),fresh)<-assigned]
     combined=M.union (buffers desktop) (M.fromList [(fresh,doc) | ((_,doc,_),fresh)<-assigned])
+    frameIdentities=M.fromList (zip (map windowId views) [firstFrame..])
+    remapGroup group=group {tabMembers=map (frameIdentities M.!) (tabMembers group)}
     firstFrame=nextId desktop+M.size incoming
     after=firstFrame+length views
     usedNumbers=S.fromList (map windowNumber (windows desktop)++maybe [] pure (messagesNumber desktop))
@@ -412,11 +414,13 @@ desktopValueWith buffer baseline plugin body desktop=do
   plugins<-mapM (\(window,prepared,(kind,version))->do
     text<-plugin prepared
     pure (object ["id" .= windowId window,"kind" .= kind,"version" .= version,"title" .= W.preparedWindowTitle prepared,"text" .= text])) durable
-  pure (object ["schemaVersion" .= (6::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
+  pure (object ["schemaVersion" .= (7::Int),"screen" .= screenSize d,"buffers" .= encodedDocuments,
     "dockedTerminals" .= [object ["windowId" .= ident,"bounds" .= rectValue rectangle,"restoredBounds" .= fmap rectValue saved] | (ident,(rectangle,saved))<-M.toList (dockedTerminals d),any ((==ident).windowId) (windows d)],
     "bottomTerminal" .= bottomTerminal d,
+    "windowTabs" .= [object ["members" .= tabMembers group,"first" .= tabFirst group]
+      | group<-retainWindowTabs (map windowId persistedWindows) (windowTabs d)],
     "pluginWindows" .= plugins,
-    "windows" .= map (windowValue d) [w | w<-windows d,maybe (S.member (windowId w) durableIds || conversationTargetFor d w/=Nothing) (`M.member` documents) (bufferId w)],"nextId" .= nextId d,
+    "windows" .= map (windowValue d) persistedWindows,"nextId" .= nextId d,
     "conversationTarget" .= conversationTarget d,"conversationViews" .= views,
     "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
       ["wordStar" .= wordStar d,"wideSectionTitles" .= wideSectionTitles d,"hapticFeedback" .= hapticFeedback d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
@@ -429,6 +433,7 @@ desktopValueWith buffer baseline plugin body desktop=do
         -- the same inert, private document handoff used at owner withdrawal.
         d=preserveEditorDrafts [ref | ref<-M.keys (editorDrafts remembered),S.notMember ref conversationDrafts] remembered
         documents=M.filter keptDocument (buffers d)
+        persistedWindows=[w | w<-windows d,maybe (S.member (windowId w) durableIds || conversationTargetFor d w/=Nothing) (`M.member` documents) (bufferId w)]
         durableIds=S.fromList [windowId w | (w,_,_)<-durable]
         durable=[(w,prepared,recovery) | w<-windows d,conversationTargetFor d w==Nothing,PluginContent reference<-[windowContent w],Just prepared<-[M.lookup reference (pluginWindows d)],Just recovery<-[W.preparedWindowRecovery prepared]]
 
@@ -574,7 +579,7 @@ sidebarValue tree=object ["root" .= treeRoot tree,"selected" .= selected,"scroll
 desktopParser :: Desktop -> Value -> Parser (Desktop,[WindowSeed],[(Int,Text,Int,Text,Text)],[(Text,ConversationSeed)])
 desktopParser baseline=withObject "checkpoint" $ \o->do
   version<-o .: "schemaVersion"
-  unless (version==(6::Int)) (fail "Unsupported checkpoint version")
+  unless (version==(7::Int)) (fail "Unsupported checkpoint version")
   strings<-o .: "strings"
   size@(cols,rows)<-o .: "screen"
   unless (cols>0 && rows>0 && cols<=4096 && rows<=4096 && toInteger cols*toInteger rows<=1048576) (fail "Invalid desktop dimensions")
@@ -610,6 +615,19 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
     restored<-entry .: "restoredBounds" >>= traverse rectParser
     pure (wid,(rectangle,restored))) encodedDock
   unless (M.size (M.fromList pinned)==length pinned) (fail "Duplicate docked terminal")
+  encodedTabs<-o .: "windowTabs"
+  unless (length encodedTabs<=length views `div` 2) (fail "Too many tab groups")
+  groups<-mapM (withObject "window tabs" $ \entry->do
+    members<-entry .: "members"
+    unless (length members>=2 && length members<=length views) (fail "Invalid tab group size")
+    unless (all (`elem` frameIds) members && all (`notElem` map fst pinned) members) (fail "Invalid tab member")
+    first<-entry .: "first" >>= boundedInt 0 (length members-1)
+    let rectangles=[(bounds window,restoredBounds window) | WindowSeed ident _ _ make<-views,
+          ident `elem` members,let window=make (SourceContent 0)]
+    unless (case rectangles of rectangle:rest->all (==rectangle) rest; []->False) (fail "Inconsistent tab geometry")
+    pure (WindowTabs members first)) encodedTabs
+  let allMembers=concatMap tabMembers groups
+  unless (S.size (S.fromList allMembers)==length allMembers) (fail "Duplicate tab membership")
   selectedTerminal<-o .:? "bottomTerminal"
   unless (maybe True (`M.member` M.fromList pinned) selectedTerminal) (fail "Unknown selected terminal")
   ident<-o .: "nextId" >>= positive
@@ -629,10 +647,10 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   mode<-prefs .: "videoMode" >>= traverse (boundedInt 0 65535)
   problems<-prefs .: "problemsVisible"; preferred<-prefs .: "problemsHeight" >>= boundedInt 0 4096
   messages<-prefs .: "messagesNumber" >>= traverse positive
-  pure (baseline {terminalMouseTracking=S.empty,dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=[],pluginWindows=M.empty,retiredPluginWindows=S.empty,nextId=ident,editorDrafts=M.empty,editingInput=MountedInput,
+  pure (baseline {windowTabs=groups,terminalMouseTracking=S.empty,dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=[],pluginWindows=M.empty,retiredPluginWindows=S.empty,nextId=ident,editorDrafts=M.empty,editingInput=MountedInput,
     conversationTarget=selectedTarget,conversationViews=M.empty,defaultDirectory=directory,sideTree=sidebar,wideSectionTitles=wideTitles,hapticFeedback=haptics,windowPresentations=M.empty,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
     defaultBufferView=toEnum defaultView,chatSubmit=submit,macKeySymbols=macSymbols,appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
-    menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,clipboard="",clipboardCode=Nothing,clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
+    menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,clipboard="",clipboardCode=Nothing,clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,
     gitReview=Nothing,hoverTarget=Nothing,typeHint="",buttonHover=Nothing,buttonPressed=Nothing,contextMenu=Nothing,contextKind=SourceContext,contributedMenus=contributedMenus baseline,agentMenuRefs=agentMenuRefs baseline,menusActive=menusActive baseline,contextTarget=Nothing,
     diagnostics=[],diagnosticsGeneration=diagnosticsGeneration baseline+1,buildDiagnostics=[],problemsSelected=0,problemsScroll=0,problemsFocused=False,statusHover=Nothing,heldModifiers=[],

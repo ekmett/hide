@@ -287,6 +287,17 @@ Files and Messages remain the boundaries for adjacent windows.
 | Activate numbered window | Alt+1…9 | ⌥1…9 |
 | Zoom | F5 | F5 |
 
+Drop a window's title bar onto another title bar to group them into tabs. The
+receiving bar highlights before release. Click a tab to select it; drag it out
+of the bar to return it to a separate window. Drag the spare title-bar border
+to move the group. Escape cancels a drag.
+
+Resize, zoom and tile operate on the whole group. Each member retains its buffer,
+selection, undo, terminal or conversation. Closing a tab closes only that member.
+The title-bar arrows scroll crowded tabs; the sidebar and numbered-window
+shortcuts still select any member. Session recovery keeps the groups and selected
+tabs. Pinning a terminal detaches it into the bottom panel.
+
 Each editor and Messages window has a stable number.
 
 **Alt+Tab** cycles the menu, Files, windows and Messages; Shift reverses it.

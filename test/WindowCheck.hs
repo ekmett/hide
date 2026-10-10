@@ -24,6 +24,7 @@ import qualified Data.Sequence as Seq
 import qualified Graphics.Vty as V
 checks :: IO ()
 checks = do
+  windowTabChecks
   sourceCoordinateChecks
   sourceScrollChecks
   ref<-E.newDraftRef
@@ -642,3 +643,64 @@ sourceScrollChecks=do
         (sourceFixtureBuffer (win back)) (buffers back)}
   check "a prospective seek clamps a shorter replacement immediately"
     (scrollColumn (win (changeScroll False 1 shrunk))==0)
+
+-- Grouping is presentation only: the title drop must leave one visible frame.
+windowTabChecks :: IO ()
+windowTabChecks = do
+  let base=addDocument (Just (FileState "Second.hs" Nothing)) (newBuffer "second")
+          (addDocument (Just (FileState "First.hs" Nothing)) (newBuffer "first") (initialDesktop (100,40)))
+      placed=base {windows=case windows base of
+        source:target:rest->source {bounds=Rect 4 22 60 12}:target {bounds=Rect 8 3 64 15}:rest
+        _->error "two source windows"}
+      event e=fst . handleEvent e
+      held=event (V.EvMouseDown 19 22 V.BLeft []) placed
+      hovered=event (V.EvMouseDown 23 3 V.BLeft []) held
+      grouped=event (V.EvMouseUp 23 3 (Just V.BLeft)) hovered
+  unless (length (floatingWindows hovered)==2) (error "title hover must not group before release")
+  unless (length (floatingWindows grouped)==1 && length (windows grouped)==2)
+    (error "dropping title bars groups views without retiring either window")
+
+  let ids=map windowId (windows placed)
+      (sourceId,targetId)=case ids of [a,b]->(a,b); _->error "two source frames"
+      geometry desktop=map (\w->(bounds w,restoredBounds w)) (windows desktop)
+      sameFrame desktop=case geometry desktop of first:rest->all (==first) rest; []->False
+      switched=focusWindow targetId grouped
+      resized=resizeWindowBounds sourceId (Rect 8 3 45 14) switched
+      third=addDocument Nothing (newBuffer "third") grouped
+      tour=take 4 (iterate (cycleEditorWindow False) third)
+  unless (sameFrame grouped && fmap windowId (activeWindow switched)==Just targetId &&
+          sameFrame resized && all ((==Rect 8 3 45 14).bounds) (windows resized))
+    (error "tab selection and hidden-member resizing share frame geometry")
+  unless (length (M.fromList [(windowId w,()) | state<-tour,Just w<-[activeWindow state]])==3)
+    (error "window cycling must escape the selected tab group")
+  unless (length (floatingWindows (tileWindows False third))==2)
+    (error "tiling places a tab group once")
+  let visible=snapshot grouped
+  unless ("second" `T.isInfixOf` visible && not ("first" `T.isInfixOf` visible))
+    (error "only the selected tab body is rendered")
+  let active=fromMaybe (error "selected tab") (activeWindow grouped)
+      tabRect=case [r | (r,wid,_)<-windowTabStrip grouped active,wid==sourceId] of
+        r:_->r; []->error "selected tab is visible"
+      x=left tabRect; y=top tabRect
+      captured=event (V.EvMouseDown x y V.BLeft []) grouped
+      detached=event (V.EvMouseDown x (y+4) V.BLeft []) captured
+      cancelled=event (V.EvKey V.KEsc []) detached
+      closedDuringDrag=closeActive (focusWindow targetId detached)
+      cancelledAfterClose=event (V.EvKey V.KEsc []) closedDuringDrag
+  unless (length (floatingWindows detached)==2 && length (floatingWindows cancelled)==1 && sameFrame cancelled)
+    (error "dragging a tab out detaches it and Escape restores the group")
+  unless (null (windowTabs cancelledAfterClose) && length (windows cancelledAfterClose)==1)
+    (error "Escape must not restore tab membership for a closed window")
+  let closed=closeActive grouped
+  unless (length (windows closed)==1 && null (windowTabs closed) && M.size (buffers closed)==1)
+    (error "closing one tab retains its neighbor and dissolves the singleton group")
+
+  let tiled=tileWindows False placed
+      (topFrame,bottomFrame)=case floatingWindows tiled of [a,b]->(a,b); _->error "two tiled frames"
+      tx=left (bounds topFrame)+8; ty=top (bounds topFrame)
+      bottomTitle=top (bounds bottomFrame)
+      tiledPress=event (V.EvMouseDown tx ty V.BLeft []) tiled
+      tiledHover=event (V.EvMouseDown tx bottomTitle V.BLeft []) tiledPress
+      tiledJoin=event (V.EvMouseUp tx bottomTitle (Just V.BLeft)) tiledHover
+  unless (tabDropTarget tiledHover==Just (windowId bottomFrame) && length (floatingWindows tiledJoin)==1)
+    (error "sticky neighbors must not move a title-drop target out of reach")

@@ -114,7 +114,7 @@ workspaceTool apply desktop name args = case parseEither parse args of
               next=maybe sized (\n->resizeProblems (snd (screenSize sized)-n-1) sized) mh
           if (isJust fw && not (isJust (sideTree next))) || (isJust mh && not (bottomVisible next))
             then failure d "Show a panel before setting its size."
-            else success next {drag=Nothing,dragOriginal=Nothing}
+            else success next {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
       "editor_file" -> parsed desktop ((,,,,,) <$> o .: "action" <*> o .:? "windowId" <*> o .:? "bufferId" <*> o .:? "path" <*> o .:? "revision" <*> o .:? "dirtyAction") $ \(action,wid,bid,path,rev,decision) ->
         fileAction apply desktop action wid bid path rev decision
       "workspace_project" -> pure (desktop,ioResult $ do
@@ -317,7 +317,7 @@ layout d=object ["screen" .= object ["columns" .= fst (screenSize d),"rows" .= s
   "messages" .= object ["visible" .= problemsVisible d,"selected" .= messagesDisplayed d,"height" .= problemsHeight d,"bounds" .= rectValue (problemsRect d)],
   "status" .= T.take 8192 (sanitizedStatus d)]
   where
-    windowValue w=object (["windowId" .= windowId w,"bufferId" .= bufferId w,"focused" .= windowFocused d w,"pinned" .= windowPinned d w,"visible" .= windowVisible d w,"bounds" .= rectValue (bounds w)]++
+    windowValue w=object (["windowId" .= windowId w,"bufferId" .= bufferId w,"focused" .= windowFocused d w,"pinned" .= windowPinned d w,"visible" .= windowVisible d w,"tabMembers" .= windowTabMembers d (windowId w),"bounds" .= rectValue (bounds w)]++
       case windowDocument (buffers d) w of
         Nothing -> []
         Just doc -> let b=documentBuffer doc; (row,column)=bufferLineColumn b (caret (selection w)) in

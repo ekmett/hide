@@ -201,6 +201,22 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   check "project sidebar dock geometry and display preferences survive"
     (defaultDirectory recovered==Just root && fmap (\tree->(treeRoot tree,treeWidth tree,treeFocused tree)) (sideTree recovered)==Just (root,23,True) && screenSize recovered==(100,35) && problemsVisible recovered && problemsPreferredHeight recovered==9 &&
      wordStar recovered && hapticFeedback recovered && not (blinkCursor recovered) && pixelateUnicode recovered && materialIcons recovered && appearance recovered==DarkMode && streamerMode recovered && chatSubmit recovered==SteerSubmit)
+  let groupedPath=root </> "tabs.checkpoint"
+      from=windowId (fromJust (activeWindow binary))
+      into=windowId (fromJust (activeWindow source))
+      grouped=groupWindows from into binary
+  writeCheckpoint groupedPath grouped >>= right
+  recoveredGroups<-readCheckpoint groupedPath fresh >>= right
+  check "recovery retains tab order, selected member and frame geometry"
+    (windowTabs recoveredGroups==windowTabs grouped &&
+     fmap windowId (activeWindow recoveredGroups)==Just from &&
+     map bounds (floatingWindows recoveredGroups)==map bounds (floatingWindows grouped))
+  importedGroups<-readSourceCheckpoint groupedPath >>= right
+  let mergedGroups=adoptRecoveredSources importedGroups fresh
+  check "source recovery remaps group identities into the destination session"
+    (map (length . tabMembers) (windowTabs mergedGroups)==[2] &&
+     all (\wid->any ((==wid).windowId) (windows mergedGroups)) (concatMap tabMembers (windowTabs mergedGroups)) &&
+     length (floatingWindows mergedGroups)==length (windows mergedGroups)-1)
   let pinnedPath=root </> "pinned.checkpoint"
       terminalWindowId=maybe (error "missing terminal") windowId (activeWindow terminal)
       pinned=setTerminalPinned True terminalWindowId terminal
@@ -450,6 +466,8 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
       set _ _ value=value
   mutate (set "conversationTarget" (toJSON ("unknown-agent"::T.Text)))
   mutate (set "schemaVersion" (toJSON (0::Int)))
+  mutate (set "windowTabs" (toJSON [object ["members" .= ([from,from]::[Int]),"first" .= (0::Int)]]))
+  mutate (set "windowTabs" (toJSON [object ["members" .= ([from,into]::[Int]),"first" .= (-1::Int)]]))
   mutate (set "nextId" (toJSON (0::Int)))
   invalidSource<-readSourceCheckpoint path
   check "source-only import retains checkpoint identity validation" (case invalidSource of Left _->True; _->False)
@@ -669,7 +687,7 @@ logicalFixture root target name records anchored selected=do
         "anchor" .= anchored,"column" .= (0::Int),"replySelection" .= selected]
       set key value (Object fields)=Object (KM.insert key value fields)
       set _ _ value=value
-      input=set "schemaVersion" (toJSON (6::Int)) . set "strings" (toJSON [""::T.Text]) .
+      input=set "schemaVersion" (toJSON (7::Int)) . set "strings" (toJSON [""::T.Text]) .
         set "buffers" (toJSON ([]::[Value])) .
         set "conversationTarget" (toJSON target) . set "conversationViews" (toJSON [view]) $ base
   BL.writeFile path (encode input)

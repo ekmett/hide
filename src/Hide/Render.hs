@@ -127,6 +127,7 @@ data RenderState = RenderState
   , keyAutocompleteWindow :: Maybe PluginWindow.WindowRef
   , keyAutocompleteACPEnabled :: Bool
   , keyDockedTerminals :: M.Map Int (Rect,Maybe Rect)
+  , keyWindowTabs :: [WindowTabs], keyDragTabs :: Maybe [WindowTabs], keyTabDropTarget :: Maybe Int
   , keyBottomTerminal :: Maybe Int
   } deriving Eq
 
@@ -284,6 +285,7 @@ renderKey original = do
         , keyAutocompleteWindow=autocompleteWindow original
         , keyAutocompleteACPEnabled=autocompleteACPEnabled original
         , keyDockedTerminals=dockedTerminals original
+        , keyWindowTabs=windowTabs original, keyDragTabs=dragTabs original, keyTabDropTarget=tabDropTarget original
         , keyBottomTerminal=bottomTerminal original
         }
   pure (RenderKey state documents views drafts question' dialog' tree
@@ -401,6 +403,8 @@ renderSceneWith canvases d=(privacyLayers++layers,visibleCursor)
     images=map CellImage
     halo (Rect x y w h)=[CellHalo shadow [(x+w,y+1,2,max 0 (h-1)),(x+2,y+h,w,1)]]
     base = images [place 0 0 menuBar, place 0 (sh-1) statusBar]
+      ++ images [place (left r+5) (top r) (V.charFill (attr black green) '═' (max 0 (width r-12)) 1)
+           | Just wid<-[tabDropTarget d],Just Moving{}<-[drag d],Just target<-[find ((==wid).windowId) (windows d)],let r=bounds target]
       ++ bottomLayers canvases d
       ++ images (maybe [] (treeLayers d) (sideTree d))
       ++ foldr stackWindow (images [V.charFill (attr blue gray) '░' sw sh]) (floatingWindows d)
@@ -468,7 +472,12 @@ hostWindowFrame :: Desktop -> Bool -> Window -> V.Attr -> [V.Image]
 hostWindowFrame d active w frame=
   (if active then [place (x+2) y (label frame "[" V.<|> label (attr (V.RGBColor 85 255 85) blue) (if videoMode d==Nothing then "x" else "■") V.<|> label frame "]"),
    place (x+ww-6) y (label frame "[" V.<|> label (attr cyan blue) "↑" V.<|> label frame "]")] else [])
-  ++[place (x+ww-7-T.length number) y (label frame number),place x y (box frame (active && not moving) ww hh)]
+  ++ [place x' y' (V.cropRight size (label (if ident==windowId w then attr black scrollCyan else frame) title V.<|>V.charFill frame ' ' size 1))
+      | (Rect x' y' size _,ident,title)<-windowTabStrip d w]
+  ++ [place x' y' (label (attr cyan blue) (if direction<0 then "◄" else "►"))
+      | (Rect x' y' _ _,direction)<-windowTabArrows d w]
+  ++ [place (x+ww-7-T.length number) y (label frame number) | not (windowGrouped d w)]
+  ++ [place x y (box frame (active && not moving) ww hh)]
   where
     Rect x y ww hh=bounds w
     number=T.pack (show (windowNumber w))
@@ -506,7 +515,7 @@ composerLayers d active w
 pluginWindowLayers :: Maybe CanvasSurface -> Desktop -> Bool -> Window -> PluginWindow.PreparedWindow -> [CellLayer]
 pluginWindowLayers canvas d active w prepared=
   map CellImage (questionLayers d w++composerLayers d active w)++imageBody++map CellImage ((if active then positionBadge++[windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
-    ++(place (x+column) y (label frame title):hostWindowFrame d active w frame)
+    ++([place (x+column) y (label frame title) | not (windowGrouped d w)]++hostWindowFrame d active w frame)
     ++[place (x+1) (y+1) (V.charFill edit ' ' (max 0 (ww-2)) (max 0 (hh-2)))])
   where
     imageBody=case canvas of
@@ -579,11 +588,11 @@ windowLayers _ d active original =
   map CellImage ([place x (y+1+issueRow issue-scrollRow w) (label (attr (if diagnosticSeverity issue==1 then V.RGBColor 255 85 85 else yellow) blue) "▶")
     | bufferView w/=MarkdownView,not (byteMode (documentBuffer doc)), issue<-diagnostics d, Just (diagnosticPath issue)==fmap filePath (documentFile doc), issueRow issue>=scrollRow w, issueRow issue<scrollRow w+hh-2]
   ++ (if active then [place (x+windowPositionColumn doc) (y+hh-1) (label frame (T.take (max 0 (ww-windowPositionColumn doc-2)) (windowPositionText d doc w))),windowScrollbarImage d True w,windowScrollbarImage d False w] else [])
-  ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w)]
+  ++ [place (x+6) y (label frame "[" V.<|> label (attr cyan blue) " " V.<|> label frame "]") | active,terminalWindow d w,not (windowPinned d w),not (windowGrouped d w)]
   ++ composerLayers d active w
   ++ hexDividerLayers
   ++ reviewDividerLayers
-  ++ [place (x+titleColumn) y titleImage])
+  ++ [place (x+titleColumn) y titleImage | not (windowGrouped d w)])
   ++ documentLayers
   ++ map CellImage (hostWindowFrame d active w frame)
   where

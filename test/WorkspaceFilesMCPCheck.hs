@@ -99,8 +99,10 @@ checks=withBufferDiffCommands $ \commands->do
       renamed<-canonicalizePath (root </> "renamed.hs")
       state<-loadFile renamed >>= either error pure
       let shared=fst (runCommand SplitVertical (uncurry (\fileState buffer->addDocument (Just fileState) buffer initial) state))
-      deleted<-file "delete" "renamed.hs" shared
-      check "deleting a clean file removes its buffers and shared windows" (M.null (buffers deleted) && null (windows deleted))
+      let grouped=case windows shared of a:b:_->groupWindows (windowId a) (windowId b) shared; _->error "split source views"
+      deleted<-file "delete" "renamed.hs" grouped
+      check "deleting a clean file removes its buffers, shared windows and tabs"
+        (M.null (buffers deleted) && null (windows deleted) && null (windowTabs deleted))
       _<-file "delete" "new/empty.hs" initial
       _<-file "delete" "new" initial
       exists<-doesDirectoryExist (root </> "new")

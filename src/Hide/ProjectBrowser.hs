@@ -46,7 +46,7 @@ projectBrowserEffects ref fallback=foldM step . (False,)
         pure (root,privateFilePaths desktop,value)
       let next=token+1
       writeIORef ref (Browser next (Just worker) Nothing)
-      pure desktop {dialog=Just (Dialog "Cabal project" (ProjectLoading next) [] 0 ["Cancel"] ["Reading the existing Cabal plan..."]),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
+      pure desktop {dialog=Just (Dialog "Cabal project" (ProjectLoading next) [] 0 ["Cancel"] ["Reading the existing Cabal plan..."]),menu=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
     request action desktop=do
       Browser _ _ cached<-readIORef ref
       case cached of

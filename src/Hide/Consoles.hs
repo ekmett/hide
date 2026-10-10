@@ -92,7 +92,7 @@ tickConsoles (Consoles state) desktop = modifyMVar state $ \(counter,consoles) -
   let projected=foldr showConsole (desktop {terminalMouseTracking=S.empty}) updated
       shown=case drag projected of
         Just (TerminalDragging wid _ _ _) | dialog projected/=Nothing || menu projected/=Nothing || contextMenu projected/=Nothing ||
-          not (any (\w->windowId w==wid && windowVisible projected w && maybe False (`S.member` terminalMouseTracking projected) (bufferId w)) (windows projected)) -> projected {drag=Nothing,dragOriginal=Nothing}
+          not (any (\w->windowId w==wid && windowVisible projected w && maybe False (`S.member` terminalMouseTracking projected) (bufferId w)) (windows projected)) -> projected {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
         _->projected
       errors = [message | (ident,console) <- M.toList updated, Just message <- [consoleError console]
                         , maybe True ((== Nothing) . consoleError) (M.lookup ident consoles)]

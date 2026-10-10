@@ -158,9 +158,14 @@ checks=bracket temporary removePathForcibly $ \root->do
       reopened<-awaitDesktop runtime "reopened completion view" hasTranscript opening
       check "reopening gets a new frame identity and retains the hint"
         (autocompleteWindow reopened/=Just oldRef && retainedHint reopened=="retained human hint")
-      let sourceFocused=maybe reopened (\w->focusWindow (windowId w) reopened) (activeWindow warm)
+      let floatingTrace=case [windowId w | w<-windows reopened,Just ref<-[autocompleteWindow reopened],windowContent w==PluginContent ref] of
+            traceId:_->setTerminalPinned False traceId reopened; []->error "reopened completion frame"
+          sourceFocused=case (activeWindow warm,activeWindow floatingTrace) of
+            (Just sourceWindow,Just trace)->groupWindows (windowId sourceWindow) (windowId trace) floatingTrace
+            _->error "source and completion frames"
       hidden<-save runtime False sourceFocused >>= awaitDesktop runtime "debug pane toggle off" (not.hasTranscript)
-      check "debug toggle keeps the source" (activeText hidden==large)
+      check "debug toggle keeps the source and retires completion tab membership"
+        (activeText hidden==large && null (windowTabs hidden))
       let shortSource=addDocument Nothing (newBuffer "x\n") hidden
           configure settingTarget option value state=snd <$> autocompleteEffects runtime (\d _->pure (False,d)) state
             [AgentSidebarAction (ConfigureCompletion settingTarget option value)]

@@ -163,8 +163,8 @@ environmentAction action args d=case (action,args) of
       entries<-sortOn fst <$> getEnvironment
       pure d {dialog=Just (Dialog "Environment" (EnvironmentDialog "choose")
         [ListBox "Variables" [T.pack k | (k,_)<-entries] 0]
-        0 ["Edit","New","Cancel"] ["Changes affect new builds, terminals and agents."]),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
+        0 ["Edit","New","Cancel"] ["Changes affect new builds, terminals and agents."]),menu=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
     form :: Text -> Text -> Bool -> Text -> Desktop
     form name value unset scope=d {dialog=Just (Dialog "Environment variable" (EnvironmentDialog "edit")
       [Input "Name" name (T.length name),Input "Environment value" value (T.length value),ComboBox "Scope" ["session","project","global"] (if scope=="global" then 2 else if scope=="project" then 1 else 0) Nothing,CheckBox "Unset variable" unset]
-      0 ["Apply","Cancel"] ["Project overrides global.","Only new processes receive changes."]),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
+      0 ["Apply","Cancel"] ["Project overrides global.","Only new processes receive changes."]),menu=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}

@@ -160,7 +160,7 @@ showConflict conflict desktop = desktop {dialog=Just (Dialog "File changed on di
    if conflictDisk conflict==Nothing then "The file was deleted. Your buffer is preserved." else "Your buffer and the disk version are both preserved.",
    "Reload is undoable. Keep retains save conflict checks.",
    "File > Disk changes reopens this review."]),menu=Nothing,contextMenu=Nothing,
-   buttonHover=Nothing,buttonPressed=Nothing,drag=Nothing,dragOriginal=Nothing}
+   buttonHover=Nothing,buttonPressed=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
 
 promptPending :: Reconciliation -> Desktop -> IO Desktop
 promptPending (Reconciliation _ ref) desktop

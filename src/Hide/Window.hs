@@ -455,7 +455,7 @@ runWindow backend scale effects tick initial = do
                     | otherwise = pure (runCommand Quit d)
     dispatch (7:_) d =
       let (released,pending)=cancelTerminalDrag d
-          (blurred,hoverEffects)=hoverAt (-1) (-1) released {drag=Nothing,dragOriginal=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]}
+          (blurred,hoverEffects)=hoverAt (-1) (-1) released {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,prefix=Nothing,buttonPressed=Nothing,heldModifiers=[]}
       in pure (blurred,pending++hoverEffects)
     dispatch (9:x:y:direction:mods:_) d = pure (wheelEvent x y direction (keyMods mods) d)
     dispatch event@(11:_) d = do

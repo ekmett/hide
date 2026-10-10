@@ -593,6 +593,7 @@ showTranscript _ False _ d=do
     Nothing->d {autocompleteWindow=Nothing}
     Just w->layoutProblems d (normalizeBottom d
       {windows=filter ((/=windowId w).windowId) (windows d),
+       windowTabs=retainWindowTabs [windowId frame | frame<-windows d,windowId frame/=windowId w] (windowTabs d),
        pluginWindows=maybe (pluginWindows d) (`M.delete` pluginWindows d) (autocompleteWindow d),
        retiredPluginWindows=maybe (retiredPluginWindows d) (`S.delete` retiredPluginWindows d) (autocompleteWindow d),
        autocompleteWindow=Nothing,dockedTerminals=M.delete (windowId w) (dockedTerminals d)})

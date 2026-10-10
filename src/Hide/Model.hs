@@ -146,6 +146,12 @@ data ReviewSelection = ReviewSelection
 
 -- | Content identity is separate from host chrome; plugin views have no buffer ID.
 data WindowContent = SourceContent !Int | PluginContent !PluginWindow.WindowRef deriving (Eq,Show)
+-- | A presentation group, never a resource owner. Members retain their own
+-- selections, scroll positions and content identities. Geometry updates copy the
+-- selected frame's small rectangle projection to every member; focus order picks
+-- the selected member independently of the stable tab order.
+data WindowTabs = WindowTabs { tabMembers :: [Int], tabFirst :: Int } deriving (Eq,Show)
+
 data Window = Window
   { windowId :: Int, windowContent :: WindowContent, bounds :: Rect, selection :: Selection
   , scrollRow :: Int, scrollColumn :: Int, restoredBounds :: Maybe Rect
@@ -286,7 +292,7 @@ data Diagnostic = Diagnostic
   { diagnosticPath :: FilePath, diagnosticVersion :: Maybe Int, diagnosticRow :: Int
   , diagnosticColumn :: Int, diagnosticSeverity :: Int, diagnosticMessage :: Text
   } deriving (Eq,Show)
-data Drag = TerminalDragging Int V.Button Int Int | FollowingLink Int Int Int LinkOrigin Text | ImagePanning Int Int Int Canvas.CanvasView | ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
+data Drag = TerminalDragging Int V.Button Int Int | FollowingLink Int Int Int LinkOrigin Text | ImagePanning Int Int Int Canvas.CanvasView | ReviewSizing Int | DockSizing | MessagesSizing | TreeScrolling | Moving Int Int Int | MovingTab Int Int Int | Resizing Int Int Int | EdgeSizing Int Bool Bool Int | Selecting Int | Scrolling Int Bool deriving (Eq,Show)
 data AgentSetting = AgentSetting { settingId :: Text, settingName :: Text, settingCategory :: Text, settingCurrent :: Text, settingChoices :: [(Text,Text)] } deriving (Eq,Show)
 -- | The human-selected composer action for Enter; Ctrl+Enter uses the other action.
 data ChatSubmit = QuerySubmit | SteerSubmit deriving (Eq,Show,Enum,Bounded)
@@ -379,6 +385,9 @@ data Desktop = Desktop
   , sessionAttachment :: !Int -- Live display lifetime; never recovered.
   , pendingSessionSwitch :: !(Maybe Text) -- Human request, consumed by the attached transport.
   , launchDirectory :: FilePath -- Fallback for unnamed buffers without a project.
+  , windowTabs :: [WindowTabs]
+  , dragTabs :: Maybe [WindowTabs] -- Presentation snapshot for Escape, never recovered.
+  , tabDropTarget :: Maybe Int -- Preview only; release validates the target again.
   } deriving (Eq,Show)
 
 data MenuItem = MenuItem Text Text Command deriving (Eq,Show)
@@ -773,7 +782,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing Nothing False False M.empty [] [] False Nothing False M.empty 0 (0,Nothing) S.empty False 0 Nothing "."
+initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing Nothing False False M.empty [] [] False Nothing False M.empty 0 (0,Nothing) S.empty False 0 Nothing "." [] Nothing Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -994,7 +1003,7 @@ activateWindowNumber number d
   | Just number==messagesNumber d, problemsVisible d = ready {bottomTerminal=Nothing,problemsFocused=True,sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d)}
   | Just w<-find ((==number) . windowNumber) (windows d) = focusWindow (windowId w) ready
   | otherwise = d
-  where ready=d {menu=Nothing,contextMenu=Nothing,drag=Nothing,dragOriginal=Nothing,prefix=Nothing}
+  where ready=d {menu=Nothing,contextMenu=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,prefix=Nothing}
 
 windowFocused :: Desktop -> Window -> Bool
 windowFocused d w = not (problemsFocused d) && not (maybe False treeFocused (sideTree d)) &&
@@ -1027,23 +1036,23 @@ editorWindowAvailable d ident=dialog d==Nothing && not (questionActive d) && any
 
 activateEditorWindow :: Int -> Desktop -> Desktop
 activateEditorWindow ident d
-  | editorWindowAvailable d ident = focusWindow ident d {menu=Nothing,contextMenu=Nothing,drag=Nothing,dragOriginal=Nothing,prefix=Nothing}
+  | editorWindowAvailable d ident = focusWindow ident d {menu=Nothing,contextMenu=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,prefix=Nothing}
   | otherwise = d
 
 focusWindow :: Int -> Desktop -> Desktop
-focusWindow i d = d { bottomTerminal=if M.member i (dockedTerminals d) then Just i else bottomTerminal d, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++ filter ((/=i) . windowId) (windows d) }
+focusWindow i d = revealWindowTab i $ d { bottomTerminal=if M.member i (dockedTerminals d) then Just i else bottomTerminal d, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++
+  filter (\w->windowId w/=i && windowId w `elem` members) (windows d) ++
+  filter ((`notElem` members) . windowId) (windows d) }
+  where members=windowTabMembers d i
 
+-- Stable window numbers make every member reachable even when selecting a tab
+-- raises its whole group. MRU rotation would otherwise cycle inside that group.
 cycleEditorWindow :: Bool -> Desktop -> Desktop
-cycleEditorWindow backwards d = case orderedWindows of
-  [] -> d
-  ws@(w:rest) -> let rotated=if backwards then last ws:init ws else rest++[w]
-                in case rotated of
-                  next:_ -> focusWindow (windowId next) d {windows=rotated,menu=Nothing,contextMenu=Nothing}
-                  [] -> d
-  where
-    orderedWindows=case activeWindow d of
-      Nothing -> windows d
-      Just active -> let (before,after)=break ((==windowId active).windowId) (windows d) in after++before
+cycleEditorWindow backwards d=case sortOn windowNumber (windows d) of
+  []->d
+  numbered->let index=fromMaybe 0 (activeWindow d >>= \w->findIndex ((==windowId w).windowId) numbered)
+                next=numbered !! ((index+if backwards then -1 else 1) `mod` length numbered)
+            in focusWindow (windowId next) d {menu=Nothing,contextMenu=Nothing}
 
 cycleUIFocus :: Bool -> Desktop -> Desktop
 cycleUIFocus backwards d = case targets of
@@ -1349,10 +1358,10 @@ wrapMessage text | T.null text=[]
 wrapMessage text=T.take 54 text:wrapMessage (T.drop 54 text)
 
 message :: Text -> [Text] -> Desktop -> Desktop
-message title lines' d = d {dialog = Just (Dialog title Information [] 0 ["OK"] lines'), menu = Nothing, drag = Nothing,dragOriginal=Nothing}
+message title lines' d = d {dialog = Just (Dialog title Information [] 0 ["OK"] lines'), menu = Nothing, drag = Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
 
 prompt :: Text -> Purpose -> [Field] -> Desktop -> Desktop
-prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []), menu = Nothing, drag = Nothing,dragOriginal=Nothing}
+prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []), menu = Nothing, drag = Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
 
 -- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
@@ -1395,7 +1404,7 @@ runCommand Copy source | dialog source==Nothing,Just view<-activePluginWindow so
   in (copyClipboard False (PluginWindow.copyPreparedSelection view a b) source {menu=Nothing,contextMenu=Nothing},[])
 runCommand SelectAll source | dialog source==Nothing,Just view<-activePluginWindow source =
   (modifyActive (\w->w {selection=Selection 0 (contentLength (PluginWindow.preparedWindowText view))}) source,[])
-runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing})
+runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing})
   where
     go DialogAccept d = applyDialogCommand DialogAccept d
     go DialogCancel d = applyDialogCommand DialogCancel d
@@ -1621,7 +1630,7 @@ closeActive :: Desktop -> Desktop
 closeActive d = case activeWindow d of
   Nothing -> d
   Just w -> layoutProblems d (normalizeBottom saved
-    {windows=ws,dockedTerminals=M.delete (windowId w) (dockedTerminals d),
+    {windows=ws,windowTabs=retainWindowTabs (map windowId ws) (windowTabs d),dockedTerminals=M.delete (windowId w) (dockedTerminals d),
      buffers=case bufferId w of
        Just bid | not (any ((==Just bid) . bufferId) ws)->M.delete bid (buffers d)
        _->buffers d,
@@ -2029,7 +2038,7 @@ handleEventCore event d = Bifunctor.first (layoutComposer d . clampReviewWindows
 
 dispatchEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 dispatchEvent (V.EvResize sw sh) d =
-  (layoutBottomWindows resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,
+  (layoutBottomWindows resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,
     menu=Nothing,contextMenu=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
   where
     resized=d {screenSize=(max 1 sw,max 3 sh),
@@ -2078,8 +2087,16 @@ dispatchEvent ev d | activeEditorMount d/=Nothing,maybe False (windowFocused d) 
 dispatchEvent ev d | Just ident<-activeTerminal d,Just text<-terminalInput ev = (d,[ServiceAction "terminal-input" [ident,text]])
 dispatchEvent (V.EvMouseUp x y button) d | Just (FollowingLink _ a b origin target)<-drag d,
   button==Nothing || button==Just V.BLeft =
-    (d {drag=Nothing,dragOriginal=Nothing},[FollowLink origin target | x==a && y==b,linkOriginCurrent d origin])
-dispatchEvent (V.EvMouseUp _ _ _) d = (d {drag = Nothing,dragOriginal=Nothing},[])
+    (d {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing},[FollowLink origin target | x==a && y==b,linkOriginCurrent d origin])
+dispatchEvent (V.EvMouseUp x y button) d = (finished,[])
+  where
+    joined=case (button,drag d,tabDropTarget d) of
+      (Just V.BLeft,Just (Moving wid _ _),Just target)
+        | titleDropTarget wid x y d==Just target -> groupWindows wid target d
+      (Nothing,Just (Moving wid _ _),Just target)
+        | titleDropTarget wid x y d==Just target -> groupWindows wid target d
+      _->d
+    finished=joined {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
 dispatchEvent (V.EvMouseDown x y button mods) d = mouseEvent x y button mods d
 dispatchEvent ev@V.EvPaste{} d | prefix d/=Nothing = dispatchEvent ev d {prefix=Nothing}
 dispatchEvent V.EvPaste{} d | activeMarkdown d = (d {status="Markdown view is read-only."},[])
@@ -2913,7 +2930,7 @@ contextOffset :: Rect -> Int -> Int
 contextOffset r chosen = let count=max 1 (height r-2) in chosen `div` count*count
 
 openContext :: ContextKind -> Int -> Int -> Desktop -> Desktop
-openContext kind x y d = d {contextKind=kind,contextTarget=captureContextTarget kind d,contextMenu=Just (popup,0),drag=Nothing,dragOriginal=Nothing,menu=Nothing}
+openContext kind x y d = d {contextKind=kind,contextTarget=captureContextTarget kind d,contextMenu=Just (popup,0),drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,menu=Nothing}
   where
     (sw,sh)=screenSize d
     items=contextItemsFor d {contextKind=kind}
@@ -3100,7 +3117,13 @@ mouseEvent x y V.BLeft _ d | Just capture <- drag d = (case capture of
   TreeScrolling -> case sideTree d of
     Just tree -> scrollTreeTo ((y-3)*treeScrollLimit d tree `div` max 1 (treeContentRows d-3)) tree d
     Nothing -> d
-  Moving i dx dy -> moveWindow i (x-dx) (y-dy) d
+  Moving i dx dy -> moveCapturedWindow i dx dy x y d
+  MovingTab i dx dy -> case find ((==i).windowId) (windows d) of
+    Just w | y/=top (bounds w) || x<left (bounds w) || x>=left (bounds w)+width (bounds w) ->
+      let detached=detachWindowTab i d
+          moved=mapWindow i (\v->v {bounds=fitMovingWindow detached (bounds v) {left=x-dx,top=y-dy},restoredBounds=Nothing}) detached
+      in moved {drag=Just (Moving i dx dy),tabDropTarget=titleDropTarget i x y moved}
+    _->d
   Resizing i dx dy -> case find ((==i).windowId) (windows d) of
     Just w -> resizeWindowBounds i (bounds w) {width=x-left (bounds w)+dx,height=y-top (bounds w)+dy} d
     Nothing -> d
@@ -3145,7 +3168,7 @@ terminalDragEvent event d=case drag d of
     where
       emit action x y mods done=let effects=maybe [] (maybe [] pure . terminalMouseEffect action (terminalButton button) mods x y d)
                                              (find ((==wid).windowId) (windows d))
-        in (d {drag=if done || null effects then Nothing else Just (TerminalDragging wid button x y),dragOriginal=Nothing},effects)
+        in (d {drag=if done || null effects then Nothing else Just (TerminalDragging wid button x y),dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing},effects)
   _->Nothing
 
 cancelTerminalDrag :: Desktop -> (Desktop,[Effect])
@@ -3204,12 +3227,17 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
           freeze target=target
       in (opened {contextTarget=fmap freeze (contextTarget opened)},[])
     V.BLeft
+      | Just (_,direction)<-find (\(rect,_)->inside rect x y) (windowTabArrows d w) ->
+          (scrollWindowTabs (windowId w) direction focused {windowTabs=windowTabs d},[])
+      | Just (_,ident,_)<-find (\(rect,_,_)->inside rect x y) (windowTabStrip d w) ->
+          let selected=focusWindow ident d in
+          (beginWindowDrag (MovingTab ident (x-l) (y-t)) selected,[])
       | not (windowFocused d w), x==l || x==l+ww-1 || y==t || y==t+hh-1 -> (focused,[])
       | y==t && x>=l+2 && x<=l+4 -> runCommand Close focused
-      | y==t && terminalWindow focused w && x>=l+6 && x<=l+8 -> runCommand ToggleTerminalPin focused
+      | y==t && not (windowGrouped focused w) && terminalWindow focused w && x>=l+6 && x<=l+8 -> runCommand ToggleTerminalPin focused
       | windowPinned d w && (x==l || x==l+ww-1 || y==t || y==t+hh-1) -> (focused,[])
       | y==t && x>=l+ww-6 && x<l+ww-3 -> runCommand Zoom focused
-      | y==t, activeConversation focused, not (null (conversationSettings focused)), inside (agentTitleRect focused w) x y -> runCommand (AgentChoose "") focused
+      | y==t, not (windowGrouped focused w), activeConversation focused, not (null (conversationSettings focused)), inside (agentTitleRect focused w) x y -> runCommand (AgentChoose "") focused
       | y==t && (x==l || x==l+ww-1) -> (beginWindowDrag (EdgeSizing (windowId w) True True 0) focused,[])
       | y==t -> (beginWindowDrag (Moving (windowId w) (x-l) (y-t)) focused,[])
       | x>=l+ww-2 && y==t+hh-1 -> (beginWindowDrag (Resizing (windowId w) (l+ww-x) (t+hh-y)) focused,[])
@@ -3229,16 +3257,22 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
     _ -> (focused,[])
 
 mapWindow :: Int -> (Window -> Window) -> Desktop -> Desktop
-mapWindow i f d = d {windows = map (\w -> if windowId w==i then f w else w) (windows d)}
+mapWindow i f d = case find ((==i).windowId) (windows d) of
+  Nothing->d
+  Just before->let after=f before; members=windowTabMembers d i
+                   update w | windowId w==i=after
+                            | windowId w `elem` members && (bounds before/=bounds after || restoredBounds before/=restoredBounds after)=copyWindowGeometry after w
+                            | otherwise=w
+               in d {windows=map update (windows d)}
 
 beginWindowDrag :: Drag -> Desktop -> Desktop
-beginWindowDrag capture d = d {drag=Just capture,
+beginWindowDrag capture d = d {drag=Just capture,dragTabs=Just (windowTabs d),tabDropTarget=Nothing,
   dragOriginal=Just [(windowId w,bounds w,restoredBounds w) | w<-windows d]}
 
 dragKey :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 dragKey key mods d = case dragOriginal d of
   Just originals@((wid,_,_):_) -> case key of
-    V.KEsc -> (done {windows=map restore (windows d)},[])
+    V.KEsc -> (done {windows=map restore (windows d),windowTabs=retainWindowTabs (map windowId (windows d)) (fromMaybe (windowTabs d) (dragTabs d))},[])
       where restore w=case find (\(i,_,_)->i==windowId w) originals of
               Just (_,r,savedBounds) -> w {bounds=r,restoredBounds=savedBounds}
               Nothing -> w
@@ -3251,12 +3285,14 @@ dragKey key mods d = case dragOriginal d of
         else moveWindow wid (left r+dx) (top r+dy) d,[])
       | otherwise -> (d,[])
   _ -> (d,[])
-  where done=d {drag=Nothing,dragOriginal=Nothing}
+  where done=d {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
 
 -- Walk both moving edges against the original contacts on each axis. Doing
 -- the axes independently keeps a diagonal title drag from losing its neighbors
 -- after the first axis moves. Corner resizing remains the way to detach.
 moveWindow :: Int -> Int -> Int -> Desktop -> Desktop
+moveWindow wid x y d | representative/=wid = moveWindow representative x y d
+  where representative=windowFrameId d wid
 moveWindow wid _ _ d | M.member wid (dockedTerminals d) = d
 moveWindow wid x y d = case find ((==wid).windowId) (windows d) of
   Nothing -> d
@@ -3274,6 +3310,8 @@ moveWindow wid x y d = case find ((==wid).windowId) (windows d) of
 -- A diagonal corner gesture deliberately breaks contacts. A single moving edge
 -- uses the same rule whether it came from a frame, corner or Shift-arrow drag.
 resizeWindowBounds :: Int -> Rect -> Desktop -> Desktop
+resizeWindowBounds wid requested d | representative/=wid = resizeWindowBounds representative requested d
+  where representative=windowFrameId d wid
 resizeWindowBounds wid _ d | M.member wid (dockedTerminals d) = d
 resizeWindowBounds wid requested d = case find ((==wid).windowId) (windows d) of
   Just w | top old==top requested && height old==height requested ->
@@ -3288,6 +3326,8 @@ axisBounds :: Bool -> Rect -> (Int,Int)
 axisBounds vertical r = if vertical then (top r,top r+height r) else (left r,left r+width r)
 
 resizeWindowEdge :: Int -> Bool -> Bool -> Int -> Desktop -> Desktop
+resizeWindowEdge wid vertical leading coordinate d | representative/=wid = resizeWindowEdge representative vertical leading coordinate d
+  where representative=windowFrameId d wid
 resizeWindowEdge wid _ _ _ d | M.member wid (dockedTerminals d) = d
 resizeWindowEdge wid vertical leading position d = case find ((==wid).windowId) (windows d) of
   Nothing -> d
@@ -4403,7 +4443,8 @@ submitDialog button dg original
     first=fromMaybe "" (listToMaybe values); second=fromMaybe "" (listToMaybe (drop 1 values))
     discardActive s = case activeWindow s of
       Nothing -> s
-      Just w | Just bid<-bufferId w -> s {windows=filter ((/=Just bid) . bufferId) (windows s), buffers=M.delete bid (buffers s)}
+      Just w | Just bid<-bufferId w -> s {windows=filter ((/=Just bid) . bufferId) (windows s),
+        windowTabs=retainWindowTabs [windowId v | v<-windows s,bufferId v/=Just bid] (windowTabs s),buffers=M.delete bid (buffers s)}
       _ -> s
 
 
@@ -4428,10 +4469,10 @@ windowPinned :: Desktop -> Window -> Bool
 windowPinned d w = M.member (windowId w) (dockedTerminals d)
 
 floatingWindows :: Desktop -> [Window]
-floatingWindows d = filter (not . windowPinned d) (windows d)
+floatingWindows d = filter (\w->not (windowPinned d w) && selectedWindowTab d w) (windows d)
 
 windowVisible :: Desktop -> Window -> Bool
-windowVisible d w = not (windowPinned d w) || bottomTerminal d==Just (windowId w)
+windowVisible d w = if windowPinned d w then bottomTerminal d==Just (windowId w) else selectedWindowTab d w
 
 bottomVisible :: Desktop -> Bool
 bottomVisible d = problemsVisible d || not (M.null (dockedTerminals d))
@@ -4440,7 +4481,13 @@ messagesDisplayed :: Desktop -> Bool
 messagesDisplayed d = problemsVisible d && bottomTerminal d==Nothing
 
 replaceFloating :: [Window] -> Desktop -> Desktop
-replaceFloating views d = d {windows=map (\w -> fromMaybe w (find ((==windowId w).windowId) views)) (windows d)}
+replaceFloating views d = d {windows=map update (windows d)}
+  where
+    update w=case find ((==windowId w).windowId) views of
+      Just changed->changed
+      Nothing->case find (\v->windowId v `elem` windowTabMembers d (windowId w)) views of
+        Just representative->copyWindowGeometry representative w
+        Nothing->w
 
 layoutBottomWindows :: Desktop -> Desktop
 layoutBottomWindows d = d {windows=map (\w -> if windowPinned d w then w {bounds=problemsRect d,restoredBounds=Nothing} else w) (windows d)}
@@ -4453,11 +4500,12 @@ normalizeBottom d = d {bottomTerminal=chosen,problemsFocused=problemsFocused d &
             | otherwise -> listToMaybe (M.keys (dockedTerminals d))
 
 setTerminalPinned :: Bool -> Int -> Desktop -> Desktop
+setTerminalPinned True ident d | any (elem ident . tabMembers) (windowTabs d) = setTerminalPinned True ident (detachWindowTab ident d)
 setTerminalPinned pinned ident d = case find ((==ident).windowId) (windows d) of
   Just w | terminalWindow d w, pinned, not (windowPinned d w) ->
-    focusWindow ident (layoutProblems d d {dockedTerminals=M.insert ident (bounds w,restoredBounds w) (dockedTerminals d),bottomTerminal=Just ident,drag=Nothing,dragOriginal=Nothing})
+    focusWindow ident (layoutProblems d d {dockedTerminals=M.insert ident (bounds w,restoredBounds w) (dockedTerminals d),bottomTerminal=Just ident,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing})
   Just _ | not pinned, Just (rectangle,saved)<-M.lookup ident (dockedTerminals d) ->
-    let next=layoutProblems d (normalizeBottom d {dockedTerminals=M.delete ident (dockedTerminals d),drag=Nothing,dragOriginal=Nothing})
+    let next=layoutProblems d (normalizeBottom d {dockedTerminals=M.delete ident (dockedTerminals d),drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing})
     in focusWindow ident (mapWindow ident (\w -> w {bounds=fitWindow next rectangle,restoredBounds=fmap (fitWindow next) saved}) next)
   _ -> d
 
@@ -4507,7 +4555,7 @@ problemsRect d = let (sw,sh)=screenSize d; h=problemsHeight d in Rect 0 (sh-h-1)
 
 setProblemsVisible :: Bool -> Desktop -> Desktop
 setProblemsVisible visible d = layoutProblems d next
-  where next=normalizeBottom d {problemsVisible=visible,bottomTerminal=if visible then Nothing else bottomTerminal d,problemsFocused=False,drag=Nothing,dragOriginal=Nothing,
+  where next=normalizeBottom d {problemsVisible=visible,bottomTerminal=if visible then Nothing else bottomTerminal d,problemsFocused=False,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,
           messagesNumber=if visible then Just (fromMaybe (nextWindowNumber d) (messagesNumber d)) else Nothing}
 
 resizeProblems :: Int -> Desktop -> Desktop
@@ -4617,7 +4665,7 @@ fitMovingWindow d r = fitWindow d (r
 setTree :: Maybe Sidebar -> Desktop -> Desktop
 setTree tree d = layoutBottomWindows (clampHexScroll d next {windows=map move (windows d)})
   where
-    next=d {sideTree=tree,drag=Nothing,dragOriginal=Nothing}
+    next=d {sideTree=tree,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
     old=treeWidthOf d; new=treeWidthOf next
     sw=fst (screenSize d); delta=new-old
     move w | windowPinned d w = w
@@ -4643,7 +4691,7 @@ resizeTree x d = case sideTree d of
       source=Rect 0 1 (treeWidthOf d) (top (problemsRect d)-1)
       requested=max 16 (min (sw-20) (x+1))-1
       (edge,moved)=resizeEdge False False requested (0,sw) (-1,source) (floatingWindows d)
-      next=d {sideTree=Just tree {treeWidth=edge+1},drag=Just DockSizing,dragOriginal=Nothing}
+      next=d {sideTree=Just tree {treeWidth=edge+1},drag=Just DockSizing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
 
 -- | Mount host-prepared sidebar metadata without changing dock geometry.
 installSidebar :: Sidebar -> Desktop -> Desktop
@@ -4746,7 +4794,7 @@ treeMouse x y button tree d = case button of
 
 openDirectoryBrowser :: FilePath -> [Entry] -> Desktop -> Desktop
 openDirectoryBrowser base entries d = d {dialog=Just (Dialog "Change directory" (ChangingDirectory base dirs)
-  [Input "Directory" (T.pack base) (length base),FileList dirs 0] 1 ["OK","Browse","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
+  [Input "Directory" (T.pack base) (length base),FileList dirs 0] 1 ["OK","Browse","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
   where dirs=filter entryDirectory entries
 
 -- | Preserve the open-dialog form when reporting filesystem failures.
@@ -4756,7 +4804,7 @@ browserError err d = case dialog d of
   Nothing -> message "Cannot open directory" (wrapMessage err) d
 
 openBrowser :: FilePath -> Text -> [Entry] -> Desktop -> Desktop
-openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing}
+openBrowser base pattern entries d = d {dialog=Just (Dialog "Open a file" (Opening base pattern entries) [Input "Name" pattern (T.length pattern),FileList entries 0] 1 ["Open","Cancel"] []),menu=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
 
 addHelpStyled :: StyledText -> Desktop -> Desktop
 addHelpStyled chars d = let opened=addHelp (styledContents chars) d
@@ -4788,7 +4836,7 @@ hoverAt x y d | Just dg<-dialog d, Just (i,name,choices,chosen,_)<-openComboBox 
 hoverAt x y d = (d {hoverTarget=target,typeHint=fromMaybe (if target==hoverTarget d && typeHint d `notElem` ["Unpin window","Dock window at bottom"] then typeHint d else "") pinHint,buttonHover=hovered,contextMenu=popup,statusHover=highlight},[])
   where
     pinHint | Just _<-bottomTerminal d, y==top (problemsRect d), x>=fst (screenSize d)-9, x<fst (screenSize d)-6 = Just "Unpin window"
-            | Just w<-find (\w->windowVisible d w && terminalWindow d w && not (windowPinned d w) && y==top (bounds w) && x>=left (bounds w)+6 && x<=left (bounds w)+8) (windows d), windowFocused d w = Just "Dock window at bottom"
+            | Just w<-find (\w->windowVisible d w && terminalWindow d w && not (windowGrouped d w) && not (windowPinned d w) && y==top (bounds w) && x>=left (bounds w)+6 && x<=left (bounds w)+8) (windows d), windowFocused d w = Just "Dock window at bottom"
             | otherwise = Nothing
     highlight = (\(_,i,_)->i) <$> find (\(rect,_,_)->inside rect x y) (statusItemRects d)
     hovered = dialog d >>= \dg -> findIndex (\r -> inside r x y) (buttonRects d dg)
@@ -4973,3 +5021,109 @@ fileExportView d = map fromIntegral [fst (pendingFileExport d),fst (screenSize d
       Just window -> map fromIntegral [windowId window,fromMaybe 0 (bufferId window),
         maybe 0 (revision . documentBuffer) (activeDocument d),left r,top r,width r,height r]
         where r=bounds window
+
+
+-- | Disjoint live groups of at least two members. Singletons are ordinary frames.
+retainWindowTabs :: [Int] -> [WindowTabs] -> [WindowTabs]
+retainWindowTabs live groups=[WindowTabs members (min (length members-1) (max 0 first))
+  | WindowTabs old first<-groups,let members=filter (`elem` live) old,length members>1]
+
+windowTabMembers :: Desktop -> Int -> [Int]
+windowTabMembers d ident=case find (elem ident . tabMembers) (windowTabs d) of
+  Nothing->[ident]
+  Just group->tabMembers group
+
+windowGrouped :: Desktop -> Window -> Bool
+windowGrouped d w=length (windowTabMembers d (windowId w))>1
+
+selectedWindowTab :: Desktop -> Window -> Bool
+selectedWindowTab d w=case find (elem (windowId w) . tabMembers) (windowTabs d) of
+  Nothing->True
+  Just group->maybe False ((==windowId w).windowId) (find ((`elem` tabMembers group).windowId) (windows d))
+
+copyWindowGeometry :: Window -> Window -> Window
+copyWindowGeometry source target=target {bounds=bounds source,restoredBounds=restoredBounds source}
+
+-- | Join two frames at the target's geometry. Resource state and stable tab
+-- order survive; the dragged frame's selected member becomes the selected tab.
+groupWindows :: Int -> Int -> Desktop -> Desktop
+groupWindows source target d
+  | source==target || target `elem` windowTabMembers d source = d
+  | Just from<-find ((==source).windowId) (windows d)
+  , Just into<-find ((==target).windowId) (windows d)
+  , not (windowPinned d from || windowPinned d into) =
+      let members=windowTabMembers d target++windowTabMembers d source
+          unrelated=filter (not . any (`elem` members) . tabMembers) (windowTabs d)
+          joined=d {windowTabs=WindowTabs members 0:unrelated,
+            windows=map (\w->if windowId w `elem` members then copyWindowGeometry into w else w) (windows d)}
+      in focusWindow source joined
+  | otherwise=d
+
+-- | Detach only this member; no buffer, plugin or process ownership changes.
+detachWindowTab :: Int -> Desktop -> Desktop
+detachWindowTab ident d=focusWindow ident d {windowTabs=retainWindowTabs (map windowId (windows d))
+  [group {tabMembers=filter (/=ident) (tabMembers group)} | group<-windowTabs d]}
+
+-- | First uncovered other frame under the pointer. Its body blocks lower bars.
+titleDropTarget :: Int -> Int -> Int -> Desktop -> Maybe Int
+titleDropTarget ident x y d=case find (\w->windowId w `notElem` members && inside (bounds w) x y) (floatingWindows d) of
+  Just w | y==top (bounds w),x>left (bounds w),x<left (bounds w)+width (bounds w)-1->Just (windowId w)
+  _->Nothing
+  where members=windowTabMembers d ident
+
+-- | One layout for drawing and hit testing. Labels borrow only bounded title
+-- text; widths are display cells, including wide graphemes. Arrows occupy a cell
+-- each even at the minimum frame size, leaving a clipped but selectable tab.
+windowTabStrip :: Desktop -> Window -> [(Rect,Int,Text)]
+windowTabStrip d w=case find (elem (windowId w) . tabMembers) (windowTabs d) of
+  Nothing->[]
+  Just group->place (left r+7) (max 0 (width r-14)) (drop (tabFirst group) (tabMembers group))
+  where
+    r=bounds w
+    place _ _ []=[]
+    place _ remaining _ | remaining<=0=[]
+    place x remaining (ident:rest)=case find ((==ident).windowId) (windows d) of
+      Nothing->place x remaining rest
+      Just member->let full=windowTitle d member
+                       name=T.take (columnOffset full 24) full
+                       size=min remaining (min 26 (max 4 (displayColumn name (T.length name)+2)))
+                       title=if size<=2 then T.take (columnOffset name size) name else " "<>T.take (columnOffset name (size-2)) name<>" "
+                   in (Rect x (top r) size 1,ident,title):place (x+size) (remaining-size) rest
+
+windowTabArrows :: Desktop -> Window -> [(Rect,Int)]
+windowTabArrows d w | windowGrouped d w = [(Rect (left r+6) (top r) 1 1,-1),(Rect (left r+width r-7) (top r) 1 1,1)]
+  | otherwise=[]
+  where r=bounds w
+
+scrollWindowTabs :: Int -> Int -> Desktop -> Desktop
+scrollWindowTabs ident delta d=d {windowTabs=map move (windowTabs d)}
+  where move group | ident `elem` tabMembers group=group {tabFirst=max 0 (min (length (tabMembers group)-1) (tabFirst group+delta))}
+                   | otherwise=group
+
+revealWindowTab :: Int -> Desktop -> Desktop
+revealWindowTab ident d=case find ((==ident).windowId) (windows d) of
+  Just w | windowGrouped d w,ident `notElem` [wid | (_,wid,_)<-windowTabStrip d w]->
+    d {windowTabs=map (\group->if ident `elem` tabMembers group
+      then group {tabFirst=fromMaybe 0 (findIndex (==ident) (tabMembers group))} else group) (windowTabs d)}
+  _->d
+
+-- | Geometry operations addressed to a hidden member still affect its frame.
+windowFrameId :: Desktop -> Int -> Int
+windowFrameId d ident=maybe ident windowId (find ((`elem` windowTabMembers d ident).windowId) (windows d))
+
+-- | Resolve title drops against the gesture's original frames, before sticky
+-- neighbors can move their title away from the pointer. A grouping preview
+-- restores those neighbors and moves only the source; outside a target the
+-- ordinary adjacency rule is evaluated from the same captured geometry.
+moveCapturedWindow :: Int -> Int -> Int -> Int -> Int -> Desktop -> Desktop
+moveCapturedWindow ident dx dy x y d=case titleDropTarget ident x y baseline of
+  Just target->(mapWindow ident (\w->w {bounds=fitMovingWindow baseline (bounds w) {left=x-dx,top=y-dy},restoredBounds=Nothing}) baseline)
+    {tabDropTarget=Just target}
+  Nothing->(moveWindow ident (x-dx) (y-dy) baseline) {tabDropTarget=Nothing}
+  where
+    baseline=case dragOriginal d of
+      Nothing->d
+      Just originals->d {windows=map restore (windows d)}
+        where restore w=case find (\(wid,_,_)->wid==windowId w) originals of
+                Just (_,rectangle,saved)->w {bounds=rectangle,restoredBounds=saved}
+                Nothing->w

@@ -210,6 +210,15 @@ checksWithBody conversation=do
       Rect px py _ _=bounds privateWindow
   check "host authority paths protect human-open buffers and input"
     (protectedBuffer privateSource privateId && sanitizedBuffer privateSource privateId==Nothing && not (readableAt privateSource (px+2) (py+2)) && not (streamerReadableAt privateSource (px+2) (py+2)))
+  let publicWindow=maybe (error "public source") id (activeWindow base)
+      tabs=groupWindows (windowId publicWindow) (windowId privateWindow) privateSource
+      frame=maybe (error "tab group") id (activeWindow tabs)
+      secretTab=case [r | (r,wid,_)<-windowTabStrip tabs frame,wid==windowId privateWindow] of
+        r:_->r; []->error "private tab is visible beside public tab"
+  check "private inactive tab labels retain their own read and input policy"
+    (not (readableAt tabs (left secretTab) (top secretTab)) &&
+     not (streamerReadableAt tabs (left secretTab) (top secretTab)) &&
+     not (pointerAllowedAt tabs (left secretTab) (top secretTab)))
   checkDenied "private source rejects pasted text" privateSource [P.Paste "replace"]
   forM_ [Copy,Cut] $ \command->do
     let row=case [i | (i,MenuItem _ _ action)<-zip [0..] (menuItemsFor privateSource 1),action==command] of
