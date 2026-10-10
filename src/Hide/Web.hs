@@ -21,16 +21,19 @@ module Hide.Web (runWeb
 #endif
   ) where
 import Hide.Model hiding (Paste)
+import Hide.SystemOneBrowser (SystemOneBrowser)
 #ifdef WITH_WEB
 import Hide.Links (followLink)
 import Hide.Protocol
 import Hide.BrowserServer
+import qualified Hide.SystemOneBrowser as DecisionBrowser
 import Control.Concurrent.Async (withAsync)
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
-import Control.Exception (finally)
+import Control.Exception (finally, bracket, try)
 import Control.Monad (forever, when, void, foldM)
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (parseEither)
 import Data.IORef
 import qualified Data.ByteString.Lazy as BL
@@ -38,7 +41,6 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Network.WebSockets as WS
 import System.Directory (getCurrentDirectory)
-import System.IO (hPutStrLn, stderr)
 import System.Timeout (timeout)
 import Hide.Buffer (bufferBytes)
 import System.FilePath (takeFileName)
@@ -51,8 +53,8 @@ import Hide.RequestedPaste
 
 -- | Serve a browser frontend, intercepting clipboard, download, link and mode
 -- effects. Acknowledge input after its effects have been applied.
-runWeb :: Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
-runWeb scale effects tick initial = do
+runWeb :: Maybe SystemOneBrowser -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
+runWeb inference scale effects tick initial = do
   font<-loadFont
   state<-newIORef initial {browserFrontend=True}
   done<-newEmptyMVar
@@ -60,24 +62,56 @@ runWeb scale effects tick initial = do
       session conn = do
         pasteReads<-newRequestedPaste
         queue<-newTBQueueIO 128
+        -- One admitted request plus its cancellation/retirement control.
+        -- Editor traffic cannot consume this reserved FIFO or reorder it.
+        inferenceQueue<-newTBQueueIO 2
         disconnected<-newEmptyTMVarIO
         let send=WS.sendTextData conn . encode
-            receive=forever $ do
-              bytes<-WS.receiveData conn :: IO BL.ByteString
-              case eitherDecode bytes >>= parseEither (\value -> (,) <$> withObject "event sequence" (\o -> o .:? "seq" .!= (0::Int)) value <*> parseInput value) of
-                Left err -> hPutStrLn stderr ("Browser input: "++err) >> WS.sendCloseCode conn 1003 ("Invalid input" :: T.Text) >> ioError (userError "Invalid browser input")
-                Right (serial,UploadFile name _) -> do
-                  payload <- timeout 30000000 (WS.receiveDataMessage conn)
-                  case payload of
-                    Just (WS.Binary payloadBytes) | BL.length payloadBytes<=16777216 -> atomically (writeTBQueue queue (Just (serial,UploadFile name (BL.toStrict payloadBytes))))
-                    _ -> WS.sendCloseCode conn 1003 ("Expected file bytes (maximum 16 MiB)"::T.Text) >> ioError (userError "Invalid file upload")
-                Right event -> atomically (writeTBQueue queue (Just event))
-        send (assetsPacket font scale)
-        canvasEpoch<-T.pack <$> randomIdentity
-        send (canvasReset canvasEpoch)
-        WS.withPingThread conn 15 (pure ()) $ withAsync (finally receive (atomically (void (tryPutTMVar disconnected ())))) $ \_ ->
-          readIORef state >>= loop canvasEpoch (CanvasSender canvasEpoch M.empty) pasteReads conn send queue disconnected Nothing
-      loop canvasEpoch transfers pasteReads conn send queue disconnected previous d = do
+            enqueue control=atomically $ do
+              live<-isEmptyTMVar disconnected
+              full<-isFullTBQueue inferenceQueue
+              if live && not full then writeTBQueue inferenceQueue control >> pure True
+              else do
+                let release=case control of
+                      Object fields->KM.lookup "type" fields `elem` map (Just . String) ["system-one-cancel","system-one-retire"]
+                      _->False
+                when (live && release) (void (tryPutTMVar disconnected True))
+                pure False
+            acquire=traverse (\owner->DecisionBrowser.attachBrowser owner 0 enqueue) inference
+            retire attachment=do
+              forced<-atomically $ do
+                void (tryPutTMVar disconnected False)
+                readTMVar disconnected
+              (when forced $ void (try (WS.sendCloseCode conn 1011 ("Inference transport unavailable"::T.Text)) :: IO (Either WS.ConnectionException ())))
+                `finally` mapM_ DecisionBrowser.retireBrowserAttachment attachment
+            invalid=WS.sendCloseCode conn 1003 ("Invalid input"::T.Text) >> ioError (userError "Invalid browser input")
+        bracket acquire retire $ \attachment->do
+          let receive=forever $ do
+                bytes<-WS.receiveData conn :: IO BL.ByteString
+                case eitherDecode bytes of
+                  Left _->invalid
+                  Right value@(Object fields) | Just (String kind)<-KM.lookup "type" fields, "system-one-" `T.isPrefixOf` kind->
+                    -- This receiver accepts only private reply/offer controls;
+                    -- viewer identity is minted here, never supplied by input.
+                    mapM_ (\owner->void (DecisionBrowser.receiveBrowserControl owner value)) attachment
+                  Right value->case parseEither (\event->(,) <$> withObject "event sequence" (\o->o .:? "seq" .!= (0::Int)) event <*> parseInput event) value of
+                    Left _->invalid
+                    Right (serial,UploadFile name _)->do
+                      payload<-timeout 30000000 (WS.receiveDataMessage conn)
+                      case payload of
+                        Just (WS.Binary payloadBytes) | BL.length payloadBytes<=16777216->atomically (writeTBQueue queue (Just (Right (serial,UploadFile name (BL.toStrict payloadBytes)))))
+                        _->invalid
+                    Right event->atomically (writeTBQueue queue (Just (Right event)))
+          mapM_ (\owner->do
+            viewer<-T.pack <$> randomIdentity
+            _<-DecisionBrowser.setBrowserViewer owner (Just viewer)
+            send (object ["type" .= ("system-one-connection"::T.Text),"connection" .= DecisionBrowser.browserAttachmentId owner,"viewer" .= viewer])) attachment
+          send (assetsPacket font scale)
+          canvasEpoch<-T.pack <$> randomIdentity
+          send (canvasReset canvasEpoch)
+          WS.withPingThread conn 15 (pure ()) $ withAsync (finally receive (atomically (void (tryPutTMVar disconnected False)))) $ \_ ->
+            readIORef state >>= loop canvasEpoch (CanvasSender canvasEpoch M.empty) pasteReads conn send queue inferenceQueue disconnected Nothing
+      loop canvasEpoch transfers pasteReads conn send queue inferenceQueue disconnected previous d = do
         pending<-tick d
         -- Retain the pending intent if socket delivery fails before retirement.
         writeIORef state pending
@@ -113,12 +147,17 @@ runWeb scale effects tick initial = do
           WS.sendBinaryData conn (framePacket reset oldRows rows (if reset then metadata else filter (`notElem` oldMetadata) metadata))
         let (nextTransfers,canvasPackets,moreCanvas)=canvasTransfer transfers scene
         mapM_ (\packet->case packet of JsonPacket value->send value; BinaryPacket bytes->WS.sendBinaryData conn bytes) canvasPackets
-        event<-if moreCanvas then atomically ((readTMVar disconnected >> pure (Just Nothing)) `orElse` (Just <$> readTBQueue queue) `orElse` pure Nothing)
-          else timeout 50000 (atomically ((readTMVar disconnected >> pure Nothing) `orElse` readTBQueue queue))
+        let nextEvent=(Just . Left <$> readTBQueue inferenceQueue) `orElse` readTBQueue queue
+        event<-if moreCanvas then atomically ((readTMVar disconnected >> pure (Just Nothing)) `orElse` (Just <$> nextEvent) `orElse` pure Nothing)
+          else timeout 50000 (atomically ((readTMVar disconnected >> pure Nothing) `orElse` nextEvent))
         case event of
           Just Nothing -> pure ()
           _ -> do
-            (next,requests)<-case event >>= id of
+            -- Inference controls share this sole socket writer. They cannot
+            -- split a file/canvas header from its binary payload.
+            mapM_ (either send (const (pure ()))) (event >>= id)
+            let input=event >>= id >>= either (const Nothing) Just
+            (next,requests)<-case input of
               Just (_,PasteReply token text)->applyRequestedPaste pasteReads token text current
               Just (_,inputEvent)->pure (applyInput inputEvent current)
               Nothing->pure (current,[])
@@ -126,11 +165,11 @@ runWeb scale effects tick initial = do
             (exit,updated)<-foldM (effect pasteReads conn send) (False,next) requests
             refreshRequestedPaste pasteReads updated
             writeIORef state updated
-            case event >>= id of
+            case input of
               Just (serial,_) -> send (object ["type" .= ("ack"::T.Text),"seq" .= serial,"dirty" .= webDirty updated])
               Nothing -> pure ()
             if exit then send (object ["type" .= ("closed"::T.Text)]) >> void (tryPutMVar done ())
-              else loop canvasEpoch nextTransfers pasteReads conn send queue disconnected (Just (key,resetKey,rows,metadata,scene)) updated
+              else loop canvasEpoch nextTransfers pasteReads conn send queue inferenceQueue disconnected (Just (key,resetKey,rows,metadata,scene)) updated
       effect _ _ _ result@(True,_) _ = pure result
       effect _ _ _ (_,d) (FollowLink origin _) | not (linkOriginCurrent d origin)=pure (False,d {status="Link body expired."})
       effect pasteReads _ send (_,d) (FollowLink origin target) = do
@@ -158,6 +197,6 @@ runWeb scale effects tick initial = do
         pure result
   serveBrowser done session
 #else
-runWeb :: Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
-runWeb _ _ _ _ = ioError (userError "Browser support is not built. Rebuild with cabal build -fweb")
+runWeb :: Maybe SystemOneBrowser -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
+runWeb _ _ _ _ _ = ioError (userError "Browser support is not built. Rebuild with cabal build -fweb")
 #endif

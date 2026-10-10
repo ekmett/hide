@@ -13,7 +13,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync, wait, waitCatch)
 import Control.Concurrent.STM (newTChanIO, atomically, readTChan, writeTChan)
 import Control.Exception (bracket, bracket_)
-import Control.Monad (unless)
+import Control.Monad (unless,void)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as KM
@@ -42,8 +42,9 @@ checks = do
     bracket (openTempFile temp "hide-canvas-relay-check") (\(path,h)->hClose h >> removeFile path) $ \(_,logHandle)->
       bracket (hDuplicate stderr) hClose $ \saved->bracket_ (hDuplicateTo logHandle stderr) (hFlush stderr >> hDuplicateTo saved stderr) $ do
         queue<-newTChanIO
+        browserControls<-newTChanIO
         let feed packets=atomically (mapM_ (writeTChan queue . Just) packets)
-            peer=RemotePeer (const (pure ())) (const (pure ())) (atomically (readTChan queue)) (pure 0) (pure "")
+            peer=RemotePeer (const (pure ())) (const (pure ())) (\stamp value->atomically (writeTChan browserControls (stamp,value)) >> pure True) (atomically (readTChan queue)) (pure 0) (pure "")
             epoch=T.replicate 48 "a";ident=T.replicate 48 "b";other=T.replicate 48 "c"
             control kind fields=JsonPacket (object (["type" .= (kind::T.Text),"epoch" .= epoch]++fields))
             reset=control "canvas-reset" []
@@ -54,8 +55,11 @@ checks = do
             scene target=object ["epoch" .= epoch,"surfaces" .= [object ["id" .= (1::Int),"resource" .= ident,"slot" .= (1::Int),"rect" .= ([0,0,2,2]::[Int]),"target" .= (target::[Double]),"name" .= ("safe.png"::T.Text),"description" .= ("2 by 2"::T.Text)]],"mask" .= ("AQAA"<>T.replicate 1276 "A")]
             frame first canvas=BinaryPacket (BL.toStrict (framePacket first (if first then [] else rows) rows ["size" .= ([40,12]::[Int]),"canvas" .= canvas,"semanticSource" .= object ["present" .= True,"value" .= ("source before disconnect"::T.Text)]]))
             payload=BS.pack [0..15]
+            connection=T.replicate 48 "d"
+            browserPacket who=object ["type" .= ("system-one-request"::T.Text),"connection" .= connection,"viewer" .= who,"offer" .= (1::Int),"supplier" .= T.replicate 48 "e","request" .= T.replicate 48 "f","input" .= object ["stateId" .= ("relay-decision"::T.Text),"state" .= ("inference canary"::T.Text),"questions" .= [object ["name" .= ("binary"::T.Text),"instructions" .= ("choose"::T.Text),"kind" .= ("binary"::T.Text),"false" .= ("no"::T.Text),"true" .= ("yes"::T.Text)]]]]
+        oldViewer<-newIORef (""::T.Text)
         withAsync (runRemoteWeb 1 "safe-host" peer) $ \server->do
-          feed ([JsonPacket (object ["type" .= ("assets"::T.Text)]),reset,resource ident]++chunk ident 0 (BS.take 4 payload)++[frame True (scene [0,0,2,2])])
+          feed ([JsonPacket (object ["type" .= ("assets"::T.Text)]),reset,resource ident]++chunk ident 0 (BS.take 4 payload)++[frame True (scene [0,0,2,2]),JsonPacket (object ["type" .= ("system-one-connection"::T.Text),"connection" .= connection])])
           url<-bounded "browser URL" (awaitURL logHandle)
           let address=drop 7 url;(host,portPath)=break (==':') address;(portText,pathText)=break (=='/') (drop 1 portPath)
               client action=WS.runClientWith host (read portText) (pathText++"socket") WS.defaultConnectionOptions [("Origin",B8.pack ("http://"++host++":"++portText))] $ action
@@ -64,10 +68,34 @@ checks = do
             reader<-newReader
             (_,resources)<-readFrame conn reader
             check "first client retains the exact unfinished prefix" (M.lookup ident resources==Just (BS.take 4 payload))
+            hello<-awaitValue "system-one-connection" conn
+            who<-field "viewer" hello
+            writeIORef oldViewer who
+            (stamp,bound)<-bounded "trusted viewer receipt" (atomically (readTChan browserControls))
+            check "gateway binds exact viewer outside editor journal" (stamp==0 && case bound of Object fields->KM.lookup "viewer" fields==Just (String who);_->False)
+            -- The next lawful offer receipt is a barrier after this forgery.
+            WS.sendTextData conn (encode (object ["type" .= ("system-one-viewer"::T.Text),"connection" .= connection,"viewer" .= who]))
+            let offered=object ["type" .= ("system-one-offer"::T.Text),"connection" .= connection,"viewer" .= who,"offer" .= (1::Int),"label" .= ("fixture"::T.Text),"manifestSHA256" .= T.replicate 64 "a","allocationLimitBytes" .= (1048576::Int),"backend" .= ("webgpu"::T.Text)]
+            WS.sendTextData conn (encode offered)
+            (_,forwarded)<-bounded "same-viewer offer receipt" (atomically (readTChan browserControls))
+            check "page cannot forge trusted viewer lifecycle" (forwarded==offered)
+            feed [JsonPacket (browserPacket who)]
+            delivered<-awaitValue "system-one-request" conn
+            check "inference control stays outside frame codec" (delivered==browserPacket who)
+          (_,retired)<-bounded "browser detach receipt" (atomically (readTChan browserControls))
+          check "detach retires its exact viewer" (case retired of Object fields->KM.lookup "type" fields==Just (String "system-one-viewer") && KM.lookup "viewer" fields==Just Null;_->False)
           attach $ \conn->do
             reader<-newReader
             (_,resources)<-readFrame conn reader
             check "reconnect replays the active resource header and prefix" (M.lookup ident resources==Just (BS.take 4 payload))
+            hello<-awaitValue "system-one-connection" conn
+            who<-field "viewer" hello
+            old<-readIORef oldViewer
+            (_,bound)<-bounded "replacement viewer receipt" (atomically (readTChan browserControls))
+            check "reconnect mints fresh viewer without selection" (who/=old && case bound of Object fields->KM.lookup "viewer" fields==Just (String who);_->False)
+            feed [JsonPacket (browserPacket old),JsonPacket (browserPacket who)]
+            delivered<-awaitValue "system-one-request" conn
+            check "old request cannot reach replacement browser" (delivered==browserPacket who)
             feed ([JsonPacket (object ["type" .= ("copy"::T.Text),"text" .= ("safe copy"::T.Text)])]++chunk ident 4 (BS.drop 4 payload)++[frame False (scene [1,0,4,4])])
             (_,complete)<-readFrame conn reader
             check "tail follows replay prefix without result interleaving" (M.lookup ident complete==Just payload)
@@ -112,7 +140,7 @@ checks = do
           bounded "relay completion" (wait server)
         let reject packets=do
               badQueue<-newTChanIO
-              let badPeer=RemotePeer (const (pure ())) (const (pure ())) (atomically (readTChan badQueue)) (pure 0) (pure "")
+              let badPeer=RemotePeer (const (pure ())) (const (pure ())) (\_ _->pure False) (atomically (readTChan badQueue)) (pure 0) (pure "")
               withAsync (runRemoteWeb 1 "safe-host" badPeer) $ \server->do
                 atomically (mapM_ (writeTChan badQueue . Just) packets)
                 result<-bounded "malformed relay refusal" (waitCatch server)
@@ -162,7 +190,8 @@ checks = do
           pure (value,retained)
     -- A reconnect replays its cached connection notice after the frame. Wait
     -- for the requested control rather than treating that notice as shutdown.
-    awaitControl expected conn=bounded "relay control" loop
+    awaitControl expected conn=void (awaitValue expected conn)
+    awaitValue expected conn=bounded "relay control" loop
       where
         loop=do
           packet<-WS.receiveDataMessage conn
@@ -170,7 +199,7 @@ checks = do
             WS.Text bytes _->do
               value<-either error pure (eitherDecode bytes)
               kind<-field "type" value
-              unless (kind==(expected::T.Text)) loop
+              if kind==(expected::T.Text) then pure value else loop
             _->loop
     field :: FromJSON a => Key -> Value -> IO a
     field key value=either error pure (parseEither (withObject "metadata" (\o->o .: key)) value)

@@ -226,7 +226,7 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
               Just result->parseMaybe (withObject "tool result" (.: "isError")) result==Just False
               _->False
             _->False
-      flip finally (S.forgetSession session) $ withAsync (runRemoteDaemonWithStartup (pure ()) (awaitPermissionWork owner) session 1 effects (tickPermissions owner) inspect base) $ \daemon->do
+      flip finally (S.forgetSession session) $ withAsync (runRemoteDaemonWithStartup Nothing (pure ()) (awaitPermissionWork owner) session 1 effects (tickPermissions owner) inspect base) $ \daemon->do
         link daemon
         _<-bracket (open (100::Int)) hClose (const (pure ()))
         withLocalPeer session True [] $ \peer->do

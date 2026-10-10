@@ -212,7 +212,7 @@ packetChecks=unless (os=="mingw32") $ bracket temporary removePathForcibly $ \ro
           , peerSendBatch = \_->error "terminal receiver sent a transport batch"
           , peerAttachment=pure 0
           , peerSession=pure ""
-          , peerReceive=atomicModifyIORef' packets (\pending->case pending of []->([],Nothing); packet:rest->(rest,Just packet))
+          , peerSendControl= \_ _->pure False,peerReceive=atomicModifyIORef' packets (\pending->case pending of []->([],Nothing); packet:rest->(rest,Just packet))
           }
     withFileExports $ \exports->do
       queue<-newTBQueueIO 8

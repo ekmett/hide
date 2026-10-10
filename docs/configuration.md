@@ -500,7 +500,8 @@ cannot change these settings or complete their own authentication.
 ## System-1 decisions
 
 Plugins can submit small classification and ranking questions to in-process
-Laya or a selected System One endpoint. This is separate from the conversational agent: it returns
+Laya, a selected System One endpoint, or a connected browser’s WebGPU worker.
+This is separate from the conversational agent: it returns
 probabilities, not edits or commands. The consumer decides what to do with them.
 
 Select the destination in the **global** configuration:
@@ -547,6 +548,24 @@ session ends. The allocation envelope covers ORT model/tensor storage, not
 whole-process RSS. Unsupported or overlong token sequences are refused; input
 is never silently truncated. A build without native Laya reports that the
 provider is unavailable rather than sending its context elsewhere.
+
+**Tools > System One supplier…** changes the running session's supplier. Choose
+Off, the supplier from global configuration, or the current browser's offer.
+Opening the menu does not load a model. Selection applies only to this session;
+edit the global configuration above to change the startup default.
+
+A browser offers inference only when its local launcher has the optional
+[runtime and model assets](install.md#browser-laya-decisions). The session owner
+must select that offer before any decision context is sent. Reconnecting or
+switching sessions retires the old offer; choose the new offer explicitly.
+A host-process-only request never goes to the browser. Browser assets are served
+by the local frontend, including when the editor session is on an SSH host.
+
+Browser allocation limits cover owned WebGPU buffers, not the JavaScript/WASM
+heap or the whole browser. The worker verifies the model manifest and payloads,
+retains its model between requests, and drains active inference before reporting
+cancellation. Closing a connection expires its requests without claiming that
+the disconnected machine has stopped computing.
 
 An endpoint's model name is reported provenance, not proof of its weights.
 Probabilities and confidence retain the provider's meaning. A consumer must apply

@@ -12,13 +12,16 @@
 -- file opens run on workers. Owner ticks adopt only exact current requests; the
 -- cached viewport never evaluates a provider or inspects buffer payloads.
 module Hide.SidebarCommands
-  ( SidebarHost, SidebarContext(..), SidebarReply(..), withSidebarCommands
+  ( SidebarHost, SidebarContext(..), SidebarReply(..), SystemOneChoice(..), withSidebarCommands
   , sidebarRegistry, sidebarCapabilities, publishTreeFromHost, retireTreeFromHost, sidebarEffects
   , tickSidebar, refreshTreeFromHost, initializeSidebar, awaitFileOpening, prepareSidebarFile, publishFormRefreshFromHost
   , sidebarInvocationContext, adoptForm, adoptPopupForm
   ) where
 
 import Hide.FileIO (withFileRead)
+import Hide.SystemOne (SystemOne,selectDecisionProvider)
+import Hide.Plugin.SystemOne (DecisionProvider,DecisionSupplier(..),SupplierDescription(..))
+import qualified Hide.SystemOneBrowser as SystemOneBrowser
 
 import Control.Concurrent.Async (Async,async,asyncWithUnmask,cancel,poll)
 import qualified Control.Concurrent.Async
@@ -73,7 +76,12 @@ data SidebarContext = SidebarContext
   , sidebarConversation :: !(Either Text (Conversation.ConversationTarget ConversationSessionReceipt))
   , sidebarConversationOperation :: !(Either Text (Conversation.ConversationOperationTarget ConversationSessionReceipt))
   , sidebarSelectedAgent :: !(Either Text Hide.AgentHub.AgentId) }
-data SidebarReply = SidebarPopupForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+-- Supplier choice is a closed human intent, carried by the existing form worker.
+-- Adoption happens only after that exact form's submission receipt is consumed.
+data SystemOneChoice = ConfiguredSystemOne !SystemOne !(Maybe DecisionProvider)
+  | BrowserSystemOne !SystemOne !SystemOneBrowser.BrowserOffer
+
+data SidebarReply = SidebarSystemOne !SystemOneChoice | SidebarPopupForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -786,6 +794,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarForm{})->d {status="Sidebar form expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right SidebarPopupForm{})->d {status="Popup form requires its captured menu owner."}
+              Right (Right SidebarSystemOne{})->d {status="Supplier selection requires its submitted human form."}
               Right (Right SidebarConversation{})->d {status="Conversation session result requires its menu owner."}
               Right (Right SidebarRename{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)
@@ -1187,6 +1196,7 @@ forceFormReply reply@(SidebarAgent request)=case request of
 forceFormReply reply@(SidebarSession (SessionDeleted ident))
   | T.length ident==48=evaluate (T.length ident) >> evaluate reply
   | otherwise=ioError (userError "Invalid deleted session result.")
+forceFormReply reply@(SidebarSystemOne choice)=evaluate choice >> evaluate reply
 forceFormReply reply@SidebarRename{}=evaluate reply
 forceFormReply reply@SidebarPopupForm{}=evaluate reply
 forceFormReply reply@(SidebarConversation request)=do
@@ -1236,6 +1246,15 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
         Right (Right (SidebarAgent request)) | consumed,acceptedFormRequest request->snd <$> core adopted [AgentSidebarAction request]
         Right (Right (SidebarSession request@SessionDeleted{})) | consumed->snd <$> core d [SessionSidebarAction request]
         Right (Right (SidebarConversation request)) | consumed->snd <$> core d [ConversationSessionAction request]
+        Right (Right (SidebarSystemOne choice)) | consumed->do
+          selected<-case choice of
+            ConfiguredSystemOne owner provider->selectDecisionProvider owner provider
+            BrowserSystemOne owner offer->SystemOneBrowser.browserProvider offer >>=
+              either (pure . Left) (selectDecisionProvider owner . Just)
+          pure d {status=case selected of
+            Left failure->"System One supplier unavailable: "<>T.pack (show failure)
+            Right Nothing->"System One decisions disabled."
+            Right (Just supplier)->"System One supplier: "<>supplierLabel (decisionSupplierDescription supplier)}
         Right (Right (SidebarRename owner prepared)) | consumed->do
           provider<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
           if not provider then pure d {status="Files provider expired."} else do

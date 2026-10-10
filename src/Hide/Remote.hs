@@ -22,6 +22,7 @@ module Hide.Remote
 import Control.Concurrent.STM (STM,retry)
 import Hide.Model (Desktop, Effect)
 import Hide.Protocol (WirePacket(..))
+import Hide.SystemOneBrowser (SystemOneBrowser)
 import qualified Data.Text as T
 import Data.Aeson (Value)
 #endif
@@ -66,6 +67,7 @@ import Hide.Session
 import System.Directory (getCurrentDirectory, doesFileExist, doesDirectoryExist, removeFile, listDirectory)
 import Hide.Recovery (writeCheckpoint, readCheckpoint, checkpointKey)
 import Hide.Render (renderKey)
+import Hide.SystemOneBrowser
 
 #endif
 
@@ -76,6 +78,9 @@ data RemotePeer = RemotePeer
   , peerSendBatch :: [WirePacket] -> IO ()
     -- ^ Atomically enqueue related metadata/payload packets, with capacity
     -- backpressure. Queueing does not confirm execution.
+  , peerSendControl :: Int -> Value -> IO Bool
+    -- ^ Nonblocking, non-replaying System-1 control for this exact attachment.
+    -- A queued control is discarded if its physical connection retires.
   , peerReceive :: IO (Maybe WirePacket)
   , peerAttachment :: IO Int -- Local input lifetime, advanced before and after handoff.
   , peerSession :: IO String -- Current session, including successful handoffs.
@@ -205,8 +210,8 @@ data Session = Session
 -- Invoke startup only after taking ownership; reclaim only eligible stale endpoints.
 -- The fixed component wake interrupts the background tick delay for accepted
 -- permission ingress and completed work; STM retains signals before a waiter.
-runRemoteDaemonWithStartup :: IO () -> STM () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
-runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial = do
+runRemoteDaemonWithStartup :: Maybe SystemOneBrowser -> IO () -> STM () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemonWithStartup browserOwner owned wake session scale effects tick inspect initial = do
   checkpoint <- checkpointPath session
   withSessionLock (checkpoint++".lock") $ runOwned checkpoint
  where
@@ -368,7 +373,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
               available <- tryTakeMVar writer
               case available of
                 Nothing -> writePacket connection (json "error" ["message" .= ("Remote editor already has a writer"::T.Text)])
-                Just () -> finally (attachment receiveChunk connection client clientAck) (do
+                Just () -> finally (attachment shutdown receiveChunk connection client clientAck) (do
                   closing<-atomically (writeTVar activeDisplay False >> readTVar inspectionClosing)
                   when closing (void (tryPutMVar done ()))
                   -- Wait behind accepted commands before another writer can attach.
@@ -376,7 +381,35 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                   atomically (writeTBQueue commands (0,0,Blur,barrier))
                   void (atomically (takeTMVar barrier))
                   putMVar writer ())
-        attachment receiveChunk connection client clientAck = do
+        attachment shutdown receiveChunk connection client clientAck = mask $ \restore->do
+          live<-newTVarIO True
+          controls<-newTBQueueIO 32
+          releases<-newTBQueueIO 1
+          let post value=if packetSize (JsonPacket value)>262144 then pure False else do
+                let packet=JsonPacket value
+                    releasing=packetType packet `elem` [Just "system-one-cancel",Just "system-one-retire"]
+                accepted<-atomically $ do
+                  current<-readTVar live
+                  let queue=if releasing then releases else controls
+                  full<-isFullTBQueue queue
+                  if not current then pure False
+                    else if full then when releasing (writeTVar live False) >> pure False
+                    else writeTBQueue queue packet >> pure True
+                -- The common owner admits one request, so its one release lane
+                -- cannot fill with unrelated work. If that law is violated, stop
+                -- the actual attachment owner; failed enqueue never fabricates
+                -- a release or calls a borrowed descriptor after retirement.
+                pure accepted
+              retire browser=do
+                atomically (writeTVar live False >> void (flushTBQueue controls) >> void (flushTBQueue releases))
+                mapM_ retireBrowserAttachment browser
+          browser<-traverse (\registry->attachBrowser registry 0 post) browserOwner
+          let transportFailed=do
+                atomically (readTVar live >>= check . not)
+                _<-shutdown
+                failure "Browser decision transport unavailable"
+          restore (race_ transportFailed (attachmentWith browser controls releases live receiveChunk connection client clientAck)) `finally` retire browser
+        attachmentWith browser controls releases live receiveChunk connection client clientAck = do
           (ack,attachmentEpoch,replay) <- modifyMVar state $ \s -> do
             when (stopped s || suspending s) (failure "Editor session is closing or suspending")
             cancelRequestedPaste pasteReads
@@ -393,6 +426,7 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
           canvasEpoch<-T.pack <$> randomIdentity
           mapM_ (writePacket connection) replay
           writePacket connection (JsonPacket (canvasReset canvasEpoch))
+          forM_ browser $ \bound->writePacket connection (json "system-one-connection" ["connection" .= browserAttachmentId bound])
           -- Keep input consumption independent of frame generation. Drain replies
           -- in order as a bounded batch, then render the latest state once.
           outgoing <- newTBQueueIO 128
@@ -402,19 +436,31 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
           let receive = forever $ do
                 packet <- readPacketWith receiveChunk >>= maybe (failure "Remote client detached") pure
                 value <- case packet of JsonPacket v -> pure v; _ -> failure "Unexpected remote binary input"
-                (serial,received,input) <- decodeValue (\v -> (,,) <$> withObject "sequence" (\o -> o .: "seq") v <*> withObject "receipt" (\o -> o .:? "received" .!= 0) v <*> parseInput v) value
-                unless (serial>0) (failure "Remote input sequence must be positive")
-                complete <- case input of
-                  UploadFile name _ -> do
-                    payload <- timeout 30000000 (readPacketWith receiveChunk)
-                    case payload of Just (Just (BinaryPacket bytes)) -> pure (UploadFile name bytes); _ -> failure "Expected upload bytes"
-                  _ -> pure input
-                reply <- newEmptyTMVarIO
-                atomically $ do
-                  readTVar inspectionClosing >>= check . not
-                  writeTBQueue commands (serial,received,complete,reply)
-                  writeTBQueue pending reply
-                  modifyTVar' inflight (+1)
+                if maybe False ("system-one-" `T.isPrefixOf`) (packetType packet) then
+                  forM_ browser $ \bound->when (packetSize packet<=262144) $
+                    if packetType packet==Just "system-one-viewer" then
+                      case parseEither (withObject "browser viewer" $ \o->do
+                        unless (all (`elem` ["type","connection","viewer"]) (KM.keys o)) (fail "Invalid viewer fields")
+                        ident<-o .: "connection"
+                        unless (ident==browserAttachmentId bound) (fail "Stale browser connection")
+                        o .: "viewer") value of
+                          Right viewer->void (setBrowserViewer bound viewer)
+                          Left _->pure ()
+                    else void (receiveBrowserControl bound value)
+                else do
+                  (serial,received,input) <- decodeValue (\v -> (,,) <$> withObject "sequence" (\o -> o .: "seq") v <*> withObject "receipt" (\o -> o .:? "received" .!= 0) v <*> parseInput v) value
+                  unless (serial>0) (failure "Remote input sequence must be positive")
+                  complete <- case input of
+                    UploadFile name _ -> do
+                      payload <- timeout 30000000 (readPacketWith receiveChunk)
+                      case payload of Just (Just (BinaryPacket bytes)) -> pure (UploadFile name bytes); _ -> failure "Expected upload bytes"
+                    _ -> pure input
+                  reply <- newEmptyTMVarIO
+                  atomically $ do
+                    readTVar inspectionClosing >>= check . not
+                    writeTBQueue commands (serial,received,complete,reply)
+                    writeTBQueue pending reply
+                    modifyTVar' inflight (+1)
               respond = forever $ do
                 reply <- atomically (readTBQueue pending)
                 (responses,exit,committed,isDirty) <- atomically (takeTMVar reply) >>= either throwIO pure
@@ -479,6 +525,12 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                 let (nextTransfers,canvasPackets,moreCanvas)=canvasTransfer transfers scene
                 mapM_ (writePacket connection) canvasPackets
                 let awaitReply =
+                      (do readTVar live >>= check
+                          control<-readTBQueue controls
+                          pure (Just [control])) `orElse`
+                      (do readTVar live >>= check
+                          control<-readTBQueue releases
+                          pure (Just [control])) `orElse`
                       (do first<-readTBQueue outgoing
                           rest<-flushTBQueue outgoing
                           pure (Just (concat (first:rest)))) `orElse` (do
@@ -492,7 +544,9 @@ runRemoteDaemonWithStartup owned wake session scale effects tick inspect initial
                   else timeout 50000 (atomically awaitReply)
                 case next of
                   Just (Just packets) -> do
-                    mapM_ (writePacket connection) packets
+                    forM_ packets $ \packet->do
+                      current<-readTVarIO live
+                      when (current || not (maybe False ("system-one-" `T.isPrefixOf`) (packetType packet))) (writePacket connection packet)
                     if any ((==Just "closed") . packetType) packets then void (tryPutMVar done ()) else send nextTransfers (Just (key,resetKey,rows,metadata,scene))
                   Just Nothing -> do
                     -- An MCP Exit has no display input to carry its close. Flush
@@ -618,6 +672,20 @@ packetType :: WirePacket -> Maybe T.Text
 packetType (JsonPacket (Object o)) = case KM.lookup "type" o of Just (String t) -> Just t; _ -> Nothing
 packetType _ = Nothing
 
+systemOneInput :: WirePacket -> Bool
+systemOneInput packet=packetType packet `elem` map Just
+  ["system-one-viewer","system-one-offer","system-one-withdraw","system-one-result","system-one-released","system-one-retired"]
+
+-- Only trusted gateway retirement may reach the original socket while a
+-- handoff is preparing. It carries no inference context and cannot reselect.
+systemOneDetach :: WirePacket -> Bool
+systemOneDetach (JsonPacket (Object fields))=
+  KM.lookup "type" fields==Just (String "system-one-viewer") && KM.lookup "viewer" fields==Just Null
+systemOneDetach _=False
+
+systemOneViewer :: WirePacket -> Bool
+systemOneViewer packet=packetType packet==Just "system-one-viewer"
+
 data Journal = Journal
   { nextSequence :: Int
   , lastAck :: Int
@@ -675,6 +743,8 @@ withSessionPeer host session resume remoteArgs action = do
   first <- freshLifetime session remoteArgs
   current <- newTVarIO first
   attachmentSerial <- newTVarIO (0::Int)
+  controlLifetime <- newTVarIO (0::Integer,False)
+  controls <- newTBQueueIO 32
   switching <- newTVarIO NoHandoff
   settings <- newTVarIO M.empty
   incoming <- newTBQueueIO 8
@@ -689,6 +759,20 @@ withSessionPeer host session resume remoteArgs action = do
         serial<-readTVarIO attachmentSerial
         handoff<-(/=NoHandoff) <$> readTVarIO switching
         emit (json "connection" ["connected" .= online,"attachment" .= serial,"switching" .= handoff,"message" .= (message::T.Text)])
+      sendControl stamp value=do
+        let packet=JsonPacket value
+        if packetSize packet>262144 || not (systemOneInput packet)
+          then pure False else atomically $ do
+            serial<-readTVar attachmentSerial
+            (epoch,online)<-readTVar controlLifetime
+            handoff<-readTVar switching
+            if stamp/=serial || not online || (handoff/=NoHandoff && not (handoff==PreparingHandoff && systemOneDetach packet)) then pure False else do
+              when (systemOneViewer packet) (void (flushTBQueue controls))
+              full<-isFullTBQueue controls
+              if full then pure False else writeTBQueue controls (epoch,serial,packet) >> pure True
+      retireControls=atomically $ do
+        modifyTVar' controlLifetime (\(epoch,_)->(epoch,False))
+        void (flushTBQueue controls)
       send packet = sendBatch [packet]
       sendBatch packets = do
         let events=length [() | JsonPacket _<-packets]
@@ -746,7 +830,7 @@ withSessionPeer host session resume remoteArgs action = do
             if packetType packet==Just "upload" then writeTVar journal j {pendingUpload=Just value} else add value []
           _ -> throwSTM (userError "Unexpected remote binary input")
       receive=atomically (readTBQueue incoming) >>= either failure pure
-      peer=RemotePeer send sendBatch receive (readTVarIO attachmentSerial) (lifetimeId <$> readTVarIO current)
+      peer=RemotePeer send sendBatch sendControl receive (readTVarIO attachmentSerial) (lifetimeId <$> readTVarIO current)
       hello (PeerLifetime record client journal) reattach = do
         j <- readTVarIO journal
         pure (json "hello" ["version" .= protocolVersion,"session" .= sessionId record,"client" .= client,"ack" .= lastAck j,"args" .= sessionArguments record,"resume" .= (serverEpoch j/=Nothing || reattach)])
@@ -903,31 +987,59 @@ withSessionPeer host session resume remoteArgs action = do
                     kind | kind `elem` [Just "canvas-chunk",Just "download"]->collect configured watermark rows metadata serial waiting True (packet:retained) (bytes+packetSize packet)
                     _->keep packet
           collect configuration initialWatermark [] KM.empty 0 False False [] 0) `onException` discardCandidate
-      connected selected connection sent = do
+      connected selected connection sent initialPackets = do
         (input,output)<-pipes connection
         requests<-newEmptyTMVarIO
+        initialConnection<-evaluate (foldl' (\old packet->if packetType packet==Just "system-one-connection" then Just packet else old) Nothing initialPackets)
+        systemOneConnection<-newIORef initialConnection
         let journal=lifetimeJournal selected
             sender delivered = do
-              entries <- atomically $ do
+              next <- atomically $ (Right <$> readTBQueue controls) `orElse` (do
                 j <- readTVar journal
                 let entries=filter ((>delivered).fst) (pending j)
                 check (not (null entries))
-                pure entries
-              forM_ entries $ \(_,packets) -> do
-                j <- readTVarIO journal
-                let receipt (JsonPacket (Object fields))=JsonPacket (Object (KM.insert "received" (toJSON (lastAck j)) fields))
-                    receipt packet=packet
-                mapM_ (writePacket input . receipt) packets
-              sender (fst (last entries))
+                pure (Left entries))
+              case next of
+                Left entries->do
+                  forM_ entries $ \(_,packets) -> do
+                    j <- readTVarIO journal
+                    let receipt (JsonPacket (Object fields))=JsonPacket (Object (KM.insert "received" (toJSON (lastAck j)) fields))
+                        receipt packet=packet
+                    mapM_ (writePacket input . receipt) packets
+                  sender (fst (last entries))
+                Right (epoch,serial,packet)->do
+                  live<-atomically $ do
+                    currentEpoch<-readTVar controlLifetime
+                    currentSerial<-readTVar attachmentSerial
+                    handoff<-readTVar switching
+                    pure (currentEpoch==(epoch,True) && currentSerial==serial &&
+                      (handoff==NoHandoff || handoff==PreparingHandoff && systemOneDetach packet))
+                  when live (writePacket input packet)
+                  sender delivered
             receiver = do
               packet <- readPacket output >>= maybe (failure "SSH connection ended") pure
               case packetType packet of
+                Just "system-one-connection"->do
+                  case packet of
+                    JsonPacket value->void $ decodeValue (withObject "browser connection" $ \o->do
+                      unless (all (`elem` ["type","connection"]) (KM.keys o)) (fail "Invalid browser connection fields")
+                      ident<-o .: "connection"
+                      unless (validIdentity (T.unpack ident)) (fail "Invalid browser connection identity")
+                      pure (ident::T.Text)) value
+                    _->failure "Invalid browser connection"
+                  writeIORef systemOneConnection (Just packet)
+                  emit packet
+                  receiver
                 Just "switch-session"->do
                   target<-case packet of JsonPacket value->decodeValue (withObject "session switch" (.: "session")) value;_->failure "Invalid session switch"
                   unless (validIdentity target && target/=lifetimeId selected) (failure "Invalid session switch target")
                   accepted<-atomically $ do
                     busy<-readTVar switching
-                    if busy/=NoHandoff then pure False else writeTVar switching PreparingHandoff >> modifyTVar' attachmentSerial (+1) >> pure True
+                    if busy/=NoHandoff then pure False else do
+                      writeTVar switching PreparingHandoff
+                      modifyTVar' attachmentSerial (+1)
+                      void (flushTBQueue controls)
+                      pure True
                   when accepted $ do
                     status False "Switching session"
                     atomically (putTMVar requests target)
@@ -979,6 +1091,7 @@ withSessionPeer host session resume remoteArgs action = do
                 Left (err::IOException)->do
                   atomically (writeTVar switching NoHandoff)
                   status True "Connected"
+                  readIORef systemOneConnection >>= mapM_ emit
                   emit (json "notice" ["message" .= T.pack ("Could not switch session: "++show err)])
                   switches
         mask $ \restore -> withAsync (restore (race_ (sender sent) receiver)) $ \transport -> withAsync (restore switches) $ \handoff ->
@@ -996,7 +1109,7 @@ withSessionPeer host session resume remoteArgs action = do
           (case prepared of
             Nothing->open selected resume `catch` \(err::IOException)->fatal selected (show err)
             Just (PreparedPeer _ connection _ _)->modifyMVar_ candidate (const (pure Nothing)) >> pure connection)
-          close $ \connection@(_,_,_,_,stop)->do
+          (\connection->retireControls >> close connection) $ \connection@(_,_,_,_,stop)->do
             modifyMVar_ activeShutdown (const (pure stop))
             (sent,events)<-case prepared of
               Nothing->admit selected resume [] connection
@@ -1004,13 +1117,20 @@ withSessionPeer host session resume remoteArgs action = do
                 serial<-readTVarIO attachmentSerial
                 emit (json "session" ["session" .= lifetimeId selected,"attachment" .= serial])
                 pure (sent,events)
-            mapM_ emit events
+            -- A prepared target's connection nonce is only useful after its
+            -- transient sender is live. Never let a gateway bind against the
+            -- preceding offline/handoff status or an unopened control lane.
+            mapM_ emit (filter ((/=Just "system-one-connection") . packetType) events)
             case prepared of Nothing->retire selected True sent Nothing;Just _->pure ()
             case selected of PeerLifetime record _ _->rememberSession record {sessionHost=host}
             writeIORef handshook True
-            atomically (writeTVar switching NoHandoff)
+            atomically $ do
+              writeTVar switching NoHandoff
+              modifyTVar' controlLifetime (\(epoch,_)->(epoch+1,True))
+              void (flushTBQueue controls)
             status True "Connected"
-            connected selected connection sent
+            mapM_ emit (filter ((==Just "system-one-connection") . packetType) events)
+            connected selected connection sent events
         case result of
           Right Nothing->pure ()
           Right (Just next@(PreparedPeer target _ _ _))->reconnect target (Just next) 0
@@ -1051,9 +1171,9 @@ withSSHPeer :: String -> [String] -> (RemotePeer -> IO ()) -> IO ()
 withSSHPeer _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 runRemoteRelay :: [String] -> IO ()
 runRemoteRelay _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
-runRemoteDaemonWithStartup :: IO () -> STM () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
-runRemoteDaemonWithStartup _ _ _ _ _ _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
+runRemoteDaemonWithStartup :: Maybe SystemOneBrowser -> IO () -> STM () -> String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
+runRemoteDaemonWithStartup _ _ _ _ _ _ _ _ _ = ioError (userError "Remote support is not built. Rebuild with cabal build -fremote")
 #endif
 
 runRemoteDaemon :: String -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> (Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))) -> Desktop -> IO ()
-runRemoteDaemon=runRemoteDaemonWithStartup (pure ()) retry
+runRemoteDaemon=runRemoteDaemonWithStartup Nothing (pure ()) retry

@@ -42,6 +42,8 @@ import Hide.Keybindings
 import Hide.Commands (configuredBindings, contributedBindingCommands)
 import Hide.SystemOne (withSystemOne,selectDecisionProvider,systemOneServices)
 import Hide.SystemOneConfig (loadSystemOneProvider)
+import Hide.SystemOneBrowser (withSystemOneBrowser)
+import Hide.SystemOneMenu (withSystemOneMenu)
 import Hide.MCPPermissions
 import Hide.ClipboardMCP
 import Hide.Links (followLink)
@@ -331,11 +333,11 @@ runEditor plugins args = do
               declarations=concatMap Plugin.pluginTools plugins
           systemOneJSON<-readSystemOne >>= either (die . T.unpack) pure
           systemOneProvider<-loadSystemOneProvider systemOneJSON >>= either (die . T.unpack) pure
-          withSystemOne $ \systemOne -> do
+          withSystemOne $ \systemOne -> withSystemOneBrowser $ \systemOneBrowser -> do
             _<-selectDecisionProvider systemOne systemOneProvider >>= either (die . show) pure
             PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
               PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.RequestTool tool<-declarations] $ \requestToolset ->
-              PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt agentProvider presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarConversationOperation PluginMenu.cancelConversationAction sidebarSelectedAgent (systemOneServices systemOne)) $ do
+              PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt agentProvider presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withSystemOneMenu menuHost sidebarHost systemOne systemOneProvider systemOneBrowser $ withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarConversationOperation PluginMenu.cancelConversationAction sidebarSelectedAgent (systemOneServices systemOne)) $ do
               contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
               let agentTools=PluginTool.toolDefinitions agentToolset
                   editorSpecs=specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset
@@ -439,7 +441,7 @@ runEditor plugins args = do
                             present<-checkpointPath sid >>= doesFileExist
                             unless present (ioError (userError "Saved session was deleted before recovery started."))
                           AR.activateAgentCheckpoint (conversationAgents conversation)
-                    runRemoteDaemonWithStartup startOwned (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
+                    runRemoteDaemonWithStartup (Just systemOneBrowser) startOwned (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
                   Nothing -> die "Missing session process identity."
   where
     lastMaybe []=Nothing

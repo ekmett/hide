@@ -15,6 +15,8 @@
 -- complete download results have separate bounded retention. Connection
 -- generations keep acknowledgements for an old browser from reaching its
 -- replacement. Interrupted delivery can replay retained results.
+-- Inference controls are transient: only a live socket's non-context connection
+-- identity is retained. Browser generations are gateway-owned, never page input.
 module Hide.RemoteWeb (runRemoteWeb) where
 import Hide.Remote (RemotePeer(..))
 #if defined(WITH_REMOTE) && defined(WITH_WEB)
@@ -35,13 +37,15 @@ import qualified Network.WebSockets as WS
 import System.Timeout (timeout)
 import Hide.Protocol
 import Hide.BrowserServer
+import Hide.RemoteEndpoint (randomIdentity)
 
 -- Keep a complete reconstructed screen for browser reconnects. The SSH peer
 -- remains attached while the browser is absent, so tooling continues running.
 data Cache = Cache
   { cachedAssets :: Maybe Value, cachedRows :: [Value], cachedMeta :: Object
   , cachedConnection :: Maybe Value, cachedSession :: Maybe Value, pendingBinary :: Maybe BinaryPurpose
-  , cachedCanvas :: CanvasCache, sessionClosed :: Bool }
+  , cachedCanvas :: CanvasCache, sessionClosed :: Bool
+  , cachedSystemOneConnection :: !(Maybe T.Text) }
 
 -- One current cursor and immutable completed resources. Byte admission includes
 -- the entire unfinished resource; replay uses its retained contiguous prefix.
@@ -51,6 +55,10 @@ data CanvasCache = CanvasCache
   { canvasEpoch :: !(Maybe T.Text), canvasResources :: !(M.Map T.Text CanvasResource)
   , canvasUpload :: !(Maybe CanvasUpload), canvasBytes :: !Int }
 data BinaryPurpose = DownloadBytes !WirePacket | CanvasBytes !Value !T.Text !Int !Int
+
+-- The inference lane holds only a request plus its release control. It shares
+-- the socket's sole writer, but display traffic cannot consume that capacity.
+data Subscriber = Subscriber !(TBQueue [WirePacket]) !(TBQueue WirePacket) !(TVar Bool)
 
 emptyCanvas :: CanvasCache
 emptyCanvas = CanvasCache Nothing M.empty Nothing 0
@@ -109,9 +117,10 @@ canvasReplay current =
 -- Uploads enter the peer as atomic metadata/payload batches.
 runRemoteWeb :: Double -> String -> RemotePeer -> IO ()
 runRemoteWeb scale host peer = do
-  cache<-newTVarIO (Cache Nothing [] KM.empty Nothing Nothing Nothing emptyCanvas False)
+  cache<-newTVarIO (Cache Nothing [] KM.empty Nothing Nothing Nothing emptyCanvas False Nothing)
   subscriber<-newTVarIO Nothing
   generation<-newTVarIO (0::Integer)
+  viewer<-newTVarIO Nothing
   nextSerial<-newTVarIO (0::Integer)
   attachment<-peerAttachment peer >>= newTVarIO
   aliases<-newTVarIO M.empty
@@ -122,8 +131,40 @@ runRemoteWeb scale host peer = do
   done<-newEmptyMVar
   let emitBatch packets=do
         current<-readTVar subscriber
-        case current of Nothing->pure (); Just queue->writeTBQueue queue packets
+        case current of Nothing->pure (); Just (Subscriber queue _ _)->writeTBQueue queue packets
       emit packet=emitBatch [packet]
+      emitDecision packet=do
+        current<-readTVar subscriber
+        forM_ current $ \(Subscriber _ controls closing)->do
+          full<-isFullTBQueue controls
+          if full then writeTVar closing True else writeTBQueue controls packet
+      clearSystemOne=do
+        currentStamp<-peerAttachment peer
+        target<-atomically $ do
+          current<-readTVar cache
+          writeTVar viewer Nothing
+          modifyTVar' cache (\c->c {cachedSystemOneConnection=Nothing})
+          emitDecision (JsonPacket (object ["type" .= ("system-one-connection"::T.Text),"connection" .= Null]))
+          pure ((,) currentStamp <$> cachedSystemOneConnection current)
+        forM_ target $ \(stamp,ident)->void (peerSendControl peer stamp (viewerControl ident Nothing))
+      bindSystemOne ident=do
+        who<-T.pack <$> randomIdentity
+        target<-atomically $ do
+          modifyTVar' cache (\c->c {cachedSystemOneConnection=Just ident})
+          current<-readTVar subscriber
+          gen<-readTVar generation
+          stamp<-readTVar attachment
+          case current of
+            Nothing->pure Nothing
+            Just _->writeTVar viewer (Just (gen,who)) >> pure (Just (gen,stamp))
+        forM_ target $ \(gen,stamp)->do
+          accepted<-peerSendControl peer stamp (viewerControl ident (Just who))
+          atomically $ do
+            current<-readTVar cache
+            active<-readTVar viewer
+            when (cachedSystemOneConnection current==Just ident && active==Just (gen,who)) $
+              emitDecision (JsonPacket (if accepted then object ["type" .= ("system-one-connection"::T.Text),"connection" .= ident,"viewer" .= who]
+                else object ["type" .= ("system-one-connection"::T.Text),"connection" .= Null]))
       retain packets=do
         let bytes=sum [case p of JsonPacket v->fromIntegral (BL.length (encode v)); BinaryPacket b->BS.length b | p<-packets]
         pending<-readTVar replies
@@ -161,20 +202,37 @@ runRemoteWeb scale host peer = do
               Just "assets" -> do
                 let adjusted=case value of Object fields->Object (KM.insert "scale" (toJSON scale) fields); _->value
                 atomically $ modifyTVar' cache (\c->c {cachedAssets=Just adjusted,cachedRows=[],cachedMeta=KM.empty,cachedCanvas=emptyCanvas}) >> emit (JsonPacket adjusted)
-              Just "session" -> atomically $ do
-                serial<-either (throwSTM . userError) pure (parseEither (withObject "session" (.: "attachment")) value)
-                writeTVar attachment serial
-                writeTVar aliases M.empty
-                modifyTVar' cache (\c->c {cachedSession=Just value,cachedRows=[],cachedMeta=KM.empty,cachedCanvas=emptyCanvas,pendingBinary=Nothing})
-                emit packet
-              Just "connection" -> atomically $ do
-                serial<-either (throwSTM . userError) pure (parseEither (withObject "connection" (\o->o .:? "attachment")) value)
-                mapM_ (writeTVar attachment) serial
+              Just "session" -> do
+                clearSystemOne
+                atomically $ do
+                  serial<-either (throwSTM . userError) pure (parseEither (withObject "session" (.: "attachment")) value)
+                  writeTVar attachment serial
+                  writeTVar aliases M.empty
+                  modifyTVar' cache (\c->c {cachedSession=Just value,cachedRows=[],cachedMeta=KM.empty,cachedCanvas=emptyCanvas,pendingBinary=Nothing})
+                  emit packet
+              Just "connection" -> do
                 let disconnected=parseMaybe (withObject "connection" (\o->o .: "connected")) value==Just False
-                let handoff=parseMaybe (withObject "connection" (\o->o .:? "switching" .!= False)) value==Just True
-                when disconnected (writeTVar aliases M.empty)
-                modifyTVar' cache (\c->if disconnected && not handoff then c {cachedConnection=Just value,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "semanticSource" (KM.delete "canvas" (cachedMeta c))} else c {cachedConnection=Just value})
-                emit packet
+                when disconnected clearSystemOne
+                atomically $ do
+                  serial<-either (throwSTM . userError) pure (parseEither (withObject "connection" (\o->o .:? "attachment")) value)
+                  mapM_ (writeTVar attachment) serial
+                  let handoff=parseMaybe (withObject "connection" (\o->o .:? "switching" .!= False)) value==Just True
+                  when disconnected (writeTVar aliases M.empty)
+                  modifyTVar' cache (\c->if disconnected && not handoff then c {cachedConnection=Just value,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "semanticSource" (KM.delete "canvas" (cachedMeta c))} else c {cachedConnection=Just value})
+                  emit packet
+              Just "system-one-connection" -> do
+                ident<-either (ioError . userError) pure (parseEither (withObject "browser connection" $ \o->do
+                  unless (all (`elem` ["type","connection"]) (KM.keys o)) (fail "Invalid browser connection fields")
+                  connection<-o .: "connection"
+                  unless (identity connection) (fail "Invalid browser connection identity")
+                  pure connection) value)
+                current<-readTVarIO cache
+                let disconnected=parseMaybe (withObject "connection" (\o->o .: "connected")) =<< cachedConnection current
+                when (disconnected/=Just False && cachedSystemOneConnection current/=Just ident) (bindSystemOne ident)
+              Just kind | "system-one-" `T.isPrefixOf` kind -> atomically $ do
+                current<-readTVar cache
+                active<-readTVar viewer
+                when (browserOutput kind && sameBrowser (cachedSystemOneConnection current) active value) (emitDecision packet)
               Just kind | "canvas-" `T.isPrefixOf` kind -> do
                 (updated,purpose)<-either (ioError . userError) pure (canvasControl (cachedCanvas before) value)
                 atomically $ do
@@ -196,6 +254,7 @@ runRemoteWeb scale host peer = do
                   Just key->modifyTVar' aliases (M.delete (key::Integer))
                   Nothing->pure ()
               Just "closed" -> do
+                clearSystemOne
                 attached<-atomically $ do
                   modifyTVar' cache (\c->c {sessionClosed=True,cachedCanvas=emptyCanvas,cachedMeta=KM.delete "semanticSource" (KM.delete "canvas" (cachedMeta c))})
                   emit packet
@@ -208,6 +267,9 @@ runRemoteWeb scale host peer = do
         BinaryPacket bytes->WS.sendBinaryData conn bytes
       session conn = do
         queue<-newTBQueueIO 128
+        controls<-newTBQueueIO 2
+        closing<-newTVarIO False
+        who<-T.pack <$> randomIdentity
         (gen,serial,snapshot)<-atomically $ do
           current<-readTVar cache
           case cachedAssets current of Nothing->retry; Just _->pure ()
@@ -217,10 +279,35 @@ runRemoteWeb scale host peer = do
           modifyTVar' generation (+1)
           gen<-readTVar generation
           writeTVar aliases M.empty
-          writeTVar subscriber (Just queue)
+          writeTVar subscriber (Just (Subscriber queue controls closing))
+          writeTVar viewer (Just (gen,who))
           serial<-readTVar attachment
           pure (gen,serial,current)
-        let cleanup=atomically (writeTVar subscriber Nothing)
+        let cleanup=do
+              target<-atomically $ do
+                current<-readTVar viewer
+                if maybe False ((==gen) . fst) current then do
+                  writeTVar viewer Nothing
+                  writeTVar subscriber Nothing
+                  ident<-cachedSystemOneConnection <$> readTVar cache
+                  stamp<-readTVar attachment
+                  pure ((,) stamp <$> ident)
+                else do
+                  currentGeneration<-readTVar generation
+                  when (currentGeneration==gen) (writeTVar subscriber Nothing)
+                  pure Nothing
+              forM_ target $ \(stamp,ident)->void (peerSendControl peer stamp (viewerControl ident Nothing))
+            sendCurrent packet=do
+              allowed<-atomically $ do
+                current<-readTVar cache
+                active<-readTVar viewer
+                pure $ case packet of
+                  JsonPacket value | maybe False ("system-one-" `T.isPrefixOf`) (messageType value)->
+                    if messageType value==Just "system-one-connection" && parseMaybe (withObject "connection" (.: "connection")) value==Just Null
+                      then cachedSystemOneConnection current==Nothing
+                      else sameBrowser (cachedSystemOneConnection current) active value && maybe False ((==gen) . fst) active
+                  _->True
+              when allowed (sendPacket conn packet)
             number value = do
               frontendSerial<-either (ioError . userError) pure (parseEither (withObject "event" (\o->o .:? "seq" .!= 0)) value :: Either String Integer)
               stamp<-either (ioError . userError) pure (parseEither (withObject "event" (.: "attachment")) value :: Either String Int)
@@ -237,29 +324,51 @@ runRemoteWeb scale host peer = do
               when (messageType value==Just "detach") $ do
                 atomically (writeTBQueue queue [JsonPacket (object ["type" .= ("detached"::T.Text)])])
                 atomically retry
-              input<-either (ioError . userError) pure (parseEither parseInput value)
-              case input of
-                UploadFile _ _ -> do
-                  blob<-timeout 30000000 (WS.receiveDataMessage conn)
-                  payload<-case blob of
-                    Just (WS.Binary payload) | BL.length payload<=16777216 -> pure (BL.toStrict payload)
-                    _->ioError (userError "Expected upload bytes (maximum 16 MiB)")
-                  numbered<-number value
-                  mapM_ (\event->peerSendBatch peer [JsonPacket event,BinaryPacket payload]) numbered
-                _ -> number value >>= mapM_ (peerSend peer . JsonPacket)
+              if maybe False ("system-one-" `T.isPrefixOf`) (messageType value) then do
+                target<-atomically $ do
+                  current<-readTVar cache
+                  active<-readTVar viewer
+                  stamp<-readTVar attachment
+                  pure (if BL.length bytes<=262144 && browserInput value && sameBrowser (cachedSystemOneConnection current) active value && maybe False ((==gen) . fst) active then Just stamp else Nothing)
+                forM_ target $ \stamp->do
+                  accepted<-peerSendControl peer stamp value
+                  -- Lost release delivery must retire the actual browser
+                  -- generation, not silently leave a supplier scope draining.
+                  -- Cleanup publishes trusted retirement before this socket
+                  -- owner exits; no inference release is fabricated.
+                  unless accepted $ do
+                    currentStamp<-peerAttachment peer
+                    -- A concurrently retired transport stamp already rejects
+                    -- this old control; handoff itself retires its viewer.
+                    when (currentStamp==stamp) (ioError (userError "Browser decision transport unavailable"))
+              else do
+                input<-either (ioError . userError) pure (parseEither parseInput value)
+                case input of
+                  UploadFile _ _ -> do
+                    blob<-timeout 30000000 (WS.receiveDataMessage conn)
+                    payload<-case blob of
+                      Just (WS.Binary payload) | BL.length payload<=16777216 -> pure (BL.toStrict payload)
+                      _->ioError (userError "Expected upload bytes (maximum 16 MiB)")
+                    numbered<-number value
+                    mapM_ (\event->peerSendBatch peer [JsonPacket event,BinaryPacket payload]) numbered
+                  _ -> number value >>= mapM_ (peerSend peer . JsonPacket)
             outgoing=forever $ do
               work<-atomically $ (do
-                pending<-readTVar replies
-                case Seq.viewl pending of
-                  Seq.EmptyL->retry
-                  (packets,bytes) Seq.:< _->pure (Left (packets,bytes)))
+                readTVar closing >>= check
+                throwSTM (userError "Browser decision transport unavailable"))
+                `orElse` (Right . (:[]) <$> readTBQueue controls)
+                `orElse` (do
+                  pending<-readTVar replies
+                  case Seq.viewl pending of
+                    Seq.EmptyL->retry
+                    (packets,bytes) Seq.:< _->pure (Left (packets,bytes)))
                 `orElse` (Right <$> readTBQueue queue)
               packet<-case work of
                 Left (packets,bytes)->do
-                  mapM_ (sendPacket conn) packets
+                  mapM_ sendCurrent packets
                   atomically $ modifyTVar' replies (Seq.drop 1) >> modifyTVar' replyBytes (subtract bytes)
                   pure (JsonPacket Null)
-                Right packets->mapM_ (sendPacket conn) packets >> pure (last packets)
+                Right packets->mapM_ sendCurrent packets >> pure (last packets)
               case packet of
                 JsonPacket value | messageType value `elem` [Just "closed",Just "detached"] -> void (tryPutMVar done ())
                 _->pure ()
@@ -272,12 +381,32 @@ runRemoteWeb scale host peer = do
           mapM_ (sendPacket conn) (canvasReplay (cachedCanvas snapshot))
           unless (null (cachedRows snapshot)) $ sendPacket conn (BinaryPacket (BL.toStrict (framePacket True [] (cachedRows snapshot) (KM.toList (cachedMeta snapshot)))))
           mapM_ (sendPacket conn . JsonPacket) (cachedConnection snapshot)
+          forM_ (cachedSystemOneConnection snapshot) $ \ident->do
+            accepted<-peerSendControl peer serial (viewerControl ident (Just who))
+            when accepted (sendCurrent (JsonPacket (object ["type" .= ("system-one-connection"::T.Text),"connection" .= ident,"viewer" .= who])))
           if sessionClosed snapshot then sendPacket conn (JsonPacket (object ["type" .= ("closed"::T.Text)])) >> void (tryPutMVar done ())
           else WS.withPingThread conn 15 (pure ()) (race_ incoming outgoing)) cleanup
   race_ receive (serveBrowser done session)
 
 messageType :: Value -> Maybe T.Text
 messageType = parseMaybe (withObject "message" (\o->o .: "type"))
+
+identity :: T.Text -> Bool
+identity value=T.length value==48 && T.all (\c->c>='0' && c<='9' || c>='a' && c<='f') value
+
+viewerControl :: T.Text -> Maybe T.Text -> Value
+viewerControl connection viewer=object ["type" .= ("system-one-viewer"::T.Text),"connection" .= connection,"viewer" .= viewer]
+
+sameBrowser :: Maybe T.Text -> Maybe (Integer,T.Text) -> Value -> Bool
+sameBrowser connection viewer value=case (connection,viewer,value) of
+  (Just ident,Just (_,who),Object fields)->KM.lookup "connection" fields==Just (String ident) && KM.lookup "viewer" fields==Just (String who)
+  _->False
+
+browserInput :: Value -> Bool
+browserInput value=messageType value `elem` map Just ["system-one-offer","system-one-withdraw","system-one-result","system-one-released","system-one-retired"]
+
+browserOutput :: T.Text -> Bool
+browserOutput kind=kind `elem` ["system-one-request","system-one-cancel","system-one-retire"]
 #else
 runRemoteWeb :: Double -> String -> RemotePeer -> IO ()
 runRemoteWeb _ _ _ = ioError (userError "Remote browser support is not built. Rebuild with cabal build -fremote -fweb")

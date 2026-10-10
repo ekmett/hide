@@ -262,6 +262,54 @@ and `rl_agent_config.json`. The manifest identifies each payload by filename,
 byte size and SHA256; the configured SHA256 pins the manifest itself. No model
 is downloaded or loaded merely by building or launching the editor.
 
+## Browser Laya decisions
+
+The browser can supply System-1 decisions using its own WebGPU device, including
+for a remote editor. This is optional: ordinary browser editing needs neither
+model weights nor an inference runtime. The tested path uses a dedicated Worker,
+ONNX Runtime 1.30.0, and the same split Laya bundle as the native provider.
+
+Build the small JavaScript runtime bundle from the Laya checkout at
+`1adc59f7e371deb601fcfa18a14e25db238addcc`:
+
+```sh
+npm --prefix /path/to/web-deps install --ignore-scripts --save-exact \
+  esbuild@0.28.2 onnxruntime-web@1.30.0 hash-wasm@4.12.0
+node tools/build-system-one-web.mjs /path/to/laya /path/to/web-deps /path/to/web-runtime
+```
+
+The builder checks the upstream revision and records the dependency and output
+hashes. Keep this output and the acquired model bundle outside the hide checkout.
+Set these variables on the machine launching the **browser frontend**, then run
+hide normally:
+
+```sh
+export HIDE_SYSTEM_ONE_WEB_RUNTIME_DIR=/path/to/web-runtime
+export HIDE_SYSTEM_ONE_WEB_MODEL_DIR=/path/to/laya-bundle
+export HIDE_SYSTEM_ONE_WEB_MANIFEST_SHA256='<manifest SHA256>'
+export HIDE_SYSTEM_ONE_WEB_GPU_BYTES=3221225472
+hide --web .
+```
+
+The model directory contains `manifest.json` and its ten pinned payloads:
+`encoder.onnx`, `encoder.onnx.data`, `head.onnx`, `head.onnx.data`,
+`tokenizer.json`, `rl_agent_config.json`, `encoder_config.json`,
+`tokenizer_config.json`, `LICENSE` and `MODEL_CARD.md`. Use an exported, verified
+bundle; the launcher does not fetch weights or convert a checkpoint.
+
+Open **Tools > System One supplier…** and select the browser's offer. The worker
+fetches only the manifest before selection; the first decision verifies and loads
+the weights. The local server streams only the fixed runtime/model filenames and
+supplies the cross-origin isolation headers required by the threaded WASM runtime.
+A browser without the required WebGPU APIs does not advertise a supplier. Device
+limits and model compatibility are checked when the first decision loads the model;
+an incompatible device refuses that request without changing its destination.
+
+The optional limit counts live WebGPU buffer declarations. It is not a browser
+memory ceiling: the checkpoint also requires CPU-side payloads, WASM and runtime
+storage. The native and browser providers expose probabilities rather than
+permission decisions; consumers retain their own validation and approval rules.
+
 ## Bash completion
 
 With current `thc` and the installed `thc-edit` launcher on your `PATH`, enable Bash completion with:

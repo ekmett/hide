@@ -553,6 +553,28 @@ function connect(){
  socket=new WebSocket(new URL('socket',location.href).href.replace(/^http/,'ws'));
  socket.binaryType='arraybuffer';
  const connection=socket,wireRows=[];let incoming=Promise.resolve(),platformSent=false,stopped=false,transportConnected=false,hasFrame=false;
+ let inferenceClient=null,inferenceBinding=null;
+ function closeInference(){inferenceBinding=null;inferenceClient?.close();inferenceClient=null;}
+ async function bindInference(message){
+  if(inferenceBinding?.connection===message.connection&&inferenceBinding?.viewer===message.viewer)return;
+  closeInference();
+  const id=value=>typeof value==='string'&&/^[0-9a-f]{48}$/.test(value);
+  if(!id(message.connection)||!id(message.viewer))return;
+  const binding={connection:message.connection,viewer:message.viewer};inferenceBinding=binding;
+  try{
+   const response=await fetch(new URL('system-one-config.json',location.href),{cache:'no-store'});
+   if(!response.ok)return;
+   const config=await response.json();
+   if(!config||stopped||connection!==socket||inferenceBinding!==binding)return;
+   for(const key of ['workerURL','runtimeBaseURL','modelBaseURL'])config[key]=new URL(config[key],location.href).href;
+   // Inference receipts are not editor input: no attachment/seq decoration,
+   // pending-edit guard, or clipboard/action authority belongs on this channel.
+   inferenceClient=new SystemOneClient({...config,send:value=>{
+    if(!stopped&&connection===socket&&connection.readyState===WebSocket.OPEN)connection.send(JSON.stringify(value));
+   }});
+   inferenceClient.connect(binding.connection,binding.viewer);
+  }catch{if(inferenceBinding===binding)closeInference();}
+ }
  function publishFrontend(){if(!ready||platformSent)return;platformSent=true;lastSize='';send({type:'frontend',mode:frame?.mode||3,mac:navigator.platform.includes('Mac')});send({type:'theme',dark:systemTheme.matches});resize();}
  socket.onmessage=e=>{incoming=incoming.then(()=>{if(!stopped&&connection===socket)return receive(e);}).catch(error=>{if(stopped||connection!==socket)return;status.textContent=`Display error: ${error.message}`;connection.close();});};
  async function receive(e){
@@ -569,12 +591,15 @@ function connect(){
      message=JSON.parse(e.data);
    }
    if(stopped||connection!==socket)return;
-   if(message.type?.startsWith('canvas-')){images.control(message);dirty=true;
+   if(message.type==='system-one-connection'){void bindInference(message);
+   }else if(inferenceClient?.receive(message)){
+   }else if(message.type?.startsWith('canvas-')){images.control(message);dirty=true;
    }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;peerAttachment=message.attachment;
    }else if(message.type==='session'){
+     closeInference();
      peerAttachment=message.attachment;attachmentEpoch++;ready=false;hasFrame=false;platformSent=false;frame=null;rows=[];wireRows.length=0;serial=acknowledged=pendingEdit=0;clipboard='';nativeCopies=[];leftDown=false;mouse=[-1,-1];lastSize='';clearClipboardRequest();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;
    }else if(message.type==='connection'){
-     transportConnected=message.connected;peerAttachment=message.attachment??peerAttachment;ready=message.connected&&glyphs.size>0&&(!sessionFrontend||hasFrame);if(!message.connected){platformSent=false;attachmentEpoch++;clearClipboardRequest();if(!message.switching){clearSidebar();clearDialog();clearSource();images.clear();}dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');publishFrontend();
+     transportConnected=message.connected;peerAttachment=message.attachment??peerAttachment;ready=message.connected&&glyphs.size>0&&(!sessionFrontend||hasFrame);if(!message.connected){closeInference();platformSent=false;attachmentEpoch++;clearClipboardRequest();if(!message.switching){clearSidebar();clearDialog();clearSource();images.clear();}dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');publishFrontend();
    }else if(message.type==='assets'){
      attachmentEpoch++;clearSidebar();clearDialog();clearSource();images.clear();dirty=true;
      if(!glyphs.size)scale=initialScale=message.scale||2;glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();hasFrame=false;ready=!sessionFrontend;status.textContent=ready?'Connected':'Connecting…';lastSize='';if(ready)send({type:'theme',dark:systemTheme.matches});
@@ -618,7 +643,7 @@ function connect(){
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{stopped=true;if(connection!==socket)return;attachmentEpoch++;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{stopped=true;closeInference();if(connection!==socket)return;attachmentEpoch++;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();

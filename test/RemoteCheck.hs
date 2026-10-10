@@ -55,6 +55,9 @@ import Hide.Remote
 import Hide.RemoteEndpoint
 import qualified Hide.Session as S
 import Hide.Recovery (readCheckpoint)
+import Hide.SystemOne
+import Hide.SystemOneBrowser
+import qualified Hide.Plugin.SystemOne as One
 isolatedStore :: IO a -> IO a
 isolatedStore action=do
   temp<-getTemporaryDirectory
@@ -205,7 +208,7 @@ checks = isolatedStore $ do
         value <- control h "ack"
         assert "remote acknowledgement tracks committed sequence" (KM.lookup "seq" value==Just (toJSON (serial::Int)))
   ownership<-newIORef False
-  withAsync (runRemoteDaemonWithStartup (writeIORef ownership True) retry session 1 effects tick inspectLive initial) $ \daemon -> do
+  withAsync (runRemoteDaemonWithStartup Nothing (writeIORef ownership True) retry session 1 effects tick inspectLive initial) $ \daemon -> do
     link daemon
     first <- awaitOpen (100::Int)
     assert "session ownership hook runs before serving" =<< readIORef ownership
@@ -391,7 +394,7 @@ sshFailureCheck = do
 
 -- A local frontend uses the same journal and keeps its desktop when detached.
 localPeerCheck :: IO ()
-localPeerCheck = do
+localPeerCheck = withSystemOne $ \decisionOwner->withSystemOneBrowser $ \browser->do
   let assert label ok=unless ok (error label)
   record <- S.newSessionRecord Nothing ["--demo"]
   offline <- S.newSessionRecord (Just "offline-test-host") ["--","project λ"]
@@ -399,6 +402,7 @@ localPeerCheck = do
   path <- sessionEndpoint session
   let initial=addDocument Nothing (newBuffer "") (initialDesktop (80,25))
   observed <- newIORef initial
+  heldDecision<-newEmptyMVar
   let tick d=writeIORef observed d >> pure d
       effects d requests=pure (Exit `elem` requests,d {buffers=M.map (\doc -> doc {documentBuffer=markSaved (documentBuffer doc)}) (buffers d)})
       awaitReady attempts=bracket (connectEndpoint path) hClose (const (pure ())) `catch` \(err::IOException) ->
@@ -418,16 +422,40 @@ localPeerCheck = do
     assert "missing local endpoints are omitted" (not (record `elem` records))
     loaded <- S.loadSession (S.sessionId offline)
     assert "catalog round-trips Unicode arguments" (loaded==Just offline)
-    withAsync (runRemoteDaemon session 1 effects tick inspect initial) $ \daemon -> do
+    withAsync (runRemoteDaemonWithStartup (Just browser) (pure ()) retry session 1 effects tick inspect initial) $ \daemon -> do
       link daemon
       awaitReady (100::Int)
       withLocalPeer session True [] $ \peer -> do
         void (receive peer "assets")
+        bridge<-receive peer "system-one-connection"
+        connection<-either error pure (parseEither (.: "connection") bridge)
+        viewer<-T.pack <$> randomIdentity
+        stamp<-peerAttachment peer
+        let control value=peerSendControl peer stamp value >>= assert "current transient control was admitted"
+        control (object ["type" .= ("system-one-viewer"::T.Text),"connection" .= (connection::T.Text),"viewer" .= viewer])
+        control (object ["type" .= ("system-one-offer"::T.Text),"connection" .= connection,"viewer" .= viewer,"offer" .= (1::Int),"label" .= ("browser fixture"::T.Text),"manifestSHA256" .= T.replicate 64 "a","allocationLimitBytes" .= (1048576::Int),"backend" .= ("webgpu"::T.Text)])
         initialFrame<-receive peer "frame-ready"
         assert "initial frame has no input demand" (KM.lookup "seq" initialFrame==Just (toJSON (0::Int)) && KM.lookup "changed" initialFrame==Just (Bool True))
         send peer ["type" .= ("key"::T.Text),"key" .= ("ArrowLeft"::T.Text),"seq" .= (777::Int)]
         noFrame<-receive peer "frame-ready"
         assert "unchanged input retires its frontend demand without a fake frame" (KM.lookup "seq" noFrame==Just (toJSON (777::Int)) && KM.lookup "changed" noFrame==Just (Bool False))
+        -- The key's committed receipt follows both controls on the sole writer
+        -- and receiver. It is a barrier for this exact offer's host admission.
+        offer<-captureBrowserOffer browser >>= maybe (error "Browser offer not admitted before key receipt") pure
+        assert "display transport preserves exact viewer/offer" (browserOfferViewer offer==viewer && browserOfferId offer==1)
+        provider<-browserProvider offer >>= either (error . show) pure
+        selected<-selectDecisionProvider decisionOwner (Just provider) >>= either (error . show) (maybe (error "Browser supplier not selected") pure)
+        let services=systemOneServices decisionOwner
+            decision=One.DecisionInput "remote-decision" "authorized text" [One.DecisionQuestion "binary" "choose" (One.BinaryDecision "no" "yes")] One.SelectedSupplier
+        ticket<-One.requestDecision services (One.decisionSupplierId selected) decision 30000 >>= either (error . show) pure
+        requested<-receive peer "system-one-request"
+        let identifiers=[key .= KM.lookup key requested | key<-["connection","viewer","offer","supplier","request"]]
+            answer=object ["question" .= ("binary"::T.Text),"kind" .= ("binary"::T.Text),"probabilities" .= ([0.25,0.75]::[Double])]
+            output=object ["manifestSHA256" .= T.replicate 64 "a","answers" .= [answer]]
+        control (object (["type" .= ("system-one-result"::T.Text),"output" .= output]++identifiers))
+        control (object (("type" .= ("system-one-released"::T.Text)):identifiers))
+        completed<-timeout 3000000 (One.awaitDecision ticket)
+        assert "actual daemon transient route returns exact decision receipt" (case completed of Just (Right value)->One.resultSupplier value==selected && One.resultStateId value=="remote-decision";_->False)
         records' <- S.listSessions
         assert "live local session listed while writer attached" (any ((==session).S.sessionId) records')
         send peer ["type" .= ("frontend"::T.Text),"mode" .= (Nothing::Maybe Int)]
@@ -438,6 +466,12 @@ localPeerCheck = do
         forM_ [1..33::Int] $ \i -> do
           ack<-receive peer "ack"
           assert "burst acknowledgements retain input order" (KM.lookup "seq" ack==Just (toJSON i))
+        pending<-One.requestDecision services (One.decisionSupplierId selected) decision 30000 >>= either (error . show) pure
+        void (receive peer "system-one-request")
+        putMVar heldDecision (pending,connection)
+      (pending,oldConnection)<-takeMVar heldDecision
+      retired<-timeout 3000000 (One.awaitDecision pending)
+      assert "actual display disconnect expires pending browser decision" (retired==Just (Left One.DecisionExpired))
       threadDelay 150000
       d <- readIORef observed
       assert "local peer detach retains unsaved desktop" (activeText d=="persistent λ"<>T.concat (map (T.pack.show) [1..32::Int]))
@@ -445,6 +479,10 @@ localPeerCheck = do
       assert "detach retains session catalog" (maybe False (const True) exists)
       withLocalPeer session True [] $ \peer -> do
         void (receive peer "assets")
+        fresh<-receive peer "system-one-connection"
+        assert "reconnect gets fresh connection without replaying browser offer" (case KM.lookup "connection" fresh of Just (String ident)->T.length ident==48 && ident/=oldConnection;_->False)
+        offered<-captureBrowserOffer browser
+        assert "mere reconnect cannot reoffer or reselect" (maybe True (const False) offered)
         send peer ["type" .= ("command"::T.Text),"command" .= ("hide.app.quit"::T.Text),"seq" .= (1::Int)]
         void (receive peer "ack")
         send peer ["type" .= ("key"::T.Text),"key" .= ("Tab"::T.Text),"seq" .= (2::Int)]
