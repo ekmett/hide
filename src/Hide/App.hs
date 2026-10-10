@@ -151,10 +151,10 @@ main plugins = do
 
 runEditor :: [Plugin.Plugin] -> [String] -> IO ()
 runEditor plugins args = do
-  presenter<-case [value | plugin<-plugins,Just value<-[Plugin.pluginAgentHistory plugin]] of
+  presenter<-case [value | plugin<-plugins,Just value<-[Plugin.pluginConversation plugin]] of
     []->pure Nothing
     [value]->pure (Just value)
-    _->die "More than one plugin contributes agent history presentation."
+    _->die "More than one plugin contributes conversation presentation."
   parentSession<-lookupEnv "THC_EDIT_SESSION"
   backendEnvironment<-lookupEnv "THC_EDIT_BACKEND"
   scaleEnvironment<-lookupEnv "THC_EDIT_SCALE"

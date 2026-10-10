@@ -18,6 +18,16 @@ module Hide.Plugin.Transcript
   , mergeTool
   , AgentHistory(..)
   , HistoryPresenter
+  , PrimarySpeaker(..)
+  , PrimaryContent(..)
+  , PrimaryUpdate(..)
+  , PrimaryPresenter
+  , ConversationPresenter(..)
+  , PrimaryTranscript
+  , emptyPrimaryTranscript
+  , primaryTranscriptStarted
+  , appendPrimaryUpdate
+  , primaryTranscriptRecords
   ) where
 
 import Data.Aeson (Value(..),FromJSON,withObject,(.:))
@@ -25,6 +35,7 @@ import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (parseMaybe)
 import Data.Text (Text)
+import Hide.Plugin.Agent (Actor)
 import Hide.Plugin.AgentServices (HistoryEvent)
 
 -- | Identity allocated by the transcript/event owner, never rendering. It is
@@ -88,6 +99,78 @@ data AgentHistory = AgentHistory
 -- workers, never on an input or render owner. The returned records carry no
 -- authority to submit, clear drafts or install host controls.
 type HistoryPresenter = AgentHistory -> [Record]
+
+-- | Host-attributed display speaker. A user-seat submission and a peer delivery
+-- remain distinct even when that peer is human. These values
+-- confer no input or provider authority.
+data PrimarySpeaker = UserSpeaker | AssistantSpeaker | PeerSpeaker Actor
+
+-- | One already-redacted primary conversation change. Messages create items;
+-- chunks may extend the final matching reply. Tool updates retain their call ID
+-- and ordered public update history. The host owns admission and redaction before
+-- publication; presentation never reads credentials or submits provider requests.
+data PrimaryContent
+  = PrimaryMessage PrimarySpeaker Text
+  | PrimaryChunk PrimarySpeaker Text
+  | PrimaryTool Value
+  | PrimaryPlan Value
+  | PrimaryFailure Value
+  | PrimaryDisconnect Text
+  | PrimaryPause Text
+
+-- | Identity and revision allocated by the host at receipt time. Presentation
+-- keeps the first item's identity when merging chunks or tool updates and uses
+-- this revision for the changed item. Payload fields remain lazy.
+data PrimaryUpdate = PrimaryUpdate !BodyItemId !Int !PrimaryContent
+
+-- | Pure incremental presentation of an admitted public update. The callback
+-- runs only when a presentation/checkpoint worker resolves its captured source.
+-- It must retain unaffected item identities and must not grant input authority.
+type PrimaryPresenter = PrimaryUpdate -> [Record] -> [Record]
+
+-- | Both transcript contributions selected together at session startup. Neither
+-- callback owns provider, input, approval or presentation-worker lifetime.
+data ConversationPresenter = ConversationPresenter
+  { primaryTranscript :: PrimaryPresenter
+  , agentHistory :: HistoryPresenter
+  }
+
+-- | Opaque immutable primary source. Each append shares one deferred callback
+-- result; multiple consumers of that source share its records rather than
+-- rerunning the presenter. Its payload is deliberately lazy, while the started
+-- flag is strict and can be inspected without visiting the record history.
+data PrimaryTranscript = PrimaryTranscript [Record] !Bool
+
+-- | /O(1)/. An unstarted source with no records.
+--
+-- @primaryTranscriptRecords emptyPrimaryTranscript = []@
+--
+-- @primaryTranscriptStarted emptyPrimaryTranscript = False@
+emptyPrimaryTranscript :: PrimaryTranscript
+emptyPrimaryTranscript=PrimaryTranscript [] False
+
+-- | /O(1)/. Whether the host has appended an update. This does not inspect the
+-- payload or call the presenter, including when that update produces no item.
+primaryTranscriptStarted :: PrimaryTranscript -> Bool
+primaryTranscriptStarted (PrimaryTranscript _ started)=started
+
+-- | /O(1)/. Capture an update without evaluating its presenter or prior records.
+-- The immutable result shares one thunk; resolving any earlier source leaves it
+-- unchanged. Successive updates resolve in their original publication order.
+--
+-- @primaryTranscriptRecords (appendPrimaryUpdate p u s) =
+--   p u (primaryTranscriptRecords s)@
+--
+-- @primaryTranscriptStarted (appendPrimaryUpdate p u s) = True@
+appendPrimaryUpdate :: PrimaryPresenter -> PrimaryUpdate -> PrimaryTranscript -> PrimaryTranscript
+appendPrimaryUpdate presenter update (PrimaryTranscript records _)=
+  PrimaryTranscript (presenter update records) True
+
+-- | Access the shared record root on a presentation/checkpoint worker. Resolving
+-- its lazy spine or payload may call the captured presenter and walk history;
+-- input, tick and render owners must use source identity or the started flag.
+primaryTranscriptRecords :: PrimaryTranscript -> [Record]
+primaryTranscriptRecords (PrimaryTranscript records _)=records
 
 field :: FromJSON a => Text -> Value -> Maybe a
 field name=parseMaybe (withObject "object" (.: K.fromText name))

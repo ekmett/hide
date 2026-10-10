@@ -7,13 +7,16 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 --
--- First-party presentation of captured public agent history. Provider lifetime,
--- redaction and human input admission remain with their host owners.
+-- First-party presentation of primary updates and captured public agent history.
+-- Provider lifetime, redaction and human input admission remain with their host
+-- owners.
 module Hide.AgentTranscript
-  ( presentHistory
+  ( presentConversation
+  , presentPrimary
+  , presentHistory
   ) where
 
-import Data.Aeson (Value,FromJSON,withObject,(.:))
+import Data.Aeson (Value,FromJSON,withObject,(.:),object,(.=))
 import qualified Data.Aeson.Key as K
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.List as List
@@ -23,6 +26,36 @@ import qualified Data.Text as T
 import qualified Hide.Plugin.Agent as A
 import qualified Hide.Plugin.AgentServices as A
 import Hide.Plugin.Transcript
+
+-- | Supply both first-party transcript reducers. The host captures the public
+-- source and evaluates these pure callbacks on its presentation workers.
+presentConversation :: ConversationPresenter
+presentConversation=ConversationPresenter presentPrimary presentHistory
+
+-- | Fold one admitted primary update into immutable presentation records.
+-- Messages always append; chunks merge only with the last matching role. Tools
+-- retain their original call identity and update order through 'mergeTool'.
+-- User-seat input displays as @You@, assistant output as @Agent@, and peer
+-- deliveries retain @Human@ or @Agent <id>@ attribution. Roles confer no authority.
+--
+-- @presentPrimary (PrimaryUpdate ident revision (PrimaryChunk speaker text)) rs =
+--   appendChunk ident revision (speakerRole speaker) text rs@
+presentPrimary :: PrimaryPresenter
+presentPrimary (PrimaryUpdate ident revision content) records=case content of
+  PrimaryMessage speaker text->append (Reply (speakerRole speaker) text)
+  PrimaryChunk speaker text->appendChunk ident revision (speakerRole speaker) text records
+  PrimaryTool value->mergeTool ident revision value records
+  PrimaryPlan value->append (Activity "Plan" value [value])
+  PrimaryFailure value->append (Activity "Request failed" value [value])
+  PrimaryDisconnect text->let value=object ["message" .= text] in append (Activity "Connection closed" value [value])
+  PrimaryPause text->append (Pause text)
+  where append value=records++[Record ident revision value]
+
+speakerRole :: PrimarySpeaker -> Text
+speakerRole UserSpeaker="You"
+speakerRole AssistantSpeaker="Agent"
+speakerRole (PeerSpeaker A.Human)="Human"
+speakerRole (PeerSpeaker (A.Agent ident))="Agent "<>A.agentIdText ident
 
 -- | Present metadata followed by the ordered public history. The metadata item
 -- has reserved identity @-1@ and the captured metadata revision. Event items use

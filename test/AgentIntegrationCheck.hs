@@ -2,9 +2,9 @@
 module AgentIntegrationCheck (checks, fixture) where
 
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
-import Hide.Plugin.Transcript (AgentHistory(..),Record(..),RecordContent(..),BodyItemId(..))
-import Control.Monad (unless)
+import Control.Exception (bracket,evaluate)
+import Hide.Plugin.Transcript (AgentHistory(..),Record(..),RecordContent(..),BodyItemId(..),ConversationPresenter(..),PrimaryUpdate(..),PrimaryContent(..),PrimarySpeaker(..),emptyPrimaryTranscript,primaryTranscriptStarted,appendPrimaryUpdate,primaryTranscriptRecords)
+import Control.Monad (forM_,unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.KeyMap as KM
@@ -16,6 +16,7 @@ import System.Environment
 import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
+import System.Mem.StableName (makeStableName)
 import GHC.Stack (HasCallStack,callStack,prettyCallStack)
 import qualified Hide.AgentTranscript as AgentTranscript
 import Hide.Conversation
@@ -36,6 +37,7 @@ import Hide.ScreenCapture (capture)
 import Hide.Session
 import Hide.Model
 import qualified Hide.Plugin.Window as W
+import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 
 -- Public reducers preserve event identity across streamed chunks and updates.
 transcriptChecks :: IO ()
@@ -50,7 +52,38 @@ transcriptChecks=do
     [_,Record (BodyItemId 1) 2 (Reply "Agent" "Worker\n\nfirst second"),Record (BodyItemId 3) 4 (Activity "call" value updates)]->
       field "title" value==Just ("Read"::T.Text) && field "status" value==Just ("completed"::T.Text) && length updates==2
     _->False)
-  where ensure label ok=unless ok (fail label)
+  let update n content=PrimaryUpdate (BodyItemId n) n content
+      append n content=appendPrimaryUpdate AgentTranscript.presentPrimary (update n content)
+      deferred=appendPrimaryUpdate (\_ _->error "primary presenter evaluated during source construction")
+        (update 0 (PrimaryMessage UserSpeaker "question")) emptyPrimaryTranscript
+      asked=append 0 (PrimaryMessage UserSpeaker "question") emptyPrimaryTranscript
+      begun=append 1 (PrimaryChunk AssistantSpeaker "first") asked
+      streamed=append 2 (PrimaryChunk AssistantSpeaker " second") begun
+      requested=append 3 (PrimaryTool (object ["toolCallId" .= ("call"::T.Text),"title" .= ("Read"::T.Text),"status" .= ("pending"::T.Text)])) streamed
+      completed=append 4 (PrimaryTool (object ["toolCallId" .= ("call"::T.Text),"title" .= Null,"status" .= ("completed"::T.Text)])) requested
+  ensure "primary source admission does not evaluate its presenter"
+    (not (primaryTranscriptStarted emptyPrimaryTranscript) && primaryTranscriptStarted deferred)
+  begunNames<-mapM recordIdentity (primaryTranscriptRecords begun)
+  streamedNames<-mapM recordIdentity (primaryTranscriptRecords streamed)
+  requestedNames<-mapM recordIdentity (primaryTranscriptRecords requested)
+  completedNames<-mapM recordIdentity (primaryTranscriptRecords completed)
+  ensure "streaming preserves the unchanged primary message object" (case (begunNames,streamedNames) of
+    ([question,_],[sameQuestion,_])->question==sameQuestion
+    _->False)
+  ensure "a tool update preserves unchanged primary reply objects" (case (requestedNames,completedNames) of
+    ([question,reply,_],[sameQuestion,sameReply,_])->question==sameQuestion && reply==sameReply
+    _->False)
+  repeatedNames<-mapM recordIdentity (primaryTranscriptRecords completed)
+  ensure "primary worker resolution shares its completed record objects" (repeatedNames==completedNames)
+  ensure "primary reduction retains exact streamed text and ordered tool updates" (case primaryTranscriptRecords completed of
+    [Record (BodyItemId 0) 0 (Reply "You" "question"),Record (BodyItemId 1) 2 (Reply "Agent" "first second"),Record (BodyItemId 3) 4 (Activity "call" value updates)]->
+      field "title" value==Just ("Read"::T.Text) && field "status" value==Just ("completed"::T.Text) && length updates==2
+    _->False)
+  where
+    ensure label ok=unless ok (fail label)
+    recordIdentity record=do
+      evaluated<-evaluate record
+      makeStableName $! evaluated
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root ->
@@ -64,7 +97,10 @@ checks=bracket temporary removePathForcibly $ \root ->
     font<-Font.loadFont
     writeFile script fixture
     BL.writeFile (config </> "agents.json") (encode (object ["executable" .= ("python3"::T.Text),"arguments" .= [script]]))
-    C.withConsoles $ \consoles->withConversationAt (Just (\_->error "presenter evaluated during owner capture")) consoles root $ \conversation->do
+    let unprepared=ConversationPresenter
+          { primaryTranscript= \_ _->error "primary presenter evaluated during owner capture"
+          , agentHistory= \_->error "child presenter evaluated during owner capture" }
+    C.withConsoles $ \consoles->withConversationAt (Just unprepared) consoles root $ \conversation->do
       let hub=AR.agentHub (conversationAgents conversation)
           caps=AH.Capabilities False False False []
       child<-AH.registerAgent hub "Unprepared" root
@@ -73,9 +109,15 @@ checks=bracket temporary removePathForcibly $ \root ->
       captured<-tickConversation conversation shown
       ensure "owner captures child source without running its presenter"
         (maybe False (maybe False (const True) . conversationSource) (M.lookup (AH.agentIdText child) (conversationViews captured)))
+      (_,accepted)<-conversationEffects conversation (\d _->pure (False,d)) captured
+        [AgentAction "show" [],AgentAction "send" ["","capture primary prompt","false","false","false"]]
+      primaryCaptured<-tickConversation conversation accepted
+      requests<-conversationBodyRequests conversation primaryCaptured
+      ensure "owner captures an accepted primary update without running its presenter"
+        (not (null requests) && maybe False (maybe False (const True) . conversationSource) (M.lookup "" (conversationViews primaryCaptured)))
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
-    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentHistory) consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \conversation -> withTextPresentation $ \presentation->do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
           primary=AR.primaryAgent agents
@@ -348,12 +390,46 @@ checks=bracket temporary removePathForcibly $ \root ->
       _<-tickBody presentation conversation finished
       invalid<-AH.statusAgent hub (AH.Agent primary) primary
       ensure "ended primary loses orchestration authority" (case invalid of Left _->True; _->False)
+    C.withConsoles $ \consoles->withConversationAt Nothing consoles root $ \conversation->do
+      recovered<-readCheckpoint (root </> "conversation-views.checkpoint") (initialDesktop (80,25)) >>= right
+      let apply desktop effects=snd <$> conversationEffects conversation (\d _->pure (False,d)) desktop effects
+      shown<-apply recovered [AgentAction "show" []]
+      saved<-maybe (fail "Missing recovered primary view") pure (M.lookup "" (conversationViews shown))
+      ensure "missing-presenter fixture retains a recovered primary catalogue" (case conversationLogical saved of Just _->True; _->False)
+      version<-captureVersion (composerBuffer shown)
+      let preserved label desktop=do
+            sameDraft<-versionCurrent version (composerBuffer desktop)
+            ensure (label++" preserves the exact recovered draft and selection")
+              (sameDraft && composerSelection desktop==composerSelection shown)
+            ensure (label++" preserves recovered primary source identities")
+              (maybe False (\view->conversationLogical view==conversationLogical saved && conversationSource view==conversationSource saved)
+                (M.lookup "" (conversationViews desktop)))
+          rejected label desktop=do
+            ensure (label++" reports the unavailable plugin") ("plugin" `T.isInfixOf` T.toLower (status desktop))
+            preserved label desktop
+      forM_ [("send",["","must not send","false","false","false"]),("new",[]),("load",["","must-not-load"])] $ \(action,args)->do
+        denied<-apply shown [AgentAction action args]
+        rejected (T.unpack action++" without a presenter") denied
+      let (submitted,effects)=runCommand (SubmitChat QuerySubmit) shown
+      ensure "recovered primary draft has a real submit action" (not (null effects))
+      deniedSubmit<-apply submitted effects
+      rejected "editor submit without a presenter" deniedSubmit
+      (_,settingsReply)<-chatToolAs conversation Nothing deniedSubmit "agent_settings" (object [])
+      settings<-settingsReply >>= right
+      ensure "rejected primary input never starts its provider" (field "connected" settings==Just False)
+      let primary=AR.primaryAgent (conversationAgents conversation)
+      caller<-captureQuestionCaller conversation primary >>= right
+      (questionView,questionReply)<-chatToolAs conversation (Just caller) shown "ask_user" (object ["question" .= ("Must not allocate a question"::T.Text)])
+      questionResult<-questionReply
+      ensure "missing presenter rejects a new question before creating its input"
+        (case (questionResult,chatQuestion questionView) of (Left _,Nothing)->True; _->False)
+      preserved "rejected question without a presenter" questionView
     recoveryRecord<-newSessionRecord Nothing ["--",root]
     rememberSession recoveryRecord
     let recoveredPath=root </> "newer-child.checkpoint"
         fakeDriver=AH.AgentDriver root "private-recovery-child" (AH.Capabilities False False False [])
           (\_ ->pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (pure ()) (pure ()) (\_ ->pure (Left "unsupported"))
-    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentHistory) consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    recoveredChild<-environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \conversation -> withTextPresentation $ \presentation->do
       let agents=conversationAgents conversation
           hub=AR.agentHub agents
       child<-AH.registerAgent hub "Recovered child" root fakeDriver >>= right
@@ -388,7 +464,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       AR.activateAgentCheckpoint agents
       AR.checkpointAgents agents >>= right
       pure child
-    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentHistory) consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    environment "THC_EDIT_SESSION" (Just (sessionId recoveryRecord)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \conversation -> withTextPresentation $ \presentation->do
       recovered<-readCheckpoint recoveredPath (initialDesktop (80,25)) >>= right
       closedRetained<-tickBody presentation conversation recovered
       ensure "a hidden recovered child catalogue stays closed before explicit show"
@@ -450,7 +526,7 @@ checks=bracket temporary removePathForcibly $ \root ->
     rememberSession corrupt
     checkpoint<-(++".agents.json") <$> checkpointPath (sessionId corrupt)
     writeFile checkpoint "{incomplete"
-    environment "THC_EDIT_SESSION" (Just (sessionId corrupt)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentHistory) consoles root $ \conversation -> withTextPresentation $ \presentation->do
+    environment "THC_EDIT_SESSION" (Just (sessionId corrupt)) $ C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \conversation -> withTextPresentation $ \presentation->do
       noticed<-tickBody presentation conversation (initialDesktop (80,25))
       ensure "agent checkpoint failures reach the status line" ("checkpoint" `T.isInfixOf` status noticed && "retained" `T.isInfixOf` status noticed)
       consumed<-tickBody presentation conversation noticed {status="ordinary status"}

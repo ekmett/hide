@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Primary ACP conversation ownership and child-agent transcript projection.
+-- | Primary ACP ownership and captured plugin transcript sources.
 --
 -- The session tick consumes protocol and hub mailbox events. Owned workers prepare
 -- prompt context, file captures and consoles before adoption; capture itself does
@@ -60,7 +60,8 @@ import Hide.MCPPermissions (permissionConfigPath, projectConfigPath, readAgentCo
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentACP as AP
-import Hide.Plugin.Transcript (HistoryPresenter,AgentHistory(..),appendChunk,mergeTool)
+import Hide.Plugin.Transcript (ConversationPresenter,AgentHistory(..),PrimaryContent(..),PrimarySpeaker(..),PrimaryUpdate(..))
+import qualified Hide.Plugin.Transcript as Transcript
 import Hide.Session (checkpointPath)
 import Hide.AgentFiles
 import Hide.Buffer
@@ -91,8 +92,8 @@ preparationCancel (ContextPrompt _ _ _ _ worker)=cancel worker
 preparationCancel (DraftPrompt _ _ worker)=cancel worker
 
 
-activity :: Text -> Value -> RecordContent
-activity ident value=Activity ident value [value]
+unavailableConversation :: Text
+unavailableConversation="Agent conversation plugin is unavailable; draft kept."
 
 toggleExpansion :: Text -> ToolExpansion -> State -> State
 toggleExpansion target item state=state {toolExpansions=if S.member key expanded then S.delete key expanded else S.insert key expanded}
@@ -120,7 +121,7 @@ data PromptReply = PromptReply !Int [Text]
 
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
-  , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe DraftReceipt), transcript :: [Record], nextRecord :: !Int
+  , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe DraftReceipt), transcript :: !Transcript.PrimaryTranscript, nextRecord :: !Int
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
   , queuedQueries :: [QueuedQuery]
   , ownedTerminals :: S.Set Text
@@ -133,7 +134,7 @@ data State = State
   , agentInitialized :: Value, agentConfig :: Value
   , streamTails :: M.Map Text Text, promptReply :: Maybe PromptReply
   , lastAgentSync :: Maybe (FilePath,Maybe (StableName A.Client),Text,AH.Capabilities,Bool)
-  , historyPresenter :: Maybe HistoryPresenter, childRecords :: M.Map Text TranscriptSource, childRender :: Maybe (Text,Value)
+  , conversationPresenter :: Maybe ConversationPresenter, childRecords :: M.Map Text TranscriptSource, childRender :: Maybe (Text,Value)
   , toolExpansions :: S.Set (Text,ToolExpansion)
   , agentControls :: M.Map Text (Maybe DraftReceipt,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
@@ -154,11 +155,11 @@ conversationAgents (ConversationState _ _ _ agents)=agents
 defaultLaunch :: A.Launch
 defaultLaunch = A.Launch "codex-acp" [] []
 
-withConversation :: Maybe HistoryPresenter -> C.Consoles -> (ConversationState -> IO a) -> IO a
+withConversation :: Maybe ConversationPresenter -> C.Consoles -> (ConversationState -> IO a) -> IO a
 withConversation presenter consoles action = getCurrentDirectory >>= \root -> withConversationAt presenter consoles root action
 
 -- | Load conversation configuration and scope only provider and agent workers.
-withConversationAt :: Maybe HistoryPresenter -> C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
+withConversationAt :: Maybe ConversationPresenter -> C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
 withConversationAt presenter consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->do
   preparedPresenter<-traverse evaluate presenter
   loading<-W.prepareSemanticTextWindow "Conversation" (styledText Comment "Preparing conversation…")
@@ -175,12 +176,12 @@ withConversationAt presenter consoles root action = W.withWindowScope $ \scope->
   editors<-newIORef M.empty
   ref<-newIORef State
     { provider=launch,connection=Nothing,session=Nothing,project=root
-    , pending=M.empty,queuedPrompt=Nothing,transcript=[],nextRecord=0,reads=M.empty
+    , pending=M.empty,queuedPrompt=Nothing,transcript=Transcript.emptyPrimaryTranscript,nextRecord=0,reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
     , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,directoryAgents=[]
-    , historyPresenter=preparedPresenter,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
+    , conversationPresenter=preparedPresenter,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
 
@@ -290,12 +291,17 @@ perform (ConversationState _ ref _ _) "toggle-tool-run" [ident] d=do
       next=toggleExpansion target (RunExpansion ident) state
   writeIORef ref next
   keepConversationPosition d <$> paintView target False next d
-perform runtime action values d
-  | action `elem` ["show","new"] = do
-      prepared<-ensureConversationEditor runtime "" "Primary" d
-      performPrimary runtime action values (selectConversationView "" "Primary" prepared)
-  | not (T.null (conversationTarget d)) && action `elem` ["send","cancel","copy","toggle-activity","new","resume","load","set-config"] = performChild runtime action values d
-  | otherwise = performPrimary runtime action values d
+perform runtime@(ConversationState _ ref _ _) action values d=do
+  state<-readIORef ref
+  case () of
+    _ | isNothing (conversationPresenter state) &&
+        (action=="new" || T.null (conversationTarget d) && action `elem` ["send","load"])->
+          pure d {status=unavailableConversation}
+      | action `elem` ["show","new"]->do
+          prepared<-ensureConversationEditor runtime "" "Primary" d
+          performPrimary runtime action values (selectConversationView "" "Primary" prepared)
+      | not (T.null (conversationTarget d)) && action `elem` ["send","cancel","copy","toggle-activity","new","resume","load","set-config"]->performChild runtime action values d
+      | otherwise->performPrimary runtime action values d
 
 performPrimary :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
 performPrimary runtime@(ConversationState directory ref consoles _) action values original = do
@@ -364,7 +370,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
           else do
             let value=object ["questionId" .= ident,"status" .= ("answered"::Text),"answer" .= answer,"choiceIndex" .= questionChoice q,"custom" .= isNothing (questionChoice q)]
                 queued=case receipt of Nothing->queuedQueries s; Just target->queuedQueries s++[QuestionQuery ident actor target answer]
-                next=appendRecords [Reply "Agent" (questionText q),Reply "You" answer]
+                next=appendPrimary [PrimaryMessage AssistantSpeaker (questionText q),PrimaryMessage UserSpeaker answer]
                   (rememberQuestion ident actor receipt value s) {waitingQuestion=Nothing,queuedQueries=queued}
             writeIORef ref next
             paint False next d {chatQuestion=Nothing,status="Answer submitted.",agentQueued=queryCount "" queued}
@@ -435,7 +441,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
       mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=Transcript.emptyPrimaryTranscript,toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime Nothing d
     ("resume",_) | primaryBusy s -> pure d {status="Cancel the current reply before resuming a session."}
     ("resume",_) -> pure d {dialog=Just (Dialog "Resume conversation" (AgentDialog "load")
@@ -446,7 +452,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
       mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=Transcript.emptyPrimaryTranscript,toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime (Just (T.strip sid)) d
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
@@ -457,7 +463,7 @@ submitPrimaryPrompt :: ConversationState -> State -> Maybe DraftReceipt -> Text 
 submitPrimaryPrompt runtime@(ConversationState _ ref _ _) s receipt prompt (selectionFlag,fileFlag,diagnosticFlag) d=do
   let context=contextText selectionFlag fileFlag diagnosticFlag d
       full=prompt<>(if T.null context then "" else "\n\n"<>context)
-      next=appendRecords [Reply "You" (composerMarkdown prompt)] s {queuedPrompt=Just (full,receipt),reads=sourceSnapshots d}
+      next=appendPrimary [PrimaryMessage UserSpeaker (composerMarkdown prompt)] s {queuedPrompt=Just (full,receipt),reads=sourceSnapshots d}
   writeIORef ref next
   opened<-if isNothing (connection s) then start runtime Nothing d else sendQueued runtime d
   latest<-readIORef ref
@@ -486,22 +492,24 @@ primaryBusy s=busy s || M.member "" (agentControls s)
 start :: ConversationState -> Maybe Text -> Desktop -> IO Desktop
 start (ConversationState _ ref _ _) resume d = do
   s<-readIORef ref
-  let (launch,directory)=case (resume,lastSession s) of
-        (Just wanted,Just (savedProvider,savedDirectory,savedId)) | wanted==savedId -> (savedProvider,savedDirectory)
-        _ -> (provider s,maybe (startingDirectory d) treeRoot (sideTree d))
-  result<-try $ do
-    root<-canonicalizePath directory
-    client<-A.startClient launch root
-    ident<-A.request client "initialize" (object ["protocolVersion" .= (1::Int),"clientInfo" .= object ["name" .= ("hide"::Text),"version" .= ("0.1.0.0"::Text)],
-      "clientCapabilities" .= object ["fs" .= object ["readTextFile" .= True,"writeTextFile" .= True],"terminal" .= Terminal.terminalAvailable]]) `onException` A.stopClient client
-    pure (root,client,ident)
-  case result of
-    Left (err::IOException) -> do
-      writeIORef ref s {queuedPrompt=Nothing}
-      pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
-    Right (root,client,ident) -> do
-      writeIORef ref s {provider=launch,connection=Just client,project=root,deliveredContext=Nothing,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,pending=M.singleton ident (Initializing resume)}
-      pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
+  if isNothing (conversationPresenter s) then pure d {status=unavailableConversation}
+  else do
+    let (launch,directory)=case (resume,lastSession s) of
+          (Just wanted,Just (savedProvider,savedDirectory,savedId)) | wanted==savedId -> (savedProvider,savedDirectory)
+          _ -> (provider s,maybe (startingDirectory d) treeRoot (sideTree d))
+    result<-try $ do
+      root<-canonicalizePath directory
+      client<-A.startClient launch root
+      ident<-A.request client "initialize" (object ["protocolVersion" .= (1::Int),"clientInfo" .= object ["name" .= ("hide"::Text),"version" .= ("0.1.0.0"::Text)],
+        "clientCapabilities" .= object ["fs" .= object ["readTextFile" .= True,"writeTextFile" .= True],"terminal" .= Terminal.terminalAvailable]]) `onException` A.stopClient client
+      pure (root,client,ident)
+    case result of
+      Left (err::IOException) -> do
+        writeIORef ref s {queuedPrompt=Nothing}
+        pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
+      Right (root,client,ident) -> do
+        writeIORef ref s {provider=launch,connection=Just client,project=root,deliveredContext=Nothing,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,pending=M.singleton ident (Initializing resume)}
+        pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
 
 restorePrimaryDraft :: Text -> Desktop -> Desktop
 restorePrimaryDraft text d=case M.lookup "" (conversationViews d) of
@@ -654,8 +662,8 @@ captureConversationSources (ConversationState _ ref _ agents) desktop=do
   pure desktop {conversationViews=views}
   where
     capture state launch primary target view
-      | T.null target,not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing (chatQuestion desktop)) || not (isNothing (conversationSource view))=do
-          source<-captureConversationSource target (PrimaryBodyProvider launch primary) (TranscriptRecords (transcript state)) (conversationSource view)
+      | T.null target,not (isNothing (conversationPresenter state)),not (isNothing (connection state)) || Transcript.primaryTranscriptStarted (transcript state) || not (isNothing (chatQuestion desktop)) || not (isNothing (conversationSource view))=do
+          source<-captureConversationSource target (PrimaryBodyProvider launch primary) (TranscriptPrimary (transcript state)) (conversationSource view)
           pure view {conversationSource=Just source}
       | not (T.null target),Just records<-M.lookup target (childRecords state)=do
           receipt<-AH.agentConfiguration (AR.agentHub agents) (AH.AgentId target)
@@ -682,8 +690,8 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
     Just reference->do
       live<-W.windowRefCurrent reference
       let question=if T.null target then chatQuestion desktop else Nothing
-          records=if T.null target then TranscriptRecords (transcript state) else M.findWithDefault (TranscriptRecords []) target (childRecords state)
-          owns=if T.null target then not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing question) || not (isNothing (lastQuestion state)) else M.member target (childRecords state)
+          records=if T.null target then TranscriptPrimary (transcript state) else M.findWithDefault (TranscriptRecords []) target (childRecords state)
+          owns=if T.null target then not (isNothing (conversationPresenter state)) && (not (isNothing (connection state)) || Transcript.primaryTranscriptStarted (transcript state) || not (isNothing question) || not (isNothing (lastQuestion state))) else M.member target (childRecords state)
           visible=any ((==PluginContent reference).windowContent) (windows desktop)
           recovered=case conversationLogical view of
             Just logical | RecoveredBodyProvider{}<-logicalBodyProvider logical,not owns->Just logical
@@ -787,7 +795,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
       mapM_ denyChild (map snd (approvals s))
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
-      writeIORef ref (appendRecords [activity "Connection closed" (object ["message" .= redact reason])]
+      writeIORef ref (appendPrimary [PrimaryDisconnect (redact reason)]
         retired {transcript=transcript current,connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty})
       pure (dismissPermission cleared) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
@@ -798,7 +806,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
         (_,Left err,_) -> do
           redact<-conversationRedactor runtime s
           when (maybe False isPrompt (M.lookup ident (pending s))) (completeConversationDelivery runtime (Left "Agent prompt failed."))
-          modifyIORef' ref (\state -> appendRecords [activity "Request failed" (redactValue redact err)] state {queuedPrompt=Nothing,deliveredContext=Nothing})
+          modifyIORef' ref (\state -> appendPrimary [PrimaryFailure (redactValue redact err)] state {queuedPrompt=Nothing,deliveredContext=Nothing})
           case M.lookup ident (pending s) of
             Just (Setting control)->AR.rejectPrimaryControl "Agent configuration failed." control
             Just (Steering _ control)->AR.rejectPrimaryControl "Agent request failed; see Conversation." control
@@ -841,7 +849,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
           pure d {agentSettings=safeSettings,contextMenu=Nothing,status=if M.member "" (agentControls s) then "Updating conversation settings..." else "Conversation settings updated."}
         (Just (Steering text control),Right value,_) -> case field "outcome" value :: Maybe Text of
           Just "injected" -> do
-            modifyIORef' ref (appendRecords [Reply "You" (composerMarkdown text)])
+            modifyIORef' ref (appendPrimary [PrimaryMessage UserSpeaker (composerMarkdown text)])
             case control of
               AR.SteerPrimary _ _ _ reply->void (tryPutMVar reply (Right value))
               _->pure ()
@@ -874,7 +882,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
             "plan" -> do
               redact<-conversationRedactor runtime s
               let public=redactValue redact update
-              modifyIORef' ref (appendRecords [activity "Plan" public])
+              modifyIORef' ref (appendPrimary [PrimaryPlan public])
               mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id public)
             "usage_update" -> mapM_ (publishPrimaryEvent runtime) (AP.publicACPUpdate id update)
             _ -> pure ()
@@ -939,27 +947,31 @@ pauseLabel previous now zone = case previous of
   _ -> Nothing
 
 stampReply :: UTCTime -> TimeZone -> State -> State
-stampReply now zone state=appendRecords (maybe [] (pure . Pause) (pauseLabel (lastMessageAt state) now zone))
+stampReply now zone state=appendPrimary (maybe [] (pure . PrimaryPause) (pauseLabel (lastMessageAt state) now zone))
   state {lastMessageAt=Just now}
 
--- Allocation happens at insertion, not in layout. Advancing the owner counter
--- for a merged update supplies its exact content revision without payload Eq.
-appendRecords :: [RecordContent] -> State -> State
-appendRecords values state=foldl' append state values
+-- Admission allocates update identities; plugin reduction stays lazy inside
+-- each immutable source root. State forces only that wrapper at admission,
+-- so later capture is constant-time and never evaluates records.
+-- With no contribution the runtime is inert: new admission is rejected and
+-- recovered sources remain owned by their checkpoint.
+appendPrimary :: [PrimaryContent] -> State -> State
+appendPrimary values state=case conversationPresenter state of
+  Nothing->state
+  Just presenter->foldl' (append (Transcript.primaryTranscript presenter)) state values
   where
-    append current value=let ident=nextRecord current in current
-      {transcript=transcript current++[Record (BodyItemId ident) ident value],nextRecord=ident+1}
+    append presenter current value=let ident=nextRecord current in current
+      {transcript=Transcript.appendPrimaryUpdate presenter (PrimaryUpdate (BodyItemId ident) ident value) (transcript current),nextRecord=ident+1}
 
 recordChunk :: Text -> Text -> State -> State
-recordChunk role text state=let revision=nextRecord state in state
-  {transcript=appendChunk (BodyItemId revision) revision role text (transcript state),nextRecord=revision+1
-  ,promptReply=case (role,promptReply state) of
+recordChunk role text state=(appendPrimary [PrimaryChunk speaker text] state)
+  {promptReply=case (role,promptReply state) of
       ("Agent",Just (PromptReply request chunks))->Just (PromptReply request (text:chunks))
       _->promptReply state}
+  where speaker=if role=="Agent" then AssistantSpeaker else UserSpeaker
 
 recordToolUpdate :: Value -> State -> State
-recordToolUpdate update state=let revision=nextRecord state in state
-  {transcript=mergeTool (BodyItemId revision) revision update (transcript state),nextRecord=revision+1}
+recordToolUpdate update=appendPrimary [PrimaryTool update]
 
 incoming :: ConversationState -> A.Client -> Value -> Text -> Value -> Desktop -> IO Desktop
 incoming runtime@(ConversationState _ ref consoles _) client ident method params d = do
@@ -1397,6 +1409,7 @@ chatToolAs (ConversationState _ ref _ agents) caller d name args
           Right (Left ident)->do
             result<-questionStatus actor ident s
             pure (d,pure result)
+          Right (Right _) | isNothing (conversationPresenter s)->pure (d,pure (Left unavailableConversation))
           Right (Right (question,choices))->case waitingQuestion s of
             Just _->pure (d,pure (Left "A question is already waiting for the user."))
             Nothing->do
@@ -1507,7 +1520,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ agents) d=do
             Just msg->do
               let author=case AH.messageAuthor msg of AH.Human -> "Human"; AH.Agent ident -> "Agent "<>AH.agentIdText ident
                   attribution=if AH.messageIsUserSeat msg then "Human message" else author<>" sent a peer message, not the human user seat"
-              writeIORef ref (appendRecords [Reply author (AH.messageText msg)] s
+              writeIORef ref (appendPrimary [PrimaryMessage (PeerSpeaker (AH.messageAuthor msg)) (AH.messageText msg)] s
                 {queuedPrompt=Just (attribution<>"\n\n"<>AH.messageText msg,Nothing),reads=sourceSnapshots desktop})
               sendQueued runtime desktop
         _->AR.rejectPrimaryDelivery agents delivery "The main conversation is not ready; connect it and retry." >> pure desktop
@@ -1670,7 +1683,7 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
               field "status" entry `elem` [Just ("recovered"::Text),Just "ended"] &&
               maybe False (\logical->case logicalBodyProvider logical of
                 RecoveredBodyProvider{}->True; _->False) (conversationLogicalBody target projected)
-            missingPresenter=isNothing (historyPresenter current) && maybe False
+            missingPresenter=isNothing (conversationPresenter current) && maybe False
               (\view->not (isNothing (conversationLogical view)) || not (isNothing (conversationSource view)))
               (M.lookup target (conversationViews projected))
         if frozen || missingPresenter || childRender current==Just signature then pure projected else do
@@ -1684,8 +1697,8 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
                   metadata=T.intercalate " · " ([fromMaybe "" (field "status" entry)]++
                     maybe [] (\parent->["parent: "<>parent]) (field "parentName" entry)++models++["recent history" | trimmed])
                   capturedHistory=AgentHistory name metadata (fromMaybe 0 (field "nextEvent" entry)) events
-                  records=case historyPresenter current of
-                    Just presenter->TranscriptHistory presenter capturedHistory
+                  records=case conversationPresenter current of
+                    Just presenter->TranscriptHistory (Transcript.agentHistory presenter) capturedHistory
                     Nothing->TranscriptRecords [Record (BodyItemId (-1)) 0 (Pause "No agent history presenter is installed.")]
               modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature})
               paintView target False current projected
@@ -1865,6 +1878,7 @@ submitConversationEditor runtime@(ConversationState _ ref _ _) mount slot origin
       editors<-readIORef (conversationEditors state)
       let target=conversationTarget d
       case M.lookup target editors of
+        _ | T.null target,isNothing (conversationPresenter state)->pure d {status=unavailableConversation}
         Nothing->pure d {status="Conversation input expired."}
         Just editor | Editor.editorMount editor/=mount->pure d {status="Conversation input expired."}
         Just editor->do
@@ -1980,7 +1994,7 @@ pollDraftPreparation runtime@(ConversationState _ ref _ _) d submitted captured 
           let admitted=stampReply now zone state
           writeIORef ref admitted
           if queuedInput then do
-            let accepted=appendRecords [Reply "You" (composerMarkdown text)] admitted
+            let accepted=appendPrimary [PrimaryMessage UserSpeaker (composerMarkdown text)] admitted
                   {queuedQueries=map (\query->if isQueuedEditor submitted query then SubmittedQuery text else query) (queuedQueries admitted)}
             writeIORef ref accepted
             cleared<-clearSubmittedDraft (Just submitted) d
@@ -1991,7 +2005,7 @@ pollDraftPreparation runtime@(ConversationState _ ref _ _) d submitted captured 
               (fmap (fmap (const ())) (AH.steerAgentAt (AR.agentHub (conversationAgents runtime)) expected text)) d
             _->refuse "Primary target expired; draft kept."
           else if primaryBusy admitted then do
-            let queued=appendRecords [Reply "You" (composerMarkdown text)] admitted {queuedQueries=queuedQueries admitted++[SubmittedQuery text]}
+            let queued=appendPrimary [PrimaryMessage UserSpeaker (composerMarkdown text)] admitted {queuedQueries=queuedQueries admitted++[SubmittedQuery text]}
             writeIORef ref queued
             cleared<-clearSubmittedDraft (Just submitted) d
             painted<-paint True queued cleared

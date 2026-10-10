@@ -988,18 +988,26 @@ invalidations to the same bounded, close-aware queue as trees and forms. No
 plugin callback runs on the UI tick. The host drains bounded deltas and owns
 input, geometry, forms and action admission. The same plugin declares its
 orchestration tools, which the host registers with existing per-tool policy.
-The plugin also contributes `Hide.AgentTranscript.presentHistory`. It turns a
-bounded, authorized `AgentHistory` snapshot into public transcript records;
-streamed replies and tool updates retain their original item identities. The
-host captures the history and presenter without evaluating them on input. Its
-existing presentation and checkpoint workers prepare the source, including for
-closed conversations; full-transcript copying uses the presentation worker too.
+The plugin also contributes `Hide.AgentTranscript.presentConversation`. Its primary
+reducer turns admitted messages, streamed chunks, tool updates, plans and notices
+into public transcript records. The host assigns item IDs and revisions after
+redaction. Each update retains a shared lazy reduction against the previous
+records, so preparation processes new updates and preserves unchanged record
+identities. Source capture observes only the immutable wrapper and a started
+flag; it neither calls plugin code nor walks the history.
 
-`Hide.Plugin.Transcript` owns the immutable record vocabulary and shared update
-reducers. Provider lifetime, redaction, composer submissions, approvals and layout
-remain host-owned. The executable selects one history presenter; the host library
-does not depend on the agent plugin. Primary provider presentation and the broader
-editor-tool surface remain to be separated.
+The same contribution presents bounded, authorized `AgentHistory` snapshots for
+child conversations. The host's existing presentation, checkpoint and copy
+workers resolve both source types, including closed conversations. Primary
+sources retain their complete contents independently of the Hub's bounded history.
+
+`Hide.Plugin.Transcript` owns the immutable record vocabulary, source capsule and
+shared update reducers. The first-party plugin owns speaker roles, activity labels
+and record grouping. Provider lifetime, redaction, composer submissions, approvals
+and layout remain host-owned. The executable selects one conversation presenter;
+the host library does not depend on the agent plugin. If the contribution is
+missing, recovered conversations and drafts remain readable. New primary
+submissions, sessions and questions are refused before changing their state.
 
 `SessionServices` owns builds, compiler discovery, build settings and shared
 consoles for the editor session. Conversation receives a console handle and owns
@@ -1014,8 +1022,8 @@ layout. Session teardown joins pending acquisition cleanup before closing jobs
 and consoles.
 
 This is a private ownership boundary, not the finished agent plugin API.
-Conversation still owns provider permissions and primary presentation. Separating
-those remaining contributions is the next step; ACP, Ghostty and DAP keep their existing
+Conversation still owns provider permissions, controls and the remaining editor
+tools. Separating those remaining contributions is the next step; ACP, Ghostty and DAP keep their existing
 workers and protocols.
 
 The ACP completion transcript uses a scoped prepared text window. Its existing

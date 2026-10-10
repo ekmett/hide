@@ -45,7 +45,7 @@ plugin :: Plugin
 plugin=Plugin
   { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
   , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool DocsTools.tools
-  , pluginAgentHistory=Just AgentTranscript.presentHistory
+  , pluginConversation=Just AgentTranscript.presentConversation
   }
 
 rootId :: P.NodeId

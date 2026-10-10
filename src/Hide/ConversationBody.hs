@@ -45,24 +45,29 @@ import System.Mem.StableName (StableName,makeStableName)
 import qualified Hide.ACP as A
 import qualified Hide.AgentHub as AH
 import qualified Hide.Plugin.Window as W
-import Hide.Plugin.Transcript (BodyItemId(..),Record(..),RecordContent(..),AgentHistory,HistoryPresenter)
+import Hide.Plugin.Transcript (BodyItemId(..),Record(..),RecordContent(..),AgentHistory,HistoryPresenter,PrimaryTranscript,primaryTranscriptRecords)
 import Hide.TextLayout (TextLayout,prepareTextLayout)
 
--- Direct sources keep the owner's existing list identity. A plugin source is a
--- closed history snapshot and presenter, not its result. Capturing its identity
--- never invokes plugin code; only presentation/checkpoint/copy workers resolve it.
+-- Direct sources keep the owner's existing list identity. Plugin sources keep
+-- a closed history snapshot or an incremental primary reduction. Capturing their
+-- identities never invokes plugin code; presentation/checkpoint/copy workers
+-- resolve the shared lazy records.
 data TranscriptSource = TranscriptRecords ![Record] | TranscriptHistory !HistoryPresenter !AgentHistory
+  | TranscriptPrimary !PrimaryTranscript
 data TranscriptIdentity = DirectTranscript !(StableName [Record])
   | PresentedTranscript !(StableName HistoryPresenter) !(StableName AgentHistory)
+  | PrimaryTranscriptIdentity !(StableName PrimaryTranscript)
   deriving Eq
 
 transcriptIdentity :: TranscriptSource -> IO TranscriptIdentity
+transcriptIdentity (TranscriptPrimary source)=PrimaryTranscriptIdentity <$> (makeStableName =<< evaluate source)
 transcriptIdentity (TranscriptRecords records)=DirectTranscript <$> (makeStableName =<< evaluate records)
 transcriptIdentity (TranscriptHistory presenter history)=PresentedTranscript
   <$> (makeStableName =<< evaluate presenter) <*> (makeStableName =<< evaluate history)
 
 -- Worker-only projection; host capture and admission inspect identities instead.
 transcriptRecords :: TranscriptSource -> [Record]
+transcriptRecords (TranscriptPrimary source)=primaryTranscriptRecords source
 transcriptRecords (TranscriptRecords records)=records
 transcriptRecords (TranscriptHistory presenter history)=presenter history
 

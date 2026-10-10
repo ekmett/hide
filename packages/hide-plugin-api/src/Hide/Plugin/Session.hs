@@ -22,7 +22,7 @@ import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
 import Hide.Plugin.Tool (Tool)
 import Hide.Plugin.Services (EditorServices)
-import Hide.Plugin.Transcript (HistoryPresenter)
+import Hide.Plugin.Transcript (ConversationPresenter)
 
 -- | Capabilities for the concrete first-party directory workflow. Providers and
 -- resource owners outlive activation. Captured requests are admitted by the host;
@@ -52,7 +52,7 @@ data Plugin = Plugin
   { withPlugin :: forall c r settings completion a. Eq completion =>
       Session c r settings completion -> IO a -> IO a
   , pluginTools :: [PluginTool]
-  , pluginAgentHistory :: Maybe HistoryPresenter
+  , pluginConversation :: Maybe ConversationPresenter
     -- ^ Pure presentation selected at startup and evaluated only on the host
     -- preparation/checkpoint workers. This contribution owns no input lifetime.
   }
