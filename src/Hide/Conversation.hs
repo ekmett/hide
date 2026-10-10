@@ -99,7 +99,7 @@ data Phase = Initializing (Maybe Text) | Starting (Maybe Text) | Prompting | Can
 -- names in ContentVersion retain no Buffer/Undo; selection/focus are independent.
 type DraftReceipt = Editor.DraftSubmission
 -- Immutable input context captured at the original human input turn.
-data ChatEditorContext = ChatEditorContext !Text !(StableName A.Launch) !(Maybe ProviderReceipt) !(Maybe AH.AgentConfigRef)
+data ChatEditorContext = ChatEditorContext !Text !(StableName A.ProviderLaunch) !(Maybe ProviderReceipt) !(Maybe AH.AgentConfigRef)
 -- Both input commands execute on the existing control worker. Their distinct
 -- services preserve primary context/connect ownership and child Hub admission.
 data ConversationEditor
@@ -157,14 +157,14 @@ data SettingsCapture = SettingsCapture !Bool !FilePath !Settings.SettingsSnapsho
 
 data State = State
   { sessionIdentity :: !Unique
-  , provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
+  , provider :: A.ProviderLaunch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe AR.PrimaryControl), transcript :: !Transcript.PrimaryTranscript, nextRecord :: !Int
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
   , queuedQueries :: [QueuedQuery]
   , ownedTerminals :: S.Set Text
   , terminalWaiters :: M.Map Text [Value]
   , lastMessageAt :: Maybe UTCTime
-  , lastSession :: Maybe (A.Launch,FilePath,Text)
+  , lastSession :: Maybe (A.ProviderLaunch,FilePath,Text)
   , waitingQuestion :: Maybe QuestionTicket, questionResults :: M.Map Int QuestionResult, questionsClosed :: Bool, lastQuestion :: Maybe Int, lastQuestionInteraction :: Maybe (StableName ChatQuestion)
   , deliveredContext :: Maybe Value
   , directoryAgents :: [AH.AgentId]
@@ -190,8 +190,8 @@ data ConversationState = ConversationState FilePath (IORef State) C.Consoles AR.
 conversationAgents :: ConversationState -> AR.AgentRuntime
 conversationAgents (ConversationState _ _ _ agents)=agents
 
-defaultLaunch :: A.Launch
-defaultLaunch = A.Launch "codex-acp" [] []
+defaultLaunch :: A.ProviderLaunch
+defaultLaunch = A.ProviderLaunch "codex-acp" [] []
 
 withConversation :: Maybe ConversationPresenter -> Maybe (InputDeclaration PrimaryInputServices) -> Maybe (InputDeclaration ChildInputServices) -> C.Consoles -> (ConversationState -> IO a) -> IO a
 withConversation presenter primary child consoles action = getCurrentDirectory >>= \root -> withConversationAt presenter primary child consoles root action
@@ -257,27 +257,27 @@ closeConversation (ConversationState _ ref consoles agents) = do
   mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
   mapM_ A.stopClient (connection s)
 
-launchValue :: A.Launch -> Value
+launchValue :: A.ProviderLaunch -> Value
 launchValue launch=object ["executable" .= A.executable launch,"arguments" .= A.arguments launch,"environment" .= M.fromList (A.environment launch)]
 
-decodeLaunch :: BS.ByteString -> Either String A.Launch
+decodeLaunch :: BS.ByteString -> Either String A.ProviderLaunch
 decodeLaunch bytes=do
   value<-eitherDecodeStrict' bytes
   maybe (Left "Expected executable, arguments array and environment object.") Right (parseMaybe (withObject "agent" $ \o ->
-    A.Launch <$> o .: "executable" <*> o .:? "arguments" .!= [] <*> (M.toList <$> (o .:? "environment" .!= M.empty))) value) >>= validateLaunch
+    A.ProviderLaunch <$> o .: "executable" <*> o .:? "arguments" .!= [] <*> (M.toList <$> (o .:? "environment" .!= M.empty))) value) >>= validateLaunch
 
-validateLaunch :: A.Launch -> Either String A.Launch
+validateLaunch :: A.ProviderLaunch -> Either String A.ProviderLaunch
 validateLaunch launch
   | null (A.executable launch) = Left "Enter an executable."
   | any (elem '\0') (A.executable launch:A.arguments launch++concatMap (\(k,v)->[k,v]) (A.environment launch)) = Left "NUL bytes are not valid in process arguments."
   | any (\(key,_) -> null key || '=' `elem` key) (A.environment launch) = Left "Invalid environment variable name."
   | otherwise = Right launch
 
-parseLaunch :: Text -> Text -> Text -> Either String A.Launch
+parseLaunch :: Text -> Text -> Text -> Either String A.ProviderLaunch
 parseLaunch command args env = do
   arguments<-eitherDecodeStrict' (TE.encodeUtf8 args)
   environment<-eitherDecodeStrict' (TE.encodeUtf8 env)
-  validateLaunch (A.Launch (T.unpack (T.strip command)) arguments (M.toList environment))
+  validateLaunch (A.ProviderLaunch (T.unpack (T.strip command)) arguments (M.toList environment))
 
 -- | Consume conversation effects and delegate unrelated effects to the next interpreter.
 conversationEffects :: ConversationState -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
@@ -1433,7 +1433,7 @@ parseTerminal root params = case parseMaybe parser params of
   Just (command,args,env,cwd,limit)
     | not (isAbsolute cwd) || '\0' `elem` cwd -> Left "Expected an absolute terminal directory."
     | limit<0 || limit>16*1024*1024 -> Left "Terminal output limit must be between 0 and 16 MiB."
-    | otherwise -> case validateLaunch (A.Launch command args env) of
+    | otherwise -> case validateLaunch (A.ProviderLaunch command args env) of
         Left err -> Left (T.pack err)
         Right _ -> Right (Terminal.TerminalConfig command args env cwd 80 24,limit)
   where parser=withObject "terminal" $ \o -> (,,,,) <$> o .: "command" <*> o .:? "args" .!= []

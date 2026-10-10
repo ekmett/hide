@@ -446,7 +446,7 @@ data QuestionProjection = QuestionProjection
 
 -- Captured incarnation, never a reusable provider/session display label.
 data BodyProvider
-  = PrimaryBodyProvider !(StableName A.Launch) !(Maybe (StableName A.Client,Maybe Text))
+  = PrimaryBodyProvider !(StableName A.ProviderLaunch) !(Maybe (StableName A.Client,Maybe Text))
   | ChildBodyProvider !AH.AgentConfigRef
   | RecoveredBodyProvider !Unique
   deriving Eq

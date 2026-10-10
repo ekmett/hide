@@ -25,7 +25,7 @@ import Graphics.Vty.Span (SpanOp(..))
 import Hide.Buffer
 import Hide.Files (FileState(..))
 import Hide.InlineState
-import Hide.InlineTypes
+import Hide.Plugin.Completion
 import Hide.Sidebar
 import Hide.Model
 import Hide.Render

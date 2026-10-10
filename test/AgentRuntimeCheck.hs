@@ -44,7 +44,7 @@ checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTo
       session = replicate 48 'a'
       script = root </> "provider.py"
       logPath = root </> "provider.jsonl"
-      launch = pure (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)])
+      launch = pure (ACP.ProviderLaunch "python3" [script] [("PROBE_LOG",logPath)])
   opened <- newIORef []
   let startEditor directory = do
         modifyIORef' opened (++[directory])
@@ -65,9 +65,9 @@ checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTo
       rejected <- spawnAgent hub Human spec
       assert "malformed policy blocks spawning but not editor startup" (either (const True) (const False) rejected)
       writeFile policy "[editor.agents]\nmax_agents = 4\nmax_subagents = 2\n[editor.agent]\ncontext = 'global context marker'\n"
-      primaryDeliveryChecks runtime project (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)])
+      primaryDeliveryChecks runtime project (ACP.ProviderLaunch "python3" [script] [("PROBE_LOG",logPath)])
       let choices=Capabilities False False True [ConfigChoice "model" "model" "small" [("small","Small"),("large","Large")]]
-      bracket (ACP.startClient (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \client->do
+      bracket (ACP.startClient (ACP.ProviderLaunch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \client->do
         _<-syncPrimary runtime project (Just client) "private-primary" choices False >>= right
         (captured,_)<-agentConfiguration hub primary >>= right
         withAsync (configureAgentAt hub captured "model" "large") $ \setting->do
@@ -80,7 +80,7 @@ checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTo
           _<-syncPrimary runtime project (Just client) "private-primary" refreshed False >>= right
           assert "capability refresh preserves an admitted primary control" =<< primaryControlCurrent runtime control (Just client) (Just "private-primary")
           recordPrimaryEvent runtime client "private-primary" (ProviderUsage 12 100)
-          bracket (ACP.startClient (ACP.Launch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \replacement->do
+          bracket (ACP.startClient (ACP.ProviderLaunch "python3" [script] [("PROBE_LOG",logPath)]) project) ACP.stopClient $ \replacement->do
             current<-primaryControlCurrent runtime control (Just replacement) (Just "private-primary")
             assert "same-key replacement cannot consume old primary control" (not current)
             _<-syncPrimary runtime project (Just replacement) "private-primary" choices False >>= right
@@ -175,7 +175,7 @@ checks = Tool.withTools [] [tool | Plugin.CoordinationTool tool<-Plugin.pluginTo
 
 -- The public receipt owns terminal completion; removing a mailbox entry alone
 -- grants no provider admission and cannot keep the cancellation barrier alive.
-primaryDeliveryChecks :: AgentRuntime -> FilePath -> ACP.Launch -> IO ()
+primaryDeliveryChecks :: AgentRuntime -> FilePath -> ACP.ProviderLaunch -> IO ()
 primaryDeliveryChecks runtime project launch=bracket (ACP.startClient launch project) ACP.stopClient $ \client->do
   let hub=agentHub runtime
       primary=primaryAgent runtime
@@ -284,7 +284,7 @@ primaryDeliveryChecks runtime project launch=bracket (ACP.startClient launch pro
 primaryShutdownCheck :: FilePath -> IO ()
 primaryShutdownCheck root=do
   let project=root </> "project"
-      launch=ACP.Launch "python3" [root </> "provider.py"] [("PROBE_LOG",root </> "provider.jsonl")]
+      launch=ACP.ProviderLaunch "python3" [root </> "provider.py"] [("PROBE_LOG",root </> "provider.jsonl")]
       key="private-shutdown"
   withEnvironment [("XDG_CONFIG_HOME",root </> "config"),("XDG_DATA_HOME",root </> "data"),("THC_EDIT_SESSION",replicate 48 'b')] $
     bracket (ACP.startClient launch project) ACP.stopClient $ \client->do
@@ -312,7 +312,7 @@ creationChecks :: FilePath -> IO ()
 creationChecks root=do
   let project=root </> "project"
       config=root </> "config"
-      launch=ACP.Launch "python3" [root </> "provider.py"] [("PROBE_LOG",root </> "creation-provider.jsonl")]
+      launch=ACP.ProviderLaunch "python3" [root </> "provider.py"] [("PROBE_LOG",root </> "creation-provider.jsonl")]
       spec=SpawnSpec "Host child" "One initial task" project Shared Fresh Nothing Nothing
       noEditor _=error "Shared creation must not open another editor"
       environment sid=[("XDG_CONFIG_HOME",config),("XDG_DATA_HOME",root </> "creation-data"),("THC_EDIT_SESSION",replicate 48 sid)]
@@ -374,7 +374,7 @@ persistenceChecks root = do
       config = root </> "config"
       logPath = root </> "recovery-provider.jsonl"
       sid = replicate 48 'b'
-      launch = pure (ACP.Launch "python3" [root </> "provider.py"] [("PROBE_LOG",logPath)])
+      launch = pure (ACP.ProviderLaunch "python3" [root </> "provider.py"] [("PROBE_LOG",logPath)])
       startEditor directory = do
         record <- newSessionRecord Nothing [directory]
         pure record {sessionDirectory=directory}

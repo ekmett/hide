@@ -150,7 +150,7 @@ sessionMenuAction runtime command value original=SidebarHost.withSidebarCommands
 withChoiceMenus :: ConversationState -> Desktop
   -> ((Desktop -> IO Desktop) -> ((Desktop,[Effect]) -> IO Desktop) -> Desktop -> IO a) -> IO a
 withChoiceMenus runtime original use=SidebarHost.withSidebarCommands $ \forms->withDocsCommands $ \docs->
-  MenuHost.withConversationMenuCommands docs runtime $ \menuOwner->withAutocomplete Nothing (startingDirectory original) $ \autocomplete->
+  MenuHost.withConversationMenuCommands docs runtime $ \menuOwner->withAutocomplete Nothing [] Nothing (startingDirectory original) $ \autocomplete->
   ConversationChoices.withConversationChoices (SidebarHost.sidebarCapabilities forms) (MenuHost.menuSidebarCapabilities menuOwner forms)
     (AgentDirectoryHost.agentDirectory (AR.agentHub (conversationAgents runtime)) autocomplete) SidebarHost.sidebarSelectedAgent SidebarHost.SidebarAgent $ do
       let effects=SidebarHost.sidebarEffects forms (MenuHost.menuEffects menuOwner (conversationEffects runtime (\desktop _->pure (False,desktop))))

@@ -21,12 +21,12 @@ import Data.Aeson.Types (parseEither, Parser)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Hide.ACP as ACP
+import qualified Hide.Plugin.Provider as ACP
 
 -- | Provider, executable, argument, model/effort and transcript-view selections.
 data CompletionConfig = CompletionConfig
-  { provider :: T.Text, acpLaunch :: ACP.Launch, model :: Maybe T.Text, effort :: Maybe T.Text
-  , copilotLaunch :: ACP.Launch, debug :: Bool } deriving (Eq,Show)
+  { provider :: T.Text, acpLaunch :: ACP.ProviderLaunch, model :: Maybe T.Text, effort :: Maybe T.Text
+  , copilotLaunch :: ACP.ProviderLaunch, debug :: Bool } deriving (Eq,Show)
 
 -- | Reject unknown settings, provider names and invalid bounded argument arrays.
 parseCompletionConfig :: Value -> Either T.Text CompletionConfig
@@ -42,7 +42,7 @@ parseCompletionConfig = either (Left . T.pack) Right . parseEither (withObject "
   cpArgs<-o .:? "copilotArguments" .!= "[\"--stdio\"]" >>= argumentList
   unless (all (\x->not (null x) && not (any (<' ') x)) [exe,cpExe]) (fail "Invalid autocomplete executable")
   showDebug<-o .:? "debug" .!= False
-  pure (CompletionConfig backend (ACP.Launch exe args []) (nonempty selected) (nonempty reasoning) (ACP.Launch cpExe cpArgs []) showDebug))
+  pure (CompletionConfig backend (ACP.ProviderLaunch exe args []) (nonempty selected) (nonempty reasoning) (ACP.ProviderLaunch cpExe cpArgs []) showDebug))
   where nonempty t=if T.null t then Nothing else Just t
         argumentList :: T.Text -> Parser [String]
         argumentList t=case eitherDecodeStrict' (TE.encodeUtf8 t) of

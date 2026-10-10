@@ -28,6 +28,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import AutocompleteACPCheck (fixture)
+import EditorFixture (withAutocompleteFixture)
 import Hide.Autocomplete
 import qualified Hide.AgentUI as AgentUI
 import qualified Hide.Plugin.Session as Plugin
@@ -82,8 +83,31 @@ checks=bracket temporary removePathForcibly $ \root->do
   withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $
     withEnv "THC_EDIT_SESSION" Nothing $
     withEnv "LOG" (Just logPath) $
-    withEnv "SECRET" (Just "runtime-autocomplete-secret") $
-    withAutocomplete (observeHint acknowledged <$> Plugin.pluginCompletionInput AgentUI.plugin) root $ \runtime->do
+    withEnv "SECRET" (Just "runtime-autocomplete-secret") $ do
+    withAutocomplete Nothing [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin]
+      (Plugin.pluginCompletionInput AgentUI.plugin) root $ \absent->
+      withAutocompleteFixture "retained completion output" desktop $ \retained->do
+        let draftState=setComposerInput (newBuffer "retained hint") (Selection 1 6) True retained
+            draftRef=maybe (error "Missing retained hint mount") E.mountDraft (activeEditorMount draftState)
+            sourceWindow=maybe (error "Missing source window") windowId (activeWindow desktop)
+            traceWindow=maybe (error "Missing trace window") windowId (activeWindow retained)
+        requested<-send absent "propose" [] (focusWindow sourceWindow draftState)
+        barrier<-timeout 5000000 (completionChoices absent (CompletionTarget 0 Nothing) "model")
+        check "absent provider handles the request before its own choices reply" (case barrier of Just (Left _)->True; _->False)
+        unchanged<-tickAutocomplete absent requested
+        check "missing provider starts no process and leaves source untouched"
+          (activeText unchanged==source && inlinePreview unchanged==Nothing && not (autocompleteACPEnabled unchanged))
+        check "missing provider preserves the retained hint and exact selection" (case M.lookup draftRef (editorDrafts unchanged) of
+          Just kept->contents (editorDraftBuffer kept)=="retained hint" && editorDraftSelection kept==Selection 1 6
+          _->False)
+        check "missing provider keeps output readable without a callable mount"
+          (case ([w | w<-windows unchanged,windowId w==traceWindow],autocompleteWindow unchanged >>= (`M.lookup` pluginWindows unchanged)) of
+            ([w],Just body)->windowEditorMount w==Nothing && W.copyPreparedSelection body 0 (contentLength (W.preparedWindowText body))=="retained completion output"
+            _->False)
+        check "missing provider cannot acquire the configured executable" . null =<< logs
+        unavailable<-autocompleteTool absent "read_completion_context" (object ["requestId" .= ("1"::T.Text)])
+        check "missing provider has no callable snapshot service" (case unavailable of Left _->True; _->False)
+    withAutocomplete (Plugin.pluginCompletionProvider AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin] (observeHint acknowledged <$> Plugin.pluginCompletionInput AgentUI.plugin) root $ \runtime->do
       configured<-awaitDesktop runtime "project ACP configuration" autocompleteACPEnabled desktop
       check "completion chat is hidden by default" (not (hasTranscript configured))
       check "provider is lazy before any request" . null =<< logs
@@ -302,7 +326,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       let (closedHints,closeEffects)=runCommand Close fullHints
       _<-snd <$> autocompleteEffects runtime (\d _->pure (False,d)) closedHints closeEffects
       releaseHint blockedId
-  closed<-withAutocomplete (Plugin.pluginCompletionInput AgentUI.plugin) root pure
+  closed<-withAutocomplete (Plugin.pluginCompletionProvider AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools AgentUI.plugin] (Plugin.pluginCompletionInput AgentUI.plugin) root pure
   closedChoices<-timeout 5000000 (completionChoices closed (CompletionTarget 0 Nothing) "model")
   check "choice requests refuse after owner shutdown" (case closedChoices of Just (Left _)->True; _->False)
   putStrLn "Autocomplete runtime checks passed"

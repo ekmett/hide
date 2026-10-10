@@ -16,7 +16,7 @@
 -- prepared responses separate expensive encoding from later authorization and
 -- sending. Session policy belongs to callers, not the transport.
 module Hide.ACP
-  ( Launch(..), Client, Event(..), startClient, startClientWithEnvironment, stopClient, request, notify, respond, PreparedResponse, prepareResponse, respondPrepared, pollEvents ) where
+  ( ProviderLaunch(..), Client, Event(..), startClient, startClientWithEnvironment, stopClient, request, notify, respond, PreparedResponse, prepareResponse, respondPrepared, pollEvents ) where
 
 import Control.Concurrent
 import Control.Exception
@@ -39,12 +39,8 @@ import System.Info (os)
 import System.IO
 import System.Process hiding (cleanupProcess)
 import System.Timeout (timeout)
+import Hide.Plugin.Provider (ProviderLaunch(..))
 
--- | Executable, argv and environment values; no shell interpretation.
--- 'startClient' treats the values as overrides; 'startClientWithEnvironment'
--- uses them as the complete child environment.
-data Launch = Launch { executable :: FilePath, arguments :: [String], environment :: [(String,String)] }
-  deriving (Eq, Show)
 data Event = Response Int (Either Value Value) | Notification Text Value | Request Value Text Value | Disconnected Text
   deriving (Eq, Show)
 data State = State
@@ -60,7 +56,7 @@ frameLimit = 16 * 1024 * 1024
 queueLimit = 32 * 1024 * 1024
 
 -- | Start with current process inheritance and the launch's explicit overrides.
-startClient :: Launch -> FilePath -> IO Client
+startClient :: ProviderLaunch -> FilePath -> IO Client
 startClient launch root = mask_ $ do
   inherited <- getEnvironment
   startClientWithEnvironment launch
@@ -68,7 +64,7 @@ startClient launch root = mask_ $ do
 
 -- | Start with the launch's complete captured environment. No variables are
 -- inherited here: the same snapshot can own both process input and redaction.
-startClientWithEnvironment :: Launch -> FilePath -> IO Client
+startClientWithEnvironment :: ProviderLaunch -> FilePath -> IO Client
 startClientWithEnvironment launch root = mask_ $ do
   (Just input, Just output, Just errors, process) <- createProcess
     (proc (executable launch) (arguments launch))

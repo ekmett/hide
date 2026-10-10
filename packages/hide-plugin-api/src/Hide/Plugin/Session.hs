@@ -20,7 +20,7 @@ module Hide.Plugin.Session
 import Hide.Plugin.AgentDirectory (AgentDirectory,DirectoryRequest)
 import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
-import Hide.Plugin.Completion (HintServices)
+import Hide.Plugin.Completion (HintServices,CompletionProvider,CompletionServices)
 import Hide.Plugin.ConversationInput (PrimaryInputServices, ChildInputServices)
 import Hide.Plugin.ConversationSession (ConversationTarget,ConversationRequest)
 import Hide.Plugin.Menu (MenuPublisher)
@@ -62,6 +62,10 @@ data PluginTool
   = EditorTool (Tool EditorServices)
   | RequestTool (Tool RequestServices)
   | CoordinationTool (Tool AgentServices)
+  | CompletionTool (Tool (Maybe CompletionServices))
+    -- ^ Exclusive to the authenticated private completion route. The supplied
+    -- services check the active request ID on every invocation; absence refuses.
+    -- Never include these in the general editor or agent tool catalogue.
 
 -- | Scope registrations and workers around the supplied session action.
 -- Activation runs before the event loop, never beneath its desktop lock.
@@ -85,6 +89,9 @@ data Plugin = Plugin
     -- ^ One command registration shared by child draft attachments. The host
     -- supplies only the captured human slot/target service on its existing
     -- worker; missing input leaves child output read-only and preserves drafts.
+  , pluginCompletionProvider :: Maybe CompletionProvider
+    -- ^ Scoped provider implementation selected at startup and acquired only on
+    -- the completion worker. Missing contribution starts no ACP fallback.
   , pluginCompletionInput :: Maybe (InputDeclaration HintServices)
     -- ^ The host compiles this declaration before its event loop and invokes its
     -- command only on the admitted completion worker. Missing input preserves

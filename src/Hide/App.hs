@@ -30,7 +30,6 @@ import qualified Hide.Plugin.Services as PluginServices
 import qualified Hide.Plugin.Request as PluginRequest
 import Hide.GuestAccess (validateGuestEffects)
 import Hide.Autocomplete
-import qualified Hide.AutocompleteACP as CompletionACP
 import Hide.BufferView
 import Hide.Defaults
 import qualified Hide.Plugin.Menu as PluginMenu
@@ -173,6 +172,10 @@ runEditor plugins args = do
     []->pure Nothing
     [value]->pure (Just value)
     _->die "More than one plugin contributes child conversation input."
+  completionProvider<-case [value | plugin<-plugins,Just value<-[Plugin.pluginCompletionProvider plugin]] of
+    []->pure Nothing
+    [value]->pure (Just value)
+    _->die "More than one plugin contributes an ACP completion provider."
   completionInput<-case [value | plugin<-plugins,Just value<-[Plugin.pluginCompletionInput plugin]] of
     []->pure Nothing
     [value]->pure (Just value)
@@ -322,7 +325,7 @@ runEditor plugins args = do
               declarations=concatMap Plugin.pluginTools plugins
           PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
             PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.RequestTool tool<-declarations] $ \requestToolset ->
-            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarSelectedAgent) $ do
+            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarSelectedAgent) $ do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let agentTools=PluginTool.toolDefinitions agentToolset
                 editorSpecs=specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset
@@ -396,7 +399,7 @@ runEditor plugins args = do
                           Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
                     response<-case token of
                       Nothing -> editorResponseWith editorSpecs (permitted Nothing inspectTool) d request
-                      Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
+                      Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly (autocompleteTools autocomplete) (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
                       Just secret -> do
                         bound<-resolveAgentAccess (AR.agentAccess agents) secret
                         case bound of

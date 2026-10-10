@@ -17,7 +17,7 @@
 -- editor displays only validated device-flow information. All operations except
 -- status polling belong to one background owner, outside the desktop lock.
 module Hide.Copilot
-  ( Copilot, withCopilot, completeCopilot, signInCopilot, finishSignInCopilot
+  ( CopilotSignIn(..), Copilot, withCopilot, completeCopilot, signInCopilot, finishSignInCopilot
   , signOutCopilot, feedbackCopilot, pollCopilotMessages
   ) where
 
@@ -42,10 +42,14 @@ import System.IO
 import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
-import qualified Hide.ACP as ACP
-import Hide.InlineTypes
+import qualified Hide.Plugin.Provider as ACP
+import Hide.Plugin.Completion
 import Hide.LSP (fileUri,offsetPosition,positionOffset,positionValue)
 import Hide.Process (processCleanup)
+
+-- | Device-flow code and validated opaque command; credentials remain provider-owned.
+data CopilotSignIn = CopilotSignIn
+  { signInCode :: Text, signInCommand :: Value } deriving (Eq,Show)
 
 data Copilot = Copilot
   { call :: Int -> Text -> Value -> IO Value
@@ -59,7 +63,7 @@ data Copilot = Copilot
 -- individual call removes its waiter and sends $/cancelRequest; it never cancels
 -- a writer halfway through a frame. Closing the scope kills the process tree
 -- before joining pipe workers. No server stderr or raw error payload is logged.
-withCopilot :: ACP.Launch -> FilePath -> (Copilot -> IO a) -> IO a
+withCopilot :: ACP.ProviderLaunch -> FilePath -> (Copilot -> IO a) -> IO a
 withCopilot launch root action = mask $ \restore -> do
   inherited<-getEnvironment
   let env'=M.toList (M.union (M.fromList (ACP.environment launch)) (M.fromList inherited))

@@ -42,6 +42,8 @@ import qualified Hide.DocsTools as DocsTools
 import qualified Hide.EnvironmentTools as EnvironmentTools
 import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.CompletionInput as CompletionInput
+import qualified Hide.CompletionTools as CompletionTools
+import qualified Hide.AutocompleteACP as CompletionACP
 import qualified Hide.ConversationInput as ConversationInput
 import qualified Hide.ConversationMenus as ConversationMenus
 import qualified Hide.ConversationChoices as ConversationChoices
@@ -67,6 +69,8 @@ plugin=Plugin
       ++map (mapToolContext editorAgentSettings) AgentSettingsTools.tools)
       ++map RequestTool (BufferTools.tools++map (mapToolContext requestQuestions) QuestionTools.tools
         ++map (mapToolContext requestTerminals) TerminalTools.tools)
+      ++map CompletionTool CompletionTools.tools
+  , pluginCompletionProvider=Just (CompletionACP.completionProvider CompletionTools.skill)
   , pluginConversation=Just AgentTranscript.presentConversation
   , pluginPrimaryInput=Just ConversationInput.primaryInput
   , pluginChildInput=Just ConversationInput.childInput

@@ -77,7 +77,7 @@ instance Eq PrimaryDelivery where
 data PrimaryControl
   = ConfigurePrimary !(StableName ACP.Client) !Text ![(Text,Text)] !(MVar (Either Text Capabilities))
   | SteerPrimary !(StableName ACP.Client) !Text !HubMessage !(MVar (Either Text Value))
-  | QueryPrimary !SubmissionIdentity !(StableName ACP.Launch) !(Maybe (StableName ACP.Client)) !(Maybe Text) !(Maybe AgentConfigRef) !Text !(MVar (Either Text ()))
+  | QueryPrimary !SubmissionIdentity !(StableName ACP.ProviderLaunch) !(Maybe (StableName ACP.Client)) !(Maybe Text) !(Maybe AgentConfigRef) !Text !(MVar (Either Text ()))
 
 -- Reply identity is the control lifetime; never compare prompt/config payloads.
 instance Eq PrimaryControl where
@@ -89,7 +89,7 @@ instance Eq PrimaryControl where
 data AgentRuntime = AgentRuntime
   { agentHub :: AgentHub, agentAccess :: AgentAccess, primaryAgent :: AgentId
   , runtimeState :: MVar RuntimeState, primaryToken :: Text
-  , rootSession :: Maybe SessionRecord, configuredLaunch :: IO ACP.Launch
+  , rootSession :: Maybe SessionRecord, configuredLaunch :: IO ACP.ProviderLaunch
   , checkpointFile :: Maybe FilePath, checkpointWritable :: Bool
   , checkpointLock :: MVar (), reconnectWorkers :: MVar (M.Map AgentId (Async ()))
   , creationWorker :: MVar (Maybe (Async (Either Text (AgentId,Int)))) }
@@ -101,19 +101,19 @@ data RuntimeState = RuntimeState
   , deliveries :: [PrimaryDelivery], admittedPrimary :: Maybe PrimaryDelivery
   , permissions :: M.Map AgentId [MVar (Maybe Text)]
   , sessions :: M.Map AgentId SessionRecord
-  , launches :: M.Map AgentId ACP.Launch
+  , launches :: M.Map AgentId ACP.ProviderLaunch
   , primaryState :: Maybe (FilePath,Maybe (StableName ACP.Client),Text,Capabilities)
   , primaryControl :: Maybe PrimaryControl
   , primaryEvents :: Maybe (DriverEvent -> IO ())
   , closed :: Bool, notice :: Maybe Text, checkpointActive :: Bool }
 
 -- | Scope providers, private bridge access, pending replies and checkpoint workers.
-withAgentRuntime :: FilePath -> IO ACP.Launch -> (AgentRuntime -> IO a) -> IO a
+withAgentRuntime :: FilePath -> IO ACP.ProviderLaunch -> (AgentRuntime -> IO a) -> IO a
 withAgentRuntime = withAgentRuntimeUsing startEditor resumeEditor
 
 -- Only editor acquisition is replaceable: tests use the real Hub, ACP process
 -- and worktree code without recursively launching their own test executable.
-withAgentRuntimeUsing :: (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> FilePath -> IO ACP.Launch -> (AgentRuntime -> IO a) -> IO a
+withAgentRuntimeUsing :: (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> FilePath -> IO ACP.ProviderLaunch -> (AgentRuntime -> IO a) -> IO a
 withAgentRuntimeUsing openEditor restoreEditor directory getLaunch action = bracket acquire release $ \runtime ->
   withAsync (forever (threadDelay 2000000 >> void (checkpointAgents runtime))) (const (action runtime))
   where
@@ -432,7 +432,7 @@ primaryDriver state access identity connection directory key caps = AgentDriver
 -- Connected submissions keep their captured configuration receipt. Only original
 -- disconnected startup omits it, because acquiring that provider changes the Hub
 -- incarnation itself. The submission identity retains no draft source payload.
-requestPrimaryQuery :: AgentRuntime -> SubmissionIdentity -> StableName ACP.Launch -> Maybe (StableName ACP.Client,Text) -> Maybe AgentConfigRef -> Text -> IO (Either Text ())
+requestPrimaryQuery :: AgentRuntime -> SubmissionIdentity -> StableName ACP.ProviderLaunch -> Maybe (StableName ACP.Client,Text) -> Maybe AgentConfigRef -> Text -> IO (Either Text ())
 requestPrimaryQuery runtime submitted launch provider config text=do
   reply<-newEmptyMVar
   requestPrimaryControl (runtimeState runtime)
@@ -440,7 +440,7 @@ requestPrimaryQuery runtime submitted launch provider config text=do
 
 -- Missing identity pieces describe only the original startup. Binding is
 -- monotone: once present, a client/session can only compare equal, never change.
-bindPrimaryQuery :: StableName ACP.Launch -> Maybe (StableName ACP.Client) -> Maybe Text -> PrimaryControl -> Maybe PrimaryControl
+bindPrimaryQuery :: StableName ACP.ProviderLaunch -> Maybe (StableName ACP.Client) -> Maybe Text -> PrimaryControl -> Maybe PrimaryControl
 bindPrimaryQuery launch client session (QueryPrimary submitted expected original key config text reply)
   | launch==expected,maybe True (\value->Just value==client) original,maybe True (\value->Just value==session) key=
       Just (QueryPrimary submitted expected client session config text reply)
@@ -544,7 +544,7 @@ cancelPermissions state ident = modifyMVar_ state $ \s -> do
   where keep (ProviderPermission other _ _) = other/=ident
         keep _ = True
 
-startChild :: (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> IO ACP.Launch -> Maybe SessionRecord -> AgentAccess -> MVar RuntimeState -> StartProvider
+startChild :: (FilePath -> IO SessionRecord) -> (SessionRecord -> IO ()) -> IO ACP.ProviderLaunch -> Maybe SessionRecord -> AgentAccess -> MVar RuntimeState -> StartProvider
 startChild openEditor restoreEditor getLaunch root access state request emit = mask $ \restore -> do
   let ident = startAgent request
       spec = startSpec request
@@ -666,7 +666,7 @@ attachEditor resume record = do
 data RuntimeCheckpoint = RuntimeCheckpoint
   { savedHub :: Value, savedPrimary :: AgentId
   , savedSessions :: M.Map AgentId SessionRecord
-  , savedLaunches :: M.Map AgentId ACP.Launch }
+  , savedLaunches :: M.Map AgentId ACP.ProviderLaunch }
 
 checkpointLimit :: Int
 checkpointLimit = 256*1024*1024
@@ -717,7 +717,7 @@ checkpointParser = withObject "agent runtime" $ \o -> do
     environment <- entry .: "environment"
     unless (ident `elem` identities && not (null executable) && valid executable && length arguments<=256 && all valid arguments &&
       length environment<=1024 && all (\(key,value) -> not (null key) && valid key && valid value && '=' `notElem` key && key/="THC_EDIT_MCP_TOKEN") environment) (fail "Provider")
-    pure (ident,ACP.Launch executable arguments environment)) providerValues
+    pure (ident,ACP.ProviderLaunch executable arguments environment)) providerValues
   unless (M.size (M.fromList editors)==length editors && M.size (M.fromList providers)==length providers) (fail "Duplicate")
   -- Binding the human seat does not resume a provider, even when it had been
   -- explicitly ended before the editor crashed. Child ended states remain.

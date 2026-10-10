@@ -77,7 +77,7 @@ data ACPPermission = ACPPermission
 
 -- | Negotiate initialize/new/fork/resume and validate the provider session
 -- before handing driver ownership to the hub.
-startACPDriver :: A.Launch -> [Value] -> Text -> (ACPPermission -> IO (Maybe Text)) -> StartProvider
+startACPDriver :: A.ProviderLaunch -> [Value] -> Text -> (ACPPermission -> IO (Maybe Text)) -> StartProvider
 startACPDriver launch servers context permission request emit=safely $ mask $ \restore -> do
   unless (T.length context<=65536) (raise "Initial agent context exceeds 65536 characters.")
   root<-canonicalizePath (spawnDirectory (startSpec request))

@@ -16,7 +16,7 @@
 -- kept warm across completions; explicit acceptance uses ordinary buffer edits.
 module Hide.Autocomplete
   ( Autocomplete, withAutocomplete, autocompleteEffects, tickAutocomplete
-  , autocompleteToken, autocompleteTool, completionSummary, completionChoices ) where
+  , autocompleteToken, autocompleteTools, autocompleteTool, completionSummary, completionChoices ) where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (newMVar,withMVar,modifyMVar_)
@@ -34,13 +34,17 @@ import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
 import qualified Graphics.Vty as V
 import System.FilePath ((</>), isAbsolute)
+import System.Environment (getEnvironment)
+import Hide.GuestAccess (sensitiveLabel)
 import System.Mem.StableName
 import Hide.Buffer
 import Hide.Model hiding (Settings, Save)
 import Hide.InlineState
-import Hide.InlineTypes
+import Hide.Plugin.Completion
 import qualified Hide.AutocompleteConfig as C
-import qualified Hide.AutocompleteACP as A
+import qualified Hide.Plugin.Completion as A
+import qualified Hide.Plugin.Provider as Launch
+import qualified Hide.Plugin.Tool as Tool
 import qualified Hide.Copilot as P
 import Hide.MCPPermissions (readAutocompleteFor, writeAutocompleteFor)
 import Hide.EditorMCP (editorServersFor)
@@ -51,7 +55,7 @@ import Control.DeepSeq (force)
 import qualified Hide.Plugin.Window as W
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Command as Command
-import Hide.Plugin.Completion (HintServices(..))
+import Hide.Copilot (CopilotSignIn(..))
 import Hide.Plugin.Input (InputDeclaration)
 import qualified Hide.Plugin.EditorHost as Editor
 import Hide.Plugin.Editor (withDraftRef)
@@ -77,7 +81,8 @@ data Provider = Provider
 
 data Autocomplete = Autocomplete
   { autocompleteToken :: T.Text, jobs :: TBQueue Job, replies :: TQueue Reply
-  , generation :: TVar Int, connection :: IORef (Maybe A.ACPCompletion)
+  , generation :: TVar Int, connection :: IORef (Maybe CompletionDriver)
+  , completionToolset :: Tool.Tools (Maybe CompletionServices)
   , requested :: IORef (Maybe Snapshot), displayed :: IORef (Maybe InlineView)
   , hold :: IORef (Maybe (Integer,Int,Bool)), debugVisible :: IORef Bool
   , transcriptScope :: W.WindowScope, debugBody :: IORef W.PreparedWindow
@@ -92,18 +97,21 @@ data Autocomplete = Autocomplete
 completionSummary :: Autocomplete -> IO (Maybe CompletionSummary)
 completionSummary=readIORef . summary
 
-withAutocomplete :: Maybe (InputDeclaration HintServices) -> FilePath -> (Autocomplete -> IO a) -> IO a
-withAutocomplete declaration root use=Command.withRegistry $ \registry->withDraftRef $ \draft->W.withWindowScope $ \scope->do
+withAutocomplete :: Maybe CompletionProvider -> [Tool.Tool (Maybe CompletionServices)]
+  -> Maybe (InputDeclaration HintServices) -> FilePath -> (Autocomplete -> IO a) -> IO a
+withAutocomplete providerContribution tools declaration root use=Tool.withTools [] tools $ \toolset->Command.withRegistry $ \registry->withDraftRef $ \draft->W.withWindowScope $ \scope->do
   registered<-traverse (\input->Editor.registerDeclaredInput registry input id >>= either (ioError . userError . show) pure) declaration
   editor<-traverse (`Editor.attachDeclaredInput` draft) registered
   empty<-prepareTranscript ""
   token<-T.pack <$> randomIdentity
-  runtime<-Autocomplete token <$> newTBQueueIO 64 <*> newTQueueIO <*> newTVarIO 0 <*> newIORef Nothing
+  runtime<-Autocomplete token <$> newTBQueueIO 64 <*> newTQueueIO <*> newTVarIO 0 <*> newIORef Nothing <*> pure toolset
     <*> newIORef Nothing <*> newIORef Nothing <*> newIORef Nothing <*> newIORef False <*> pure scope <*> newIORef empty <*> newIORef Nothing <*> newIORef Nothing <*> newIORef 0 <*> newTVarIO False <*> newIORef editor <*> newTVarIO []
   servers<-editorServersFor (Just token)
   withAsync (owner runtime servers `finally` closeChoices runtime) $ \_ ->
     withAsync (traceLoop runtime) (const (use runtime)) `finally` closeChoices runtime
   where
+    acpAvailable=maybe False (const True) providerContribution
+    enabledACP cfg=C.provider cfg=="acp" && acpAvailable
     owner runtime servers=forever $ do
       loaded<-readAutocompleteFor root
       let values=either (const (object [])) id loaded
@@ -115,9 +123,9 @@ withAutocomplete declaration root use=Command.withRegistry $ \registry->withDraf
     loop runtime servers values cfg active=do
       epoch<-atomicModifyIORef' (settingsEpoch runtime) (\previous->(previous+1,previous+1))
       settings<-newIORef values
-      emit runtime (Configured (C.debug cfg) (C.provider cfg=="acp"))
+      emit runtime (Configured (C.debug cfg) (enabledACP cfg))
       let refresh=do
-            preparedSummary<-if C.provider cfg/="acp" then pure Nothing else do
+            preparedSummary<-if not (enabledACP cfg) then pure Nothing else do
               configuration<-readIORef (connection runtime) >>= maybe (pure Nothing) A.completionConfiguration
               pure (Just (CompletionSummary (CompletionTarget epoch (fmap fst configuration)) (if isNothing configuration then "configured" else "connected")))
             writeIORef (summary runtime) preparedSummary
@@ -138,14 +146,14 @@ withAutocomplete declaration root use=Command.withRegistry $ \registry->withDraf
                   case previous of
                     Right old | selected {C.debug=C.debug old}==old->do
                       writeIORef settings updated
-                      emit runtime (Configured (C.debug selected) (C.provider selected=="acp"))
+                      emit runtime (Configured (C.debug selected) (enabledACP selected))
                       pure True
                     _->pure False
             Feedback action proposal->forM_ current (\p->void (try (feedback p action proposal) :: IO (Either IOException ()))) >> pure True
             Request snap intent serial->do
               valid<-((==serial) <$> readTVarIO (generation runtime))
               when valid $ case current of
-                Nothing->emit runtime (Notice "Choose ACP or Copilot in Options > Autocomplete.")
+                Nothing->emit runtime (Notice (if C.provider cfg=="acp" && not acpAvailable then "ACP autocomplete plugin is unavailable." else "Choose ACP or Copilot in Options > Autocomplete."))
                 Just p->do
                   result<-race (atomically (readTVar (generation runtime) >>= check . (/=serial))) $ try $ do
                     input<-prepareInput snap intent serial
@@ -207,7 +215,7 @@ withAutocomplete declaration root use=Command.withRegistry $ \registry->withDraf
                 session<-readIORef (connection runtime)
                 case session of
                   Just provider | valid && C.provider cfg=="acp"->do
-                    A.discoverACPConfiguration provider
+                    A.discoverCompletionConfiguration provider
                     configuration<-A.completionConfiguration provider
                     case configuration of
                       Just (receipt,choices) | [choice]<-[choice | choice<-choices,Hub.configCategory choice==category]->do
@@ -225,7 +233,7 @@ withAutocomplete declaration root use=Command.withRegistry $ \registry->withDraf
               case (session,expected) of
                 (Just provider,CompletionTarget _ (Just receipt)) | valid->do
                   configuration<-A.completionConfiguration provider
-                  result<-A.configureACPAt provider receipt option value
+                  result<-A.configureCompletionAt provider receipt option value
                   case result of
                     Left problem->emit runtime (Notice problem)
                     Right ()->do
@@ -254,7 +262,7 @@ withAutocomplete declaration root use=Command.withRegistry $ \registry->withDraf
               Hint (CompletionTarget expected _) submitted _ | expected==epoch && C.provider cfg=="acp"->Editor.mountCurrent (Editor.submissionMount submitted)
               _->pure False
             let needsProvider=case job of Request{}->True; SignIn->True; FinishSignIn->True; SignOut->True; Hint{}->hintLive; Choices{}->True; _->False
-            if needsProvider && maybe True (const False) current && C.provider cfg/="off"
+            if needsProvider && maybe True (const False) current && C.provider cfg/="off" && (C.provider cfg/="acp" || acpAvailable)
               then do
                 opened<-try (withProvider runtime servers cfg (\p->run (Just p) job >>= \again->refresh >> when again (go (Just p))))
                 case opened of
@@ -268,10 +276,20 @@ withAutocomplete declaration root use=Command.withRegistry $ \registry->withDraf
               else run current job >>= \again->refresh >> when again (go current)
       go active
     withProvider runtime servers cfg action
-      | C.provider cfg=="acp"=A.withACPCompletion (C.acpLaunch cfg) root servers (C.model cfg) (C.effort cfg) $ \session->do
-          writeIORef (connection runtime) (Just session)
-          action (Provider (A.completeACP session) (A.feedbackACP session) (A.hintACP session) unavailable (const unavailable) unavailable)
-            `finally` writeIORef (connection runtime) Nothing
+      | C.provider cfg=="acp"=case providerContribution of
+          Nothing->ioError (userError "ACP autocomplete plugin is unavailable.")
+          Just contributed->do
+            let launch=C.acpLaunch cfg
+                acquireLaunch=do
+                  inherited<-getEnvironment
+                  let environment=M.toList (M.union (M.fromList (Launch.environment launch)) (M.fromList inherited))
+                      credentials=[T.pack value | (name,value)<-environment,sensitiveLabel (T.pack name),not (null value)]
+                  pure (launch {Launch.environment=environment},credentials)
+                start=CompletionStart acquireLaunch (map (T.pack . snd) (Launch.environment launch)) root servers (C.model cfg) (C.effort cfg)
+            withCompletionProvider contributed start $ \session->do
+              writeIORef (connection runtime) (Just session)
+              action (Provider (A.requestCompletion session) (A.reportCompletion session) (A.sendCompletionHint session) unavailable (const unavailable) unavailable)
+                `finally` writeIORef (connection runtime) Nothing
       | otherwise=P.withCopilot (C.copilotLaunch cfg) root $ \session->
           action (Provider (P.completeCopilot session) (P.feedbackCopilot session) (const unavailable) (P.signInCopilot session) (P.finishSignInCopilot session) (P.signOutCopilot session))
     unavailable=ioError (userError "Authentication is available only for Copilot")
@@ -303,8 +321,18 @@ enqueue runtime job=atomically $ do
   full<-isFullTBQueue (jobs runtime)
   if full then writeTQueue (replies runtime) (Notice "Autocomplete is busy.") else writeTBQueue (jobs runtime) job
 
+-- | Immutable metadata for the private completion catalogue only. Discovery
+-- invokes no plugin code and exposes none of the general editor/agent tools.
+autocompleteTools :: Autocomplete -> [Value]
+autocompleteTools=Tool.toolDefinitions . completionToolset
+
+-- | Run the actual contributed command on the authenticated request worker.
+-- The optional services recheck their own current request; an old driver cannot
+-- gain authority over a replacement provider. No Desktop enters this callback.
 autocompleteTool :: Autocomplete -> T.Text -> Value -> IO (Either T.Text Value)
-autocompleteTool runtime name args=readIORef (connection runtime) >>= maybe (pure (Left "No active completion request.")) (\c->A.callCompletionTool c name args)
+autocompleteTool runtime name args=do
+  current<-readIORef (connection runtime)
+  Tool.callTool (completionToolset runtime) (A.completionServices <$> current) name args
 
 -- The existing bounded provider queue owns delivery. Capturing is constant time;
 -- queue pressure or a duplicate Enter leaves the human's draft untouched.
@@ -360,7 +388,7 @@ prepareInput (Snapshot v b _ path) intent serial=do
       (row,_)=bufferLineColumn b offset
       (first,nearby)=context 40 row
       history=recent 3 b
-      input=CompletionInput (T.pack (show serial)) intent path (contents b) (revision b) offset first nearby (toJSON history)
+      input=CompletionInput (T.pack (show serial)) intent path (contents b) (revision b) offset first nearby history
   _<-evaluate (T.length (inputText input)+sum (map T.length nearby)+length (show history))
   pure input
   where
@@ -369,14 +397,14 @@ prepareInput (Snapshot v b _ path) intent serial=do
       let first=max 0 (row-radius)
           rows=[bufferLineAt b n | n<-[first..min (bufferLineCount b-1) (row+radius)]]
       in if radius>0 && sum (map T.length rows)>16384 then context (radius-1) row else (first,rows)
-    recent :: Int -> Buffer -> [Value]
+    recent :: Int -> Buffer -> [CompletionEdit]
     recent 0 _=[]
     recent n after=case undoStack after of
       []->[]
       _->let before=undo after
              (a,z,inserted)=fromMaybe (0,0,0) (lastChange after)
-         in object ["startOffset" .= a,"oldText" .= bufferSlice before a (min 2048 (z-a)),
-                    "newText" .= bufferSlice after a (min 2048 inserted)]:recent (n-1) before
+         in CompletionEdit a (bufferSlice before a (min 2048 (z-a)))
+              (bufferSlice after a (min 2048 inserted)):recent (n-1) before
 
 request :: Autocomplete -> T.Text -> Desktop -> IO Desktop
 request runtime intent d=do
@@ -550,7 +578,7 @@ traceLoop runtime=go ""
   where
     go old=do
       threadDelay 100000
-      messages<-readIORef (connection runtime) >>= maybe (pure []) A.pollACPCompletionTranscript
+      messages<-readIORef (connection runtime) >>= maybe (pure []) A.pollCompletionTranscript
       if null messages then go old else do
         let text=T.takeEnd 65536 (old<>T.intercalate "\n" messages<>"\n")
         body<-prepareTranscript text

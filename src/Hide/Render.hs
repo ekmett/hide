@@ -56,7 +56,7 @@ import Hide.Plugin.Canvas
 import Hide.Frontend (modeHeight)
 import Hide.Model
 import Hide.InlineState
-import Hide.InlineTypes (proposalEnd)
+import Hide.Plugin.Completion (proposalEnd)
 import Hide.Syntax
 import Hide.Files (FileState(..))
 import Hide.Browser (Entry(..))

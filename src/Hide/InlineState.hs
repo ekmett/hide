@@ -20,7 +20,7 @@ import Data.Char (isSpace)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import Hide.Buffer
-import Hide.InlineTypes
+import Hide.Plugin.Completion
 
 -- Only bounded proposal rows live here. Source trees/history remain in Buffer.
 data InlineOption = InlineOption

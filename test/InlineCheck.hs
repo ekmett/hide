@@ -16,7 +16,7 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import Hide.Buffer
 import Hide.InlineState
-import Hide.InlineTypes
+import Hide.Plugin.Completion
 
 checks :: IO ()
 checks=do

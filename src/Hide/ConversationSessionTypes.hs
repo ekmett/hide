@@ -18,7 +18,7 @@ import qualified Hide.ACP as A
 import Hide.AgentHub (AgentId,AgentConfigRef)
 
 data ConversationSessionReceipt = ConversationSessionReceipt
-  !Unique !AgentId !(StableName A.Launch) !(Maybe (StableName A.Client))
+  !Unique !AgentId !(StableName A.ProviderLaunch) !(Maybe (StableName A.Client))
   !(Maybe Text) !(Maybe AgentConfigRef) deriving Eq
 
 -- Provider-private keys and launch configuration must never appear in status.

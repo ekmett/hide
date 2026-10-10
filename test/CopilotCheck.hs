@@ -30,14 +30,14 @@ import System.Exit (ExitCode(..))
 import System.Info (os)
 import qualified Hide.ACP as ACP
 import Hide.Copilot
-import Hide.InlineTypes
+import Hide.Plugin.Completion
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do
   let server=root </> "fake-copilot.py"
       source=root </> "space λ.py"
-      launch=ACP.Launch "python3" ["-X","utf8",server,"--stdio"] []
-      input text version=CompletionInput "fixture" "propose" source text version (T.length text) 0 [] Null
+      launch=ACP.ProviderLaunch "python3" ["-X","utf8",server,"--stdio"] []
+      input text version=CompletionInput "fixture" "propose" source text version (T.length text) 0 [] []
   writeUtf8 server fakeServer
   withCopilot launch root $ \client->do
     check "process probe identifies the live provider" . (==Just True) =<< running (root </> "pid")

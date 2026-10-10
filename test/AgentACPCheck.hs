@@ -33,7 +33,7 @@ checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root -> do
   let script=root </> "provider.py"
       logPath=root </> "requests.jsonl"
-      launch=A.Launch "python3" [script] [("LOG",logPath)]
+      launch=A.ProviderLaunch "python3" [script] [("LOG",logPath)]
       spec=SpawnSpec "worker" "Inspect parser" root Shared Fresh Nothing Nothing
       request=StartRequest (AgentId "agent-1") Human spec Nothing Nothing
       bearer=T.replicate 12 "ab19"
