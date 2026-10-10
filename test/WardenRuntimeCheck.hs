@@ -12,7 +12,7 @@ import Control.Concurrent.Async (withAsync,wait)
 import qualified Control.Concurrent.STM as STM
 import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar,tryPutMVar,tryTakeMVar)
 import Control.Exception (finally)
-import Control.Monad (unless,void,forM_)
+import Control.Monad (unless,void,forM_,when)
 import Data.Aeson (Value(Null),object,(.=))
 import Data.IORef
 import Data.Either (isLeft)
@@ -264,12 +264,14 @@ outcomeChecks=withSystemOne $ \system->do
 -- Advice uses real owner receipts; the decision driver is the external model
 -- seam. Explicit barriers test takeover while inference is in flight.
 adviceChecks :: IO ()
-adviceChecks=withSystemOne $ \system->do
+adviceChecks=forM_ [False,True] $ \takeover->withSystemOne $ \system->do
   received<-newIORef []
   content<-newIORef (\_ _->pure ())
   hold<-newEmptyMVar
   entered<-newEmptyMVar
   retired<-newEmptyMVar
+  scopeRetiring<-newEmptyMVar
+  releaseScope<-newEmptyMVar
   let description=SupplierDescription "Advice check" InProcess (ReportedModel "advice-check") Nothing 0
       provider=DecisionProvider description $ \_ use->use (DecisionDriver $ \input stopped->do
         modifyIORef' received (input:)
@@ -282,6 +284,9 @@ adviceChecks=withSystemOne $ \system->do
             pure (Left DecisionCancelled)
           Nothing->pure (Right (DecisionOutput (supplierModel description)
             [DecisionAnswer (questionName q) BinaryAnswer [0.01,0.99] Nothing | q<-decisionQuestions input] Nothing)))
+        `finally` do
+          void (tryPutMVar scopeRetiring ())
+          when (not takeover) (takeMVar releaseScope)
       acquire kind identity launch endpoints context incomingHost incomingRequest emit=do
         maybe (pure ()) (writeIORef content) (providerContent incomingHost)
         fakeProvider kind identity launch endpoints context incomingHost incomingRequest emit
@@ -289,7 +294,8 @@ adviceChecks=withSystemOne $ \system->do
       host=ProviderHost (const (pure (finished (Right Nothing)))) Nothing Nothing (Just (\_ _->pure ()))
       request=StartRequest (AgentId "advice-owner") Human
         (SpawnSpec "Advice" "Task" "/" Shared Fresh Nothing Nothing) Nothing Nothing
-  void (selectDecisionProvider system (Just provider) >>= require)
+  -- Supplier replacement ends the review case. Takeover has a fresh owner:
+  -- selection publishes an incarnation before the old physical scope drains.
   withWarden (systemOneServices system) config (const (pure (Right ["Keep source files."]))) $ \owner->do
     identity<-newProviderIdentity
     driver<-wardenProviderFactory owner acquire PrimaryProvider identity
@@ -307,13 +313,38 @@ adviceChecks=withSystemOne $ \system->do
           submission<-newProviderSubmission
           void (driverSteer driver (HubMessage 0 Human "Use a different approach." False) [] submission >>= require)
         count=length <$> readIORef received
-    (do
+    (if takeover then do
+      void (selectDecisionProvider system (Just provider) >>= require)
+      void (deliver "Explain the parser.")
+      steer
+      failed
+      putMVar hold ()
+      withAsync (prepareWardenAdvice binding) $ \worker->do
+        barrier "advice request did not arrive" (takeMVar entered)
+        steer
+        result<-barrier "steered advice did not resolve" (wait worker)
+        check "in-flight advice cannot follow a changed task" (isLeft result)
+        barrier "task takeover did not cancel inference" (takeMVar retired)
+      publish<-readIORef content
+      (privateTurn,privateActive)<-deliver "Review completion."
+      publish (Just privateTurn) (ProviderMessage "Agent" "private-session-reference")
+      publish (Just privateTurn) (ProviderTurnBoundary privateTurn)
+      void (pollProviderReply (providerTurnReply privateActive))
+      prior<-count
+      privateReply<-prepareWardenAdvice binding
+      later<-count
+      check "private reply evidence is unavailable before supplier lookup" (isLeft privateReply && prior==later)
+      (partialTurn,partialActive)<-deliver "Review incomplete completion."
+      publish (Just partialTurn) (ProviderMessage "Agent" "All done.")
+      void (pollProviderReply (providerTurnReply partialActive))
+      partial<-prepareWardenAdvice binding
+      check "unstamped completion boundary cannot attest to a complete claim" (isLeft partial)
+     else do
       (turn,active)<-deliver "Explain the parser."
       absent<-prepareWardenAdvice binding
       check "advice without evidence does not run inference" . (&&isLeft absent) . (==0) =<< count
       failed
       failed
-      void (selectDecisionProvider system Nothing >>= require)
       unavailable<-prepareWardenAdvice binding
       check "absent supplier leaves evidence reviewable" (isLeft unavailable)
       void (selectDecisionProvider system (Just provider) >>= require)
@@ -342,32 +373,16 @@ adviceChecks=withSystemOne $ \system->do
       check "human steering retires advice" . isLeft =<< checkWardenAdvice claim
       failed
       afterSteer<-prepareWardenAdvice binding >>= require
+      check "replacement starts with current advice" . (==Right ()) =<< checkWardenAdvice afterSteer
       void (selectDecisionProvider system (Just provider) >>= require)
+      barrier "replaced supplier scope did not start retiring" (takeMVar scopeRetiring)
       check "supplier replacement expires draft receipt" . isLeft =<< checkWardenAdvice afterSteer
-      _<-prepareWardenAdvice binding >>= require
-      steer
-      failed
-      putMVar hold ()
-      withAsync (prepareWardenAdvice binding) $ \worker->do
-        barrier "advice request did not arrive" (takeMVar entered)
-        steer
-        result<-barrier "steered advice did not resolve" (wait worker)
-        check "in-flight advice cannot follow a changed task" (isLeft result)
-        barrier "task takeover did not cancel inference" (takeMVar retired)
-      (privateTurn,privateActive)<-deliver "Review completion."
-      publish (Just privateTurn) (ProviderMessage "Agent" "private-session-reference")
-      publish (Just privateTurn) (ProviderTurnBoundary privateTurn)
-      void (pollProviderReply (providerTurnReply privateActive))
-      prior<-count
-      privateReply<-prepareWardenAdvice binding
-      later<-count
-      check "private reply evidence is unavailable before supplier lookup" (isLeft privateReply && prior==later)
-      (partialTurn,partialActive)<-deliver "Review incomplete completion."
-      publish (Just partialTurn) (ProviderMessage "Agent" "All done.")
-      void (pollProviderReply (providerTurnReply partialActive))
-      partial<-prepareWardenAdvice binding
-      check "unstamped completion boundary cannot attest to a complete claim" (isLeft partial)
-      ) `finally` driverStop driver
+      beforeReplacement<-count
+      busy<-prepareWardenAdvice binding
+      check "review refuses a supplier while its old physical scope drains"
+        (case busy of Left message->message=="Warden review unavailable: the decision supplier is busy";_->False)
+      check "busy replacement does not run inference" . (==beforeReplacement) =<< count
+      ) `finally` (driverStop driver `finally` void (tryPutMVar releaseScope ()))
 
 barrier :: String -> IO a -> IO a
 barrier label action=timeout 2000000 action >>= maybe (ioError (userError label)) pure
