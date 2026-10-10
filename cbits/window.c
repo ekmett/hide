@@ -1,4 +1,7 @@
 #include "window.h"
+#ifdef _WIN32
+#include "file-drag-windows.h"
+#endif
 #include "accessibility.h"
 #include "unicode.h"
 #include "shaders/cell.h"
@@ -82,6 +85,12 @@ static Uint64 cursor_epoch;
 static Uint32 command_event, wake_event, dock_event, canvas_action_event;
 static double wheel_remainder;
 static void pointer(float x, float y, int32_t *event);
+#ifdef _WIN32
+static char *file_drag_path;
+static SDL_FRect file_drag_rect;
+static SDL_FPoint file_drag_start;
+static bool file_drag_pressed;
+#endif
 
 /* Immutable image resources belong to the SDL thread. An ID always identifies
  * the same pixels; explicit readmission after release may reuse it. Duplicate live begins fail,
@@ -301,8 +310,8 @@ void thc_close(void) {
 #ifdef __APPLE__
     thc_accessibility_close();
     thc_dock_close();
-    thc_file_drag_close();
 #endif
+    thc_cancel_file_drag();
     clear_pointer();
     left_down = false; held_mouse_buttons = 0;
     suppress_option_text = false;
@@ -483,19 +492,31 @@ void thc_file_drag_ended(void) {
 void thc_cancel_file_drag(void) {
 #ifdef __APPLE__
     thc_file_drag_close();
+#elif defined(_WIN32)
+    SDL_free(file_drag_path); file_drag_path=NULL;
+    if (file_drag_pressed) SDL_CaptureMouse(false);
+    file_drag_pressed=false;
 #endif
 }
 int thc_arm_file_drag(const char *path, int x, int y, int width, int height) {
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(_WIN32)
+    thc_cancel_file_drag();
     if (x<0 || y<0 || width<=0 || height<=0 || x>=cols || y>=rows || width>cols-x || height>rows-y) return SDL_SetError("The exported file row is no longer visible");
     int ww,wh;
     SDL_GetWindowSize(window,&ww,&wh);
     geometry();
     double sx=(double)ww/pixel_w,sy=(double)wh/pixel_h;
+#ifdef __APPLE__
     void *native=SDL_GetPointerProperty(SDL_GetWindowProperties(window),SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,NULL);
     if (!native) return SDL_SetError("Native file drag is unavailable");
     thc_file_drag_arm(native,path,(origin_x+cell_x(x))*sx,(origin_y+cell_y(y))*sy,
                       (cell_x(x+width)-cell_x(x))*sx,(cell_y(y+height)-cell_y(y))*sy);
+#else
+    file_drag_path=SDL_strdup(path);
+    if (!file_drag_path) return 0;
+    file_drag_rect=(SDL_FRect){(origin_x+cell_x(x))*sx,(origin_y+cell_y(y))*sy,
+        (cell_x(x+width)-cell_x(x))*sx,(cell_y(y+height)-cell_y(y))*sy};
+#endif
     return 1;
 #else
     (void)path;(void)x;(void)y;(void)width;(void)height;
@@ -988,6 +1009,56 @@ static void latest_motion(SDL_Event *event) {
         if (oldest && (!event->common.timestamp || oldest<event->common.timestamp)) event->common.timestamp=oldest;
     }
 }
+#ifdef _WIN32
+/* Only native mouse events can start an OS drag. The server's permission check
+ * and immutable snapshot precede arming; navigation invalidates that offer. */
+static bool file_drag_event(SDL_Event *event) {
+    if (!file_drag_path) return false;
+    switch (event->type) {
+    case SDL_EVENT_MOUSE_BUTTON_DOWN: {
+        SDL_FPoint point={event->button.x,event->button.y};
+        if (event->button.button!=SDL_BUTTON_LEFT ||
+            event->button.windowID!=SDL_GetWindowID(window) ||
+            !SDL_PointInRectFloat(&point,&file_drag_rect)) break;
+        file_drag_start=point; file_drag_pressed=true; SDL_CaptureMouse(true); return true;
+    }
+    case SDL_EVENT_MOUSE_MOTION:
+        if (!file_drag_pressed) return false;
+        latest_motion(event);
+        if (!(event->motion.state&SDL_BUTTON_LMASK)) break;
+        if (fabsf(event->motion.x-file_drag_start.x)<GetSystemMetrics(SM_CXDRAG) &&
+            fabsf(event->motion.y-file_drag_start.y)<GetSystemMetrics(SM_CYDRAG)) return true;
+        /* The Shell owns its modal drag loop and copy cursor. Do not keep SDL's
+         * mouse capture across it. OLE is balanced on this same SDL thread. */
+        SDL_CaptureMouse(false);
+        HRESULT initialized=OleInitialize(NULL),result=initialized;
+        if (SUCCEEDED(initialized)) {
+            IDataObject *data=NULL;
+            result=hide_file_drag_data(file_drag_path,&data);
+            if (SUCCEEDED(result)) {
+                DWORD effect=DROPEFFECT_NONE;
+                SDL_ShowCursor();
+                result=SHDoDragDrop(NULL,data,NULL,DROPEFFECT_COPY,&effect);
+                IDataObject_Release(data);
+            }
+            OleUninitialize();
+        }
+        thc_cancel_file_drag();
+        thc_file_drag_ended();
+        if (FAILED(result)) SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,"File export failed (HRESULT 0x%08lx)",(unsigned long)result);
+        return true;
+    case SDL_EVENT_MOUSE_BUTTON_UP: {
+        bool consumed=file_drag_pressed && event->button.button==SDL_BUTTON_LEFT;
+        thc_cancel_file_drag(); return consumed;
+    }
+    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_TEXT_INPUT: case SDL_EVENT_MOUSE_WHEEL:
+    case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+        break;
+    default: return false;
+    }
+    thc_cancel_file_drag(); return false;
+}
+#endif
 static double wheel_delta(const SDL_Event *event) {
     return event->wheel.y * (event->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -1 : 1);
 }
@@ -1020,12 +1091,13 @@ int thc_wait(int32_t *out) {
             SDL_free(input_text);input_text=e.user.data1;
             out[0]=18;return delivered(&e,out);
         }
+#ifdef _WIN32
+        if (file_drag_event(&e)) continue;
+#endif
         switch (e.type) {
         case SDL_EVENT_QUIT: case SDL_EVENT_WINDOW_CLOSE_REQUESTED: out[0] = 6; return delivered(&e,out);
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-#ifdef __APPLE__
-            thc_file_drag_close();
-#endif
+            thc_cancel_file_drag();
             geometry(); refresh_pointer(); out[0] = 5; out[1] = cols; out[2] = rows; return delivered(&e,out);
         case SDL_EVENT_WINDOW_EXPOSED: out[0] = 8; return delivered(&e,out);
         case SDL_EVENT_WINDOW_MOUSE_ENTER:

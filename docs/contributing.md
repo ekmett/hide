@@ -487,6 +487,15 @@ that supports GPU presentation; a headless Wayland compositor works, while Xvfb
 alone lacks the required DRI3 support. Select the hardware ICD when checking a
 headless machine so a software Vulkan driver cannot stand in for the GPU.
 
+On Windows, run it from an MSYS2 UCRT64 shell with SDL3, Pango, utf8proc and
+pkg-config installed. Set `CC` to the compiler if it is not named `cc`; GHC ships
+Clang in `mingw/bin`. With that Clang, retain the pkg-config system flags as in
+the [Windows build setup](install.md#native-window).
+The check also reads a Unicode-named binary export through the
+Windows Shell data object and checks cancellation of an armed Files row. This
+runs without dragging the desktop pointer or opening a visible window; acceptance
+by a particular destination application still needs an interactive check.
+
 On macOS the script also checks an unshown application menu for duplicate
 enablement and retained old menu-item stamps. These checks do not start an editor
 session. To also verify restoring a minimized window, set
