@@ -195,7 +195,7 @@ Hub-owned. These tools receive no human approval or settings capability.
 
 Plugin declarations carry their service context. `EditorTool` receives
 `EditorServices` after admission; `CoordinationTool` receives authenticated
-`AgentServices`. `RequestTool` receives `RequestServices`, whose buffer operations
+`AgentServices`. `RequestTool` receives `RequestServices`, whose read and diff operations
 request fresh permission themselves. This explicit distinction prevents nested
 approvals and never follows from a read-only hint. Anonymous editor connections
 cannot manufacture an agent context, and child coordination connections do not
@@ -208,7 +208,7 @@ The primary route exposes editor and coordination tools; a child's coordination
 route exposes only coordination tools. Autocomplete keeps its separate restricted
 route. The remaining editor tools still use host types.
 
-## Immutable plugin buffer reads
+## Immutable plugin buffer and window reads
 
 `Hide.Plugin.BufferRead` in `hide-plugin-api` exposes checked page requests,
 masked metadata and immutable text/byte replies. `hide-agents` declares
@@ -223,6 +223,20 @@ An omitted buffer selector binds to the active source at dispatch. The captured
 allocation frontier excludes later-created buffers; closed IDs are never reused
 within a session. Closing the session reader rejects further captures, while the
 plugin tool scope separately retires retained tool calls.
+
+`Hide.Plugin.WindowRead` supplies the same bounded text pages for `read_window`.
+`Hide.BufferRequest` captures the exact frame and prepared or logical body before
+worker dispatch, then supplies `RequestServices.requestWindows`. The capability
+is absent on other requests. An omitted selector keeps the originally active
+window; a different selector is refused. Every call rechecks current actor,
+policy, privacy and body identity through the host reader. Closing or replacing
+the body before admission rejects the request. An already admitted immutable
+snapshot remains readable after close.
+
+Conversation pages address the logical transcript, independently of its visible
+rows or wrapping. Worker-side projection applies privacy masks before producing
+the bounded page. The plugin owns the `window-text` reply codec; no prepared body,
+source tree or callable window handle crosses this package boundary.
 
 The lower-level `Hide.Plugin.Buffer` is currently a host-internal module, despite
 its namespace. It provides opaque `BufferRef`, `BufferRead` and `ContentVersion` values.
@@ -262,10 +276,11 @@ and resolves typed replies. Cancellation withdraws one request; shutdown closes
 acceptance and terminally resolves pending replies. Only the host's fixed capture
 operation and actor check run during admission.
 
-The public buffer services reuse this reader's ownership rather than adding a
-second queue or command registry. Prepared `read_window` requests still use
-`Hide.BufferReadCommand` to bind their exact logical body before approval;
-source buffer pages bind document identity and capture its current contents.
+Public buffer and window services reuse the existing reader ownership. Source
+buffer pages bind document identity and capture its current contents; window
+pages bind the exact prepared or logical body before approval. Both use the
+host's measured paging implementation in `Hide.BufferReadServices`, with no
+separate command registry.
 
 `BufferRef` combines the running session namespace with its once-allocated
 logical document ID. It survives ordinary edits and reload of that document;

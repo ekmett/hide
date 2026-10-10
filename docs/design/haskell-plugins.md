@@ -785,6 +785,13 @@ text/byte pages. The host retains measured source trees, target identity,
 permission ownership and privacy filtering. The plugin owns tool declarations
 and wire presentation.
 
+`read_window` uses `Hide.Plugin.WindowRead` through a request-bound capability.
+The host captures its exact frame and prepared or logical body before dispatch;
+changing focus cannot retarget it. Each invocation rechecks caller, policy,
+privacy and that body identity. Projection and bounded paging run on the worker,
+including the logical conversation catalogue. The plugin owns the declaration
+and `window-text` reply codec; no host body or source tree crosses the API.
+
 `buffer_apply_diff` consumes the public `Hide.Plugin.BufferDiff` service through
 `RequestServices`. Its target and exact content identity are captured before
 worker dispatch, and only that request receives the diff capability. The callback

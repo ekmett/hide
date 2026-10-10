@@ -20,7 +20,9 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Hide.EditorMCP
 import Hide.BufferReads (captureWindow)
-import Hide.BufferReadCommand (withBufferReadCommands,bufferPage)
+import Hide.BufferReadServices (bufferPage)
+import Hide.BufferRequest (bufferRequestServices)
+import qualified Hide.Plugin.Tool as Tool
 import Hide.Plugin.Command (Codec(..))
 import qualified Hide.Plugin.BufferRead as R
 import qualified Hide.BufferTools as BufferTools
@@ -32,7 +34,7 @@ import Hide.Buffer
 import Hide.Model
 
 checks :: AllocationProfile -> IO ()
-checks profile = do
+checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
   let check name ok=unless ok (error name)
       original=addDocument Nothing (newBuffer "old\nsecond") (initialDesktop (80,25))
       win=fromJust (activeWindow original)
@@ -42,7 +44,10 @@ checks profile = do
       text=TE.decodeUtf8 . BL.toStrict . encode
       names=editorResponse edited (rpc "tools/list" (object []))
       content=bufferContents edited (object ["bufferId" .= sourceFixtureBuffer win,"startLine" .= (1::Int),"lineCount" .= (1::Int)])
-  check "MCP lists built-in live window tools" (all (\name->maybe False (T.isInfixOf name . text) names) ["list_windows","read_window","read_selection"])
+  check "MCP lists built-in live window metadata tools" (all (\name->maybe False (T.isInfixOf name . text) names) ["list_windows","read_selection"])
+  check "read_window belongs only to the public plugin declarations"
+    (maybe False (not . T.isInfixOf "read_window" . text) names
+      && length [() | Object fields<-Tool.toolDefinitions toolset,KM.lookup "name" fields==Just (String "read_window")]==1)
   check "MCP returns unsaved Unicode text" (either (const False) (T.isInfixOf "unsaved λ" . text) content && not (either (const False) (T.isInfixOf "second" . text) content))
   check "MCP does not fabricate saved paths for untitled buffers" (maybe False (T.isInfixOf "Untitled" . text) (call "list_windows" (object [])))
   check "MCP missing buffer is a tool error" (case bufferContents edited (object ["bufferId" .= (999::Int)]) of Left "Buffer not found"->True; _->False)
@@ -59,12 +64,14 @@ checks profile = do
         (V.fromList [(0,T.length "Session: provider-secret"),(answerStart,T.length conversationText)]) V.empty V.empty
   conversationBody<-W.prepareSemanticTextWindow "Conversation" [(conversationText,Plain)] semantics
     >>= either (error . T.unpack) pure
-  W.withWindowScope $ \scope->withBufferReadCommands $ \commands->do
+  W.withWindowScope $ \scope->do
     update<-W.openWindow scope conversationBody >>= maybe (error "Prepared read fixture scope ended") pure
     (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "Prepared read fixture admission failed") pure
     let conversation=addPluginWindow reference conversationBody (initialDesktop (80,25))
-    (_,finishRead)<-readWindowTool commands (captureWindow conversation) conversation "read_window" (object [])
-    privateRead<-finishRead
+    context<-bufferRequestServices (error "window read evaluated the buffer reader")
+      (error "window read evaluated the buffer editor") (captureWindow conversation)
+      conversation "read_window" (object []) >>= either (error . T.unpack) pure
+    privateRead<-Tool.callTool toolset context "read_window" (object [])
     let encodedRead=either id text privateRead
     check "MCP prepared window reads redact private semantic ranges"
       (case privateRead of
@@ -180,7 +187,7 @@ checks profile = do
   mapM_ (\specs->mapM_ (\name->do
     denied<-strict specs (request name (object []))
     check "strict server cannot fall back to workspace reads" (maybe False (T.isInfixOf "Unknown tool" . text) denied
-      && not (maybe False (T.isInfixOf "unsaved λ" . text) denied))) ["read_buffer","list_buffers","list_windows","read_selection"]) [[],[agentSpec]]
+      && not (maybe False (T.isInfixOf "unsaved λ" . text) denied))) ["read_buffer","list_buffers","list_windows","read_window","read_selection"]) [[],[agentSpec]]
   check "strict rejected calls never reach controller" . (==2) =<< readIORef invoked
   allowed<-strict [agentSpec] (request "agents_list" (object []))
   check "strict registered tool reaches controller" (maybe False (T.isInfixOf "ready" . text) allowed)

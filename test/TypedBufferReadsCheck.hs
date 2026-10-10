@@ -25,7 +25,8 @@ import Hide.Protocol
 import Hide.Remote
 import Hide.RemoteEndpoint
 import qualified Hide.Session as S
-import Hide.BufferReadCommand (withBufferReadCommands,bufferReadServices,readPage,readWindowCommand)
+import Hide.BufferReadServices (bufferReadServices,windowPage)
+import qualified Hide.Plugin.WindowRead as WR
 import Hide.BufferReads (windowReadTarget,capturedWindowPrepared)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
@@ -39,12 +40,12 @@ import Hide.Model
 import Hide.MCPPermissions
 import qualified Hide.Plugin.Buffer as P
 import Hide.Plugin.BufferHost (readerReference)
-import Hide.EditorMCP (builtinTools,readWindowTool,editorResponseOnly)
+import Hide.EditorMCP (builtinTools,editorResponseOnly)
 import qualified Hide.BufferTools as BufferTools
 import qualified Hide.Plugin.BufferRead as R
 import Hide.Plugin.Request (RequestServices(..))
 import qualified Hide.Plugin.Tool as Tool
-import Hide.Plugin.Command (codecEncode)
+import Hide.Plugin.Command (codecDecode,codecEncode)
 
 ownerUntil :: Hide.MCPPermissions.Permissions -> Desktop -> Async a -> IO Desktop
 ownerUntil owner desktop worker=do
@@ -80,7 +81,7 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
   bracket temporary removePathForcibly $ \root->do
     let path=root </> "config.toml"
     listingChecks toolset specs path
-    windowReadChecks path
+    windowReadChecks toolset specs path
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'enable'\n"
     withPermissionsAt path specs $ \owner->do
       let reader=bufferReader owner (pure (Right ()))
@@ -94,7 +95,7 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
         captured<-wait worker >>= either (error . T.unpack) pure
         check "typed capture reads owner current state" (text captured==Right "current λ\n")
         check "granted snapshot retains measured source" (P.capturedRef captured==reference)
-      context<-evaluate (RequestServices (bufferReadServices reader (activeWindow base >>= bufferId) (nextId base)) Nothing)
+      context<-evaluate (RequestServices (bufferReadServices reader (activeWindow base >>= bufferId) (nextId base)) Nothing Nothing)
       let focusedElsewhere=addDocument Nothing (newBuffer "later source") base
       withAsync (Tool.callTool toolset context "read_buffer" (object [])) $ \worker->do
         queued worker
@@ -190,7 +191,7 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
           editor=bufferEditor owner (pure (Right ()))
           inspect d _ request=do
             let dispatch current name args=do
-                  captured<-bufferRequestServices reader editor current name args
+                  captured<-bufferRequestServices reader editor (windowReader owner (pure (Right ()))) current name args
                   pure (current,either (pure . Left) (\context->Tool.callTool toolset context name args) captured)
             (next,reply)<-editorResponseOnly (specs++fileTools) dispatch d request
             pure (False,next,reply)
@@ -303,7 +304,7 @@ listingChecks toolset specs path=do
         check "listed refs cannot cross session namespaces" . rejected =<< wait capture
     let reply=Tool.callTool toolset (RequestServices (R.BufferReadServices
           (R.bufferList (bufferReadServices reader Nothing 0))
-          (error "listing evaluated read-only context")) Nothing) "list_buffers" (object [])
+          (error "listing evaluated read-only context")) Nothing Nothing) "list_buffers" (object [])
     withAsync reply $ \worker->do
       queued worker
       _<-ownerUntil owner current worker
@@ -342,11 +343,11 @@ listingChecks toolset specs path=do
       check "listing defers exceptional dirty comparison to consumer worker" (case outcome of Left _->True; _->False)
     retired<-Tool.withTools [] BufferTools.tools pure
     check "closed tool registry refuses listing before enqueue" . rejected =<<
-      Tool.callTool retired (RequestServices (bufferReadServices reader Nothing 0) Nothing) "list_buffers" (object [])
+      Tool.callTool retired (RequestServices (bufferReadServices reader Nothing 0) Nothing Nothing) "list_buffers" (object [])
 
 -- One actual prepared-window read workflow, sharing the existing admission pump.
-windowReadChecks :: FilePath -> IO ()
-windowReadChecks path=W.withWindowScope $ \scope->do
+windowReadChecks :: Tool.Tools RequestServices -> [Value] -> FilePath -> IO ()
+windowReadChecks toolset specs path=W.withWindowScope $ \scope->do
   let check label ok=unless ok (error label)
       semantics=W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow
         (V.singleton (7,13)) V.empty V.empty
@@ -361,22 +362,47 @@ windowReadChecks path=W.withWindowScope $ \scope->do
         timeout 3000000 observe >>= maybe (error "window read did not enqueue") pure
       wait worker=timeout 3000000 (Control.Concurrent.Async.wait worker) >>= maybe (error "window read timed out") pure
       text result=result >>= parseMaybe (withObject "read" (.: "text"))
+      call context arguments=Tool.callTool toolset context "read_window" arguments
   prepared<-prepare "public\nsecret\nvisible"
   update<-W.openWindow scope prepared >>= maybe (error "window read opening failed") pure
   (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "window read admission failed") pure
   let base=addPluginWindow reference prepared (initialDesktop (80,25))
       ident=maybe (error "window read frame missing") windowId (activeWindow base)
+      arguments=object ["windowId" .= ident]
       closed=base {windows=[],pluginWindows=M.empty}
   target<-either (error . T.unpack) pure (windowReadTarget base ident)
-  page<-either (error . T.unpack) pure (readPage 1 200 0)
+  pageArguments<-either (error . T.unpack) pure (WR.readArguments (Just ident) 1 200)
+  check "window request codec preserves checked coordinates"
+    (codecDecode WR.readInput (codecEncode WR.readInput pageArguments)==Right pageArguments)
+  check "window request codec defaults the captured active target"
+    (codecDecode WR.readInput (object [])==WR.readArguments Nothing 1 200)
+  check "window request codec rejects unknown fields and unbounded coordinates"
+    (all (rejected . codecDecode WR.readInput)
+      [object ["byteOffset" .= (0::Int)],object ["startLine" .= (0::Int)],
+       object ["lineCount" .= (1001::Int)],object ["windowId" .= (0.5::Double)]])
   privateBody<-W.prepareTextWindow "Private metadata" "private text"
-  check "private prepared window refuses read selection"
-    (rejected (windowReadTarget (base {pluginWindows=M.singleton reference privateBody}) ident))
+  let private=base {pluginWindows=M.singleton reference privateBody}
+  check "private prepared window refuses read selection" (rejected (windowReadTarget private ident))
   TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'enable'\nread_window = 'enable'\n"
-  withPermissionsAt path builtinTools $ \owner->withBufferReadCommands $ \commands->do
+  withPermissionsAt path specs $ \owner->do
     let reader=windowReader owner (pure (Right ()))
-    (_,reply)<-readWindowTool commands reader base "read_window" (object ["windowId" .= ident])
-    withAsync reply $ \worker->do
+        contextFor caller desktop args=bufferRequestServices (bufferReader owner caller)
+          (bufferEditor owner caller) (windowReader owner caller) desktop "read_window" args
+          >>= either (error . T.unpack) pure
+    context<-contextFor (pure (Right ())) base arguments
+    readOnlyContext<-bufferRequestServices (bufferReader owner (pure (Right ())))
+      (bufferEditor owner (pure (Right ()))) reader base "read_buffer" (object [])
+      >>= either (error . T.unpack) pure
+    missing<-call readOnlyContext arguments
+    check "public window tool requires an exact captured capability"
+      (missing==Left "Window read requires an exact host-captured request.")
+    substituted<-call context (object ["windowId" .= (ident+1)])
+    check "captured window capability rejects target substitution"
+      (substituted==Left "Window read changed its original target")
+    denied<-bufferRequestServices (bufferReader owner (pure (Right ())))
+      (bufferEditor owner (pure (Right ()))) reader private "read_window" arguments
+    check "public window preflight retains private-body refusal" (rejected denied)
+    withAsync (call context arguments) $ \worker->do
       queued worker
       _<-ownerUntil owner base worker
       result<-wait worker >>= either (error . T.unpack) pure
@@ -386,47 +412,71 @@ windowReadChecks path=W.withWindowScope $ \scope->do
           Just (Object meta)->KM.lookup "windowId" meta==Just (toJSON ident) && KM.lookup "coordinateSpace" meta==Just (String "window-text") && not (KM.member "bufferId" meta)
           _->False
         _->False
+      page<-either (error . T.unpack) pure (codecDecode BufferTools.windowOutput result)
+      check "public window output codec round-trips the admitted page"
+        (codecDecode BufferTools.windowOutput (codecEncode BufferTools.windowOutput page)==Right page)
+      check "public window output codec enforces the text budget"
+        (rejected (codecDecode BufferTools.windowOutput (codecEncode BufferTools.windowOutput
+          (page {WR.windowPage=(WR.windowPage page) {R.pageText=T.replicate 131073 "x"}}))))
+      check "public window output codec rejects extra fields" (case result of
+        Object fields->rejected (codecDecode BufferTools.windowOutput (Object (KM.insert "bufferId" (toJSON ident) fields)))
+        _->False)
+    defaultContext<-contextFor (pure (Right ())) base (object [])
+    let focusedElsewhere=addDocument Nothing (newBuffer "later source") base
+    withAsync (call defaultContext (object [])) $ \worker->do
+      queued worker
+      _<-ownerUntil owner focusedElsewhere worker
+      result<-wait worker >>= either (error . T.unpack) pure
+      check "default window read keeps the target selected before dispatch"
+        (text (Just result)==Just ("public\n      \nvisible"::T.Text))
     withAsync (reader target) $ \worker->do
       queued worker
       _<-ownerUntil owner base worker
       image<-wait worker >>= either (error . T.unpack) pure
       check "captured window retains exact prepared identity" (capturedWindowPrepared image==prepared)
       check "closed frame rejects a new target" (rejected (windowReadTarget closed ident))
-      result<-readWindowCommand commands (pure (Right image)) page >>= either (error . T.unpack) pure
-      check "accepted immutable window snapshot formats after close" (text (Just result)==Just ("public\n      \nvisible"::T.Text))
+      page<-windowPage image pageArguments >>= either (error . T.unpack) pure
+      check "accepted immutable window snapshot formats after close"
+        (text (Just (codecEncode BufferTools.windowOutput page))==Just ("public\n      \nvisible"::T.Text))
     refreshed<-prepare "public\nsecret\nnew body"
     refresh<-W.refreshWindow reference refreshed >>= maybe (error "window read refresh failed") pure
     _<-W.admitWindowUpdate True refresh >>= maybe (error "window read refresh admission failed") pure
     let current=base {pluginWindows=M.singleton reference refreshed}
-    withAsync (reader target) $ \worker->do
+    withAsync (call context arguments) $ \worker->do
       queued worker
       _<-ownerUntil owner current worker
-      check "queued window read refuses prepared refresh" . rejected =<< wait worker
-    withAsync (reader target) $ \worker->do
+      check "queued public window read refuses prepared refresh" . rejected =<< wait worker
+    withAsync (call context arguments) $ \worker->do
       queued worker
       _<-ownerUntil owner closed worker
-      check "queued window read refuses closed frame" . rejected =<< wait worker
+      check "queued public window read refuses closed frame" . rejected =<< wait worker
     actor<-newIORef (Right ())
-    withAsync (windowReader owner (readIORef actor) target) $ \worker->do
+    attributed<-contextFor (readIORef actor) base arguments
+    withAsync (call attributed arguments) $ \worker->do
       queued worker
       writeIORef actor (Left "actor revoked")
       _<-ownerUntil owner base worker
       outcome<-wait worker
-      check "window read rechecks the captured caller" (case outcome of Left "actor revoked"->True; _->False)
-    withAsync (reader target) $ \worker->do
+      check "public window read rechecks the captured caller" (outcome==Left "actor revoked")
+    withAsync (call context arguments) $ \worker->do
       queued worker
       cancel worker
       _<-tickPermissions owner base
-      check "window cancellation resolves its capture claim" . either (const True) (const False) =<< waitCatch worker
+      check "public window cancellation resolves its capture claim" . either (const True) (const False) =<< waitCatch worker
+    retired<-Tool.withTools [] BufferTools.tools pure
+    check "retired plugin registry refuses window reads before enqueue" . rejected =<<
+      Tool.callTool retired context "read_window" arguments
     W.retireWindowRef reference
-    withAsync (reader target) $ \worker->do
+    withAsync (call context arguments) $ \worker->do
       queued worker
       _<-ownerUntil owner base worker
       check "inert installed readable text survives action retirement" . either (const False) (const True) =<< wait worker
-  (reader,pending)<-withPermissionsAt path builtinTools $ \owner->do
-    let reader=windowReader owner (pure (Right ()))
-    pending<-async (reader target)
+  (context,pending)<-withPermissionsAt path specs $ \owner->do
+    context<-bufferRequestServices (bufferReader owner (pure (Right ())))
+      (bufferEditor owner (pure (Right ()))) (windowReader owner (pure (Right ()))) base "read_window" arguments
+      >>= either (error . T.unpack) pure
+    pending<-async (call context arguments)
     queued pending
-    pure (reader,pending)
-  check "shutdown resolves accepted window capture" . rejected =<< wait pending
-  check "closed service refuses new window capture" . rejected =<< reader target
+    pure (context,pending)
+  check "shutdown resolves accepted public window read" . rejected =<< wait pending
+  check "closed service refuses new public window read" . rejected =<< call context arguments

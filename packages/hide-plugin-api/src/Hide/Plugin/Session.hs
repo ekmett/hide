@@ -41,7 +41,8 @@ data Session c r settings completion = Session
 --
 -- Request tools share editor visibility but receive self-admitting services.
 -- Each operation requests fresh permission through its host owner; exact diff
--- capability is present only for a host-captured request. Do not wrap these tools
+-- and window-read capabilities are present only for their host-captured request.
+-- Do not wrap these tools
 -- in a second permission call or supply general editor services before admission.
 data PluginTool
   = EditorTool (Tool EditorServices)

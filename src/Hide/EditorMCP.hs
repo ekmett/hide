@@ -5,7 +5,7 @@
 -- Tool initiation and reply waiting are separate phases so HLS, DAP and human
 -- approvals can continue while a request is pending. Actor-bound routes expose
 -- only their supplied tools, with no fallback into ordinary desktop reads.
-module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, readWindowTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, openEditorFiles, readMCPLine) where
+module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, openEditorFiles, readMCPLine) where
 
 import Hide.Sidebar
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
@@ -30,8 +30,6 @@ import System.Environment (lookupEnv, getExecutablePath)
 import System.Directory (makeAbsolute)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import Hide.Buffer
-import Hide.BufferReadCommand (BufferReadCommands,readPage,readWindowCommand)
-import Hide.BufferReads (WindowReadTarget,CapturedWindowRead,windowReadTarget)
 import qualified Hide.Plugin.Window as W
 import Hide.Files (filePath)
 import Hide.GuestAccess (protectedWindow)
@@ -231,7 +229,6 @@ builtinTool desktop=tool
   where
     tool :: T.Text -> Value -> Either T.Text Value
     tool "list_windows" _=Right (object ["windows" .= (map window (windows desktop)++panels)])
-    tool "read_window" _=Left "Window reads require the live permission owner."
     tool "read_selection" args = parseArgs (withObject "read_selection" (.:? "windowId")) args >>= \wanted -> do
       w <- maybe (maybe (Left "No active window") Right (activeWindow desktop))
         (\ident -> maybe (Left "Window not found") Right (findWindow ident)) wanted
@@ -268,21 +265,6 @@ builtinTool desktop=tool
     rect (Rect x y w h)=object ["x" .= x,"y" .= y,"width" .= w,"height" .= h]
     title doc | privateDocument desktop doc="[private]"
               | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
--- | Select one exact prepared body under serialization, then return the fixed
--- capture/format worker continuation. No body walk or masking occurs here.
-readWindowTool :: BufferReadCommands -> (WindowReadTarget -> IO (Either T.Text CapturedWindowRead)) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
-readWindowTool commands capture desktop _ args=case request of
-  Left err->pure (desktop,pure (Left err))
-  Right (target,page)->target `seq` page `seq` pure (desktop,readWindowCommand commands (capture target) page)
-  where
-    request=do
-      (wanted,start,count)<-either (Left . T.pack) Right $ parseEither
-        (withObject "read_window" $ \o->(,,) <$> o .:? "windowId" <*> o .:? "startLine" .!= 1 <*> o .:? "lineCount" .!= 200) args
-      ident<-maybe (maybe (Left "No active window") (Right . windowId) (activeWindow desktop)) Right wanted
-      target<-windowReadTarget desktop ident
-      page<-readPage start count 0
-      pure (target,page)
-
 -- | Dispatch with the desktop locked and return a reply continuation.
 -- Wait for that continuation only after releasing the desktop lock.
 editorResponseWith :: [Value]
@@ -384,7 +366,6 @@ debugTools =
 tools :: [Value]
 tools =
   [ describe "list_windows" "List editor window IDs, titles, buffer IDs, geometry, active window and side panels." []
-  , describe "read_window" "Read an explicitly readable prepared text window by logical window-text lines; private regions are redacted. Defaults to the active window, 200 lines; maximum 1000 lines and 131072 characters. Source windows use read_buffer." [("windowId","integer"),("startLine","integer"),("lineCount","integer")]
   , describe "read_selection" "Read up to 131072 selected characters and cursor offsets in an editor window; truncated reports a larger selection. coordinateSpace distinguishes source from rendered-markdown offsets; a pending Markdown view refuses the read. Defaults to the active window." [("windowId","integer")]
   ]
   where

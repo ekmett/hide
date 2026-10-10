@@ -70,7 +70,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
       response<-either (error . show) pure result
       check "internal typed handler applies exact diff without Desktop" (activeText updated=="agent\n" && P.appliedDiff response==patch && not (P.userModified response))
       check "internal typed diff has one ordinary Undo" (length (undoStack (documentBuffer (buffers updated M.! ident)))==1 && activeText (fst (runCommand Undo updated))=="old\n")
-    readOnlyContext<-bufferRequestServices reader linkedEditor base "read_buffer" (object []) >>= either (error . T.unpack) pure
+    readOnlyContext<-bufferRequestServices reader linkedEditor (windowReader owner (pure (Right ()))) base "read_buffer" (object []) >>= either (error . T.unpack) pure
     missing<-timeout 5000000 (Tool.callTool toolset readOnlyContext "buffer_apply_diff" arguments)
     check "public diff tool refuses a request without captured diff capability"
       (missing==Just (Left "Diff requires an exact host-captured request."))
@@ -84,7 +84,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
         editor=bufferEditor owner (pure (Right ()))
         reference=editorReference editor ident
     version<-captureVersion (documentBuffer (buffers base M.! ident))
-    captured<-bufferRequestServices reader editor base "buffer_apply_diff" arguments >>= either (error . T.unpack) pure
+    captured<-bufferRequestServices reader editor (windowReader owner (pure (Right ()))) base "buffer_apply_diff" arguments >>= either (error . T.unpack) pure
     substituted<-timeout 5000000 (Tool.callTool toolset captured "buffer_apply_diff"
       (object ["bufferId" .= (ident+1),"revision" .= (0::Int),"diff" .= patch]))
     check "captured diff capability cannot be redirected to another target"
@@ -131,7 +131,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
   retired<-Tool.withTools [] BufferTools.tools pure
   withPermissionsAt config specs $ \owner->do
     captured<-bufferRequestServices (bufferReader owner (pure (Right ())))
-      (bufferEditor owner (pure (Right ()))) base "buffer_apply_diff" arguments >>= either (error . T.unpack) pure
+      (bufferEditor owner (pure (Right ()))) (windowReader owner (pure (Right ()))) base "buffer_apply_diff" arguments >>= either (error . T.unpack) pure
     result<-timeout 5000000 (Tool.callTool retired captured "buffer_apply_diff" arguments)
     check "retired plugin tool cannot resurrect a diff request in live service"
       (case result of Just (Left "RegistryClosed")->True; _->False)
@@ -288,7 +288,7 @@ batchChecks specs directory config single first firstPatch=do
 -- same test worker rather than issuing a second diff request.
 startDiffCall :: Tool.Tools RequestServices -> Permissions -> IO (Either T.Text ()) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 startDiffCall toolset owner caller desktop name args=do
-  captured<-bufferRequestServices (bufferReader owner caller) (bufferEditor owner caller) desktop name args
+  captured<-bufferRequestServices (bufferReader owner caller) (bufferEditor owner caller) (windowReader owner caller) desktop name args
   let response=either (pure . Left) (\context->Tool.callTool toolset context name args) captured
   worker<-async response
   let queued=do

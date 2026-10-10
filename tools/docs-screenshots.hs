@@ -13,7 +13,7 @@ import Hide.Buffer (newBuffer, Selection(..), revision, contents, replaceSelecti
 import Hide.BufferView (BufferView(SideBySideView,MarkdownView))
 import Hide.Files (FileState(..))
 import Hide.TextPresentation (prepareTextPresentations)
-import Hide.MCPPermissions (withPermissionsAt, bufferEditor, bufferReader, tickPermissions, policyEffects)
+import Hide.MCPPermissions (withPermissionsAt, bufferEditor, bufferReader, tickPermissions, policyEffects,windowReader)
 import Hide.WorkspaceFilesMCP (fileTools)
 import Hide.BufferRequest (bufferRequestServices)
 import qualified Hide.BufferTools as BufferTools
@@ -267,7 +267,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
                   ["-"<>first,"+{-# LANGUAGE MultiParamTypeClasses #-}","+{-# LANGUAGE OverloadedStrings #-}"] ++ map (" "<>) rest)
             let args=object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch]
             context<-bufferRequestServices (bufferReader permissions (pure (Right ())))
-              (bufferEditor permissions (pure (Right ()))) d "buffer_apply_diff" args >>= either (fail . T.unpack) pure
+              (bufferEditor permissions (pure (Right ()))) (windowReader permissions (pure (Right ()))) d "buffer_apply_diff" args >>= either (fail . T.unpack) pure
             withAsync (PluginTool.callTool bufferTools context "buffer_apply_diff" args) $ \_->
               await "typed diff approval" (tickPermissions permissions) ((/=Nothing).dialog) d
           _ -> fail "Permission screenshot requires the open source buffer"

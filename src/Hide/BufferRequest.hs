@@ -7,7 +7,7 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 --
--- Capture the narrow context of self-admitting buffer tools before worker
+-- Capture the narrow context of self-admitting read and diff tools before worker
 -- dispatch. The permission owner retains mutation, review and cancellation;
 -- plugins receive neither the desktop nor an editable buffer tree.
 module Hide.BufferRequest
@@ -18,9 +18,11 @@ import Control.DeepSeq (force)
 import Control.Exception (evaluate)
 import Data.Aeson (Value)
 import Data.Text (Text)
-import Hide.BufferReadCommand (bufferReadServices)
-import Hide.Model (Desktop,activeWindow,bufferId,nextId)
+import Hide.BufferReadServices (bufferReadServices,windowPage)
+import Hide.BufferReads (WindowReadTarget,CapturedWindowRead,windowReadTarget,windowReadIdentifier)
+import Hide.Model (Desktop,activeWindow,bufferId,nextId,windowId)
 import qualified Hide.Plugin.Buffer as P
+import qualified Hide.Plugin.WindowRead as W
 import qualified Hide.Plugin.BufferDiff as D
 import Hide.Plugin.BufferHost (editorReference)
 import Hide.Plugin.Command (Codec(..),CommandError(..))
@@ -32,15 +34,38 @@ import Hide.WorkspaceFilesMCP (capturePatchRequest)
 -- immutable content identity before any permission wait; equal numeric revision
 -- never permits a replacement buffer to inherit the request.
 --
--- The context contains only session-bound services and narrow immutable keys.
+-- The context contains session-bound services and immutable target captures;
+-- window captures retain only their prepared body or logical transcript.
 -- A diff capability is present only for a validated diff request. It refuses
 -- target/revision substitution and asks the existing owner for fresh admission
--- on every invocation, including retries with a changed patch.
-bufferRequestServices :: P.BufferReader -> P.BufferEditor -> Desktop -> Text -> Value
+-- on every invocation, including retries with a changed patch. A window read
+-- pins the original active/explicit window and exact body before approval; later
+-- focus changes cannot retarget it and body replacement expires the capture.
+bufferRequestServices :: P.BufferReader -> P.BufferEditor
+  -> (WindowReadTarget -> IO (Either Text CapturedWindowRead)) -> Desktop -> Text -> Value
   -> IO (Either Text RequestServices)
-bufferRequestServices reader editor desktop name args=do
+bufferRequestServices reader editor captureWindow desktop name args=do
   reading<-evaluate (bufferReadServices reader (activeWindow desktop >>= bufferId) (nextId desktop))
-  if name/="buffer_apply_diff" then pure (Right (RequestServices reading Nothing))
+  if name=="read_window" then case codecDecode W.readInput args of
+    Left err->pure (Left err)
+    Right request->case do
+      ident<-maybe (maybe (Left "No active window") (Right . windowId) (activeWindow desktop)) Right (W.wantedWindow request)
+      windowReadTarget desktop ident of
+        Left err->pure (Left err)
+        Right target->do
+          captured<-evaluate target
+          let ident=windowReadIdentifier captured
+              readPage candidate
+                | maybe False (/=ident) (W.wantedWindow candidate)=
+                    pure (Left (CommandRejected "Window read changed its original target"))
+                | otherwise=do
+                    admitted<-captureWindow captured
+                    result<-case admitted of
+                      Left err->pure (Left err)
+                      Right image->windowPage image candidate
+                    pure (either (Left . CommandRejected) Right result)
+          pure (Right (RequestServices reading Nothing (Just (W.WindowReadServices readPage))))
+  else if name/="buffer_apply_diff" then pure (Right (RequestServices reading Nothing Nothing))
   else case codecDecode D.applyInput args of
     Left err->pure (Left err)
     Right request->do
@@ -59,4 +84,4 @@ bufferRequestServices reader editor desktop name args=do
                       Left err->pure (Left (CommandRejected err))
                       Right result->Right <$> evaluate (force (D.DiffReply ident (P.diffRevision result)
                         (P.appliedDiff result) (P.userModified result)))
-          in Right (RequestServices reading (Just (D.BufferDiffServices apply)))
+          in Right (RequestServices reading (Just (D.BufferDiffServices apply)) Nothing)

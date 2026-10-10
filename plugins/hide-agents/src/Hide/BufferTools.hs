@@ -13,12 +13,13 @@ module Hide.BufferTools
   ( tools
   , listOutput
   , readOutput
+  , windowOutput
   , applyOutput
   ) where
 
 import Control.Monad (unless)
 import Data.Aeson
-import Data.Aeson.Types (Parser,parseEither)
+import Data.Aeson.Types (Pair,Parser,parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import Data.Char (intToDigit)
@@ -26,6 +27,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Hide.Plugin.BufferRead
 import qualified Hide.Plugin.BufferDiff as D
+import qualified Hide.Plugin.WindowRead as W
 import Hide.Plugin.Request (RequestServices(..))
 import Hide.Plugin.Command (Codec(..),CommandDef(..),CommandError(..))
 import Hide.Plugin.Tool (Tool(..))
@@ -33,6 +35,7 @@ import Hide.Plugin.Tool (Tool(..))
 -- | Explicit editor-visible requests. Every service call owns fresh host
 -- admission; read-only metadata grants no authority and must not add an outer
 -- approval call. A diff requires the exact request-bound capability from the host.
+-- A prepared-window read similarly requires the captured immutable body service.
 tools :: [Tool RequestServices]
 tools=
   [Tool "list_buffers" True (CommandDef "hide.buffer.list"
@@ -41,6 +44,11 @@ tools=
   ,Tool "read_buffer" True (CommandDef "hide.buffer.read"
     "Read live buffer contents including unsaved edits; private conversation fields are redacted and approval buffers are unavailable. Text is paged by 1-based lines (200 default, 1000 maximum), capped at 131072 characters; binary buffers return up to 4096 hex bytes from byteOffset."
     readInput readOutput (\services->bufferRead (requestBuffers services)))
+  ,Tool "read_window" True (CommandDef "hide.window.read"
+    "Read an explicitly readable prepared text window by logical window-text lines; private regions are redacted. Defaults to the active window, 200 lines; maximum 1000 lines and 131072 characters. Source windows use read_buffer."
+    W.readInput windowOutput (\services arguments->case requestWindows services of
+      Nothing->pure (Left (CommandRejected "Window read requires an exact host-captured request."))
+      Just reader->W.readWindow reader arguments))
   ,Tool "buffer_apply_diff" False (CommandDef "hide.buffer.apply-diff"
     "Apply one strict unified diff to a live text buffer at the given revision. Context and hunk positions must match exactly. This permission also covers linked plugin batches for several buffers; every patch in a batch is applied atomically with ordinary Undo per buffer. No file is saved. File headers are optional and identify only the target buffer, never disk paths."
     D.applyInput applyOutput (\services arguments->case requestDiff services of
@@ -106,24 +114,59 @@ readOutput=Codec (object ["type" .= ("object"::Text),"oneOf" .= [textSchema,byte
       pure (ByteBufferPage metadata (BytePage offset bytes total))
     else do
       only ["buffer","startLine","lineCount","totalLines","text","redacted","truncated"] fields
-      start<-fields .: "startLine"
-      count<-fields .: "lineCount"
-      total<-fields .: "totalLines"
-      body<-fields .: "text"
-      redacted<-fields .: "redacted"
-      truncated<-fields .: "truncated"
-      unless (start>=1 && count>=0 && count<=1000 && total>=0
-        && count<=max 0 (total-start+1) && T.length body<=131072) (fail "Invalid buffer text page bounds")
-      pure (TextBufferPage metadata (TextPage start count total body redacted truncated))))
+      TextBufferPage metadata <$> parseTextPage fields))
   encodePage
   where
-    textSchema=objectSchema [("buffer",metadataSchema),("startLine",integer 1 Nothing),
-      ("lineCount",integer 0 (Just 1000)),("totalLines",integer 0 Nothing),
-      ("text",object ["type" .= ("string"::Text),"maxLength" .= (131072::Int)]),
-      ("redacted",boolean),("truncated",boolean)]
+    textSchema=objectSchema (("buffer",metadataSchema):textPageSchema)
     byteSchema=objectSchema [("buffer",metadataSchema),("byteOffset",integer 0 Nothing),
       ("bytes",integer 0 (Just 4096)),("totalBytes",integer 0 Nothing),
       ("hex",object ["type" .= ("string"::Text),"maxLength" .= (12287::Int)])]
+
+-- | Concrete prepared-window reply with the existing window-text coordinate
+-- marker. The body uses the same bounded text-page codec as buffer reads; there
+-- is no source buffer ID, byte view or live action capability in this reply.
+--
+-- @codecDecode windowOutput (codecEncode windowOutput page) = Right page@
+-- for a host page satisfying the public text-page bounds.
+windowOutput :: Codec W.WindowPage
+windowOutput=Codec (objectSchema (("window",metadata):textPageSchema))
+  (decodeValue (withObject "window page" $ \fields->do
+    only ["window","startLine","lineCount","totalLines","text","redacted","truncated"] fields
+    (ident,title)<-fields .: "window" >>= withObject "window metadata" (\info->do
+      only ["windowId","title","coordinateSpace"] info
+      ident<-info .: "windowId"
+      title<-info .: "title"
+      space<-info .: "coordinateSpace"
+      unless (space==("window-text"::Text)) (fail "Invalid window coordinate space")
+      pure (ident,title))
+    W.WindowPage ident title <$> parseTextPage fields))
+  (\page->object (("window" .= object
+    ["windowId" .= W.windowIdentifier page,"title" .= W.windowTitle page,
+     "coordinateSpace" .= ("window-text"::Text)]):encodeTextPage (W.windowPage page)))
+  where metadata=objectSchema [("windowId",object ["type" .= ("integer"::Text)]),("title",string),
+          ("coordinateSpace",object ["type" .= ("string"::Text),"const" .= ("window-text"::Text)])]
+
+parseTextPage :: Object -> Parser TextPage
+parseTextPage fields=do
+  start<-fields .: "startLine"
+  count<-fields .: "lineCount"
+  total<-fields .: "totalLines"
+  body<-fields .: "text"
+  redacted<-fields .: "redacted"
+  truncated<-fields .: "truncated"
+  unless (start>=1 && count>=0 && count<=1000 && total>=0
+    && count<=max 0 (total-start+1) && T.length body<=131072) (fail "Invalid text page bounds")
+  pure (TextPage start count total body redacted truncated)
+
+textPageSchema :: [(Key,Value)]
+textPageSchema=[("startLine",integer 1 Nothing),("lineCount",integer 0 (Just 1000)),
+  ("totalLines",integer 0 Nothing),("text",object ["type" .= ("string"::Text),"maxLength" .= (131072::Int)]),
+  ("redacted",boolean),("truncated",boolean)]
+
+encodeTextPage :: TextPage -> [Pair]
+encodeTextPage page=["startLine" .= pageStartLine page,"lineCount" .= pageLineCount page,
+  "totalLines" .= pageTotalLines page,"text" .= pageText page,
+  "redacted" .= pageRedacted page,"truncated" .= pageTruncated page]
 
 encodeMetadata :: BufferMetadata -> Value
 encodeMetadata info=object
@@ -142,10 +185,7 @@ metadataSchema=objectSchema [("bufferId",object ["type" .= ("integer"::Text)]),(
   ("modified",boolean),("binary",boolean),("revision",object ["type" .= ("integer"::Text)])]
 
 encodePage :: BufferPage -> Value
-encodePage (TextBufferPage info page)=object
-  ["buffer" .= encodeMetadata info,"startLine" .= pageStartLine page,"lineCount" .= pageLineCount page,
-   "totalLines" .= pageTotalLines page,"text" .= pageText page,
-   "redacted" .= pageRedacted page,"truncated" .= pageTruncated page]
+encodePage (TextBufferPage info page)=object (("buffer" .= encodeMetadata info):encodeTextPage page)
 encodePage (ByteBufferPage info page)=object
   ["buffer" .= encodeMetadata info,"byteOffset" .= pageByteOffset page,"bytes" .= BS.length (pageBytes page),
    "hex" .= T.pack (drop 1 (BS.foldr hex [] (pageBytes page))),"totalBytes" .= pageTotalBytes page]

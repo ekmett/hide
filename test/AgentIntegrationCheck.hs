@@ -30,7 +30,10 @@ import Data.IORef
 import Hide.Buffer (contents,newBuffer,contentSlice,contentLength,Selection(..))
 import Hide.AgentSidebarTypes (DirectoryRequest(ShowAgent))
 import Hide.Recovery (writeCheckpoint,readCheckpoint,checkpointKey)
-import Hide.BufferReadCommand (withBufferReadCommands,readPage,readWindowCommand)
+import Hide.BufferReadServices (windowPage)
+import qualified Hide.Plugin.WindowRead as WR
+import qualified Hide.BufferTools as BufferTools
+import Hide.Plugin.Command (codecEncode)
 import Hide.BufferReads (windowReadTarget,captureWindow)
 import qualified Hide.Font as Font
 import Hide.ScreenCapture (capture)
@@ -547,11 +550,13 @@ tickBody owner conversation current=do
 -- Public read_window acquisition checks exact logical source independently of
 -- width, bubble furniture and the asynchronously adopted bounded viewport.
 canonicalWindowText :: Desktop -> IO T.Text
-canonicalWindowText desktop=withBufferReadCommands $ \commands->do
+canonicalWindowText desktop=do
   window<-maybe (fail "No canonical conversation frame") pure (activeWindow desktop)
   target<-either (fail . T.unpack) pure (windowReadTarget desktop (windowId window))
-  page<-either (fail . T.unpack) pure (readPage 1 1000 0)
-  value<-readWindowCommand commands (captureWindow desktop target) page >>= either (fail . T.unpack) pure
+  arguments<-either (fail . T.unpack) pure (WR.readArguments (Just (windowId window)) 1 1000)
+  image<-captureWindow desktop target >>= either (fail . T.unpack) pure
+  page<-windowPage image arguments >>= either (fail . T.unpack) pure
+  let value=codecEncode BufferTools.windowOutput page
   case (field "text" value,field "truncated" value,field "lineCount" value::Maybe Int,field "totalLines" value) of
     (Just text,Just False,Just count,Just total) | count==total->pure text
     _->fail "Canonical recovery fixture requires one complete read page"

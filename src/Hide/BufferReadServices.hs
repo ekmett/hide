@@ -3,15 +3,12 @@
 -- operation uses the session's actor-bound admission queue; paging and metadata
 -- evaluation stay on its invoking worker. Only bounded values cross the public
 -- plugin API. Prepared windows retain their separate exact-body capture rule.
-module Hide.BufferReadCommand
-  ( BufferReadCommands, withBufferReadCommands, ReadPage, readPage, readWindowCommand
-  , bufferReadServices, bufferPage
+module Hide.BufferReadServices
+  ( bufferReadServices, bufferPage, windowPage
   ) where
 
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
-import Data.Aeson
-import Data.Aeson.Types (parseEither)
 import Hide.BufferReads (CapturedWindowRead(..))
 import Hide.ConversationBody (logicalBodyRead)
 import Hide.GuestAccess (sanitizedPreparedContent)
@@ -19,24 +16,9 @@ import qualified Hide.Plugin.Window as W
 import qualified Data.Text as T
 import qualified Hide.Plugin.Buffer as P
 import qualified Hide.Plugin.BufferRead as R
+import qualified Hide.Plugin.WindowRead as WR
 import Hide.Plugin.BufferHost (readerReference)
 import Hide.Plugin.Command
-
-data ReadPage = ReadPage !Int !Int !Int
-
-newtype ReadContext = WindowReadContext (IO (Either T.Text CapturedWindowRead))
-data BufferReadCommands = BufferReadCommands (Registry ReadContext) (Command ReadContext ReadPage Value)
-
--- | Validate window page coordinates before capture.
-readPage :: Int -> Int -> Int -> Either T.Text ReadPage
-readPage start count offset
-  | start>=1 && count>=1 && count<=1000 && offset>=0=Right (ReadPage start count offset)
-  | otherwise=Left "Use startLine >= 1, lineCount 1..1000, and byteOffset >= 0"
-
-withBufferReadCommands :: (BufferReadCommands -> IO a) -> IO a
-withBufferReadCommands use=withRegistry $ \registry->do
-  window<-registerCommand registry windowDefinition >>= either (ioError . userError . show) pure
-  use (BufferReadCommands registry window)
 
 -- | Capture only the default source identity and allocation frontier under the
 -- UI owner. IDs are allocated once per session: a later buffer cannot become an
@@ -81,46 +63,19 @@ bufferPage info arguments redacted content
       pure (R.ByteBufferPage info (R.BytePage offset bytes size))
   | otherwise=R.TextBufferPage info <$> textPage (R.startLine arguments) (R.lineCount arguments) redacted content
 
--- | Run an exact window capture and privacy-aware formatting on the invoking
--- worker. The fixed host capture only queues/awaits; it retains no Desktop.
-readWindowCommand :: BufferReadCommands -> IO (Either T.Text CapturedWindowRead) -> ReadPage -> IO (Either T.Text Value)
-readWindowCommand (BufferReadCommands registry command) capture page=
-  fmap (either (Left . message) Right) (invoke registry command (WindowReadContext capture) page)
-
-message :: CommandError -> T.Text
-message (CommandRejected err)=err
-message (CommandFailed err)=err
-message err=T.pack (show err)
-
-windowDefinition :: CommandDef ReadContext ReadPage Value
-windowDefinition=CommandDef "hide.window.read" "Read window page" input output $ \(WindowReadContext capture) (ReadPage start count _)->do
-  captured<-capture
-  result<-case captured of
+-- | Format an already admitted immutable window read on its invoking worker.
+-- Conversation pages address the whole logical transcript, independently of
+-- viewport wrapping. Masks and bounded measured reads precede wire encoding;
+-- the public result contains neither a body handle nor editable source content.
+windowPage :: CapturedWindowRead -> WR.ReadArguments -> IO (Either T.Text WR.WindowPage)
+windowPage image arguments=do
+  let prepared=capturedWindowPrepared image
+  projection<-case capturedWindowLogical image of
+    Nothing->pure (maybe (Left "This window is private.") Right (sanitizedPreparedContent prepared))
+    Just body->Right <$> logicalBodyRead body
+  case projection >>= \(redacted,content)->textPage (WR.startLine arguments) (WR.lineCount arguments) redacted content of
     Left err->pure (Left err)
-    Right image->do
-      let prepared=capturedWindowPrepared image
-          info=object ["windowId" .= capturedWindowIdentifier image,"title" .= W.preparedWindowTitle prepared,
-            "coordinateSpace" .= ("window-text"::T.Text)]
-      projection<-case capturedWindowLogical image of
-        Nothing->pure (maybe (Left "This window is private.") Right (sanitizedPreparedContent prepared))
-        Just body->Right <$> logicalBodyRead body
-      pure $ do
-        (redacted,content)<-projection
-        page<-textPage start count redacted content
-        pure (object ["window" .= info,"startLine" .= R.pageStartLine page,"lineCount" .= R.pageLineCount page,
-          "totalLines" .= R.pageTotalLines page,"text" .= R.pageText page,
-          "redacted" .= R.pageRedacted page,"truncated" .= R.pageTruncated page])
-  case result of
-    Left err->pure (Left (CommandRejected err))
-    Right value->Right <$> evaluate (force value)
-  where
-    input=Codec (object ["type" .= ("object"::T.Text),"additionalProperties" .= False,
-      "properties" .= object [property .= object ["type" .= ("integer"::T.Text)] | property<-["startLine","lineCount","byteOffset"]]])
-      (\value->do
-        (start,count,offset)<-either (Left . T.pack) Right (parseEither (withObject "read page" (\o->(,,) <$> o .:? "startLine" .!= 1 <*> o .:? "lineCount" .!= 200 <*> o .:? "byteOffset" .!= 0)) value)
-        readPage start count offset)
-      (\(ReadPage start count offset)->object ["startLine" .= start,"lineCount" .= count,"byteOffset" .= offset])
-    output=Codec (object ["type" .= ("object"::T.Text)]) Right id
+    Right page->Right <$> evaluate (force (WR.WindowPage (capturedWindowIdentifier image) (W.preparedWindowTitle prepared) page))
 
 -- Shared logical text paging; window responses never fabricate buffer metadata.
 textPage :: Int -> Int -> Bool -> P.BufferRead -> Either T.Text R.TextPage

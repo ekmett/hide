@@ -8,7 +8,8 @@ import qualified Control.Concurrent.STM as STM
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
 import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
-import Hide.BufferReadCommand (withBufferReadCommands,bufferReadServices)
+import Hide.BufferReadServices (bufferReadServices)
+import Hide.BufferRequest (bufferRequestServices)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -25,7 +26,7 @@ import Hide.Files (FileState(..))
 import Hide.AgentAccess
 import qualified Hide.AgentHub as AH
 import Hide.BufferReads
-import Hide.EditorMCP (builtinTools,readWindowTool)
+import Hide.EditorMCP (builtinTools)
 import qualified Hide.BufferTools as BufferTools
 import Hide.Plugin.Request (RequestServices(..))
 import qualified Hide.Plugin.Tool as Tool
@@ -50,12 +51,15 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
         _ -> error "missing read approval"
       text image=P.readText (capturedContent image) (P.TextRange (P.CharOffset 0) (P.CharOffset 6))
   saved<-newIORef Nothing
-  withPermissionsAt path specs $ \runtime -> withBufferReadCommands $ \commands->do
+  withPermissionsAt path specs $ \runtime -> do
     let reader=bufferReader runtime (pure (Right ()))
         begin reader' d=beginRequest d $ do
-          let context=RequestServices (bufferReadServices reader' (activeWindow d >>= bufferId) (nextId d)) Nothing
+          let context=RequestServices (bufferReadServices reader' (activeWindow d >>= bufferId) (nextId d)) Nothing Nothing
           context `seq` pure (d,Tool.callTool toolset context "read_buffer" args)
-        beginWindow d=beginRequest d (readWindowTool commands (windowReader runtime (pure (Right ()))) d "read_window" (object []))
+        beginWindow d=beginRequest d $ do
+          captured<-bufferRequestServices reader (bufferEditor runtime (pure (Right ())))
+            (windowReader runtime (pure (Right ()))) d "read_window" (object [])
+          pure (d,either (pure . Left) (\context->Tool.callTool toolset context "read_window" (object [])) captured)
         beginRequest d request=do
           (_,finish)<-request
           worker<-async finish
