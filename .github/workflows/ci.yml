@@ -64,7 +64,7 @@ jobs:
       - name: Prepare invocation reports
         run: mkdir -p "$TEST_RESULTS"
       - name: Build optimized editor checks
-        run: cabal build editor-tests --builddir=build/allocation --disable-coverage -O1 -j2 -f-window -f-terminal
+        run: cabal build editor-tests --builddir=build/allocation --disable-coverage -O1 --semaphore -j4 -f-window -f-terminal
       - name: Cache completed build
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

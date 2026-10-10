@@ -66,7 +66,7 @@ jobs:
       - name: Install report converter
         run: cabal install hpc-codecov-0.6.4.1 --installdir="$RUNNER_TEMP/coverage-tools" --install-method=copy --overwrite-policy=always
       - name: Build representative coverage checks
-        run: cabal build coverage-smoke --builddir=build/coverage --enable-coverage -O0 -j2 -f-window -f-terminal
+        run: cabal build coverage-smoke --builddir=build/coverage --enable-coverage -O0 --semaphore -j4 -f-window -f-terminal
       - name: Cache completed build
         if: steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
