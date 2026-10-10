@@ -18,6 +18,7 @@ import Control.Concurrent.MVar
 import qualified Control.Concurrent.STM as STM
 import Control.Exception (bracket,finally)
 import Control.Monad (unless,void)
+import Data.IORef
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe,Pair)
 import Data.List (findIndex)
@@ -32,7 +33,7 @@ import Hide.Plugin.SystemOne
 import Hide.SystemOne
 
 checks :: IO ()
-checks=stepBudgetCheck >> takeoverCheck
+checks=stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck
 
 -- A sent step is only an admission: the run must observe this command's new
 -- stopped generation before reporting its step budget as completed.
@@ -126,8 +127,127 @@ takeoverCheck=withSystemOne $ \owner->do
       _<-tool runtime settled "debug_control" ["generation" .= generationOf value,"command" .= ("disconnect"::T.Text)]
       pure ()) `finally` void (tryPutMVar release ())
 
+-- UI and MCP share one admitted operation. A hidden inspection-only run ends
+-- at its repeated-location limit; reveal prepares existing views without an
+-- execution command or a second stepping run.
+stallRevealCheck :: IO ()
+stallRevealCheck=withSystemOne $ \owner->do
+  entered<-newEmptyMVar
+  let provider=DecisionProvider description $ \_ use->use (DecisionDriver $ \input _->do
+        void (tryPutMVar entered input)
+        pure (Right (choose "inspect" input)))
+  void (selectDecisionProvider owner (Just provider) >>= right)
+  session (systemOneServices owner) $ \runtime path initial->do
+    (hidden,_)<-tool runtime initial "debug_present" ["follow" .= False]
+    (_,form)<-debuggerEffects runtime (\d _->pure (False,d)) hidden [DebugAction "assist" []]
+    action<-case dialog form of
+      Just dg | DebugDialog captured<-purpose dg->pure captured
+      _->fail "Assisted debugger goal dialog was not presented"
+    (_,started)<-debuggerEffects runtime (\d _->pure (False,d)) (form {dialog=Nothing})
+      [DebugAction action ["0","Find useful runtime evidence.","20","60000"]]
+    admitted<-state runtime started
+    run<-runIdOf admitted
+    (finished,value)<-awaitState "assisted inspection stall limit" runtime
+      (\s->pure (sameRun run s && (assistance s >>= field "phase")==Just ("finished"::T.Text))) started
+    input<-barrier "UI start did not reach the shared provider operation" (takeMVar entered)
+    check "UI supplied the goal through the shared operation" ("Find useful runtime evidence." `T.isInfixOf` decisionState input)
+    check "inspect-only run stops after three repeated-location decisions"
+      ((assistance value >>= field "reason")==Just ("stall"::T.Text) &&
+       (assistance value >>= field "steps")==Just (0::Int) &&
+       (assistance value >>= field "decisions")==Just (4::Int))
+    let observations=maybe [] id (assistance value >>= field "observations" :: Maybe [Value])
+    check "retained evidence names its exact stop and source location"
+      (not (null observations) && all (\observation->field "generation" observation==Just (generationOf value) &&
+        field "threadId" observation==Just (7::Int) && isJust (field "location" observation :: Maybe Value) &&
+        isJust (field "source" observation :: Maybe Value)) observations)
+    (revealing,_)<-tool runtime finished "debug_assist" ["command" .= ("reveal"::T.Text)]
+    (shown,_)<-awaitState "revealed evidence output receipt" runtime
+      (\s->pure ("Assisted debugger observation" `T.isInfixOf` maybe "" id (field "output" s))) revealing
+    commands<-requests path
+    check "inspect and reveal never send a step, continue, evaluate or mutation"
+      (all (\r->commandOf r `notElem` map Just ["next","stepIn","stepOut","continue","evaluate","setVariable"]) commands)
+    _<-tool runtime shown "debug_control" ["generation" .= generationOf value,"command" .= ("disconnect"::T.Text)]
+    pure ()
+
+-- The injected monotonic deadline expires while the actual supplier is holding
+-- an answer. This is a real cancellation receipt, not a sleep/status heuristic.
+timeBudgetCheck :: IO ()
+timeBudgetCheck=withSystemOne $ \owner->do
+  clock<-newIORef (0::Integer)
+  entered<-newEmptyMVar
+  returned<-newEmptyMVar
+  ticketCell<-newEmptyMVar
+  let base=systemOneServices owner
+      services=base {requestDecision= \supplier input budget->do
+        result<-requestDecision base supplier input budget
+        case result of Right ticket->putMVar ticketCell ticket;_->pure ()
+        pure result}
+      provider=DecisionProvider description $ \_ use->use (DecisionDriver $ \input stop->do
+        putMVar entered ()
+        STM.atomically (stop >>= STM.check)
+        putMVar returned ()
+        pure (Right (choose "next" input)))
+  void (selectDecisionProvider owner (Just provider) >>= right)
+  sessionWith (withDebuggerClock (readIORef clock)) services $ \runtime path initial->do
+    before<-state runtime initial
+    (started,accepted)<-tool runtime initial "debug_assist"
+      ["command" .= ("start"::T.Text),"generation" .= generationOf before,
+       "goal" .= ("Inspect until the deadline."::T.Text),"budgetMs" .= (1000::Int)]
+    run<-runIdOf accepted
+    (deciding,_)<-awaitState "supplier entered before run deadline" runtime (const (not <$> isEmptyMVar entered)) started
+    ticket<-barrier "run deadline ticket absent" (takeMVar ticketCell)
+    writeIORef clock 1000000001
+    (finished,value)<-awaitState "exact assisted time budget" runtime
+      (\s->pure (sameRun run s && (assistance s >>= field "phase")==Just ("finished"::T.Text))) deciding
+    receipt<-barrier "run deadline did not cancel its decision" (awaitDecision ticket)
+    check "time budget owns exact ticket cancellation" (receipt==Left DecisionCancelled &&
+      (assistance value >>= field "reason")==Just ("time-budget"::T.Text))
+    barrier "supplier did not receive deadline cancellation" (takeMVar returned)
+    commands<-requests path
+    check "a decision held beyond the total deadline cannot step" (null (filter isStep commands))
+    _<-tool runtime finished "debug_control" ["generation" .= generationOf value,"command" .= ("disconnect"::T.Text)]
+    pure ()
+
+callerRetirementCheck :: IO ()
+callerRetirementCheck=withSystemOne $ \owner->do
+  active<-newIORef True
+  entered<-newEmptyMVar
+  ticketCell<-newEmptyMVar
+  let base=systemOneServices owner
+      services=base {requestDecision= \supplier input budget->do
+        result<-requestDecision base supplier input budget
+        case result of Right ticket->putMVar ticketCell ticket;_->pure ()
+        pure result}
+      caller=readIORef active >>= \live->pure (if live then Right () else Left "retired")
+      provider=DecisionProvider description $ \_ use->use (DecisionDriver $ \input stop->do
+        putMVar entered ()
+        STM.atomically (stop >>= STM.check)
+        pure (Right (choose "next" input)))
+  void (selectDecisionProvider owner (Just provider) >>= right)
+  session services $ \runtime path initial->do
+    before<-state runtime initial
+    (started,reply)<-debuggerToolWithCaller caller runtime initial "debug_assist" (object
+      ["command" .= ("start"::T.Text),"generation" .= generationOf before,"goal" .= ("Inspect this connection's stop."::T.Text)])
+    accepted<-reply >>= right
+    run<-runIdOf accepted
+    (deciding,_)<-awaitState "caller-bound supplier entered" runtime (const (not <$> isEmptyMVar entered)) started
+    ticket<-barrier "caller-bound ticket absent" (takeMVar ticketCell)
+    writeIORef active False
+    (finished,value)<-awaitState "caller retirement receipt" runtime
+      (\s->pure (sameRun run s && (assistance s >>= field "phase")==Just ("finished"::T.Text))) deciding
+    receipt<-barrier "retired caller did not cancel its exact ticket" (awaitDecision ticket)
+    check "retirement retains the original run and cancels it" (receipt==Left DecisionCancelled &&
+      (assistance value >>= field "reason")==Just ("caller-retired"::T.Text))
+    commands<-requests path
+    check "retired caller cannot execute a held action" (null (filter isStep commands))
+    _<-tool runtime finished "debug_control" ["generation" .= generationOf value,"command" .= ("disconnect"::T.Text)]
+    pure ()
+
 session :: SystemOneServices -> (Debugger -> FilePath -> Desktop -> IO a) -> IO a
-session services use=bracket (Fixture.fixture "assist") Fixture.cleanup $ \(port,path,_)->withDebugger $ \runtime->
+session=sessionWith withDebugger
+
+sessionWith :: ((Debugger -> IO a) -> IO a) -> SystemOneServices -> (Debugger -> FilePath -> Desktop -> IO a) -> IO a
+sessionWith scope services use=bracket (Fixture.fixture "assist") Fixture.cleanup $ \(port,path,_)->scope $ \runtime->
   withDebuggerSystemOne services runtime $ do
     (connecting,_)<-tool runtime (initialDesktop (100,35)) "debug_attach" ["port" .= (read port::Int)]
     (ready,_)<-awaitState "ready paused DAP frame" runtime
