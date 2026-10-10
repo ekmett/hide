@@ -75,13 +75,19 @@ stepBudgetCheck=withSystemOne $ \owner->do
     run<-runIdOf accepted
     (finished,value)<-awaitState "exact assisted step budget" runtime
       (\s->pure (sameRun run s && (assistance s >>= field "phase")==Just ("finished"::T.Text))) started
-    input<-barrier "selected supplier was not invoked" (takeMVar entered)
-    check "debug assistance sends the explicit goal to the selected supplier"
-      ("Find the next source transition." `T.isInfixOf` decisionState input)
-    check "step budget waits for a new real DAP stop"
+    let outcome=object ["runId" .= (assistance value >>= field "runId" :: Maybe T.Text),
+          "phase" .= (assistance value >>= field "phase" :: Maybe T.Text),
+          "reason" .= (assistance value >>= field "reason" :: Maybe T.Text),
+          "steps" .= (assistance value >>= field "steps" :: Maybe Int),
+          "decisions" .= (assistance value >>= field "decisions" :: Maybe Int),
+          "generation" .= generationOf value,"stopped" .= (field "stopped" value :: Maybe Bool)]
+    check ("step budget waits for a new real DAP stop; terminal assistance: "<>take 2048 (show outcome))
       (field "stopped" value==Just True && generationOf value>generationOf before &&
        (assistance value >>= field "steps")==Just (1::Int) &&
        (assistance value >>= field "reason")==Just ("step-budget"::T.Text))
+    input<-barrier "selected supplier was not invoked" (takeMVar entered)
+    check "debug assistance sends the explicit goal to the selected supplier"
+      ("Find the next source transition." `T.isInfixOf` decisionState input)
     commands<-requests path
     let sources=[arguments | request<-commands,commandOf request==Just "source",Just arguments<-[field "arguments" request :: Maybe Value]]
         selectedSource=field "frame" before >>= field "source" :: Maybe Value
