@@ -170,6 +170,7 @@ tests = askOption $ \profile->withResource
   , testCase "AgentWorkspace" AgentWorkspaceCheck.checks
 #ifdef WITH_REMOTE
   , testCase "Remote" RemoteCheck.checks
+  , testCase "Remote.parent-open" RemoteCheck.parentOpenChecks
   , testCase "RemoteWindow" RemoteWindowCheck.checks
   , testCase "RemoteTerminal" (RemoteTerminalCheck.checks profile)
   , testCase "GuestAccess" GuestAccessCheck.checks

@@ -1,5 +1,5 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
-module RemoteCheck (checks) where
+module RemoteCheck (checks, parentOpenChecks) where
 import Control.Concurrent.STM (atomically, retry)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
@@ -15,18 +15,22 @@ import qualified Network.Socket as N
 import Data.IORef
 import qualified Data.Text as T
 import System.IO
-import System.Directory (getTemporaryDirectory, createDirectory, removeFile, removePathForcibly)
-import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.Directory (getTemporaryDirectory, createDirectory, removeFile, removePathForcibly, canonicalizePath, withCurrentDirectory)
+import System.Environment (lookupEnv, setEnv, unsetEnv, withArgs)
 #ifndef mingw32_HOST_OS
-import System.FilePath ((</>))
 import Control.Monad (replicateM_)
 import System.Posix.Files (setFileMode)
 import Data.List (isInfixOf)
 #endif
 import System.Timeout (timeout)
+import System.FilePath ((</>))
+import System.Exit (ExitCode)
+import qualified Hide.App as App
+import Hide.Files (filePath)
+import Hide.WorkspaceMCP (workspaceTools, workspaceTool)
 import Hide.Buffer (Selection(..), newBuffer, markSaved)
 import qualified Data.Map.Strict as M
-import Hide.EditorMCP (editorResponse, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine)
+import Hide.EditorMCP (editorResponse, editorResponseOnly, rpcError, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine)
 import Hide.Markdown (renderMarkdown)
 import Hide.Model
 import Hide.Protocol
@@ -41,6 +45,80 @@ isolatedStore action=do
   bracket (do (path,h)<-openTempFile temp "thc-session-tests"; hClose h; removeFile path; createDirectory path; pure path)
     removePathForcibly $ \path -> bracket_ (setEnv "XDG_DATA_HOME" path)
       (maybe (unsetEnv "XDG_DATA_HOME") (setEnv "XDG_DATA_HOME") old) action
+
+-- The actual CLI talks to a live, already attached session. An invalid backend
+-- guards against accidentally opening a visible frontend in this check.
+parentOpenChecks :: IO ()
+parentOpenChecks = isolatedStore $ do
+  Just root<-lookupEnv "XDG_DATA_HOME"
+  directory<-canonicalizePath root
+  let source=directory </> "file λ.hs"
+      contents="main = print 42\n"
+      check label good=unless good (error label)
+      withEnv name value action=bracket (lookupEnv name) (maybe (unsetEnv name) (setEnv name)) $ \_ ->
+        maybe (unsetEnv name) (setEnv name) value >> action
+  BS.writeFile source contents
+  record<-S.newSessionRecord Nothing []
+  let sid=S.sessionId record
+      initial=(initialDesktop (80,25)) {launchDirectory=directory </> "different-project"}
+  endpoint<-sessionEndpoint sid
+  observed<-newIORef initial
+  calls<-newIORef (0::Int)
+  let inspectOpen d token request=do
+        modifyIORef' calls (+1)
+        (next,reply)<-if token==Just "denied-actor"
+          then pure (d,pure (Just (rpcError (toJSON (1::Int)) (-32600) "Invalid or inactive agent connection.")))
+          else editorResponseOnly workspaceTools (workspaceTool App.applyEffects) d request
+        writeIORef observed next
+        pure (False,next,reply)
+      awaitReady=bracket (connectEndpoint endpoint) hClose (const (pure ())) `catch` \(_::IOException)->threadDelay 1000 >> awaitReady
+      receive peer wanted=do
+        packet<-peerReceive peer
+        case packet of
+          Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String wanted)->pure fields
+          Just _->receive peer wanted
+          Nothing->error "Parent editor display disconnected"
+      run args=withArgs args (App.main [])
+      opened=do
+        d<-readIORef observed
+        pure (fmap (fmap filePath . documentFile) (activeDocument d)==Just (Just source))
+  withEnv "THC_EDIT_SESSION" (Just sid) $
+    withEnv "THC_EDIT_BACKEND" (Just "invalid-test-backend") $
+    withEnv "THC_EDIT_MCP_TOKEN" Nothing $
+    withCurrentDirectory directory $
+    withAsync (runRemoteDaemon sid 1 App.applyEffects pure inspectOpen initial) $ \daemon->do
+      link daemon
+      ready<-timeout 3000000 awaitReady
+      check "parent endpoint becomes available" (ready==Just ())
+      withLocalPeer sid True [] $ \peer->do
+        attached<-timeout 3000000 (receive peer "assets")
+        check "display attaches before nested file open" (maybe False (const True) attached)
+        result<-try (run ["file λ.hs"]) :: IO (Either ExitCode ())
+        check "plain file arguments open in parent instead of launching a frontend" (either (const False) (const True) result)
+        check "shell cwd supplies the opened file's absolute path" =<< opened
+        -- The original display still accepts input after the inspection request.
+        peerSend peer (JsonPacket (object ["type" .= ("paste"::T.Text),"seq" .= (1::Int),"text" .= ("live "::T.Text)]))
+        acknowledgement<-timeout 3000000 (receive peer "ack")
+        check "opening files leaves the display attachment intact" (maybe False ((==Just (toJSON (1::Int))).KM.lookup "seq") acknowledgement)
+        run ["--","file λ.hs"]
+        current<-readIORef observed
+        check "reopening keeps unsaved edits" (activeText current=="live main = print 42\n")
+        count<-readIORef calls
+        separate<-try (run ["--new-session","file λ.hs"]) :: IO (Either ExitCode ())
+        countAfter<-readIORef calls
+        check "explicit new session bypasses parent routing" (either (const True) (const False) separate && countAfter==count)
+        denied<-withEnv "THC_EDIT_MCP_TOKEN" (Just "denied-actor") (try (run ["file λ.hs"])) :: IO (Either ExitCode ())
+        check "parent open preserves actor refusal" (either (const True) (const False) denied)
+        countDenied<-readIORef calls
+        check "actor-bound request reaches the parent once" (countDenied==count+1)
+        missing<-try (run ["missing.hs"]) :: IO (Either ExitCode ())
+        check "file-open failure returns to the shell" (either (const True) (const False) missing)
+      -- A stale inherited endpoint cannot fall back into another session.
+      stale<-randomIdentity
+      count<-readIORef calls
+      failed<-withEnv "THC_EDIT_SESSION" (Just stale) (try (run ["file λ.hs"])) :: IO (Either ExitCode ())
+      countAfter<-readIORef calls
+      check "stale parent fails without touching the live session" (either (const True) (const False) failed && countAfter==count)
 
 checks :: IO ()
 checks = isolatedStore $ do

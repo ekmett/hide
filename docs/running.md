@@ -90,6 +90,18 @@ F5, F6, F10, numbered-window
 shortcuts and menu controls stay with the editor. Resizing the terminal window
 resizes its PTY; output supports colors, attributes and Unicode.
 
+Run `hide file.hs` inside an embedded terminal to open an existing file in the
+same editor. Relative paths use the shell's current directory. The command waits
+for the editor's reply, including any permission prompt, without taking over its
+display. Reopening a file keeps its unsaved edits. This also works in terminals
+on an SSH session's host.
+
+`hide --new-session file.hs` starts a separate editor. Explicit display, resume
+and other launch options keep their usual meaning. Plain file opens use the
+inherited `THC_EDIT_SESSION` and the existing editor tool permissions; a stale
+parent, denied operation or missing file returns an error instead of silently
+starting another session. **Ctrl+C** cancels a pending open request.
+
 Click the terminal title bar's cyan **[ ]** control, or choose **Window >
 Pin / unpin terminal**, to dock it at the bottom. Messages and pinned terminals
 share one panel with tabs. Click a tab or use the existing numbered-window/F6

@@ -60,7 +60,7 @@ import Hide.AgentServicesHost (agentServices)
 import qualified Hide.Plugin.Tool as PluginTool
 import Hide.BufferReadCommand (withBufferReadCommands)
 import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
-import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool)
+import Hide.EditorMCP (runEditorMCP, openEditorFiles, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool)
 import Hide.RemoteEndpoint (sessionEndpoint)
 import Hide.Session
 import Hide.Completion (bashCompletion)
@@ -102,7 +102,7 @@ import Hide.Render
 import Hide.Files
 import Hide.Reconcile
 
-data Option = Daemon | Sessions | MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | RequireCheckpoint | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Daemon | NewSession | Sessions | MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | RequireCheckpoint | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
           ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
@@ -110,6 +110,7 @@ options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Docu
           ,Option [] ["remote"] (NoArg (Use Remote)) "Serve the remote editing protocol on stdin/stdout"
           ,Option [] ["ssh"] (ReqArg SSH "HOST") "Connect to a remote hide (also HOST:PATH)"
           ,Option [] ["daemon"] (NoArg Daemon) "Start a session without a display; print its ID when ready"
+          ,Option [] ["new-session"] (NoArg NewSession) "Start a separate editor even inside an embedded terminal"
           ,Option [] ["sessions"] (NoArg Sessions) "List running, recoverable and remote sessions"
           ,Option [] ["resume"] (OptArg Resume "ID") "Resume an unfinished editor session (choose if several exist)"
           ,Option [] ["remote-session"] (ReqArg RemoteSession "ID") "Reattach to an existing remote session"
@@ -149,6 +150,7 @@ main plugins = do
 
 runEditor :: [Plugin.Plugin] -> [String] -> IO ()
 runEditor plugins args = do
+  parentSession<-lookupEnv "THC_EDIT_SESSION"
   backendEnvironment<-lookupEnv "THC_EDIT_BACKEND"
   scaleEnvironment<-lookupEnv "THC_EDIT_SCALE"
   appearanceEnvironment<-lookupEnv "THC_EDIT_APPEARANCE"
@@ -161,6 +163,9 @@ runEditor plugins args = do
     _ -> die "--mcp-editor accepts only a session ID."
   else if Sessions `elem` flags then
     if flags==[Sessions] && null paths then printSessions else die "--sessions does not accept other options or paths."
+  else if null flags && not (null paths) && all ((==Nothing) . parseRemoteTarget) paths && parentSession/=Nothing then
+    openEditorFiles (fromMaybe "" parentSession) paths `catch` (\(err::IOException)->
+      die ("Parent editor: "++show err++"\nUse --new-session to start a separate editor."))
   else do
     when (Daemon `elem` flags && (Use Remote `elem` flags || any isDaemon flags || Snapshot `elem` flags || Html `elem` flags)) $
       die "--daemon cannot be combined with --remote, --remote-daemon, or snapshots."

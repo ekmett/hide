@@ -5,13 +5,13 @@
 -- Tool initiation and reply waiting are separate phases so HLS, DAP and human
 -- approvals can continue while a request is pending. Actor-bound routes expose
 -- only their supplied tools, with no fallback into ordinary desktop reads.
-module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, readMCPLine) where
+module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, openEditorFiles, readMCPLine) where
 
 import Hide.Sidebar
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
-import Control.Concurrent.Async (async, cancel, AsyncCancelled(..))
+import Control.Concurrent.Async (Async, async, cancel, wait, withAsync, AsyncCancelled(..))
 import Control.Concurrent.MVar
-import Control.Monad (unless)
+import Control.Monad (unless, forM_)
 import Data.Aeson
 import qualified Data.Aeson.Key
 import Data.Aeson.Types (Parser, parseEither)
@@ -27,6 +27,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Text.IO as TIO
 import Paths_hide (getDataFileName)
 import System.Environment (lookupEnv, getExecutablePath)
+import System.Directory (makeAbsolute)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import Hide.Buffer
 import Hide.BufferReadCommand (BufferReadCommands,readPage,listBufferCommand,readBufferCommand,readWindowCommand,formatBufferRead)
@@ -70,37 +71,18 @@ runEditorMCPWithHandles ident = runEditorMCPWithToken ident Nothing
 -- The token selects the host-authorized actor route; callers retain handle ownership.
 runEditorMCPWithToken :: String -> Maybe T.Text -> Handle -> Handle -> IO ()
 runEditorMCPWithToken ident token input outputHandle = do
-  unless (maybe True (\value -> not (T.null value) && T.length value<=256) token)
-    (ioError (userError "Invalid editor MCP token"))
-  path <- sessionEndpoint ident
+  path <- editorEndpoint ident token
   hSetBinaryMode input True
   hSetBinaryMode outputHandle True
   outputLock<-newMVar ()
   pendingCalls<-newMVar M.empty
   let output value=withMVar outputLock $ \_ -> BL.hPut outputHandle (encode value<>"\n") >> hFlush outputHandle
-      -- A cancellation can precede connection setup. The latch prevents a
-      -- late connection from starting work, and serializes wakeup with close.
-      invoke active request=mask $ \restore ->
-        let close (connection,_)=do
-              modifyMVar_ active (\(stopped,_) -> pure (stopped,pure ()))
-              hClose connection
-        in bracket (connectEndpointWithShutdown path) close $ \(connection,shutdown) -> do
-          stopped<-modifyMVar active (\(stopped,_) -> pure ((stopped,shutdown),stopped))
-          if stopped then shutdown >> throwIO AsyncCancelled else restore $ do
-            writePacket connection (JsonPacket (object (["type" .= ("inspect"::T.Text),"request" .= request]++["agentToken" .= value | Just value<-[token]])))
-            reply <- readPacket connection
-            case reply of
-              Just (JsonPacket Null) -> pure ()
-              Just (JsonPacket response) -> output response
-              _ -> ioError (userError "Editor connection ended")
-      stop (worker,active)=do
-        modifyMVar_ active (\(_,shutdown) -> shutdown >> pure (True,pure ()))
-        cancel worker
+      invoke active request=inspectEditor path token active request >>= mapM_ output
       dispatch request@(Object fields)
         | KM.lookup "method" fields==Just (String "notifications/cancelled") = do
             let wanted=KM.lookup "params" fields >>= \params -> case params of Object o -> KM.lookup "requestId" o; _ -> Nothing
             worker<-maybe (pure Nothing) (\key -> M.lookup (encode key) <$> readMVar pendingCalls) wanted
-            mapM_ stop worker
+            mapM_ stopInspection worker
         | Just requestId<-KM.lookup "id" fields = do
             let key=encode requestId
             accepted<-modifyMVar pendingCalls $ \calls ->
@@ -121,8 +103,71 @@ runEditorMCPWithToken ident token input outputHandle = do
           Just (line,rest) -> do
             either (const (output (rpcError Null (-32700) "Invalid JSON"))) dispatch (eitherDecodeStrict' line)
             loop rest
-      cleanup=readMVar pendingCalls >>= mapM_ stop . M.elems
+      cleanup=readMVar pendingCalls >>= mapM_ stopInspection . M.elems
   loop BS.empty `finally` cleanup
+
+-- | Open existing files in a running session without attaching a display.
+-- Paths are resolved in the calling shell, and each operation waits for the
+-- host's acknowledgement. Inherited actor identity and host permissions remain
+-- in force. Refusal or disconnection raises an 'IOException'; there is no
+-- fallback to a fresh editor. Interrupting the caller cancels its pending call.
+openEditorFiles :: String -> [FilePath] -> IO ()
+openEditorFiles ident files=do
+  token<-fmap T.pack <$> lookupEnv "THC_EDIT_MCP_TOKEN"
+  endpoint<-editorEndpoint ident token
+  forM_ files $ \file->do
+    absolute<-makeAbsolute file
+    active<-newMVar (False,pure ())
+    let request=object ["jsonrpc" .= ("2.0"::T.Text),"id" .= (1::Int),"method" .= ("tools/call"::T.Text),
+          "params" .= object ["name" .= ("editor_file"::T.Text),"arguments" .=
+            object ["action" .= ("open"::T.Text),"path" .= absolute]]]
+    response<-withAsync (inspectEditor endpoint token active request) $ \worker->
+      wait worker `finally` stopInspection (worker,active)
+    let outcome=maybe (Left "Editor did not acknowledge the file open.") (parseEither opened) response
+    either (ioError . userError . (("Cannot open "++file++": ")++)) pure outcome
+  where
+    opened=withObject "file-open reply" $ \reply->do
+      version<-reply .: "jsonrpc"
+      number<-reply .: "id"
+      unless (version==("2.0"::T.Text) && number==(1::Int)) (fail "Unexpected editor reply.")
+      err<-reply .:? "error"
+      case err of
+        Just value->withObject "editor error" (\fields->fields .: "message" >>= fail) value
+        Nothing->do
+          result<-reply .: "result"
+          failed<-result .: "isError"
+          if not failed then pure () else do
+            content<-result .: "content"
+            messages<-mapM (withObject "tool error" (.: "text")) content
+            fail (T.unpack (T.intercalate "\n" messages))
+
+editorEndpoint :: String -> Maybe T.Text -> IO FilePath
+editorEndpoint ident token=do
+  unless (maybe True (\value->not (T.null value) && T.length value<=256) token)
+    (ioError (userError "Invalid editor MCP token"))
+  sessionEndpoint ident
+
+-- A cancellation can precede connection setup. The latch prevents a late
+-- connection from starting work, and serializes socket wakeup with close.
+inspectEditor :: FilePath -> Maybe T.Text -> MVar (Bool,IO ()) -> Value -> IO (Maybe Value)
+inspectEditor path token active request=mask $ \restore->
+  let close (connection,_)=do
+        modifyMVar_ active (\(stopped,_)->pure (stopped,pure ()))
+        hClose connection
+  in bracket (connectEndpointWithShutdown path) close $ \(connection,shutdown)->do
+    stopped<-modifyMVar active (\(stopped,_)->pure ((stopped,shutdown),stopped))
+    if stopped then shutdown >> throwIO AsyncCancelled else restore $ do
+      writePacket connection (JsonPacket (object (["type" .= ("inspect"::T.Text),"request" .= request]++["agentToken" .= value | Just value<-[token]])))
+      reply<-readPacket connection
+      case reply of
+        Just (JsonPacket Null)->pure Nothing
+        Just (JsonPacket response)->pure (Just response)
+        _->ioError (userError "Editor connection ended")
+
+stopInspection :: (Async a,MVar (Bool,IO ())) -> IO ()
+stopInspection (worker,active)=do
+  modifyMVar_ active (\(_,shutdown)->shutdown >> pure (True,pure ()))
+  cancel worker
 
 -- | Read a size-bounded JSON-RPC line, retaining bytes after its newline.
 -- Enforce the limit even when a sender never terminates the line.
