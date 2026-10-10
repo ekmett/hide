@@ -185,9 +185,10 @@ result does not prove it failed.
 Advice goes into the existing composer for you to edit and send with Query or
 Steer. It is never sent automatically and cannot overwrite a newer draft.
 Changing the task, agent, supplier or Warden settings expires the review.
-Repeated reviews are bounded; this is a progress check, not an interruption after
-every tool call. Expand its Warden activity to inspect the observed result IDs
-and scores. Missing, private or incomplete reply evidence is reported as
+Each task permits three reviews, with at most one completed review of each
+evidence version per supplier. This is a progress check, not an interruption
+after every tool call. Expand its Warden activity to inspect the observed result
+IDs and scores. Missing, private or incomplete reply evidence is reported as
 unavailable.
 
 The editor can gate only actions it owns. An agent's own shell or external tools

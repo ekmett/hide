@@ -24,6 +24,7 @@ import qualified Hide.Conversation as Conversation
 import qualified Hide.Warden as Warden
 import qualified Hide.WardenRuntime as WardenRuntime
 import qualified Hide.Plugin.SystemOne as SystemOne
+import qualified Hide.SystemOne as SystemOneOwner
 import qualified Hide.Plugin.Menu as HideMenu
 import qualified Hide.Plugin.Editor as Editor
 import Hide.AgentSidebarTypes (DirectoryRequest(..))
@@ -1236,6 +1237,58 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
                 writeReply<-nativeResponse "write-1"
                 check "switching Observe to Enforce requires a fresh judgment before retained native Write approval" (maybe False hasError writeReply)
               check "held or expired native writes preserve disk" . (=="Warden source\n") =<< BS.readFile nativeSource
+    -- Actual failed native reads, followed by reviewed composer adoption and
+    -- an ordinary human Steer. Each operation has its own protocol receipt.
+    let adviceRoot=root </> "warden-advice"
+        adviceSource=adviceRoot </> "Source.hs"
+        adviceLog=adviceRoot </> "messages.jsonl"
+        adviceEnvironment=object ["THC_LOG" .= adviceLog,"THC_SOURCE" .= adviceSource,"THC_RESUME" .= ("yes"::T.Text)]
+        adviceConfig=Warden.defaultWardenSettings {Warden.wardenMode=Warden.WardenObserve}
+        model=SystemOne.ReportedModel "review-check"
+        decisionProvider=SystemOne.DecisionProvider (SystemOne.SupplierDescription "Review check" SystemOne.InProcess model Nothing 0) $ \_ use->
+          use (SystemOne.DecisionDriver $ \input _->pure (Right (SystemOne.DecisionOutput model
+            [SystemOne.DecisionAnswer (SystemOne.questionName q) SystemOne.BinaryAnswer
+              (if SystemOne.questionName q=="repeated-failure" then [0.01,0.99] else [0.99,0.01]) Nothing
+              | q<-SystemOne.decisionQuestions input] Nothing)))
+    createDirectory adviceRoot
+    BS.writeFile adviceSource "binary\0source"
+    SystemOneOwner.withSystemOne $ \decisions->
+      WardenRuntime.withWarden (SystemOneOwner.systemOneServices decisions) adviceConfig (\_->pure (Right [])) $ \warden->
+        C.withConsoles $ \consoles->withGuardedConversationAt (Just warden)
+          (WardenRuntime.wardenProviderFactory warden <$> ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin)
+          (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles adviceRoot $ \runtime->do
+            configured<-send runtime "configure" ["0","python3",json [server],json adviceEnvironment]
+              ((initialDesktop (90,28)) {defaultDirectory=Just adviceRoot})
+            shown<-send runtime "show" [] configured
+            started<-submit runtime QuerySubmit (draftAt (newBuffer "warden-review") (Selection 13 13) shown)
+            let ready pendingDesktop=do
+                  next<-tickConversation runtime pendingDesktop
+                  rows<-WardenRuntime.wardenObservations (WardenRuntime.wardenAgent warden (AR.primaryAgent (conversationAgents runtime)))
+                  replies<-readMessages adviceLog
+                  let arrived ident=case findResponse ident replies of Just _->True; Nothing->False
+                  if length rows==2 && all arrived ["advice-1","advice-2"] && bufferLength (composerBuffer next)==0
+                    then pure (next,replies) else threadDelay 1000 >> ready next
+            (current,messages)<-timeout 8000000 (ready started) >>= maybe (error "Warden failed-read receipts did not arrive") pure
+            check "both failed reads have actual error responses"
+              (all (maybe False hasError . (`findResponse` messages)) ["advice-1","advice-2"])
+            _<-SystemOneOwner.selectDecisionProvider decisions (Just decisionProvider) >>= either (error . show) pure
+            (target,binding)<-captureConversationAdvice runtime current >>= either (error . T.unpack) pure
+            advice<-WardenRuntime.prepareWardenAdvice binding >>= either (error . T.unpack) pure
+            let text=WardenRuntime.wardenAdviceText advice
+                prepared=newBuffer text
+                newer=draftAt (newBuffer "my newer draft") (Selection 14 14) current
+            unchanged<-adoptConversationAdvice runtime target advice prepared newer
+            check "late review cannot overwrite a new human draft" (contents (composerBuffer unchanged)=="my newer draft")
+            adopted<-adoptConversationAdvice runtime target advice prepared current
+            check "review places advice in the existing composer" (contents (composerBuffer adopted)==text)
+            beforeSend<-readMessages adviceLog
+            let isSteer entry=field "method" entry==Just ("_session/steering"::T.Text)
+            check "preparing and adopting advice sends no steering" (not (any isSteer beforeSend))
+            _<-submit runtime SteerSubmit adopted >>= done runtime
+            sent<-readMessages adviceLog
+            check "ordinary human Steer sends the reviewed draft"
+              (any (\entry->isSteer entry && case field "params" entry >>= field "prompt" of
+                Just [value]->field "text" value==Just text;_->False) sent)
     -- Provider acquisition completes independently of UI ticks. Holding adoption
     -- gives Cancel a deterministic completed-but-unowned client to retire.
     forM_ [False,True] $ \cancelled->C.withConsoles $ \consoles->withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->do
@@ -2250,6 +2303,7 @@ providerScript=unlines
   , "      call(scenario+'-head','fs/read_text_file',{'path':os.path.join(os.path.dirname(os.environ['THC_SOURCE']),'slow-source')})"
   , "      call(scenario+'-source','fs/read_text_file',{'path':os.environ['THC_SOURCE'],'line':1,'limit':1})"
   , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'guarded requests sent'}})"
+  , "    elif scenario=='warden-review': call('advice-1','fs/read_text_file',{'path':os.environ['THC_SOURCE']})"
   , "    elif scenario=='write-two': call('two-read-a','fs/read_text_file',{'path':os.environ['THC_SOURCE']})"
   , "    elif scenario=='wait': update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'waiting for cancellation'}})"
   , "    elif scenario=='disconnect': sys.exit(0)"
@@ -2263,6 +2317,8 @@ providerScript=unlines
   , "      call('terminal-create-'+str(terminal_serial),'terminal/create',{'command':executable,'args':['-c',command],'outputByteLimit':8})"
   , "  elif method is None and isinstance(ident,str):"
   , "    if ident=='slow-write' or ident in ['slow-replaced-source','slow-private-source']: finish()"
+  , "    elif ident=='advice-1': call('advice-2','fs/read_text_file',{'path':os.environ['THC_SOURCE']})"
+  , "    elif ident=='advice-2': pass"
   , "    elif ident=='two-read-a': call('two-read-b','fs/read_text_file',{'path':os.environ['THC_SECOND']})"
   , "    elif ident=='two-read-b': call('two-write-a','fs/write_text_file',{'path':os.environ['THC_SOURCE'],'content':'first approved\\n'})"
   , "    elif ident=='two-write-a': call('two-write-b','fs/write_text_file',{'path':os.environ['THC_SECOND'],'content':'should be rejected\\n'})"
