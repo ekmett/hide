@@ -1,12 +1,12 @@
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, StrictData #-}
 -- |
 -- Module      : Hide.Consoles
 -- Copyright   : (c) 2026 Edward Kmett
 -- License     : BSD-2-Clause OR Apache-2.0
 -- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
--- Portability : OverloadedStrings
+-- Portability : OverloadedStrings, StrictData
 --
 -- Own named terminals and their corresponding editor documents.
 --
@@ -21,7 +21,7 @@ module Hide.Consoles
   ) where
 
 import Control.Concurrent.MVar
-import Control.Exception (bracket, mask_, onException)
+import Control.Exception (bracket, evaluate, mask_, onException)
 import qualified Data.ByteString as BS
 import Data.ByteString (ByteString)
 import Data.List (find, intercalate)
@@ -34,9 +34,11 @@ import Hide.Model hiding (message)
 import Hide.Syntax (Style(..),StyledText,styledContents)
 import Hide.Terminal
 
+-- Output bounds apply at polling, not when an agent eventually reads the tail.
 newtype Consoles = Consoles (MVar (Integer,M.Map Text Console))
 data Console = Console
-  { consoleTerminal :: Terminal, consoleBuffer :: Int, outputLimit :: Int
+  { consoleTerminal :: ~Terminal -- Opaque capability; the disabled backend has no inhabitants.
+  , consoleBuffer :: Int, outputLimit :: Int
   , retainedOutput :: ByteString, outputTruncated :: Bool
   , latestSnapshot :: TerminalSnapshot, consoleError :: Maybe Text, consoleRetiring :: Bool
   , consoleMouse :: Maybe TerminalMouseEvent }
@@ -62,8 +64,10 @@ prepareConsole unset config limit = mask_ $ do
       polled <- pollTerminal terminal
       case polled of
         Left message -> closeTerminal terminal >> pure (Left message)
-        Right snapshot -> pure (Right (PreparedConsole (recordOutput snapshot
-          (Console terminal 0 (max 0 (min (16*1024*1024) limit)) BS.empty False snapshot Nothing False Nothing)))))
+        Right snapshot -> do
+          console<-evaluate (recordOutput snapshot
+            (Console terminal 0 (max 0 (min (16*1024*1024) limit)) BS.empty False snapshot Nothing False Nothing))
+          pure (Right (PreparedConsole console)))
       `onException` closeTerminal terminal
 
 closePreparedConsole :: PreparedConsole -> IO ()
@@ -208,7 +212,7 @@ refresh console
   | otherwise = do
       result <- pollTerminal (consoleTerminal console)
       case result of
-        Right snapshot -> pure (recordOutput snapshot console)
+        Right snapshot -> evaluate (recordOutput snapshot console)
         Left message -> do
           killTerminal (consoleTerminal console)
           pure console {consoleError=Just message}

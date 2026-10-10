@@ -8,11 +8,11 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 
-module AgentHubCheck (checks, completedTurn) where
+module AgentHubCheck (checks, completedTurn, collectionChecks) where
 import Control.Concurrent
 import Control.Concurrent.Async (withAsync, cancel, wait, waitCatch)
 import Control.Concurrent.STM
-import Control.Exception (bracket, finally, SomeAsyncException, fromException)
+import Control.Exception (bracket, finally, evaluate, SomeAsyncException, fromException)
 import Control.Monad (unless,void,forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -20,12 +20,46 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import Data.IORef
+import Data.Maybe (isNothing)
+import Data.Unique (newUnique,hashUnique)
+import System.Mem (performGC)
+import System.Mem.Weak (Weak,mkWeakPtr,deRefWeak)
 import qualified Data.Text as T
 import System.Timeout (timeout)
 import System.Directory (getTemporaryDirectory, canonicalizePath)
 import System.FilePath ((</>))
 import Hide.AgentHub
 import Hide.Plugin.Provider
+
+-- Exercise eviction without reading the history counter, which itself used to
+-- discharge the chain that incorrectly retained already-discarded events.
+collectionChecks :: IO ()
+collectionChecks=do
+  directory<-getTemporaryDirectory >>= canonicalizePath
+  let caps=Capabilities False False False []
+      driver=AgentDriver directory "collection-check" caps (\_->pure (Right caps))
+        (\_ _ _ _->pure (Left "No delivery in collection check")) (pure ()) (pure ())
+        (\_ _ _->pure (Left "No steering in collection check"))
+      right=either (error.T.unpack) pure
+  bracket (newAgentHub (HubLimits 1 0) (\_ _->pure (Right driver))) closeAgentHub $ \hub->do
+    ident<-registerAgent hub "Collection" directory driver >>= right
+    weak<-recordCollectibleEvent hub ident
+    forM_ [1..1100::Int] $ \n->recordAgentEvent hub ident "event" (String (T.pack (show n)))
+    -- A sidebar read demands the current entry but not the evicted-event count.
+    _<-agentSummaries hub >>= evaluate . length . show
+    performGC
+    gone<-isNothing <$> deRefWeak weak
+    unless gone (error "Agent history retains evicted events")
+    void (agentSummaries hub >>= evaluate . length)
+
+{-# NOINLINE recordCollectibleEvent #-}
+recordCollectibleEvent :: AgentHub -> AgentId -> IO (Weak Value)
+recordCollectibleEvent hub ident=do
+  serial<-hashUnique <$> newUnique
+  value<-evaluate (String (T.pack (show serial)))
+  weak<-mkWeakPtr value Nothing
+  recordAgentEvent hub ident "event" value
+  pure weak
 
 checks :: IO ()
 checks=do

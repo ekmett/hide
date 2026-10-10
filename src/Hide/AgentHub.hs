@@ -1,12 +1,12 @@
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, StrictData #-}
 -- |
 -- Module      : Hide.AgentHub
 -- Copyright   : (c) 2026 Edward Kmett
 -- License     : BSD-2-Clause OR Apache-2.0
 -- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
--- Portability : OverloadedStrings
+-- Portability : OverloadedStrings, StrictData
 --
 -- Agent identities, relationships, message tickets and bounded history in STM.
 --
@@ -56,6 +56,8 @@ agentConfigAgent :: AgentConfigRef -> AgentId
 agentConfigAgent (AgentConfigRef ident _ _ _)=ident
 
 data Phase = Starting | Idle | Running | Cancelling | Ended | Failed | Recovered deriving (Eq,Show)
+-- History/queue limits must release their old roots during publication. In
+-- particular, a lazy dropped-event counter keeps every discarded Entry alive.
 data Entry = Entry
   { entryId :: AgentId, entryParent :: Maybe AgentId, entrySpec :: SpawnSpec, entryPhase :: Phase
   , entryDriver :: Maybe AgentDriver, entryKey :: Maybe Text, entryCaps :: Capabilities
@@ -120,7 +122,7 @@ reserve (AgentHub _ _ ref) limits actor raw external=do
       let ident=AgentId ("agent-"<>T.pack (show (hubNextId state)))
           entry=appendEvent "created" actor (object ["name" .= spawnName spec,"task" .= spawnTask spec])
             (Entry ident (case actor of Human->Nothing; Agent parent->Just parent) spec Starting Nothing Nothing emptyCaps Q.empty Nothing M.empty 1 Q.empty 0 1 0 external False False Nothing Nothing 1 0 0)
-      writeTVar ref state {hubEntries=M.insert ident entry (hubEntries state),hubNextId=hubNextId state+1,hubLastLimits=limits}
+      writeTVar ref $! state {hubEntries=M.insert ident entry (hubEntries state),hubNextId=hubNextId state+1,hubLastLimits=limits}
       pure (Right (entry,source))
   where
     prepare state=do
@@ -202,7 +204,7 @@ reconnectAgent hub@(AgentHub readLimits launcher ref) ident=mask $ \restore->do
         Left err->pure (Left err)
         Right (entry,key,limits)->do
           let reconnecting=appendEvent "reconnecting" Human Null entry {entryPhase=Starting,entryEpoch=entryEpoch entry+1,entryCapsVersion=0,entryControl=Nothing,entryUsage=Nothing}
-          writeTVar ref state {hubEntries=M.insert ident reconnecting (hubEntries state),hubLastLimits=limits}
+          writeTVar ref $! state {hubEntries=M.insert ident reconnecting (hubEntries state),hubLastLimits=limits}
           pure (Right (reconnecting,key))
   case reserved of
     Left err->pure (Left err)
@@ -252,7 +254,7 @@ updateExternalAgent hub@(AgentHub readLimits _ ref) ident driver=mask $ \restore
           let reviving=entryPhase entry==Recovered
           if reviving && length (filter active (M.elems (hubEntries state)))>=totalActiveAgents limits then pure (Left "Total active-agent limit reached.") else do
             let next=appendEvent "provider_updated" Human Null entry {entryDriver=Just driver,entryKey=if T.null (driverSessionKey driver) then Nothing else Just (driverSessionKey driver),entryCaps=driverCapabilities driver,entryCapsVersion=0,entryEpoch=entryEpoch entry+1,entryControl=Nothing,entryUsage=Nothing,entrySpec=(entrySpec entry) {spawnDirectory=driverDirectory driver},entryPhase=if reviving then Idle else entryPhase entry}
-            writeTVar ref state {hubEntries=M.insert ident next (hubEntries state),hubLastLimits=limits}
+            writeTVar ref $! state {hubEntries=M.insert ident next (hubEntries state),hubLastLimits=limits}
             pure (Right (reviving,entryEpoch next))
         _->pure (Left "Unknown or ended external agent.")
   case result of
@@ -305,7 +307,7 @@ installDriver hub@(AgentHub _ _ ref) ident epoch driver=do
     case M.lookup ident (hubEntries state) of
       Just entry | entryPhase entry==Starting && entryEpoch entry==epoch && not (hubClosed state)->do
         let next=appendEvent "ready" Human Null entry {entryDriver=Just driver,entryKey=if T.null (driverSessionKey driver) then Nothing else Just (driverSessionKey driver),entryCaps=if entryCapsVersion entry==0 then driverCapabilities driver else entryCaps entry,entryPhase=Idle,entrySpec=(entrySpec entry) {spawnDirectory=driverDirectory driver}}
-        writeTVar ref state {hubEntries=M.insert ident next (hubEntries state)}
+        writeTVar ref $! state {hubEntries=M.insert ident next (hubEntries state)}
         pure True
       _->pure False
   if accepted then void (forkIOWithUnmask (\unmask->unmask (worker hub ident))) >> pure True else pure False
@@ -333,7 +335,7 @@ worker hub@(AgentHub _ _ ref) ident = do
               let updated = appendEvent "message_started" (messageAuthor message)
                     (object ["ticket" .= messageTicket message])
                     entry {entryQueue = rest, entryCurrent = Just message, entryPhase = Running}
-              writeTVar ref state {hubEntries = M.insert ident updated (hubEntries state)}
+              writeTVar ref $! state {hubEntries = M.insert ident updated (hubEntries state)}
               pure ((message,) <$> entryDriver entry)
   case next of
     Nothing -> pure ()
@@ -445,7 +447,7 @@ agentControl (AgentHub _ _ ref) ident kind validate action commit=mask $ \restor
         Right (entry,driver)->do
           let token=entryNextEvent entry
               next=appendEvent (kind<>"_requested") Human Null entry {entryControl=Just (token,kind)}
-          writeTVar ref state {hubEntries=M.insert ident next (hubEntries state)}
+          writeTVar ref $! state {hubEntries=M.insert ident next (hubEntries state)}
           pure (Right (token,entry,driver))
   case reserved of
     Left err->pure (Left err)
@@ -462,7 +464,7 @@ agentControl (AgentHub _ _ ref) ident kind validate action commit=mask $ \restor
             Just entry | active entry,entryEpoch entry==epoch,entryControl entry==Just (token,kind)->do
               let apply value=let changed=commit value entry in if kind=="configuration" && entryCapsVersion entry/=entryCapsVersion original then changed {entryCaps=entryCaps entry} else changed
                   next=either (\err->appendEvent (kind<>"_failed") Human (String (boundedError err)) entry) apply result
-              writeTVar ref state {hubEntries=M.insert ident next (hubEntries state)}
+              writeTVar ref $! state {hubEntries=M.insert ident next (hubEntries state)}
               pure result
             _->pure (Left "Agent operation ended or was cancelled.")) `finally` release
 
@@ -486,7 +488,7 @@ sendAgentChecked (AgentHub _ _ ref) actor ident expected body=atomically $ do
           message=HubMessage ticket actor body (actor==owner)
           next=appendEvent "message_queued" actor (object ["ticket" .= ticket,"text" .= body,"userSeat" .= messageIsUserSeat message])
             entry {entryQueue=entryQueue entry Q.|> message,entryNextTicket=ticket+1}
-      writeTVar ref state {hubEntries=M.insert ident next (hubEntries state)}
+      writeTVar ref $! state {hubEntries=M.insert ident next (hubEntries state)}
       pure (Right ticket)
   where prepare state=do
           validActor actor state
@@ -527,7 +529,7 @@ renameAgent (AgentHub _ _ ref) actor ident raw=atomically $ do
     Left err->pure (Left err)
     Right (entry,name)->do
       let next=appendEvent "renamed" actor (object ["previousName" .= spawnName (entrySpec entry),"name" .= name]) entry {entrySpec=(entrySpec entry) {spawnName=name}}
-      writeTVar ref state {hubEntries=M.insert ident next (hubEntries state)}
+      writeTVar ref $! state {hubEntries=M.insert ident next (hubEntries state)}
       pure (Right ())
 
 -- Human permission can authorize a tool call, but an agent can never use this
@@ -550,7 +552,7 @@ cancelAgent (AgentHub _ _ ref) actor ident = mask $ \restore -> do
         | otherwise -> do
             let next = cancelPending "Agent prompt cancelled." (retireControls entry)
                   {entryPhase = Cancelling, entryCancelPending = True}
-            writeTVar ref state
+            writeTVar ref $! state
               {hubEntries = M.insert ident (appendEvent "cancelled" actor Null next) (hubEntries state)}
             pure (Right (Just (mapM_ driverCancel (entryDriver entry))))
   case result of
@@ -584,7 +586,7 @@ endAgent (AgentHub _ _ ref) actor ident=do
             drivers=[driver | entry<-M.elems (hubEntries state),ending entry,Just driver<-[entryDriver entry]]
             stop entry | ending entry=appendEvent "ended" actor Null (cancelPending "Agent session ended." entry) {entryPhase=Ended,entryCurrent=Nothing,entryDriver=Nothing,entryControl=Nothing,entryUsage=Nothing}
                        | otherwise=entry
-        writeTVar ref state {hubEntries=M.map stop (hubEntries state)}
+        writeTVar ref $! state {hubEntries=M.map stop (hubEntries state)}
         pure (Right drivers)
   case result of Left err->pure (Left err); Right drivers->mapM_ stopQuiet drivers >> pure (Right ())
 
@@ -765,7 +767,7 @@ restoreHub limits launcher value=case parseEither persisted value of
   Left _->pure (Left "Invalid agent directory checkpoint.")
   Right state->do
     hub@(AgentHub _ _ ref)<-newAgentHub limits launcher
-    atomically (writeTVar ref state)
+    atomically (writeTVar ref $! state)
     pure (Right hub)
   where
     persisted=withObject "agent directory" $ \o->do

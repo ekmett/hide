@@ -45,9 +45,9 @@ import Hide.Plugin.Provider (ProviderLaunch(..))
 data Event = Response Int (Either Value Value) | Notification Text Value | Request Value Text Value | Disconnected Text
   deriving (Eq, Show)
 data State = State
-  { outgoing :: Seq.Seq (Int,BL.ByteString), outgoingBytes :: Int
-  , incoming :: Seq.Seq (Int,Event), incomingBytes :: Int
-  , pending :: IS.IntSet, nextId :: Int, failure :: Maybe Text }
+  { outgoing :: !(Seq.Seq (Int,BL.ByteString)), outgoingBytes :: !Int
+  , incoming :: !(Seq.Seq (Int,Event)), incomingBytes :: !Int
+  , pending :: !IS.IntSet, nextId :: !Int, failure :: !(Maybe Text) }
 -- | Opaque owner of the provider process and transport workers; stop it after use.
 data Client = Client { state :: TVar State, wakeWriter :: MVar (), disconnect :: Text -> IO (), closeClient :: IO () }
 
@@ -118,10 +118,12 @@ startClientWithEnvironment launch root = mask_ $ do
                   Nothing -> pure ()
                   Just body -> BL.hPutStr input body >> BS.hPut input "\n" >> hFlush input >> drain
           drain
+        -- Retain the bounded bytes now, not a chain of truncations that only
+        -- runs when the provider fails and somebody reads its diagnostic tail.
         drainer = do
           chunk <- BS.hGetSome errors 4096
           unless (BS.null chunk) $ do
-            modifyMVar_ errorTail (\old -> let bytes = old <> chunk in pure (BS.drop (max 0 (BS.length bytes - 4096)) bytes))
+            modifyMVar_ errorTail (\old -> let bytes = old <> chunk in evaluate (BS.copy (BS.drop (max 0 (BS.length bytes - 4096)) bytes)))
             drainer
     -- A separate supervisor owns cleanup, so no worker kills itself or waits on its own handle lock.
     void $ forkIO $ (do
@@ -193,11 +195,13 @@ requestPrepared (PreparedRequest client ident (PreparedResponse size body)) curr
 
 -- Transport state transactions contain only small identities and bounded queue
 -- operations. Expensive framing and plugin work never execute in this owner.
+-- Force the strict state here: idle polls also update byte counters, and must
+-- not accumulate subtraction thunks or retain previously consumed events.
 modifyState :: TVar State -> (State -> STM (State,a)) -> STM a
 modifyState shared update=do
   previous<-readTVar shared
   (next,result)<-update previous
-  writeTVar shared next
+  writeTVar shared $! next
   pure result
 
 notify :: Client -> Text -> Value -> IO ()
