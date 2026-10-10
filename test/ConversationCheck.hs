@@ -64,6 +64,9 @@ import Hide.GuestAccess (guestCommandAllowed, protectedBuffer, readableAt)
 import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.ConversationInput as ConversationInput
 import qualified Hide.ConversationMenus as ConversationMenus
+import qualified Hide.ConversationChoices as ConversationChoices
+import Hide.Autocomplete (withAutocomplete)
+import qualified Hide.AgentDirectoryHost as AgentDirectoryHost
 import Hide.DocumentationHost (withDocsCommands)
 import qualified Hide.MenuCommands as MenuHost
 import qualified Hide.SidebarCommands as SidebarHost
@@ -133,6 +136,19 @@ sessionMenuAction runtime command value original=SidebarHost.withSidebarCommands
             let typed=form {dialog=fmap (\dg->dg {fields=[SelectedInput "Session ID" sid (Selection (T.length sid) (T.length sid))]}) (dialog form)}
             accepted<-act (runCommand DialogAccept typed)
             bounded "Resume submission" (submitted accepted)
+
+-- Keep the existing menu/form owners alive across both dropdown levels.
+withChoiceMenus :: ConversationState -> Desktop
+  -> ((Desktop -> IO Desktop) -> ((Desktop,[Effect]) -> IO Desktop) -> Desktop -> IO a) -> IO a
+withChoiceMenus runtime original use=SidebarHost.withSidebarCommands $ \forms->withDocsCommands $ \docs->
+  MenuHost.withConversationMenuCommands docs runtime $ \menuOwner->withAutocomplete Nothing (startingDirectory original) $ \autocomplete->
+  ConversationChoices.withConversationChoices (SidebarHost.sidebarCapabilities forms) (MenuHost.menuSidebarCapabilities menuOwner forms)
+    (AgentDirectoryHost.agentDirectory (AR.agentHub (conversationAgents runtime)) autocomplete) SidebarHost.sidebarSelectedAgent SidebarHost.SidebarAgent $ do
+      let effects=SidebarHost.sidebarEffects forms (MenuHost.menuEffects menuOwner (conversationEffects runtime (\desktop _->pure (False,desktop))))
+          tick desktop=MenuHost.tickMenus menuOwner effects desktop >>= SidebarHost.tickSidebar forms effects >>= Conversation.tickConversation runtime
+          act (desktop,requests)=snd <$> effects desktop requests
+      metadata<-HideMenu.menuSnapshot (MenuHost.menuContributions menuOwner)
+      use tick act original {contributedMenus=metadata,menusActive=True,agentMenuRefs=MenuHost.menuAgentReferences menuOwner}
 
 sameDraftRoot :: Desktop -> Desktop -> IO Bool
 sameDraftRoot before after=captureVersion (composerBuffer before) >>= \version->versionCurrent version (composerBuffer after)
@@ -1384,31 +1400,53 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       check "unfolding restores individual detail state"
         (conversationText reopenedGroup==conversationText detailGroup)
       check "provider settings appear in the title" (conversationTitle streamed=="fixture-model (high) ▼")
-      let conversationWindow=fromMaybe (error "conversation window") (activeWindow streamed)
-          titleRect=agentTitleRect streamed conversationWindow
-          titleMenu=fst (handleEvent (V.EvMouseDown (left titleRect) (top titleRect) V.BLeft []) streamed)
-          modelMenu=fst (handleEvent (V.EvKey V.KEnter []) titleMenu)
-          chosen=fst (handleEvent (V.EvKey V.KDown []) modelMenu)
-          (changing,changeEffects)=handleEvent (V.EvKey V.KEnter []) chosen
-      let many=streamed {screenSize=(90,12),agentSettings=[AgentSetting "model" "Model" "model" "0" [(T.pack (show n),"Model "<>T.pack (show n)) | n<-[0..29::Int]]]}
-          paged=foldl (\d _ -> fst (handleEvent (V.EvKey V.KDown []) d)) (openAgentChoices "model" many) [1..25::Int]
-      check "long provider menus remain on screen and select by absolute index"
-        (maybe False (\(r,_) -> top r+height r<12) (contextMenu paged) && snd (handleEvent (V.EvKey V.KEnter []) paged)==[AgentAction "set-config" ["model","25"]])
-      check "title click opens settings without moving the window" (contextMenu titleMenu/=Nothing && drag titleMenu==Nothing)
-      check "model selection waits for confirmation" (conversationTitle changing==conversationTitle streamed && changeEffects==[AgentAction "set-config" ["model","fixture-other"]])
-      changed<-snd <$> conversationEffects runtime fallback changing changeEffects
-      updated<-await runtime "model selection" ((=="Conversation settings updated.").status) changed
-      check "model acknowledgement updates title and choices" (conversationTitle updated=="fixture-other (high) ▼")
-      effortPending<-send runtime "set-config" ["reasoning_effort","ultra"] updated
-      effortChanged<-await runtime "effort selection" ((=="Conversation settings updated.").status) effortPending
-      check "effort acknowledgement updates title" (conversationTitle effortChanged=="fixture-other (ultra) ▼")
-      let primaryRuntime=conversationAgents runtime
-      primaryHistory<-AH.historyAgent (AR.agentHub primaryRuntime) AH.Human (AR.primaryAgent primaryRuntime) 0 100
-      check "primary model and effort use the hub configuration path" (case primaryHistory of
-        Right history->length [() | event<-AH.historyEvents history,AH.historyKind event=="configured"]>=2
-        _->False)
-      unavailable<-send runtime "set-config" ["model","not-advertised"] effortChanged
-      check "unadvertised options are rejected locally" (status unavailable=="This conversation setting is unavailable." && agentSettings unavailable==agentSettings effortChanged)
+      effortChanged<-withChoiceMenus runtime reopenedGroup $ \tickChoices act mounted->do
+        let popupReference d=case contextKind d of FormChoicesContext reference _ _->Just reference; _->Nothing
+            awaitChoice label predicate initial=timeout 5000000 (loop initial) >>= maybe (error ("Choice popup did not complete: "++label)) pure
+              where loop d=do
+                      next<-tickChoices d
+                      ready<-predicate next
+                      if ready then pure next else threadDelay 1000 >> loop next
+            opened label=awaitChoice label (\d->pure (contextMenu d/=Nothing && popupReference d/=Nothing))
+            submenu before=awaitChoice "opening values" (\d->pure (contextMenu d/=Nothing && popupReference d/=Nothing && popupReference d/=popupReference before))
+            -- A provider ACK can update the title before the hub commits its
+            -- new configuration receipt. Await that operation and its host
+            -- retirement before starting another setting change.
+            awaitConfiguration option value=awaitChoice ("configuration "++T.unpack option) $ \d->do
+              let agents=conversationAgents runtime
+                  hub=AR.agentHub agents
+                  who=AR.primaryAgent agents
+              current<-AH.agentConfiguration hub who
+              pending<-AH.agentControlPending hub who
+              pure (not pending && not (agentReplying d) && case current of
+                Right (_,choices)->any (\choice->AH.configId choice==option && AH.configCurrent choice==value) choices
+                _->False)
+            select index d=act (handleEvent (V.EvKey V.KEnter []) d {contextMenu=fmap (\(rect,_)->(rect,index)) (contextMenu d)})
+            conversationWindow=fromMaybe (error "conversation window") (activeWindow mounted)
+            titleRect=agentTitleRect mounted conversationWindow
+        titleMenu<-act (handleEvent (V.EvMouseDown (left titleRect) (top titleRect) V.BLeft []) mounted) >>= opened "opening model categories"
+        check "title click opens the two-level popup without a modal or moving the window"
+          (dialog titleMenu==Nothing && drag titleMenu==Nothing && length (contextItemsFor titleMenu)==2)
+        modelMenu<-select 0 titleMenu >>= submenu titleMenu
+        check "value popup preserves the provider checkmark and labels" ("✓ fixture-model" `T.isInfixOf` snapshot modelMenu && "fixture-other" `T.isInfixOf` snapshot modelMenu)
+        let chosen=fst (handleEvent (V.EvKey V.KDown []) modelMenu)
+            (changing,changeEffects)=handleEvent (V.EvKey V.KEnter []) chosen
+        check "model selection captures the installed form before closing its popup"
+          (conversationTitle changing==conversationTitle mounted && case changeEffects of [SubmitPopupChoiceForm _ _ 1 HideMenu.HumanMenu]->True; _->False)
+        changed<-act (changing,changeEffects)
+        updated<-awaitConfiguration "model" "fixture-other" changed
+        check "model acknowledgement updates title and choices" (conversationTitle updated=="fixture-other (high) ▼")
+        effortCategory<-act (runCommand AgentChoose updated) >>= opened "opening effort categories"
+        effortMenu<-select 1 effortCategory >>= submenu effortCategory
+        effortPending<-select 1 effortMenu
+        effortChanged<-awaitConfiguration "reasoning_effort" "ultra" effortPending
+        check "effort acknowledgement updates title" (conversationTitle effortChanged=="fixture-other (ultra) ▼")
+        let primaryRuntime=conversationAgents runtime
+        primaryHistory<-AH.historyAgent (AR.agentHub primaryRuntime) AH.Human (AR.primaryAgent primaryRuntime) 0 100
+        check "primary model and effort use the captured hub configuration path" (case primaryHistory of
+          Right history->length [() | event<-AH.historyEvents history,AH.historyKind event=="configured"]>=2
+          _->False)
+        pure effortChanged
       copyRequested<-send runtime "copy" [] effortChanged
       let copySerial=fst (clipboardExport copyRequested)
       copied<-await runtime "raw transcript copy receipt" (\d->case clipboardExport d of
@@ -1564,6 +1602,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       sourceReceipt<-captureVersion (documentBuffer (sourceDocument cancelled))
       sameSource<-versionCurrent sourceReceipt (documentBuffer (sourceDocument steered))
       check "steering does not edit source or retain sent draft" (T.null (contents (composerBuffer steered)) && sameSource)
+      let primaryRuntime=conversationAgents runtime
       steerHistory<-AH.historyAgent (AR.agentHub primaryRuntime) AH.Human (AR.primaryAgent primaryRuntime) 0 100
       check "primary steering is attributed by the hub to the human user seat" (case steerHistory of
         Right history->any (\event->AH.historyKind event=="steered" && AH.historyAuthor event==AH.Human && field "userSeat" (AH.historyDetail event)==Just True)

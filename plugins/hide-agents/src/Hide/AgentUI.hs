@@ -20,7 +20,7 @@ import Data.Aeson (Value(Null))
 import Data.IORef
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
-import Data.Maybe (mapMaybe,listToMaybe)
+import Data.Maybe (mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Read (readMaybe)
@@ -43,6 +43,8 @@ import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.CompletionInput as CompletionInput
 import qualified Hide.ConversationInput as ConversationInput
 import qualified Hide.ConversationMenus as ConversationMenus
+import qualified Hide.ConversationChoices as ConversationChoices
+import Hide.AgentConfigurationForms (captureChoices,prepareAgentChoice,choiceSpec)
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Sidebar as Sidebar
@@ -55,6 +57,8 @@ plugin :: Plugin
 plugin=Plugin
   { withPlugin= \session->ConversationMenus.withConversationMenus (sessionSidebar session)
       (sessionMenus session) (sessionConversation session) (sessionConversationReply session)
+      . ConversationChoices.withConversationChoices (sessionSidebar session) (sessionMenus session)
+          (sessionAgents session) (sessionSelectedAgent session) (sessionAgentReply session)
       . withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
   , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (map (mapToolContext editorDocumentation) DocsTools.tools
       ++map (mapToolContext editorEnvironment) EnvironmentTools.tools
@@ -100,19 +104,15 @@ withAgentSidebar host inject directory use=withRegistry $ \registry->do
     (\ctx (receipt,option,value)->human ctx (ConfigureAgent receipt option value))
   configureCompletion<-command "hide.sidebar.completion.configure" "Apply completion setting"
     (\ctx (target,option,value)->human ctx (ConfigureCompletion target option value))
-  let choiceSpec title options current=Form.ChoiceFormSpec title "Provider choices"
-        [(optionId,T.take 256 (T.map (\c->if c<' ' || c=='\DEL' then ' ' else c) label)) | (optionId,label)<-options]
-        (if current `elem` map fst options then current else maybe "" fst (listToMaybe options)) "Apply"
-      configurationCommand category ctx who
+  let configurationCommand category ctx who
         | Sidebar.sidebarOrigin host ctx/=Menu.HumanMenu=pure (Left (CommandRejected "Agent forms require the human."))
         | otherwise=do
             -- The host owns advertised metadata and validates the captured
             -- receipt again on application. A refresh cannot retarget this form.
-            captured<-directorySettings directory who
+            captured<-captureChoices directory who
             case captured of
               Right (receipt,choices) | [choice]<-[choice | choice<-choices,A.configCategory choice==category]->do
-                prepared<-Form.prepareForm Form.ReadableForm (choiceSpec "Agent setting" (A.configValues choice) (A.configCurrent choice))
-                  (Form.formAction registry configureAgent (\value->(receipt,A.configId choice,value)) (\_ reply->pure reply))
+                prepared<-prepareAgentChoice False registry configureAgent receipt choice
                 pure (Sidebar.formReply host <$> prepared)
               _->pure (Left (CommandRejected "The agent has not advertised these choices."))
       completionCommand category ctx target

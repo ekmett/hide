@@ -24,6 +24,9 @@ data Sidebar c r = Sidebar
   { sidebarOrigin :: c -> MenuOrigin
   , sidebarWorkspace :: c -> FilePath
   , formReply :: PreparedForm c r -> r
+  , popupFormReply :: PreparedForm c r -> r
+    -- ^ Request popup presentation of finite choices through the same form
+    -- owner. The host supplies geometry and checks its captured human target.
   , publishTree :: TreeProvider c r -> IO ()
   , publishFormRefresh :: FormUpdate -> IO ()
   , invalidateTree :: TreeRef -> NodeId -> IO ()

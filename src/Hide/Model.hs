@@ -34,6 +34,7 @@ import Hide.DownloadsWindowTypes
 import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Editor as Editor
 import Hide.AgentSidebarTypes
+import Hide.AgentHub (AgentConfigRef)
 import Hide.ConversationSessionTypes (ConversationSessionReceipt)
 import Hide.Plugin.ConversationSession (ConversationRequest)
 import Hide.SessionSidebarTypes
@@ -219,7 +220,7 @@ data Command = New | Open | Download | ExportBuffer | ChangeDir | Save | SaveAs 
   | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
   | ProjectBrowser | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
-  | AgentChoose Text | AgentSet Text Text
+  | AgentChoose | FormChoice !Form.FormRef !Integer !Int
   | EnvironmentOptions | AgentDirectory | AgentOptions | AgentPermissions | AgentGuidance | Conversation | AgentCancel | AgentResume | AgentCopyRaw | AgentNew
   | ExecuteShellBlock ShellOrigin (Int,Int,Text,Text)
   | SetBufferView BufferView | SetDefaultBufferView BufferView | RevertChange Int Int (Int,Int) Int
@@ -246,7 +247,14 @@ data ConflictAction = CompareDisk | ReloadDisk | KeepBuffer | SaveConflictAs der
 data Conflict = Conflict { conflictBuffer :: Int, conflictRevision :: Int, conflictBaseline :: FileState, conflictDisk :: Maybe ByteString } deriving (Eq,Show)
 data GitAction = FetchRemote | PullRemote | MergeBranch Text deriving (Eq,Show)
 data Toolchain = THC | GHC deriving (Eq,Show)
-data ContextKind = TreeContext [Tree.TreeHit] [(Text,Command)] | ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | WindowRowsContext | SourceContext | GitContext | MessagesContext | AgentContext [(Text,Command)] deriving (Eq,Show)
+data ContextKind = TreeContext [Tree.TreeHit] [(Text,Command)] | ToolchainContext [(Text,Command)] | LinkContext Command | ShellContext Command | ChangeContext Command | WindowRowsContext | SourceContext | GitContext | MessagesContext | FormChoicesContext !Form.FormRef !Integer ![(Text,Command)] | SubmittedChoicesContext !Form.FormRef !Integer deriving (Eq,Show)
+
+-- | Small host popup admission receipt. Provider metadata, desktop, source
+-- buffers and Undo never become part of a popup's action/currentness key.
+data ChoicePopupTarget = ChoicePopupTarget
+  { choicePopupWindow :: !Int, choicePopupView :: !Text
+  , choicePopupConfig :: !AgentConfigRef, choicePopupBounds :: !Rect
+  , choicePopupX :: !Int, choicePopupY :: !Int } deriving (Eq,Show)
 -- | Bounded hit target retained while a context popup is open. Messages use a
 -- projection generation and optional frozen source location, never message text. The
 -- source target keeps a copied expression of at most 4096 characters, never a
@@ -257,7 +265,7 @@ data ContextKind = TreeContext [Tree.TreeHit] [(Text,Command)] | ToolchainContex
 data ContextTarget = WindowRowTarget !PluginWindow.WindowRef !Tree.NodeId | SidebarTarget [Tree.TreeHit] | SourceTarget
   { sourceTargetWindow :: !Int, sourceTargetBuffer :: !Int, sourceTargetRevision :: !Int
   , sourceTargetSelection :: !Selection, sourceTargetRow :: !Int
-  , sourceTargetExpression :: !(Maybe Text), sourceTargetFile :: !(Maybe FilePath) } | ConversationTarget Text | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
+  , sourceTargetExpression :: !(Maybe Text), sourceTargetFile :: !(Maybe FilePath) } | ChoicePopupContextTarget !ChoicePopupTarget | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
 
 data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
@@ -273,7 +281,7 @@ data PackageBuildTarget = PackageBuildTarget
   , packageBuildName :: !Text } deriving (Eq,Show)
 
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = TerminalMouseInput !Text !Terminal.TerminalMouseEvent | CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ConversationSessionAction !(ConversationRequest ConversationSessionReceipt) | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ExportBufferDocument !Int !Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | OpenFile !Plugin.MenuOrigin !FilePath | OpenFileBytes !Text !ByteString | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice !Plugin.MenuOrigin FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = TerminalMouseInput !Text !Terminal.TerminalMouseEvent | CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | SubmitPopupChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ConversationSessionAction !(ConversationRequest ConversationSessionReceipt) | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ExportBufferDocument !Int !Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | OpenFile !Plugin.MenuOrigin !FilePath | OpenFileBytes !Text !ByteString | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice !Plugin.MenuOrigin FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -409,7 +417,7 @@ menus =
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" (AgentChoose ""),mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" AgentChoose,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload keybindings" "" ReloadBindings,mi "Inspect keybindings" "" InspectBindings])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView),mi "Markdown" "" (SetBufferView MarkdownView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About hide..." "" About])]
@@ -469,6 +477,7 @@ commandBindingKeys d cmd
                                | Plugin.menuName ref=="hide.debug.toggle-breakpoint" -> DebugCommand "breakpoint"
                                | Plugin.menuName ref=="hide.agents.new" -> AgentNew
                                | Plugin.menuName ref=="hide.agents.resume" -> AgentResume
+                               | Plugin.menuName ref=="hide.agents.model" -> AgentChoose
           _ -> cmd
 
 commandDescription :: Command -> Text
@@ -556,8 +565,8 @@ commandDescription cmd = case cmd of
     "exception-info" -> "Inspect the stopped exception, its cause and stack."
     "disconnect" -> "Disconnect the debugger; stop editor-owned programs."
     _ -> "Debugger: " <> action
-  AgentChoose _ -> "Choose the conversation model or reasoning effort."
-  AgentSet _ _ -> "Apply this choice to the conversation."
+  AgentChoose -> "Choose the conversation model or reasoning effort."
+  FormChoice{} -> "Select this finite form choice."
   AgentDirectory -> "Inspect agents, their history and workspaces."
   AgentOptions -> "Configure agents and their executable commands."
   AgentPermissions -> "Set each agent tool to Enable, Prompt, or Disable."
@@ -685,13 +694,13 @@ menuItemsFor d i
   where
     original=menuItems i
     slot=let (title,_,_)=menus !! (i `mod` length menus) in T.toLower title
-    additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot,Plugin.menuName (Plugin.menuReference item) `notElem` ["hide.agents.new","hide.agents.resume"]]
+    additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot,Plugin.menuName (Plugin.menuReference item) `notElem` ["hide.agents.new","hide.agents.resume","hide.agents.model"]]
     helpEntry=[item | item@(MenuItem _ _ (RegisteredMenu ref _))<-additions,Plugin.menuName ref=="hide.help.contents"]
     sourceEntry=find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
     replaceSource (MenuItem title key (DebugCommand "breakpoint"))=case sourceEntry of
       Just item->MenuItem title key (contributionCommand d item)
       Nothing->MenuItem title key (if menusActive d then Disabled "Breakpoint command is unavailable." else DebugCommand "breakpoint")
-    replaceSource (MenuItem title key cmd) | cmd `elem` [AgentNew,AgentResume]=case find ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
+    replaceSource (MenuItem title key cmd) | cmd `elem` [AgentNew,AgentResume,AgentChoose]=case find ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
       Just item->MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item)
       Nothing->MenuItem title key (Disabled "Conversation session command is unavailable.")
     replaceSource item=item
@@ -726,6 +735,7 @@ commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.m
 commandEnabled d (TreeCommand trace _) = dialog d==Nothing && maybe False (hitCurrent trace) (sideTree d)
 commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find ((==reference) . Plugin.menuReference) (contributedMenus d) of
   Nothing -> False
+  Just item | Plugin.menuName (Plugin.menuReference item)=="hide.agents.model" -> activeConversation d && not (null (conversationSettings d))
   Just item | Plugin.menuSlot item=="context.source" -> case sourceInvocationTarget d of
     Just target@SourceTarget{} -> contextTargetCurrent d {contextTarget=Just target} && maybe False (textBuffer . documentBuffer) (activeDocument d)
     _ -> False
@@ -755,8 +765,10 @@ commandEnabled d (RevertChange bid version counts _) = case activeDocument d of
 commandEnabled d ToggleTerminalPin = maybe False (terminalWindow d) (activeWindow d)
 commandEnabled d cmd | cmd `elem` [Zoom,SplitVertical,SplitHorizontal], maybe False (windowPinned d) (activeWindow d) = False
 commandEnabled d CopyLocation = maybe False (\doc -> documentFile doc/=Nothing && not (byteMode (documentBuffer doc))) (activeDocument d)
-commandEnabled d (AgentChoose _) = not (null (conversationSettings d))
-commandEnabled d (AgentSet _ _) = not (agentReplying d) && not (null (conversationSettings d))
+commandEnabled d AgentChoose = dialog d==Nothing && activeConversation d && not (null (conversationSettings d)) && any ((=="hide.agents.model") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
+commandEnabled d (FormChoice reference version _) = dialog d==Nothing && contextMenu d/=Nothing && contextTargetCurrent d && case contextKind d of
+  FormChoicesContext owned revision _->owned==reference && revision==version
+  _->False
 commandEnabled d cmd | cmd `elem` [GoToMessage,CopyAllMessages,NextMessage,PreviousMessage] = not (null (diagnostics d))
 commandEnabled d Copy | problemsVisible d && problemsFocused d = case messageInvocationTarget d of
   Just (MessagesTarget _ _ (Just _)) -> True
@@ -765,6 +777,7 @@ commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,
 commandEnabled _ _ = True
 sessionCommandName :: Command -> Text
 sessionCommandName AgentNew="hide.agents.new"
+sessionCommandName AgentChoose="hide.agents.model"
 sessionCommandName _="hide.agents.resume"
 
 contributedSession :: Text -> Desktop -> (Desktop,[Effect])
@@ -1405,6 +1418,11 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 -- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
+runCommand (FormChoice reference version selected) source
+  | commandEnabled source (FormChoice reference version selected)=
+      (source {contextMenu=Nothing,contextKind=SubmittedChoicesContext reference version,menu=Nothing},
+       [SubmitPopupChoiceForm reference version selected Plugin.HumanMenu])
+  | otherwise=(source {contextMenu=Nothing,contextKind=SourceContext,contextTarget=Nothing},[])
 runCommand cmd source | dialog source==Nothing,menu source==Nothing,contextMenu source==Nothing,not (questionActive source),
   Just key<-lookup cmd [(CursorLeft False,V.KLeft),(CursorRight False,V.KRight),(CursorUp False,V.KUp),(CursorDown False,V.KDown)],
   Just next<-imageKey key [] source = (next,[])
@@ -1444,7 +1462,7 @@ runCommand Copy source | dialog source==Nothing,Just view<-activePluginWindow so
   in (copyClipboard False (PluginWindow.copyPreparedSelection view a b) source {menu=Nothing,contextMenu=Nothing},[])
 runCommand SelectAll source | dialog source==Nothing,Just view<-activePluginWindow source =
   (modifyActive (\w->w {selection=Selection 0 (contentLength (PluginWindow.preparedWindowText view))}) source,[])
-runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing})
+runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, contextKind=case contextKind source of FormChoicesContext{}->SourceContext; SubmittedChoicesContext{}->SourceContext; other->other, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing})
   where
     go DialogAccept d = applyDialogCommand DialogAccept d
     go DialogCancel d = applyDialogCommand DialogCancel d
@@ -1511,8 +1529,8 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go AgentCancel d = (d,[AgentAction "cancel" []])
     go AgentResume d = contributedSession "hide.agents.resume" d
     go AgentNew d = contributedSession "hide.agents.new" d
-    go (AgentChoose category) d = (openAgentChoices category d,[])
-    go (AgentSet ident value) d = (d,[AgentAction "set-config" [ident,value]])
+    go AgentChoose d = contributedSession "hide.agents.model" d
+    go FormChoice{} d = (d,[])
     go AgentCopyRaw d = (d,[AgentAction "copy" []])
     go SaveAs d = case activeWindow d of
       Nothing -> (d,[])
@@ -2875,7 +2893,8 @@ contextItems (ChangeContext command) = ("Revert this change",command):contextIte
 contextItems WindowRowsContext = []
 contextItems SourceContext = [("Copy Location",CopyLocation),("Export buffer copy…",ExportBuffer),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
-contextItems (AgentContext items) = items
+contextItems (FormChoicesContext _ _ items) = items
+contextItems SubmittedChoicesContext{} = []
 contextItems GitContext = [("Pull",GitPull),("Fetch",GitFetch),("Merge...",GitMerge)]
 
 -- | Compose prepared context contributions with the existing session actions.
@@ -2956,15 +2975,18 @@ agentTitleRect d w = Rect (x+max 6 ((ww-T.length title) `div` 2)) y (max 0 (min 
     title=" "<>conversationTitle d<>" "
     count=T.length (T.pack (show (windowNumber w)))
 
-openAgentChoices :: Text -> Desktop -> Desktop
-openAgentChoices category d
-  | null items = d {status="The provider has not advertised model settings."}
-  | otherwise = openContext (AgentContext items) x (y+1) d
-  where
-    Rect x y _ _=maybe (Rect 1 1 0 0) (agentTitleRect d) (activeWindow d)
-    items | T.null category = [(settingName option<>"  "<>settingCurrent option<>" ►",AgentChoose (settingId option)) | option<-conversationSettings d]
-          | otherwise = [(if value==settingCurrent option then "✓ "<>name else "  "<>name,AgentSet category value)
-                        | option<-conversationSettings d,settingId option==category,(value,name)<-settingChoices option]
+-- | Install bounded form metadata using the existing context-menu geometry.
+-- Each row carries its exact form/revision; labels never determine the action.
+openChoicePopup :: ChoicePopupTarget -> Form.FormRef -> Integer -> [(Text,Command)] -> Desktop -> Desktop
+openChoicePopup target reference version rows d=(openContext (FormChoicesContext reference version rows)
+  (choicePopupX target) (choicePopupY target) d) {contextTarget=Just (ChoicePopupContextTarget target)}
+
+choicePopupTargetCurrent :: ChoicePopupTarget -> Desktop -> Bool
+choicePopupTargetCurrent target d=dialog d==Nothing && activeConversation d &&
+  not (problemsFocused d) && not (maybe False treeFocused (sideTree d)) &&
+  conversationTarget d==choicePopupView target && case activeWindow d of
+    Just w->windowId w==choicePopupWindow target && windowFocused d w && bounds w==choicePopupBounds target
+    _->False
 
 contextOffset :: Rect -> Int -> Int
 contextOffset r chosen = let count=max 1 (height r-2) in chosen `div` count*count
@@ -2990,7 +3012,8 @@ captureContextTarget kind d = case kind of
   TreeContext trace _ -> Just (SidebarTarget trace)
   SourceContext -> source
   ChangeContext{} -> source
-  AgentContext{} -> Just (ConversationTarget (conversationTarget d))
+  FormChoicesContext{} -> contextTarget d
+  SubmittedChoicesContext{} -> contextTarget d
   MessagesContext -> Just $ if messagesOwner d then
     MessagesTarget (diagnosticsGeneration d) (problemsSelected d) (case drop (problemsSelected d) (diagnostics d) of
       problem:_ -> let path=diagnosticPath problem; row=diagnosticRow problem; column=diagnosticColumn problem
@@ -3038,7 +3061,7 @@ contextTargetCurrent d = case contextTarget d of
       _->False
   Just (SidebarTarget trace) -> maybe False (\tree->treeFocused tree && hitCurrent trace tree) (sideTree d)
   Nothing -> True
-  Just (ConversationTarget target) -> conversationTarget d==target
+  Just (ChoicePopupContextTarget target) -> choicePopupTargetCurrent target d
   Just target@SourceTarget{} -> case (activeWindow d,activeDocument d) of
     (Just window,Just doc) -> bufferView window/=MarkdownView && sourceContextDocument doc && windowFocused d window &&
       windowId window==sourceTargetWindow target && bufferId window==Just (sourceTargetBuffer target) &&
@@ -3095,7 +3118,9 @@ contextEvent ev (r,chosen) d = case ev of
   V.EvMouseDown x y V.BRight mods -> mouseEvent x y V.BRight mods d {contextMenu=Nothing}
   _ -> (d,[])
   where
-    close=(d {contextMenu=Nothing},[])
+    close=case contextKind d of
+      FormChoicesContext reference _ _->(d {contextMenu=Nothing,contextKind=SourceContext,contextTarget=Nothing},[RetireInputForm reference])
+      _->(d {contextMenu=Nothing},[])
     choose i=(d {contextMenu=Just (r,i `mod` length items)},[])
     invoke i=case drop i items of (_,cmd):_ | contextTargetCurrent d && commandEnabled d cmd -> runCommand cmd d; _ -> close
     items=contextItemsFor d
@@ -3277,7 +3302,7 @@ windowMouse x y button mods d = case find (\w -> windowVisible d w && inside (bo
       | y==t && not (windowGrouped focused w) && terminalWindow focused w && x>=l+6 && x<=l+8 -> runCommand ToggleTerminalPin focused
       | windowPinned d w && (x==l || x==l+ww-1 || y==t || y==t+hh-1) -> (focused,[])
       | y==t && x>=l+ww-6 && x<l+ww-3 -> runCommand Zoom focused
-      | y==t, not (windowGrouped focused w), activeConversation focused, not (null (conversationSettings focused)), inside (agentTitleRect focused w) x y -> runCommand (AgentChoose "") focused
+      | y==t, not (windowGrouped focused w), activeConversation focused, not (null (conversationSettings focused)), inside (agentTitleRect focused w) x y -> runCommand AgentChoose focused
       | y==t && (x==l || x==l+ww-1) -> (beginWindowDrag (EdgeSizing (windowId w) True True 0) focused,[])
       | y==t -> (beginWindowDrag (Moving (windowId w) (x-l) (y-t)) focused,[])
       | x>=l+ww-2 && y==t+hh-1 -> (beginWindowDrag (Resizing (windowId w) (l+ww-x) (t+hh-y)) focused,[])

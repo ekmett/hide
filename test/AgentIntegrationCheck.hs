@@ -30,7 +30,7 @@ import Hide.GuestAccess (guestKeyboardAllowed,guestCommandAllowed,sanitizedBuffe
 import qualified Data.Map.Strict as M
 import Data.IORef
 import Hide.Buffer (bufferLength, contents,newBuffer,contentSlice,contentLength,Selection(..))
-import Hide.AgentSidebarTypes (DirectoryRequest(ShowAgent))
+import Hide.AgentSidebarTypes (DirectoryRequest(ShowAgent,ConfigureAgent))
 import Hide.Recovery (writeCheckpoint,readCheckpoint,checkpointKey)
 import Hide.BufferReadServices (windowPage)
 import qualified Hide.Plugin.WindowRead as WR
@@ -136,6 +136,9 @@ checks=bracket temporary removePathForcibly $ \root ->
               (current,Just _)->current==serial
               _->False)) requested
           select ident d=apply d [AgentSidebarAction (ShowAgent ident)]
+          configure ident option value d=do
+            (receipt,_)<-AH.agentConfiguration hub ident >>= right
+            apply d [AgentSidebarAction (ConfigureAgent receipt option value)]
           submit action d=let (prepared,effects)=runCommand (SubmitChat action) d in apply prepared effects
           draft text selected d=setComposerInput (newBuffer text) selected True d
           send text d=submit QuerySubmit (draft text (Selection (T.length text) (T.length text)) d)
@@ -302,27 +305,31 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "primary mailbox cancellation does not cancel selected child" . (==0) =<< readIORef peerCancels
       ensure "primary cancellation preserves child target and draft" (conversationTarget afterPrimaryCancel==AH.agentIdText peer && contents (composerBuffer afterPrimaryCancel)=="child unsent")
       let primaryMetadata=childAgain {agentReplying=True,agentSteering=True,agentContextUsage=Just (42,84),agentSettings=[AgentSetting "model" "Model" "model" "primary-model" [("primary-model","Primary")]]}
-      ensure "child capabilities do not inherit primary steering or model settings" (not (conversationSteering primaryMetadata) && not (commandEnabled primaryMetadata (AgentChoose "")) && not (commandEnabled primaryMetadata (AgentSet "model" "primary-model")))
+      ensure "child capabilities do not inherit primary steering or model settings" (not (conversationSteering primaryMetadata) && null (conversationSettings primaryMetadata))
       ensure "child view does not show primary context usage" (conversationContextUsage primaryMetadata==Nothing)
       settingsReply<-agentSettingsReply conversation primaryMetadata
       settingsInfo<-settingsReply >>= right
       ensure "settings snapshot identifies primary scope and does not mix child busy state" (field "scope" settingsInfo==Just ("primary"::T.Text) && field "replying" settingsInfo==Just False)
       cancellingPeer<-ui "cancel" [] afterPrimaryCancel
-      _<-tickUntil (\_->(==1) <$> readIORef peerCancels) cancellingPeer
-      settingPeer<-ui "set-config" ["model","invented"] childAgain
+      cancelledPeer<-tickUntil (\desktop->do
+        calls<-readIORef peerCancels
+        entry<-AH.statusAgent hub AH.Human peer >>= right
+        pure (calls==1 && field "status" entry==Just ("idle"::T.Text) && not (agentReplying desktop))) cancellingPeer
+      settingPeer<-configure peer "model" "invented" cancelledPeer
       rejectedPeer<-tickUntil (pure . not . agentReplying) settingPeer
       ensure "unadvertised settings never reach the provider" . (==0) =<< readIORef peerConfigurations
       ensure "child setters cannot reconfigure the primary" (conversationTarget rejectedPeer==AH.agentIdText peer && agentSettings rejectedPeer==agentSettings childAgain)
       liveChild<-AH.spawnAgent hub (AH.Agent primary) (AH.SpawnSpec "Live child" "Inspect source" root AH.Shared AH.Fresh Nothing Nothing) >>= right
       parentTicket<-AH.sendAgent hub (AH.Agent primary) liveChild "parent instruction" >>= right
       _<-AH.waitAgent hub AH.Human liveChild parentTicket 3000 >>= right
-      refreshedDirectory<-ui "directory" [] childAgain
+      refreshedDirectory<-ui "directory" [] rejectedPeer
       listedNow<-AH.listAgents hub AH.Human >>= right
       ensure "live child remains listed in the directory" (any ((==Just (AH.agentIdText liveChild)) . field "id") (maybe [] id (field "agents" listedNow::Maybe [Value])))
       liveView<-select liveChild refreshedDirectory {dialog=Nothing} >>= tickUntil (pure . T.isInfixOf "controlling parent" . activeText)
       ensure "parent-owned child shows controlling-parent attribution" ("controlling parent" `T.isInfixOf` activeText liveView)
-      ensure "live child title/dropdown use advertised child model choices" ("small" `T.isInfixOf` conversationTitle liveView && commandEnabled liveView (AgentChoose ""))
-      changedChild<-ui "set-config" ["model","large"] liveView
+      ensure "live child title uses its model and settings require a registered menu"
+        ("small" `T.isInfixOf` conversationTitle liveView && not (commandEnabled liveView AgentChoose))
+      changedChild<-configure liveChild "model" "large" liveView
       configuredChild<-tickUntil (pure . (\d->not (agentReplying d) && any ((=="large").settingCurrent) (childAgentSettings d))) changedChild
       ensure "child configuration does not replace primary provider settings" (agentSettings configuredChild==agentSettings liveView && "large" `T.isInfixOf` conversationTitle configuredChild)
       waitingChild<-submit QuerySubmit (draft "steer-wait" (Selection 10 10) configuredChild)

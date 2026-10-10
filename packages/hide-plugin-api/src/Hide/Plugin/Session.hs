@@ -24,6 +24,7 @@ import Hide.Plugin.Completion (HintServices)
 import Hide.Plugin.ConversationInput (PrimaryInputServices, ChildInputServices)
 import Hide.Plugin.ConversationSession (ConversationTarget,ConversationRequest)
 import Hide.Plugin.Menu (MenuPublisher)
+import Hide.Plugin.Agent (AgentId)
 import Data.Text (Text)
 import Hide.Plugin.Input (InputDeclaration)
 import Hide.Plugin.Request (RequestServices)
@@ -41,6 +42,9 @@ data Session c r settings completion receipt = Session
   , sessionMenus :: MenuPublisher c r
   , sessionConversation :: c -> Either Text (ConversationTarget receipt)
   , sessionConversationReply :: ConversationRequest receipt -> r
+  , sessionSelectedAgent :: c -> Either Text AgentId
+    -- ^ Small selected-agent identity captured at menu admission. It grants no
+    -- authority and must never be recomputed from later focus on a worker.
   }
 
 -- | Endpoint visibility carries its actual service context. Editor tools are

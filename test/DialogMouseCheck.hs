@@ -31,7 +31,7 @@ import qualified Data.Foldable as F (foldl')
 import qualified Data.Text.Lazy as TL
 
 checks :: AllocationProfile -> IO ()
-checks profile = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase->do
+checks profile = do
   textAreaRenderChecks profile
   contextShortcutChecks
   searchChecks
@@ -135,10 +135,6 @@ checks profile = withEditorFixture "child" (initialDesktop (80,25)) $ \childBase
       replacedOutput=addReadOnly "Output" "second" outputPopup
   check "source context refuses sidebar ownership" (let (refused,effects)=selectPopup sidebarFocus in contextMenu refused==Nothing && clipboard refused==clipboard sidebarFocus && null effects)
   check "read-only output remains unavailable as replacement advances revision" (not (contextTargetCurrent outputPopup) && not (contextTargetCurrent replacedOutput) && fmap ((+1) . revision . documentBuffer) (activeDocument outputPopup)==fmap (revision . documentBuffer) (activeDocument replacedOutput))
-  let childPopup=openContext (AgentContext [("Cancel reply",AgentCancel)]) 10 5 childBase
-      switched=childPopup {conversationTarget=""}
-  check "unchanged conversation context can invoke" (snd (selectPopup childPopup)==[AgentAction "cancel" []])
-  check "context action refuses a different conversation target" (let (refused,effects)=selectPopup switched in contextMenu refused==Nothing && null effects)
   let source=addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer "hello\nworld") (initialDesktop (80,25))
       problem=Diagnostic "/project/Main.hs" Nothing 1 2 1 "Not in scope"
       pane=setProblemsVisible True source {diagnostics=[problem]}

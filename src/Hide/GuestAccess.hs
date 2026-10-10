@@ -107,7 +107,7 @@ guestCommandAllowed cmd=case cmd of
   GitDiff -> False
   GitCommit -> False
   AgentChoose{} -> False
-  AgentSet{} -> False
+  FormChoice{} -> False
   AgentDirectory -> False
   AgentOptions -> False
   ChatInputOptions -> False
@@ -191,6 +191,7 @@ guestEffectsAllowed=all allowed
     allowed RetireEditorMount{}=False
     allowed SubmitInputForm{}=False
     allowed SubmitChoiceForm{}=False
+    allowed SubmitPopupChoiceForm{}=False
     allowed RetireInputForm{}=False
     allowed AgentSidebarAction{}=False
     allowed ConversationSessionAction{}=False
@@ -245,7 +246,7 @@ privateFrameChooserAction action=case T.splitOn ":" action of
 
 guestModalBlocked :: Desktop -> Bool
 guestModalBlocked d=maybe False (protectedPurpose . purpose) (dialog d) || case (contextMenu d,contextKind d) of
-  (Just _,AgentContext{}) -> True
+  (Just _,FormChoicesContext{}) -> True
   (Just _,WindowRowsContext) -> True
   _ -> False
 guestKeyboardAllowed :: Desktop -> Bool
@@ -472,14 +473,8 @@ sensitiveLabel label=any (`T.isInfixOf` lower) ["password","token","secret","cre
   where lower=T.map toLower label
 privateAgentChoice :: Desktop -> Int -> Int -> Bool
 privateAgentChoice d x y=case (contextMenu d,contextKind d) of
-  (Just (r,chosen),AgentContext items) | inside r x y -> case at items (contextOffset r chosen+y-top r-1) of
-    Just (_,AgentChoose ident) -> case find ((==ident).settingId) (conversationSettings d) of
-      Just option | secret option -> x>=left r+2+displayColumn (settingName option) (T.length (settingName option))+2
-      _ -> False
-    Just (_,AgentSet ident _) -> maybe False secret (find ((==ident).settingId) (conversationSettings d)) && x>=left r+2
-    _ -> False
-  _ -> False
-  where secret option=any sensitiveLabel [settingId option,settingName option,settingCategory option]
+  (Just (r,_),FormChoicesContext reference _ _) -> Form.formDisclosure reference==Form.PrivateForm && inside r x y
+  _->False
 
 pointerAllowedAt :: Desktop -> Int -> Int -> Bool
 pointerAllowedAt d=pointerAllowedAtWith (privateFilePaths d) d

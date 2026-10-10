@@ -12,7 +12,7 @@
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, withConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, captureConversationChoices, withConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
 import Hide.ConversationBody
@@ -346,7 +346,7 @@ perform runtime@(ConversationState _ ref _ _) action values d=do
       | action=="show"->do
           prepared<-ensureConversationEditor runtime "" "Primary" d
           performPrimary runtime action values (selectConversationView "" "Primary" prepared)
-      | not (T.null (conversationTarget d)) && action `elem` ["send","cancel","copy","toggle-activity","set-config"]->performChild runtime action values d
+      | not (T.null (conversationTarget d)) && action `elem` ["send","cancel","copy","toggle-activity"]->performChild runtime action values d
       | otherwise->performPrimary runtime action values d
 
 performPrimary :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
@@ -448,17 +448,6 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       -- A recovered transcript belongs to the checkpoint until a provider
       -- connects. Opening its window must not repaint it from empty state.
       ensureEditorWithState True s "" "Primary" d
-    ("set-config",[ident,value])
-      | primaryBusy s -> pure d {status="Wait for the current reply before changing its model."}
-      | Just _<-connection s, Just _<-session s,
-        any (\option -> settingId option==ident && value `elem` map fst (settingChoices option)) (agentSettings d) -> do
-          let agents=conversationAgents runtime
-          captured<-AH.agentConfiguration (AR.agentHub agents) (AR.primaryAgent agents)
-          case captured of
-            Left err->pure d {status=err}
-            Right (receipt,_)->startAgentControl runtime (AR.primaryAgent agents) Nothing
-              (fmap (fmap (const AgentControlAccepted)) (AH.configureAgentAt (AR.agentHub agents) receipt ident value)) d
-      | otherwise -> pure d {status="This conversation setting is unavailable."}
     ("copy",_) -> pure d {status="Conversation copy requires its presentation owner."}
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)),not (primaryBusy s) ->
       submitPrimaryPrompt runtime s Nothing prompt (selectionFlag=="true",fileFlag=="true",diagnosticFlag=="true") d
@@ -501,6 +490,27 @@ captureConversationSession (ConversationState _ ref _ agents) d=do
       receipt<-evaluate (ConversationSessionReceipt (sessionIdentity s) (AR.primaryAgent agents) launch client sid config)
       target<-evaluate (Session.ConversationTarget receipt (T.null (conversationTarget d)) (maybe "" (\(_,_,value)->value) (lastSession s)))
       pure (Right target)
+
+-- | Capture the selected agent and geometry without retaining a desktop or
+-- provider metadata. The original configuration governs opening and every
+-- submenu/submit, including changes while the plugin worker reads choices.
+captureConversationChoices :: ConversationState -> Desktop -> IO (Either Text ChoicePopupTarget)
+captureConversationChoices (ConversationState _ _ _ agents) d=case activeWindow d of
+  Just w | activeConversation d,windowFocused d w->do
+    let view=T.copy (conversationTarget d)
+        who=if T.null view then AR.primaryAgent agents else AH.AgentId view
+    _<-evaluate (T.length view+T.length (AH.agentIdText who))
+    captured<-AH.agentConfiguration (AR.agentHub agents) who
+    case captured of
+      Left err->pure (Left err)
+      Right (receipt,_)->do
+        ready<-evaluate receipt
+        let Rect x y _ _=agentTitleRect d w
+            frame=bounds w
+        _<-evaluate (left frame+top frame+width frame+height frame)
+        target<-evaluate (ChoicePopupTarget (windowId w) view ready frame x (y+1))
+        pure (Right target)
+  _->pure (Left "Select a conversation window.")
 
 -- This is the owning lifecycle operation, not a text command adapter. Admission
 -- is serialized with provider ticks; a stale form never cancels a question,
@@ -1729,7 +1739,6 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
   case action of
     "send" | M.member target (agentControls state) -> pure d {status="Wait for the child operation before sending."}
     "send" -> send hub ident text Nothing
-    "set-config" | [option,value]<-values -> startControl Nothing (AH.configureAgent hub ident option value)
     "cancel" -> case M.lookup target (childCancels state) of
       Just _ -> pure d {status="Cancellation requested."}
       Nothing -> do
@@ -1743,7 +1752,6 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
       keepConversationPosition d <$> paintView target False next d
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
-    startControl submitted operation=startAgentControl runtime (AH.AgentId (conversationTarget d)) submitted (fmap (fmap (const AgentControlAccepted)) operation) d
     send hub ident text receipt = do
       result<-AH.sendAgent hub AH.Human ident (composerMarkdown text)
       case result of

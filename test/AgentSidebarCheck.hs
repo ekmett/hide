@@ -24,6 +24,7 @@ import Hide.MCPPermissions (readAutocompleteFor)
 import qualified Hide.AgentUI
 import qualified Hide.Plugin.Session as Plugin
 import qualified Hide.AgentDirectoryHost as AgentDirectory
+import qualified Hide.Plugin.AgentDirectory as Directory
 import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
@@ -32,7 +33,8 @@ import Hide.MenuCommands
 import Hide.DocumentationHost (withDocsCommands)
 import Hide.Commands (configuredBindings)
 import Hide.Buffer (Selection(..),newBuffer,contents)
-import Hide.Plugin.Command (withRegistry,registerCommand,CommandDef(..),Codec(..))
+import Hide.Plugin.Command (withRegistry,registerCommand,CommandDef(..),Codec(..),CommandError(..))
+import qualified Hide.Plugin.Sidebar as PluginSidebar
 import qualified FormExtension
 import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import qualified Hide.Plugin.Form as Form
@@ -63,7 +65,7 @@ checks=bracket temporary removePathForcibly $ \root->
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Plugin.pluginPrimaryInput Hide.AgentUI.plugin) (Plugin.pluginChildInput Hide.AgentUI.plugin) consoles root $ \conversation->
       withDocsCommands $ \docs->withConversationMenuCommands docs conversation $ \menuHost->
-      withAutocomplete (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost host) sidebarConversation SidebarConversation) $ do
+      withAutocomplete (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost host) sidebarConversation SidebarConversation sidebarSelectedAgent) $ do
         createRequests<-newIORef []
         agentRequests<-newIORef []
         sessionRequests<-newIORef []
@@ -89,9 +91,9 @@ checks=bracket temporary removePathForcibly $ \root->
             primary=AR.primaryAgent (conversationAgents conversation)
         initial<-initializeSidebar host (installSidebar (emptySidebar root 26 True) (modifyActive (\w->w {selection=Selection 2 4}) ((addDocument Nothing (newBuffer "source payload") (initialDesktop (100,35))) {defaultDirectory=Just root})))
         published<-await tick (has "Agents") initial
-        ensure "agent plugin publishes New and Resume through the public menu boundary"
+        ensure "agent plugin publishes session actions and choices through the public menu boundary"
           (all (`elem` map (Menu.menuName . Menu.menuReference) (contributedMenus published))
-            ["hide.agents.new","hide.agents.resume"])
+            ["hide.agents.new","hide.agents.resume","hide.agents.model"])
         let sessionEntry name desktop=case [entry | i<-[0..length menus-1],entry@(MenuItem _ _ (RegisteredMenu reference _))<-menuItemsFor desktop i,Menu.menuName reference==name] of
               [entry]->entry; _->error "Missing or duplicated conversation menu entry"
             boundSessions=published {keyBindings=either (error . show) id (configuredBindings [] M.empty)}
@@ -298,8 +300,105 @@ checks=bracket temporary removePathForcibly $ \root->
         refusedChild<-refuseReplay childUpdated (snd capturedChild)
         ensure "sidebar child setting never selects that conversation" (T.null (conversationTarget refusedChild))
         ensure "child setting does not change Primary settings" (any (\option->settingId option=="model" && settingCurrent option=="large") (agentSettings refusedChild))
+        let popupRef desktop=case contextKind desktop of FormChoicesContext owner _ _->Just owner; _->Nothing
+            hasPopup desktop=contextMenu desktop/=Nothing && popupRef desktop/=Nothing
+            nextPopup previous desktop=hasPopup desktop && popupRef desktop/=popupRef previous
+            selectedPopup selected desktop=handleEvent (V.EvKey V.KEnter []) desktop {contextMenu=fmap (\(rect,_)->(rect,selected)) (contextMenu desktop)}
+        childTitle<-act (refusedChild,[AgentSidebarAction (ShowAgent childId)]) >>= await tick (not . null . childAgentSettings)
+        _<-captureConversationChoices conversation childTitle {buffers=error "choice capture forced buffers"} >>= right
+        childCategories<-act (runCommand AgentChoose childTitle) >>= await tick hasPopup
+        childValues<-act (selectedPopup 0 childCategories) >>= await tick (nextPopup childCategories)
+        ensure "child title uses the public two-level popup and its advertised checkmark"
+          (dialog childValues==Nothing && any ((=="✓ Large").fst) (contextItemsFor childValues) && not (guestKeyboardAllowed childValues))
+        let capturedPopup=selectedPopup 0 childValues
+        beforePopupCancel<-length <$> readIORef agentRequests
+        closedPopup<-act (handleEvent (V.EvKey V.KEsc []) childValues)
+        refusedPopup<-act (closedPopup,snd capturedPopup)
+        afterPopupCancel<-length <$> readIORef agentRequests
+        ensure "Escape retires the popup before a saved numeric submission can claim it"
+          (beforePopupCancel==afterPopupCancel && contextMenu refusedPopup==Nothing)
+        categoriesAgain<-act (runCommand AgentChoose refusedPopup) >>= await tick hasPopup
+        valuesAgain<-act (selectedPopup 0 categoriesAgain) >>= await tick (nextPopup categoriesAgain)
+        let (submittedPopup,popupSubmission)=selectedPopup 0 valuesAgain
+            sourceWindow=case activeWindow initial of Just window->windowId window; _->error "Missing source window"
+        beforeFocusChange<-length <$> readIORef agentRequests
+        focusRefused<-act (focusWindow sourceWindow submittedPopup,popupSubmission)
+        afterFocusChange<-length <$> readIORef agentRequests
+        ensure "changed focus refuses the popup without claiming its form"
+          (beforeFocusChange==afterFocusChange)
+        expiredPopup<-await tick (\desktop->contextMenu desktop==Nothing && case contextKind desktop of SourceContext->True; _->False) focusRefused
+        selectedChildAgain<-act (expiredPopup,[AgentSidebarAction (ShowAgent childId)])
+        freshCategories<-act (runCommand AgentChoose selectedChildAgain) >>= await tick hasPopup
+        freshValues<-act (selectedPopup 0 freshCategories) >>= await tick (nextPopup freshCategories)
+        let freshSubmission=selectedPopup 0 freshValues
+        childSmall<-act freshSubmission >>= awaitIO tick (\_->fmap (\current->case current of Right (_,options)->any ((=="small").AH.configCurrent) options; _->False) (AH.agentConfiguration hub childId))
+        ensure "a fresh child popup configures its captured child"
+          (conversationTarget childSmall==AH.agentIdText childId && not (guestEffectsAllowed (snd freshSubmission)))
+        replayedPopup<-refuseReplay childSmall (snd freshSubmission)
+        -- An independently named public contribution uses the same popup owner.
+        -- The long list exercises its existing viewport rather than provider IO.
+        afterPaging<-withRegistry $ \registry->do
+          selections<-newIORef []
+          gateChoice<-newIORef Nothing
+          latestForm<-newIORef Nothing
+          let codec=Codec Null (const (Left "Typed only")) (const Null)
+              directoryApi=AgentDirectory.agentDirectory hub autocomplete
+          select<-registerCommand registry (CommandDef "test.choice.select" "Select choice" codec codec (\ctx (who,value)->
+            if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Human only")) else do
+              modifyIORef' selections (++[(who,value)])
+              pure (Right (SidebarAgent (RenameAgentTo who "Child"))))) >>= right
+          opening<-registerCommand registry (CommandDef "test.choice.popup" "Public choices" codec codec (\ctx ()->do
+            who<-right (sidebarSelectedAgent ctx)
+            readIORef gateChoice >>= mapM_ (\(entered,release)->putMVar entered () >> takeMVar release)
+            -- This worker read may observe newer metadata. The host's earlier
+            -- target still governs opening; the plugin cannot replace it.
+            _<-Directory.directorySettings directoryApi who >>= right
+            prepared<-Form.prepareForm Form.ReadableForm
+              (Form.ChoiceFormSpec "Public choices" "Values" [(T.pack (show n),"Model "<>T.pack (show n)) | n<-[0..29::Int]] "0" "Select")
+              (Form.formAction registry select (\value->(who,value)) (\_ reply->pure reply)) >>= right
+            writeIORef latestForm (Just prepared)
+            pure (Right (PluginSidebar.popupFormReply (sidebarCapabilities host) prepared)))) >>= right
+          bracket (Menu.publishMenu (menuSidebarCapabilities menuHost host)
+            (Menu.MenuDef "test.choice.popup" "tools" "test" 0 "Public choices" "" False
+              (Menu.menuAction registry opening (const (Right ())) (\_ reply->pure reply))) >>= right)
+            (Menu.withdrawMenu (menuSidebarCapabilities menuHost host)) $ \popupMenu->do
+              visible<-await tick (any ((==popupMenu).Menu.menuReference) . contributedMenus) replayedPopup
+              pagedPopup<-act (runCommand (RegisteredMenu popupMenu False) visible {screenSize=(90,12)}) >>= await tick hasPopup
+              let key code desktop=fst (handleEvent (V.EvKey code []) desktop)
+                  page=key V.KPageDown pagedPopup
+                  firstPage=key V.KPageUp page
+                  row25=iterate (key V.KDown) firstPage !! 25
+                  numericSelection=handleEvent (V.EvKey V.KEnter []) row25
+              ensure "PageDown advances the popup selection and PageUp restores it"
+                (maybe False ((>0).snd) (contextMenu page) && fmap snd (contextMenu firstPage)==Just 0)
+              ensure "public popup paging keeps geometry bounded and emits the installed numeric receipt"
+                (case contextMenu row25 of
+                  Just (rect,25)->left rect>=0 && top rect>=0 && left rect+width rect<=90 && top rect+height rect<=12 &&
+                    case snd numericSelection of [SubmitPopupChoiceForm owner revision 25 Menu.HumanMenu]->Just owner==popupRef row25 && revision==1; _->False
+                  _->False)
+              beforePaged<-length <$> readIORef agentRequests
+              chosen<-act numericSelection >>= awaitIO tick (\_->do
+                selected<-readIORef selections
+                dispatched<-drop beforePaged <$> readIORef agentRequests
+                pure (selected==[(childId,"25")] && RenameAgentTo childId "Child" `elem` dispatched))
+              -- Delay only the declared command, then change the host receipt
+              -- before its newer worker metadata is returned for adoption.
+              entered<-newEmptyMVar
+              release<-newEmptyMVar
+              writeIORef gateChoice (Just (entered,release))
+              writeIORef latestForm Nothing
+              pendingChoice<-act (runCommand (RegisteredMenu popupMenu False) chosen)
+              reached<-timeout 10000000 (takeMVar entered)
+              ensure "public popup command runs on the menu worker" (reached==Just ())
+              (oldReceipt,_)<-AH.agentConfiguration hub childId >>= right
+              _<-AH.configureAgentAt hub oldReceipt "model" "small" >>= right
+              putMVar release ()
+              rejected<-awaitIO tick (\_->readIORef latestForm >>= maybe (pure False) (fmap not . Form.formCurrent)) pendingChoice
+              ensure "newer worker metadata cannot replace the original popup receipt" (contextMenu rejected==Nothing)
+              pure rejected {screenSize=screenSize replayedPopup}
+        primaryAfterPopup<-act (afterPaging,[AgentSidebarAction (ShowAgent primary)])
         (subagent,_)<-AH.spawnAgentWithTask hub (AH.Agent primary) (AH.SpawnSpec "Nested" "Count files" root AH.Shared AH.Fresh Nothing Nothing) >>= right
-        parentReady<-await tick (\d->case [row | (_,row)<-visibleRows 0 32768 (tree d),P.infoLabel (rowInfo row)=="N  idle"] of row:_->P.infoBranch (rowInfo row); _->False) refusedChild
+        parentReady<-await tick (\d->case [row | (_,row)<-visibleRows 0 32768 (tree d),P.infoLabel (rowInfo row)=="N  idle"] of row:_->P.infoBranch (rowInfo row); _->False) primaryAfterPopup
         nested<-act (activateTree True (index "N  idle" parentReady) parentReady) >>= await tick (has "Nested")
         let nestedRows=[row | (_,row)<-visibleRows 0 32768 (tree nested),T.isPrefixOf "Nested" (P.infoLabel (rowInfo row))]
         ensure "agent parent IDs determine the shared hierarchy" (case nestedRows of

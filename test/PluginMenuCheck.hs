@@ -112,7 +112,7 @@ checks=do
       current<-menuCurrent mapped composed
       unless (not current) (error "mapped menu lost its original command lifetime")
   withMenus ["tools"] $ \menus->do
-    let forms=Sidebar.Sidebar fst (const "") SessionForm (\_->pure ()) (\_->pure ()) (\_ _->pure ())
+    let forms=Sidebar.Sidebar fst (const "") SessionForm SessionForm (\_->pure ()) (\_->pure ()) (\_ _->pure ())
         publisher=MenuPublisher (contributeMenu menus) (void . retireMenu menus)
         captured (_,receipt)=Right (ConversationTarget receipt True "private-resume-id")
         check label condition=unless condition (error label)

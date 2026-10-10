@@ -6,14 +6,15 @@
 -- Stability   : experimental
 -- Portability : ExistentialQuantification, OverloadedStrings
 --
--- Host-owned single-line inputs and finite-choice modals for trusted linked commands.
+-- Host-owned single-line inputs and finite choices for trusted linked commands.
 -- The registration owns the form lifetime; presentation refresh never changes
 -- its action or resets the host's draft/selection. Adapters run on a worker.
 --
 -- Laws: refresh preserves the reference and host input; reopen mints a fresh
 -- reference; each accepted submission/result is claimed/consumed at most once.
 -- Host primitives grant no authority: admission/submission require the owning
--- host's current human/modal checks. This slice has no general widget reducer.
+-- host's current human and presentation checks. Hosts may present finite choices
+-- as a modal or an anchored popup. This slice has no general widget reducer.
 module Hide.Plugin.Form
   ( -- * Prepared input and choices
     FormRef
@@ -63,7 +64,7 @@ data Catalogue = ConfirmationCatalogue | InputCatalogue | InputsCatalogue ![Text
 -- grants no input or source access: owners must sanitize public metadata first.
 -- Refresh cannot change disclosure; both variants still require human submit.
 data FormDisclosure = PrivateForm | ReadableForm deriving (Eq,Show)
--- | Exact opaque modal lifetime. Reopening always obtains a fresh identity.
+-- | Exact opaque form lifetime. Reopening always obtains a fresh identity.
 data FormRef = FormRef !Unique !(TVar (Integer,Phase)) !Catalogue !FormDisclosure
 instance Eq FormRef where FormRef a _ _ _==FormRef b _ _ _=a==b
 instance Show FormRef where show (FormRef a _ _ _)="FormRef "++show (hashUnique a)

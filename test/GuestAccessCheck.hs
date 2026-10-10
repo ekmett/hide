@@ -3,7 +3,7 @@ module GuestAccessCheck (checks) where
 import EditorFixture (withEditorBodyFixture)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless,forM_)
-import Data.Aeson (object,(.=),withObject,(.:))
+import Data.Aeson (Value(Null),object,(.=),withObject,(.:))
 import Data.Aeson.Types (parseMaybe)
 import Hide.ControlMCP (controlTool)
 import qualified Data.Map.Strict as M
@@ -22,6 +22,8 @@ import qualified Hide.Protocol as P
 import qualified Hide.Plugin.Editor as E
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Window as W
+import qualified Hide.Plugin.Form as Form
+import Hide.Plugin.Command (withRegistry,registerCommand,CommandDef(..),Codec(..))
 import qualified Data.Vector as Vec
 import Hide.Syntax (Style(..))
 
@@ -184,10 +186,15 @@ checksWithBody conversation=do
       (not (readableAt secretDesktop (left secretRect) (top secretRect+1)) && not (pointerAllowedAt secretDesktop (left secretRect) (top secretRect+1)))
     checkDenied "private value rejects text input" secretDesktop [P.Paste "guest key",P.Key "x" []]
     check "private value allows field navigation" . not =<< denied secretDesktop (P.Key "Tab" [])
-  let option=AgentSetting "apiKey" "API key" "authentication" "private-token" []
-      dropdown=base {agentSettings=[option],contextMenu=Just (Rect 2 2 40 4,0),contextKind=AgentContext [("API key  private-token",AgentChoose "apiKey")]}
-  check "agent dropdown public labels stay readable but secret values do not"
-    (readableAt dropdown 4 3 && not (readableAt dropdown 14 3) && not (pointerAllowedAt dropdown 4 3))
+  withRegistry $ \registry->do
+    let codec=Codec Null Right id
+    command<-registerCommand registry (CommandDef "test.private-choice" "Private choice" codec codec (\() value->pure (Right value))) >>= either (error . show) pure
+    prepared<-Form.prepareForm Form.PrivateForm (Form.ChoiceFormSpec "Private" "Value" [("private-token","Private token")] "private-token" "Apply")
+      (Form.formAction registry command (const Null) (\_ _->pure ())) >>= either (error . show) pure
+    let reference=Form.formReference prepared
+        dropdown=base {contextMenu=Just (Rect 2 2 40 4,0),contextKind=FormChoicesContext reference 1 [("Private token",FormChoice reference 1 0)]}
+    check "private finite-choice popup masks values and rejects guest input"
+      (not (readableAt dropdown 4 3) && not (readableAt dropdown 14 3) && not (pointerAllowedAt dropdown 4 3) && not (guestKeyboardAllowed dropdown))
   check "ordinary preferences remain usable" . not =<< denied base {dialog=Just (Dialog "Find" (Searching False "") [Input "Text" "" 0] 0 ["Find"] [])} (P.Paste "needle")
   check "build dialogs remain usable" (guestEffectsAllowed [ServiceAction "make" [],ServiceAction "run-config" [],ServiceAction "terminal-input" ["1","ls\n"]])
   check "human editor, agent question and permission effects are rejected"

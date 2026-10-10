@@ -35,8 +35,10 @@ import Hide.Plugin.Documentation
 import Hide.Links (LinkResult, applyLink, prepareMarkdown)
 import Hide.BufferView (BufferView(..))
 import qualified Hide.Plugin.EditorHost as Editor
-import Hide.SidebarCommands (SidebarHost,SidebarContext(..),SidebarReply(..),sidebarInvocationContext,adoptForm)
-import Hide.Conversation (ConversationState,captureConversationSession)
+import Hide.SidebarCommands (SidebarHost,SidebarContext(..),SidebarReply(..),sidebarInvocationContext,adoptForm,adoptPopupForm)
+import Hide.Conversation (ConversationState,captureConversationSession,captureConversationChoices,conversationAgents)
+import qualified Hide.AgentHub as AgentHub
+import qualified Hide.AgentRuntime as AgentRuntime
 import Hide.Model hiding (menus)
 import qualified Hide.Model as Model
 import qualified Hide.Plugin.Window as PluginWindow
@@ -50,6 +52,7 @@ data MenuContext = MenuContext
   { invocationColumns :: Int, invocationOrigin :: Plugin.MenuOrigin
   , invocationNavigation :: Maybe NavigationInput, invocationSource :: Maybe SourceInput
   , invocationRow :: Maybe (PluginWindow.WindowRef,Tree.NodeId)
+  , invocationPopup :: !(Maybe ChoicePopupTarget)
   , invocationSidebar :: !SidebarContext
   }
 data SourceInput = SourceInput ContextTarget ContentVersion DirtySnapshot
@@ -299,10 +302,15 @@ menuEffects host@(MenuHost menus permitted _ _ ref _ conversation) _ original [I
       navigation<-captureNavigation origin target d
       source<-captureSource target d
       sessionTarget<-maybe (pure (Left "No conversation session owner.")) (\runtime->captureConversationSession runtime d) conversation
-      sidebar<-evaluate ((sidebarInvocationContext origin d) {sidebarConversation=sessionTarget})
+      popup<-if origin==Plugin.HumanMenu then
+        maybe (pure (Left "No conversation owner.")) (\runtime->captureConversationChoices runtime d) conversation
+        else pure (Left "Conversation choices require the human.")
+      selected<-traverse (evaluate . AgentHub.agentConfigAgent . choicePopupConfig) popup
+      _<-evaluate (either (const 0) (T.length . AgentHub.agentIdText) selected)
+      sidebar<-evaluate ((sidebarInvocationContext origin d) {sidebarConversation=sessionTarget,sidebarSelectedAgent=selected})
       _<-evaluate (length (sidebarContextWorkspace sidebar))
       let row=case target of Just (WindowRowTarget windowRef ident)->Just (windowRef,ident); _->Nothing
-          context=MenuContext (columns d) origin navigation source row sidebar
+          context=MenuContext (columns d) origin navigation source row (either (const Nothing) Just popup) sidebar
       worker<-async (restore (Plugin.invokeMenu menus reference context))
       modifyIORef' ref (\s->s {menuPending=Just (Pending reference target context worker)})
       pure (False,d {status="Running menu action…"})
@@ -341,7 +349,7 @@ adoptNavigation context (Navigation path row offset loaded) d
 -- | Drain ordered publication/retirement before late reply adoption. No handler
 -- or lazy extension metadata executes here, and no file work runs under the lock.
 tickMenus :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-tickMenus host@(MenuHost menus _ sourceRefs _ ref closed _) core original=
+tickMenus host@(MenuHost menus _ sourceRefs _ ref closed conversation) core original=
   readTVarIO closed >>= \stopped->if stopped then pure original else do
   published<-adoptPublications host original
   d<-tickEditorBindings host published
@@ -368,6 +376,8 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed _) core original=
           if not live || not current then pure d {status="Menu result expired; invoke it again."} else case result of
             Left err->pure d {status="Menu action failed: "<>T.pack (displayException err)}
             Right (Left err)->pure d {status="Menu action failed: "<>T.pack (show err)}
+            Right (Right (PreparedSidebar sidebar (SidebarPopupForm prepared))) | invocationOrigin context==Plugin.HumanMenu,Just popupTarget<-invocationPopup context,Just runtime<-conversation->
+              adoptPopupForm sidebar (AgentRuntime.agentHub (conversationAgents runtime)) popupTarget prepared d
             Right (Right (PreparedSidebar sidebar (SidebarForm prepared))) | invocationOrigin context==Plugin.HumanMenu->adoptForm sidebar True prepared d
             Right (Right (PreparedSidebar _ (SidebarConversation request))) | invocationOrigin context==Plugin.HumanMenu->snd <$> core d [ConversationSessionAction request]
             Right (Right PreparedSidebar{})->pure d {status="Menu result requires its owning operation."}
@@ -424,7 +434,7 @@ submitMenuEditor (MenuHost _ _ _ _ ref _ _) mount slot origin d=mask $ \_->do
         case captured of
           Nothing->pure d {status="Editor input expired."}
           Just submitted->do
-            let context=MenuContext (columns d) origin Nothing Nothing Nothing (sidebarInvocationContext origin d)
+            let context=MenuContext (columns d) origin Nothing Nothing Nothing Nothing (sidebarInvocationContext origin d)
             worker<-asyncWithUnmask (\unmask->unmask (Editor.invokeEditorAction editor context submitted >>= traverse evaluate))
             modifyIORef' ref (\s->s {menuPending=Just (PendingEditor submitted worker)})
             pure d {status="Submitting editor input..."}

@@ -6,7 +6,7 @@ module Hide.SidebarCommands
   ( SidebarHost, SidebarContext(..), SidebarReply(..), withSidebarCommands
   , sidebarRegistry, sidebarCapabilities, publishTreeFromHost, retireTreeFromHost, sidebarEffects
   , tickSidebar, refreshTreeFromHost, initializeSidebar, awaitFileOpening, prepareSidebarFile, publishFormRefreshFromHost
-  , sidebarInvocationContext, adoptForm
+  , sidebarInvocationContext, adoptForm, adoptPopupForm
   ) where
 
 import Hide.FileIO (withFileRead)
@@ -60,8 +60,9 @@ import qualified Hide.Plugin.Menu as Menu
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
   , sidebarColumns :: !Int, sidebarOpenedImage :: !(Maybe (FilePath,Int,PluginWindow.WindowRef)), sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int, sidebarAttachment :: !Int
-  , sidebarConversation :: !(Either Text (Conversation.ConversationTarget ConversationSessionReceipt)) }
-data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+  , sidebarConversation :: !(Either Text (Conversation.ConversationTarget ConversationSessionReceipt))
+  , sidebarSelectedAgent :: !(Either Text Hide.AgentHub.AgentId) }
+data SidebarReply = SidebarPopupForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -83,6 +84,7 @@ data State = State
   , badgeStamp :: !(Maybe (StableName (M.Map Int Document)))
   , badgeJob :: !(Maybe (StableName (M.Map Int Document),Async (M.Map FilePath (Bool,Int,Int))))
   , sidebarRevision :: !Integer, inputForm :: !(Maybe (Form.PreparedForm SidebarContext SidebarReply))
+  , inputPopup :: !(Maybe (Hide.AgentHub.AgentHub,ChoicePopupTarget))
   , editorBindings :: !(M.Map Editor.DraftRef (PluginWindow.WindowRef,Editor.PreparedEditor SidebarContext SidebarReply)) }
 -- Prepared alongside visible rows; owner applies at most four branch changes.
 data RecoveryProjection = RecoveryProjection !(Maybe SidebarHints)
@@ -96,7 +98,7 @@ sidebarRegistry (SidebarHost registry _ _ _ _ _)=registry
 -- | Public contribution capabilities reuse this host's ordered close-aware
 -- queue. The host retains all currentness, privacy and presentation decisions.
 sidebarCapabilities :: SidebarHost -> PluginSidebar.Sidebar SidebarContext SidebarReply
-sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm
+sidebarCapabilities host=PluginSidebar.Sidebar sidebarOrigin sidebarContextWorkspace SidebarForm SidebarPopupForm
   (publishTreeFromHost host) (publishFormRefreshFromHost host) (invalidateTree host)
 
 -- A preparation worker publishes invalidation through the same bounded queue as
@@ -110,7 +112,7 @@ withSidebarCommands :: (SidebarHost -> IO a) -> IO a
 withSidebarCommands use=PluginWindow.withWindowScope $ \scope->withRegistry $ \registry->bracket (acquire scope registry) close use
   where
     acquire scope registry=do
-      state<-newIORef (State scope M.empty M.empty [] [] Nothing Nothing [] Nothing Nothing Nothing 0 Nothing M.empty)
+      state<-newIORef (State scope M.empty M.empty [] [] Nothing Nothing [] Nothing Nothing Nothing 0 Nothing Nothing M.empty)
       publications<-newTBQueueIO 32
       cancellation<-newTBQueueIO 32
       closed<-newTVarIO False
@@ -158,14 +160,14 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d) (Left "No captured conversation session.")
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d) (Left "No captured conversation session.") (Left "No captured conversation agent.")
 
 -- | Shallow immutable menu input for this same form owner. It retains no desktop,
 -- source contents or Undo. The menu owner supplies its captured session receipt.
 sidebarInvocationContext :: Menu.MenuOrigin -> Desktop -> SidebarContext
 sidebarInvocationContext origin d=SidebarContext origin workspace workspace Nothing []
   (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] 0 (sessionAttachment d)
-  (Left "No captured conversation session.")
+  (Left "No captured conversation session.") (Left "No captured conversation agent.")
   where workspace=startingDirectory d
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
@@ -362,6 +364,7 @@ sidebarEffects host@(SidebarHost _ ref _ _ _ closed) core d effects=do
       LoadTree request origin->(False,) <$> enqueue host request origin current
       InvokeTree trace reference origin->(False,) <$> invokeAction host trace reference origin current
       SubmitChoiceForm reference version selected origin->(False,) <$> submitChoiceForm host reference version selected origin current
+      SubmitPopupChoiceForm reference version selected origin->(False,) <$> submitPopupChoiceForm host reference version selected origin current
       SubmitInputForm reference text origin->(False,) <$> submitForm host reference text origin current
       RetireInputForm reference->do
         Form.retireForm reference
@@ -771,6 +774,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarEditorUpdate{})->d {status="Editor result has no submitted job."}
               Right (Right SidebarForm{})->d {status="Sidebar form expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
+              Right (Right SidebarPopupForm{})->d {status="Popup form requires its captured menu owner."}
               Right (Right SidebarConversation{})->d {status="Conversation session result requires its menu owner."}
               Right (Right SidebarRename{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)
@@ -1000,7 +1004,7 @@ adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
   accepted<-if owned then Form.admitForm present prepared else pure False
   if not accepted then pure d else do
     when opening (mapM_ (Form.retireForm . Form.formReference) (inputForm state))
-    modifyIORef' ref (\s->s {inputForm=Just prepared})
+    modifyIORef' ref (\s->s {inputForm=Just prepared,inputPopup=Nothing})
     let spec=Form.formSpec prepared
         choiceIndex value=maybe 0 id (Form.formChoiceIndex prepared value)
         build=case spec of
@@ -1026,15 +1030,65 @@ adoptForm (SidebarHost _ ref _ _ _ _) opening prepared d=do
               in ListBox label (map snd choices) retained
             _->field | field<-fields dg]}
     pure d {dialog=if opening then Just build else refresh <$> dialog d,contextMenu=Nothing,contextTarget=Nothing}
+-- | Popup presentation shares the single installed form and action worker.
+-- Only finite-choice metadata may be projected; the fixed hub/configuration and
+-- small window/view/geometry receipt govern every adoption and submission.
+adoptPopupForm :: SidebarHost -> Hide.AgentHub.AgentHub -> ChoicePopupTarget
+  -> Form.PreparedForm SidebarContext SidebarReply -> Desktop -> IO Desktop
+adoptPopupForm (SidebarHost _ ref _ _ _ _) hub target prepared d=do
+  state<-readIORef ref
+  config<-Hide.AgentHub.agentConfigurationCurrent hub (choicePopupConfig target)
+  let finite=case Form.formSpec prepared of Form.ChoiceFormSpec{}->True; _->False
+  accepted<-if finite && config && choicePopupTargetCurrent target d && contextMenu d==Nothing
+    then Form.admitForm False prepared else pure False
+  if not accepted then Form.retireForm (Form.formReference prepared) >> pure d {status="Conversation choices expired; invoke them again."} else do
+    mapM_ (Form.retireForm . Form.formReference) (inputForm state)
+    modifyIORef' ref (\current->current {inputForm=Just prepared,inputPopup=Just (hub,target)})
+    pure (installChoicePopup target prepared 0 d)
+
+installChoicePopup :: ChoicePopupTarget -> Form.PreparedForm c r -> Int -> Desktop -> Desktop
+installChoicePopup target prepared selected d=opened {contextMenu=fmap (\(rect,_)->(rect,selected)) (contextMenu opened)}
+  where
+    reference=Form.formReference prepared
+    version=Form.formRevision prepared
+    opened=openChoicePopup target reference version rows d
+    rows=case Form.formSpec prepared of
+      Form.ChoiceFormSpec _ _ choices _ _->[(label,FormChoice reference version index) | (index,(_,label))<-zip [0..] choices]
+      _->[]
+
+popupInstalled :: Bool -> Form.FormRef -> Integer -> ChoicePopupTarget -> Desktop -> Bool
+popupInstalled submitted reference version target d=choicePopupTargetCurrent target d &&
+  contextTarget d==Just (ChoicePopupContextTarget target) && case contextKind d of
+    FormChoicesContext owned revision _->not submitted && contextMenu d/=Nothing && owned==reference && revision==version
+    SubmittedChoicesContext owned revision->submitted && contextMenu d==Nothing && owned==reference && revision==version
+    _->False
+
+popupCurrent :: Bool -> Form.PreparedForm c r -> (Hide.AgentHub.AgentHub,ChoicePopupTarget) -> Desktop -> IO Bool
+popupCurrent submitted prepared (hub,target) d=do
+  config<-Hide.AgentHub.agentConfigurationCurrent hub (choicePopupConfig target)
+  pure (config && popupInstalled submitted (Form.formReference prepared) (Form.formRevision prepared) target d)
+
 -- Refresh transport is metadata-only and cannot create a modal by escaped ref.
 refreshForm :: SidebarHost -> Form.FormUpdate -> Desktop -> IO Desktop
 refreshForm host@(SidebarHost _ ref _ _ _ _) update d=do
   state<-readIORef ref
   case inputForm state of
-    Just original | formDialog (Form.updateFormReference update) d->do
-      merged<-Form.admitFormRefresh original update
-      case merged of Nothing->pure d; Just prepared->adoptForm host False prepared d
+    Just original | Form.formReference original==Form.updateFormReference update->case inputPopup state of
+      Nothing | formDialog (Form.formReference original) d->do
+        merged<-Form.admitFormRefresh original update
+        maybe (pure d) (\prepared->adoptForm host False prepared d) merged
+      Just owner@(_,target)->do
+        current<-popupCurrent False original owner d
+        merged<-if current then Form.admitFormRefresh original update else pure Nothing
+        case merged of
+          Nothing->pure d
+          Just prepared->do
+            let selected=contextMenu d >>= (\(_,index)->Form.formChoiceAt original index) >>= Form.formChoiceIndex prepared
+            modifyIORef' ref (\next->next {inputForm=Just prepared})
+            pure (installChoicePopup target prepared (maybe 0 id selected) d)
+      _->pure d
     _->pure d
+
 tickForm :: SidebarHost -> Desktop -> IO Desktop
 tickForm (SidebarHost _ ref _ _ _ _) d=do
   state<-readIORef ref
@@ -1043,11 +1097,18 @@ tickForm (SidebarHost _ ref _ _ _ _) d=do
     Just prepared->do
       live<-Form.formCurrent prepared
       submitted<-Form.submissionCurrent prepared
-      let owned=formDialog (Form.formReference prepared) d
-      if live && (owned || submitted) then pure d else do
+      owned<-case inputPopup state of
+        Nothing->pure (formDialog (Form.formReference prepared) d || submitted)
+        Just owner->popupCurrent submitted prepared owner d
+      if live && owned then pure d else do
         Form.retireForm (Form.formReference prepared)
-        modifyIORef' ref (\s->s {inputForm=Nothing})
-        pure (if owned then d {dialog=Nothing,status="Input form expired."} else d)
+        modifyIORef' ref (\next->next {inputForm=Nothing,inputPopup=Nothing})
+        let popupOwned=case contextKind d of
+              FormChoicesContext reference _ _->reference==Form.formReference prepared
+              SubmittedChoicesContext reference _->reference==Form.formReference prepared
+              _->False
+        pure (if popupOwned then d {contextMenu=Nothing,contextKind=SourceContext,contextTarget=Nothing,status="Conversation choices expired."}
+              else if formDialog (Form.formReference prepared) d then d {dialog=Nothing,status="Input form expired."} else d)
 -- Resolve indices only through the exact installed form; labels grant no action.
 submitChoiceForm :: SidebarHost -> Form.FormRef -> Integer -> Int -> Menu.MenuOrigin -> Desktop -> IO Desktop
 submitChoiceForm host@(SidebarHost _ ref _ _ _ _) reference version selected origin d=do
@@ -1055,20 +1116,36 @@ submitChoiceForm host@(SidebarHost _ ref _ _ _ _) reference version selected ori
   case inputForm state of
     Just prepared | Form.formReference prepared==reference,Form.formRevision prepared==version,Just value<-Form.formChoiceAt prepared selected->submitForm host reference (Form.TextValue value) origin d
     _->pure d {status="Choice form expired."}
+submitPopupChoiceForm :: SidebarHost -> Form.FormRef -> Integer -> Int -> Menu.MenuOrigin -> Desktop -> IO Desktop
+submitPopupChoiceForm host@(SidebarHost _ ref _ _ _ _) reference version selected origin d=do
+  state<-readIORef ref
+  case (inputForm state,inputPopup state) of
+    (Just prepared,Just owner) | origin==Menu.HumanMenu,Form.formReference prepared==reference,Form.formRevision prepared==version,Just value<-Form.formChoiceAt prepared selected->do
+      current<-popupCurrent True prepared owner d
+      if current then startFormSubmission host prepared (Form.TextValue value) (sidebarInvocationContext origin d) d
+        else pure d {status="Conversation choice expired."}
+    _->pure d {status="Conversation choice expired."}
+
 submitForm :: SidebarHost -> Form.FormRef -> Form.FormValue -> Menu.MenuOrigin -> Desktop -> IO Desktop
-submitForm (SidebarHost _ ref _ _ _ _) reference value origin d=mask $ \restore->do
+submitForm host@(SidebarHost _ ref _ _ _ _) reference value origin d=do
   state<-readIORef ref
   case inputForm state of
     Just prepared | origin==Menu.HumanMenu,Form.formReference prepared==reference,formDialog reference d->
-      case actionJob state of
-        Just _->pure d {status="Sidebar worker is busy; submit again."}
-        Nothing->do
-          accepted<-Form.claimFormSubmission prepared
-          if not accepted then pure d {status="Input form expired."} else do
-            worker<-async (restore (Form.invokeFormAction prepared (context origin d) value >>= traverse forceFormReply)) `onException` Form.retireForm reference
-            modifyIORef' ref (\s->s {actionJob=Just (FormJob reference worker False)})
-            pure d {dialog=Nothing,status="Submitting input form..."}
+      startFormSubmission host prepared value (context origin d) d
     _->pure d {status="Input form expired."}
+
+startFormSubmission :: SidebarHost -> Form.PreparedForm SidebarContext SidebarReply -> Form.FormValue -> SidebarContext -> Desktop -> IO Desktop
+startFormSubmission (SidebarHost _ ref _ _ _ _) prepared value captured d=mask $ \restore->do
+  state<-readIORef ref
+  case actionJob state of
+    Just _->pure d {status=case inputPopup state of Just _->"Sidebar worker is busy; reopen choices."; Nothing->"Sidebar worker is busy; submit again."}
+    Nothing->do
+      accepted<-Form.claimFormSubmission prepared
+      let reference=Form.formReference prepared
+      if not accepted then pure d {status="Input form expired."} else do
+        worker<-async (restore (Form.invokeFormAction prepared captured value >>= traverse forceFormReply)) `onException` Form.retireForm reference
+        modifyIORef' ref (\next->next {actionJob=Just (FormJob reference worker False)})
+        pure d {dialog=Nothing,status="Submitting input form..."}
 -- Fixed agent/file rename replies require their owning checked adoption routes.
 -- Other typed form handlers require their own checked host result route.
 -- Fixed replies are forced at their owning worker before the UI receives them.
@@ -1096,6 +1173,7 @@ forceFormReply reply@(SidebarSession (SessionDeleted ident))
   | T.length ident==48=evaluate (T.length ident) >> evaluate reply
   | otherwise=ioError (userError "Invalid deleted session result.")
 forceFormReply reply@SidebarRename{}=evaluate reply
+forceFormReply reply@SidebarPopupForm{}=evaluate reply
 forceFormReply reply@(SidebarConversation Conversation.NewConversation{})=evaluate reply
 forceFormReply reply@(SidebarConversation (Conversation.ResumeConversation _ sid))=evaluate (T.length sid) >> evaluate reply
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
@@ -1112,7 +1190,14 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
   live<-case inputForm state of
     Just prepared | Form.formReference prepared==reference->Form.submissionCurrent prepared
     _->pure False
-  let current=live && not cancelled && dialog d==Nothing
+  surface<-case (inputForm state,inputPopup state) of
+    (Just prepared,Just owner)->popupCurrent True prepared owner d
+    (_,Nothing)->pure True
+    _->pure False
+  let current=live && surface && not cancelled && dialog d==Nothing
+      adopted=case inputPopup state of
+        Just _->d {contextKind=SourceContext,contextTarget=Nothing}
+        Nothing->d
   completed<-poll worker
   case completed of
     Nothing | not current && not cancelled->do
@@ -1125,7 +1210,8 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
       modifyIORef' ref (\s->s {actionJob=Nothing})
       consumed<-if current then Form.finishFormSubmission reference else Form.retireForm reference >> pure False
       case result of
-        Right (Right (SidebarAgent request)) | consumed,acceptedFormRequest request->snd <$> core d [AgentSidebarAction request]
+        Right (Right (SidebarPopupForm prepared)) | consumed,Just (hub,target)<-inputPopup state->adoptPopupForm host hub target prepared adopted
+        Right (Right (SidebarAgent request)) | consumed,acceptedFormRequest request->snd <$> core adopted [AgentSidebarAction request]
         Right (Right (SidebarSession request@SessionDeleted{})) | consumed->snd <$> core d [SessionSidebarAction request]
         Right (Right (SidebarConversation request)) | consumed->snd <$> core d [ConversationSessionAction request]
         Right (Right (SidebarRename owner prepared)) | consumed->do

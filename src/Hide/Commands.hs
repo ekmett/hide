@@ -130,7 +130,7 @@ builtinCommands =
   ,BuiltinCommand "hide.language.restart" (RestartHLS)
   ,BuiltinCommand "hide.agents.conversation" (Conversation)
   ,BuiltinCommand "hide.agents.directory" (AgentDirectory)
-  ,BuiltinCommand "hide.agents.model" (AgentChoose "")
+  ,BuiltinCommand "hide.agents.model" AgentChoose
   ,BuiltinCommand "hide.agents.cancel" (AgentCancel)
   ,BuiltinCommand "hide.agents.resume" (AgentResume)
   ,BuiltinCommand "hide.agents.new" (AgentNew)

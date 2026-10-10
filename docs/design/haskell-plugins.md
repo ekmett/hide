@@ -25,10 +25,17 @@ navigation model.
 **Agents > Rename** and **Files > Rename** use single-input forms. **New Agent**
 uses named Name and Task inputs. **Tools > Resume session** uses a private
 Session ID input. **Model** and **Effort** use choice forms for primary, child
-and ACP completion agents. A linked handler prepares an
-`InputFormSpec`, `InputsFormSpec` or `ChoiceFormSpec` with a typed registered
-action, then embeds the form in a host reply through the sidebar capability.
-The host owns drafts, selection, focus and modal geometry.
+and ACP completion agents. With a conversation focused, its title and **Tools >
+Conversation model** open a two-level dropdown: choose a setting, then its value.
+The title selector and Agents tree share advertised choices and configuration
+dispatch.
+
+A linked handler prepares an `InputFormSpec`, `InputsFormSpec` or `ChoiceFormSpec`
+with a typed registered action. The sidebar capability embeds it in a host reply:
+`formReply` requests a modal; `popupFormReply` requests finite choices anchored to
+the captured conversation title. Both use the same form lifetime and submission
+worker. The host owns drafts, selection, focus, geometry and input admission;
+plugins do not supply a desktop callback or arbitrary popup coordinates.
 
 Choices submit provider IDs, not labels or row numbers. Metadata refresh can
 relabel or reorder the same choices while preserving the selected ID. Named
@@ -36,6 +43,13 @@ inputs submit a map keyed by field ID; their ordered IDs stay fixed for the life
 of the form. Changing either schema requires a new form. Input refresh preserves
 the typed drafts, selected ranges and focus. Closing and reopening creates a new
 `FormRef`.
+
+Each popup row resolves through its captured form and metadata revision to the
+raw choice ID. Keyboard navigation and paging use the ordinary context-menu layout. Moving from
+a setting to its values retains the original configuration receipt. Escape,
+closing the window or changing focus expires unsubmitted input. A submitted choice
+survives its own visual closure, but a replaced provider or changed advertisement
+still rejects it. A label or a later row index cannot redirect it to another agent.
 
 A human submission is claimed once, and its reply is adopted only while that form
 and its command registration remain current. Agent configuration rechecks the
@@ -49,13 +63,12 @@ when explicitly resumed. Reading recovery metadata starts no provider.
 
 The checked host results support agent creation, rename, configuration, primary
 conversation New/Resume and saved-file basename rename. Persistent multiline
-input is described below; arbitrary widget actions remain separate work. Agent input cannot operate these
-forms. The linked owner declares capture disclosure when preparing a form;
+input is described below; arbitrary widget actions remain separate work. Agent
+input cannot operate these forms. The linked owner declares capture disclosure when preparing a form;
 refresh cannot change it. Rename, new-agent and resume forms are private.
-Model/effort forms expose filtered public capability labels, preserving readable
-agent settings without allowing
-agent input. A readable form is no authority to expose protected source or session
-keys; its owner must remove those before preparation.
+Model/effort forms and popups expose filtered public capability labels, preserving
+readable agent settings while reserving submission for the human. A readable form
+is no authority to expose protected source or session keys; its owner must remove those before preparation.
 
 `Hide.Plugin.Sidebar` connects those prepared trees and forms to the session.
 Its `Sidebar c r` capability keeps invocation context and host reply types opaque
@@ -72,10 +85,12 @@ The same session supplies `MenuPublisher c r` for scoped menu contributions.
 `mapMenu` projects immutable invocation context and adapts replies on the menu
 worker while retaining the original command registration. The host routes a
 prepared form to its existing form controller; there is no second modal queue.
-The New/Resume declarations, labels and input validation live in `hide-agents`.
-New selects Primary without consuming a child conversation's draft. New and
-Resume retain their command IDs, configured shortcuts and native labels, but
-require a live contribution.
+The New/Resume and model/effort declarations, labels and input validation live in
+`hide-agents`. `sessionSelectedAgent` supplies the agent captured at menu admission;
+choice preparation never looks up whichever window happens to be focused later.
+New selects Primary without consuming a child conversation's draft. These commands
+retain their IDs, configured shortcuts and native labels, but require a live
+contribution.
 
 ## Direction
 
