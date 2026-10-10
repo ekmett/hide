@@ -137,11 +137,20 @@ formatTextRead :: K.Key -> Value -> Int -> Int -> Bool -> P.BufferRead -> Either
 formatTextRead kind metadata start count redacted b=do
   total<-readResult (P.readLineCount b)
   let available=if start>total then 0 else min count (total-start+1)
-  rows<-mapM (readResult . P.readLine b . P.LineNumber . (start-1+)) [0..available-1]
-  let text=T.intercalate "\n" rows
-      limited=T.take 131072 text
+  (parts,truncated)<-readRows 131072 (start-1) available
   Right (object [kind .= metadata,"startLine" .= start,"lineCount" .= available,
-    "totalLines" .= total,"text" .= limited,"redacted" .= redacted,"truncated" .= (T.length limited<T.length text)])
+    "totalLines" .= total,"text" .= T.concat parts,"redacted" .= redacted,"truncated" .= truncated])
   where
+    readRows _ _ 0=Right ([],False)
+    readRows remaining row countLeft=do
+      P.TextRange (P.CharOffset a) (P.CharOffset z)<-readResult (P.lineRange b (P.LineNumber row))
+      let size=min remaining (z-a)
+      text<-readResult (P.readText b (P.TextRange (P.CharOffset a) (P.CharOffset (a+size))))
+      if size<z-a then Right ([text],True)
+      else if countLeft==1 then Right ([text],False)
+      else if size==remaining then Right ([text],True)
+      else do
+        (rest,truncated)<-readRows (remaining-size-1) (row+1) (countLeft-1)
+        Right (text:"\n":rest,truncated)
     readResult :: Either P.RangeError a -> Either T.Text a
     readResult=either (Left . T.pack . show) Right
