@@ -18,12 +18,16 @@
 -- current task/settings incarnation. Steering clears them, rather than granting
 -- old judgments or results a new task identity. No arguments or result text enter
 -- this ledger, and observing an outcome does not depend on model availability.
+-- Reply evidence is separate: a bounded complete reply belongs to one exact
+-- provider turn. Unstamped chunks, partial replies and retired turns cannot be
+-- used as completion claims. Nothing in this owner automatically sends advice.
 module Hide.WardenRuntime
   ( WardenRuntime, WardenBinding, WardenReceipt, withWarden
   , wardenProviderFactory, wardenAgent, wardenProvider, wardenAnonymous
   , runWarden, checkWarden, captureWardenBinding, wardenBindingCurrent, wardenEnforces
   , getWardenSettings, setWardenSettings, WardenSettingsRef, captureWardenSettings, chooseWardenMode, wardenReceiptResult
   , WardenOutcome(..), WardenObservation(..), recordWardenOutcome, wardenObservations
+  , WardenAdvice, wardenAdviceText, prepareWardenAdvice, checkWardenAdvice
   ) where
 
 import Control.Concurrent.STM
@@ -33,12 +37,14 @@ import Control.Exception (bracket,finally,mask,onException)
 import Control.Monad (unless,void)
 import Data.Char (isControl)
 import Data.Aeson
+import qualified Data.ByteString as BS
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Vector as V
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Data.Unique (Unique,newUnique,hashUnique)
 import System.Environment (getEnvironment)
 import Hide.GuestAccess (sensitiveLabel)
@@ -51,7 +57,23 @@ data Entry = Entry
   { entryRevision :: !Unique, entryAdmitting :: !Bool, entryTurn :: !(Maybe ProviderTurnId)
   , entryTask :: !(Either Text Text), entryRules :: !(Either Text [Text])
   , entrySecrets :: ![Text], entryReport :: !(Value -> IO ())
-  , entryObservations :: ![WardenObservation] }
+  , entryObservations :: ![WardenObservation]
+  , entryReply :: !ReplyEvidence, entryEvidenceRevision :: !Integer
+  , entryAdviceAttempts :: !Int, entryAdviceEvidence :: !(Maybe Integer)
+  , entryAdviceIdentity :: !(Maybe Unique) }
+
+-- The chunks are copied at the provider ingress and bounded in both bytes and
+-- count. Prepared entries are forced on their worker before publication, so
+-- polling cannot inherit text processing. Only a matching terminal receipt can
+-- promote a boundary to complete.
+-- Child update events have no turn stamp; their exact terminal receipt supplies
+-- the complete text instead. No transcript walk or inferred current turn occurs.
+data ReplyEvidence
+  = ReplyMissing
+  | ReplyPending !ProviderTurnId ![Text] !Int !Int
+  | ReplyBoundary !ProviderTurnId !Text
+  | ReplyComplete !ProviderTurnId !Text
+  | ReplyUnavailable
 data State = State
   { settings :: !WardenSettings, settingsRevision :: !Integer, closed :: !Bool
   , providers :: !(M.Map ProviderIdentity Entry), agents :: !(M.Map AgentId ProviderIdentity) }
@@ -67,6 +89,39 @@ data WardenBinding = WardenBinding !WardenRuntime !Target !(Maybe Snapshot)
 data WardenReceipt = WardenReceipt !WardenRuntime !Integer
   !(Maybe (ProviderIdentity,Unique)) !WardenSettings !WardenResult
   !(Maybe Text) !(TVar Bool)
+
+-- | Immutable human-reviewed advice. It carries only copied host wording and
+-- small exact revocation keys; provider replies, task text and callbacks do not
+-- escape in the receipt. The human input owner additionally checks its original
+-- empty draft version and mount before inserting this text, and never sends it.
+data WardenAdvice = WardenAdvice !WardenRuntime !Integer !ProviderIdentity !Unique
+  !Integer !Unique !DecisionSupplier !Text
+
+-- | Copied factual wording for insertion into a human-owned draft, not a
+-- command or automatic steer request. Check the receipt again at adoption.
+wardenAdviceText :: WardenAdvice -> Text
+wardenAdviceText (WardenAdvice _ _ _ _ _ _ _ text)=text
+
+-- | Preparation is unavailable while the advice backend is incomplete. It
+-- performs no supplier lookup or inference and does not mint a receipt or spend
+-- the task's advice budget.
+prepareWardenAdvice :: WardenBinding -> IO (Either Text WardenAdvice)
+prepareWardenAdvice _=pure (Left "Warden reviewed advice is unavailable.")
+
+-- | /O(1)/. A receipt must retain its exact task, settings, evidence and selected
+-- supplier incarnation. Stale receipts never acquire a newer provider or task.
+checkWardenAdvice :: WardenAdvice -> IO (Either Text ())
+checkWardenAdvice (WardenAdvice (WardenRuntime service _ cell _) version identity task evidence advice supplier _)=do
+  current<-readTVarIO cell
+  let owns=not (closed current) && settingsRevision current==version &&
+        wardenMode (settings current)/=WardenOff && case M.lookup identity (providers current) of
+          Just entry->entryAdmitting entry && entryRevision entry==task &&
+            entryEvidenceRevision entry==evidence && entryAdviceIdentity entry==Just advice
+          Nothing->False
+  if not owns then pure (Left "Warden advice expired; review the current evidence again.") else do
+    selected<-currentDecisionSupplier service
+    pure $ if fmap decisionSupplierId selected==Just (decisionSupplierId supplier)
+      then Right () else Left "Warden advice supplier changed; review the current evidence again."
 
 -- | An actual host operation outcome, not a model assessment of its success.
 -- 'WardenExited' requires an explicit process exit receipt. 'WardenCaptured'
@@ -112,7 +167,7 @@ setWardenSettings (WardenRuntime _ _ cell _) config=case validateSettings config
     s<-readTVar cell
     if closed s then pure (Left "Warden session is closed.") else do
       writeTVar cell s {settings=config,settingsRevision=settingsRevision s+1,
-        providers=M.map (\e->e {entryObservations=[]}) (providers s)}
+        providers=M.map clearEvidence (providers s)}
       pure (Right ())
 
 -- | Capture only the scalar settings epoch for a submitted human form.
@@ -126,7 +181,7 @@ chooseWardenMode (WardenSettingsRef (WardenRuntime _ _ cell _) expected) mode=at
   s<-readTVar cell
   if closed s || settingsRevision s/=expected then pure (Left "Warden settings changed; reopen the menu.") else do
     writeTVar cell s {settings=(settings s) {wardenMode=mode},settingsRevision=expected+1,
-      providers=M.map (\e->e {entryObservations=[]}) (providers s)}
+      providers=M.map clearEvidence (providers s)}
     pure (Right ())
 
 validateSettings :: WardenSettings -> Either Text ()
@@ -201,7 +256,7 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
       task=case kind of
         PrimaryProvider->Right ""
         ChildProvider->Right (attributed (startOwner request) (spawnTask (startSpec request)))
-      entry=Entry revision False Nothing task initialRules secrets report []
+      entry=Entry revision False Nothing task initialRules secrets report [] ReplyMissing 0 0 Nothing Nothing
       retire=atomically $ modifyTVar' cell $ \s->s
         {providers=M.delete identity (providers s),agents=case M.lookup ident (agents s) of
           Just owner | owner==identity->M.delete ident (agents s)
@@ -210,11 +265,12 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
         fresh<-newUnique
         atomically $ modifyTVar' cell $ \s->s {providers=M.adjust
           (\e->if maybe True (==entryRevision e) expected
-            then e {entryRevision=fresh,entryAdmitting=False,entryObservations=[]} else e) identity (providers s)}
+            then (clearEvidence e) {entryRevision=fresh,entryAdmitting=False,entryAdviceAttempts=0} else e) identity (providers s)}
       invalidateTurn turn=do
         fresh<-newUnique
         atomically $ modifyTVar' cell $ \s->s {providers=M.adjust
-          (\e->if entryTurn e==Just turn then e {entryRevision=fresh,entryAdmitting=False,entryObservations=[]} else e) identity (providers s)}
+          (\e->if entryTurn e==Just turn
+            then (clearEvidence e) {entryRevision=fresh,entryAdmitting=False,entryAdviceAttempts=0} else e) identity (providers s)}
       revise readRules activeTurn message=do
         fresh<-newUnique
         -- Reserve before interruptible IO. Old grants expire immediately, and
@@ -224,8 +280,10 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
           case M.lookup identity (providers s) of
             Just e | not (closed s)->do
               writeTVar cell s {providers=M.insert identity
-                e {entryRevision=fresh,entryAdmitting=False,entryTurn=maybe (entryTurn e) Just activeTurn,
-                  entryObservations=[]} (providers s)}
+                (clearEvidence e) {entryRevision=fresh,entryAdmitting=False,entryTurn=maybe (entryTurn e) Just activeTurn,
+                  entryAdviceAttempts=0,entryReply=case activeTurn of
+                    Just turn | wardenMode (settings s)/=WardenOff->ReplyPending turn [] 0 0
+                    _->ReplyMissing} (providers s)}
               pure True
             _->pure False
         if not reserved then pure (Left "Warden provider retired before task delivery.") else do
@@ -242,13 +300,16 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
       wrappedEmit event=case event of
         ProviderClosed->retire >> emit event
         _->emit event
+      wrappedHost=host {providerContent=fmap (\publish turn content->do
+        captureContent cell identity turn content
+        publish turn content) (providerContent host)}
   registered<-atomically $ do
     s<-readTVar cell
     if closed s then pure False else do
       writeTVar cell s {providers=M.insert identity entry (providers s),agents=M.insert ident identity (agents s)}
       pure True
   if not registered then pure (Left "Warden session is closed.") else do
-    result<-restore (acquire kind identity launch endpoints context host request wrappedEmit) `onException` retire
+    result<-restore (acquire kind identity launch endpoints context wrappedHost request wrappedEmit) `onException` retire
     case result of
       Left err->retire >> pure (Left err)
       Right driver->do
@@ -271,7 +332,9 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
                     sent<-unmask (driverDeliver driver turn message extra submission) `onException` invalidateAt (Just revisionSent)
                     case sent of
                       Left err->invalidateAt (Just revisionSent) >> pure (Left err)
-                      Right active->pure (Right active {cancelProviderTurn=invalidateTurn turn >> cancelProviderTurn active})
+                      Right active->pure (Right active
+                        { providerTurnReply=captureReply cell kind identity revisionSent turn (providerTurnReply active)
+                        , cancelProviderTurn=invalidateTurn turn >> cancelProviderTurn active })
             , driverSteer= \message extra submission->mask $ \unmask->do
                 revised<-revise (unmask (loadRules (spawnDirectory (startSpec request)))) Nothing message
                 case revised of
@@ -290,6 +353,91 @@ wardenProviderFactory (WardenRuntime _ loadRules cell _) acquire kind identity l
           if T.length body>65536 then Left "Task history exceeds the Warden input bound; start a fresh conversation."
             else Right body
     attributed author text=(case author of Human->"Human task: "; Agent agent->"Parent agent "<>agentIdText agent<>" task: ")<>text
+
+-- Settings changes invalidate facts and receipts but do not refill the task's
+-- advice allowance. A new trusted task revision resets that allowance explicitly.
+clearEvidence :: Entry -> Entry
+clearEvidence entry=entry
+  {entryObservations=[],entryReply=ReplyMissing,entryEvidenceRevision=entryEvidenceRevision entry+1
+  ,entryAdviceEvidence=Nothing,entryAdviceIdentity=Nothing}
+
+advanceEvidence :: Entry -> Entry
+advanceEvidence entry=entry
+  {entryEvidenceRevision=entryEvidenceRevision entry+1,entryAdviceIdentity=Nothing}
+
+-- Bounded exact text, never a cropped or redacted substitute. Secret matching
+-- normalizes newlines in both operands; a provider's redaction marker means its
+-- complete original claim is unavailable even when no known value survives.
+boundedReply :: Entry -> Text -> Maybe Text
+boundedReply entry text
+  | T.length (T.take 8193 text)>8192=Nothing
+  | BS.length (TE.encodeUtf8 text)>8192=Nothing
+  | "[private]" `T.isInfixOf` text=Nothing
+  | any (\secret->not (T.null secret) && normalize secret `T.isInfixOf` normalize text) (entrySecrets entry)=Nothing
+  | otherwise=Just (T.copy text)
+  where normalize=T.replace "\r\n" "\n"
+
+captureContent :: TVar State -> ProviderIdentity -> Maybe ProviderTurnId -> ProviderContent -> IO ()
+captureContent _ _ Nothing _=pure ()
+captureContent cell identity (Just turn) content=atomically $ do
+  s<-readTVar cell
+  case M.lookup identity (providers s) of
+    Just entry | not (closed s),wardenMode (settings s)/=WardenOff,
+      entryAdmitting entry,entryTurn entry==Just turn->case content of
+        ProviderMessage "Agent" text->case entryReply entry of
+          ReplyPending actual chunks bytes count | actual==turn->do
+            let next=case boundedReply entry text of
+                  Just copied | count<64,let size=BS.length (TE.encodeUtf8 copied),bytes+size<=8192->
+                    entry {entryReply=ReplyPending turn (copied:chunks) (bytes+size) (count+1)}
+                  _->advanceEvidence entry {entryReply=ReplyUnavailable}
+            next `seq` writeTVar cell s {providers=M.insert identity next (providers s)}
+          _->pure ()
+        ProviderTurnBoundary actual | actual==turn->case entryReply entry of
+          ReplyPending expected chunks _ _ | expected==turn->do
+            let complete=T.concat (reverse chunks)
+                next=case boundedReply entry complete of
+                  Just text->entry {entryReply=ReplyBoundary turn text}
+                  Nothing->advanceEvidence entry {entryReply=ReplyUnavailable}
+            next `seq` writeTVar cell s {providers=M.insert identity next (providers s)}
+          _->pure ()
+        _->pure ()
+    _->pure ()
+
+-- Primary completion polling is cheap: its ingress already copied the bounded
+-- text before the terminal receipt was published. Child completion runs on its
+-- Hub worker and obtains text only from the exact captured turn's receipt.
+captureReply :: TVar State -> ProviderKind -> ProviderIdentity -> Unique -> ProviderTurnId
+  -> ProviderReply Value -> ProviderReply Value
+captureReply cell kind identity revision turn original=original
+  { pollProviderReply=do
+      ready<-pollProviderReply original
+      mapM_ complete ready
+      pure ready
+  , awaitProviderReply=do
+      ready<-awaitProviderReply original
+      complete ready
+      pure ready }
+  where
+    complete reply=atomically $ do
+      s<-readTVar cell
+      case M.lookup identity (providers s) of
+        Just entry | not (closed s),wardenMode (settings s)/=WardenOff,
+          entryAdmitting entry,entryRevision entry==revision,entryTurn entry==Just turn->
+          case entryReply entry of
+            ReplyComplete{}->pure ()
+            ReplyUnavailable->pure ()
+            _->do
+              let evidence=case (kind,reply) of
+                    (PrimaryProvider,Right _)->case entryReply entry of
+                      ReplyBoundary actual text | actual==turn->ReplyComplete turn text
+                      _->ReplyUnavailable
+                    (ChildProvider,Right (Object fields))
+                      | Just (String text)<-KM.lookup "text" fields,Just (Bool False)<-KM.lookup "truncated" fields->
+                          maybe ReplyUnavailable (ReplyComplete turn) (boundedReply entry text)
+                    _->ReplyUnavailable
+                  next=advanceEvidence entry {entryReply=evidence}
+              next `seq` writeTVar cell s {providers=M.insert identity next (providers s)}
+        _->pure ()
 
 -- | Enforce runs on the owning request worker. Off returns immediately.
 -- Observe offers one judgment to the scoped observation slot and returns; busy
@@ -425,7 +573,7 @@ recordWardenOutcome (WardenReceipt (WardenRuntime _ _ cell _) version task confi
               let observation=WardenObservation (T.copy (wardenResultStateId result)) name outcome
                   history=take 16 (observation:entryObservations entry)
               length history `seq` observation `seq` writeTVar cell s {providers=M.insert ident
-                entry {entryObservations=history} (providers s)}
+                (advanceEvidence entry) {entryObservations=history} (providers s)}
             _->pure ()
       _->pure ()
 

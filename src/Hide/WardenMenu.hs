@@ -7,18 +7,19 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 --
--- Human-only Warden selection. A submitted form changes only its captured
--- settings epoch; reopening or changing policy cannot replay an old choice.
+-- Human-only Warden settings and reviewed advice. Mode choices retain their
+-- captured settings epoch; advice prepares an unsent draft on the menu worker.
 -- Global TOML supplies startup defaults. Menu changes apply to this session.
 module Hide.WardenMenu (parseWardenSettings,withWardenMenu) where
 
-import Control.Exception (bracket)
+import Control.Exception (bracket,evaluate)
 import Control.Monad (unless)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Hide.Buffer (newBuffer,prepareBuffer)
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Menu as Menu
@@ -45,6 +46,9 @@ parseWardenSettings value=either (Left . T.pack) Right (parseEither parser value
       unless (not (isNaN threshold || isInfinite threshold) && threshold>=0 && threshold<=1) (fail "Invalid Warden probability threshold.")
       pure (WardenSettings mode budget threshold)
 
+-- | Scope both human declarations to the existing menu/form owners. Mode
+-- controls load no supplier. Explicit advice review prepares an unsent draft
+-- from the captured conversation receipt; its owner validates adoption.
 withWardenMenu :: MenuHost -> SidebarHost -> WardenRuntime -> IO a -> IO a
 withWardenMenu menus sidebar owner use=withRegistry $ \registry->do
   select<-registerCommand registry (CommandDef "hide.warden.select" "Set ACP Warden mode" hidden hidden $ \ctx (reference,name)->
@@ -63,11 +67,26 @@ withWardenMenu menus sidebar owner use=withRegistry $ \registry->do
           [("off","Off"),("observe","Observe actions"),("enforce","Hold actions that fail judgment")] selected "Select")
         (Form.formAction registry select ((,) reference) (\_ reply->pure reply))
       pure (SidebarForm <$> prepared)) >>= required
+  review<-registerCommand registry (CommandDef "hide.warden.advice" "Review Warden advice" hidden hidden $ \ctx ()->
+    if sidebarOrigin ctx/=Menu.HumanMenu then pure (Left (CommandRejected "Reviewing Warden advice requires the human.")) else
+      case sidebarWardenAdvice ctx of
+        Left err->pure (Left (CommandRejected err))
+        Right (target,binding)->do
+          advice<-prepareWardenAdvice binding
+          case advice of
+            Left err->pure (Left (CommandRejected err))
+            Right receipt->do
+              let prepared=newBuffer (wardenAdviceText receipt)
+              _<-evaluate (prepareBuffer prepared)
+              pure (Right (SidebarWardenAdvice target receipt prepared))) >>= required
   let publisher=menuSidebarCapabilities menus sidebar
       definition=Menu.MenuDef "hide.warden.mode" "options" "agents" 0 "ACP Warden…" "" False
         (Menu.menuAction registry open (const (Right ())) (\_ reply->pure reply))
-  bracket (Menu.publishMenu publisher definition >>= required) (Menu.withdrawMenu publisher) (const use)
+      adviceDefinition=Menu.MenuDef "hide.warden.advice" "tools" "agents" 8 "Review Warden advice" "" False
+        (Menu.menuAction registry review (const (Right ())) (\_ reply->pure reply))
+  bracket (Menu.publishMenu publisher definition >>= required) (Menu.withdrawMenu publisher) $ \_->
+    bracket (Menu.publishMenu publisher adviceDefinition >>= required) (Menu.withdrawMenu publisher) (const use)
   where
-    hidden=Codec Null (const (Left "Host-captured human Warden form only.")) (const Null)
+    hidden=Codec Null (const (Left "Host-captured human Warden action only.")) (const Null)
     required :: Show e => Either e a -> IO a
     required=either (ioError . userError . show) pure

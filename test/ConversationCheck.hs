@@ -1165,7 +1165,16 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           withGuardedConversationAt (Just warden) (WardenRuntime.wardenProviderFactory warden <$> ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin)
             (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles nativeRoot $ \runtime->do
               configured<-send runtime "configure" ["0","python3",json [server],json nativeEnvironment] nativeDesktop
-              started<-prompt runtime "write" configured
+              missingAdvice<-captureConversationAdvice runtime configured
+              check "reviewed advice requires a focused real conversation input" (isLeft missingAdvice)
+              shown<-send runtime "show" [] configured
+              emptyAdvice<-captureConversationAdvice runtime shown
+              check "empty primary input captures the advice owner without loading a supplier" (not (isLeft emptyAdvice))
+              let existingDraft=draftAt (newBuffer "keep this human draft") (Selection 4 4) shown
+              nonemptyAdvice<-captureConversationAdvice runtime existingDraft
+              check "reviewed advice refuses an existing human draft"
+                (case nonemptyAdvice of Left reason->"empty" `T.isInfixOf` reason; _->False)
+              started<-prompt runtime "write" existingDraft
               if mode==Warden.WardenEnforce then do
                 settled<-done runtime started
                 readReply<-nativeResponse "read-1"

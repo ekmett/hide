@@ -45,7 +45,7 @@ import Hide.Links (LinkResult, applyLink, prepareMarkdown)
 import Hide.BufferView (BufferView(..))
 import qualified Hide.Plugin.EditorHost as Editor
 import Hide.SidebarCommands (SidebarHost,SidebarContext(..),SidebarReply(..),sidebarInvocationContext,adoptForm,adoptPopupForm)
-import Hide.Conversation (ConversationState,captureConversationSession,captureConversationOperation,captureConversationChoices,conversationAgents)
+import Hide.Conversation (ConversationState,captureConversationSession,captureConversationOperation,captureConversationChoices,captureConversationAdvice,adoptConversationAdvice,conversationAgents)
 import qualified Hide.AgentHub as AgentHub
 import qualified Hide.AgentRuntime as AgentRuntime
 import Hide.Model hiding (menus)
@@ -321,7 +321,10 @@ menuEffects host@(MenuHost menus permitted _ _ ref _ conversation) core original
         else pure (Left "Conversation choices require the human.")
       selected<-traverse (evaluate . AgentHub.agentConfigAgent . choicePopupConfig) popup
       _<-evaluate (either (const 0) (T.length . AgentHub.agentIdText) selected)
-      sidebar<-evaluate ((sidebarInvocationContext origin d) {sidebarConversation=sessionTarget,sidebarConversationOperation=operationTarget,sidebarSelectedAgent=selected})
+      advice<-if origin==Plugin.HumanMenu then
+        maybe (pure (Left "No conversation owner.")) (\runtime->captureConversationAdvice runtime d) conversation
+        else pure (Left "Reviewing Warden advice requires the human.")
+      sidebar<-evaluate ((sidebarInvocationContext origin d) {sidebarConversation=sessionTarget,sidebarConversationOperation=operationTarget,sidebarSelectedAgent=selected,sidebarWardenAdvice=advice})
       _<-evaluate (length (sidebarContextWorkspace sidebar))
       let row=case target of Just (WindowRowTarget windowRef ident)->Just (windowRef,ident); _->Nothing
           context=MenuContext (columns d) origin navigation source row (either (const Nothing) Just popup) sidebar
@@ -394,6 +397,8 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed conversation) core orig
               adoptPopupForm sidebar (AgentRuntime.agentHub (conversationAgents runtime)) popupTarget prepared d
             Right (Right (PreparedSidebar sidebar (SidebarForm prepared))) | invocationOrigin context==Plugin.HumanMenu->adoptForm sidebar True prepared d
             Right (Right (PreparedSidebar _ (SidebarConversation request))) | invocationOrigin context==Plugin.HumanMenu->snd <$> core d [ConversationSessionAction request]
+            Right (Right (PreparedSidebar _ (SidebarWardenAdvice captured advice prepared))) | invocationOrigin context==Plugin.HumanMenu,Just runtime<-conversation->
+              adoptConversationAdvice runtime captured advice prepared d
             Right (Right PreparedSidebar{})->pure d {status="Menu result requires its owning operation."}
             Right (Right (PreparedDownloadCancel request))->snd <$> core d [DownloadCancelAction request]
             Right (Right (PreparedWindow prepared))->adoptWindowUpdate (invocationOrigin context) prepared d

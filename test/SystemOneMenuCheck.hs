@@ -10,6 +10,7 @@ module SystemOneMenuCheck (checks) where
 
 import Control.Concurrent (yield)
 import Control.Monad (unless)
+import qualified Hide.Plugin.Command as Command
 import qualified Data.Text as T
 import System.Timeout (timeout)
 import Hide.DocumentationHost (withDocsCommands)
@@ -82,6 +83,19 @@ checks=withSystemOne $ \owner->withSystemOneBrowser $ \browsers->
     let (wardenRef,wardenRevision)=form wardenForm
     (_,wardenPending)<-core wardenForm [SubmitChoiceForm wardenRef wardenRevision 1 Menu.HumanMenu]
     _<-await tick (const ((==WardenObserve) . wardenMode <$> getWardenSettings warden)) wardenPending
+    adviceEntry<-case filter ((=="hide.warden.advice") . Menu.menuName . Menu.menuReference) metadata of
+      [value]->pure value
+      _->fail "Missing reviewed Warden advice menu"
+    check "reviewed advice is a human-only Tools declaration"
+      (Menu.menuSlot adviceEntry=="tools" && Menu.menuTitle adviceEntry=="Review Warden advice" && not (Menu.menuAgentAllowed adviceEntry))
+    let invokeAdvice origin=Menu.invokeMenu (menuContributions menus) (Menu.menuReference adviceEntry)
+          (MenuContext 100 origin Nothing Nothing Nothing Nothing (sidebarInvocationContext origin initial))
+    agentAdvice<-invokeAdvice Menu.AgentMenu
+    check "agents cannot invoke advice through the registered command"
+      (case agentAdvice of Left (Menu.MenuCommandError (Command.CommandRejected reason))->"human" `T.isInfixOf` reason; _->False)
+    missingComposer<-invokeAdvice Menu.HumanMenu
+    check "missing conversation refuses without supplier acquisition"
+      (case missingComposer of Left (Menu.MenuCommandError (Command.CommandRejected reason))->"conversation draft" `T.isInfixOf` reason; _->False)
     pure ()
   where
     -- Selection must not acquire weights or start a network request.

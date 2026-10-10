@@ -20,7 +20,7 @@ module Hide.SidebarCommands
 
 import Hide.FileIO (withFileRead)
 import Hide.Warden (WardenMode(..))
-import Hide.WardenRuntime (WardenSettingsRef,chooseWardenMode)
+import Hide.WardenRuntime (WardenSettingsRef,chooseWardenMode,WardenBinding,WardenAdvice)
 import Hide.SystemOne (SystemOne,selectDecisionProvider)
 import Hide.Plugin.SystemOne (DecisionProvider,DecisionSupplier(..),SupplierDescription(..))
 import qualified Hide.SystemOneBrowser as SystemOneBrowser
@@ -77,13 +77,14 @@ data SidebarContext = SidebarContext
   , sidebarColumns :: !Int, sidebarOpenedImage :: !(Maybe (FilePath,Int,PluginWindow.WindowRef)), sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int, sidebarAttachment :: !Int
   , sidebarConversation :: !(Either Text (Conversation.ConversationTarget ConversationSessionReceipt))
   , sidebarConversationOperation :: !(Either Text (Conversation.ConversationOperationTarget ConversationSessionReceipt))
-  , sidebarSelectedAgent :: !(Either Text Hide.AgentHub.AgentId) }
+  , sidebarSelectedAgent :: !(Either Text Hide.AgentHub.AgentId)
+  , sidebarWardenAdvice :: !(Either Text (ConversationAdviceTarget,WardenBinding)) }
 -- Supplier choice is a closed human intent, carried by the existing form worker.
 -- Adoption happens only after that exact form's submission receipt is consumed.
 data SystemOneChoice = ConfiguredSystemOne !SystemOne !(Maybe DecisionProvider)
   | BrowserSystemOne !SystemOne !SystemOneBrowser.BrowserOffer
 
-data SidebarReply = SidebarWarden !WardenSettingsRef !WardenMode | SidebarSystemOne !SystemOneChoice | SidebarPopupForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+data SidebarReply = SidebarWardenAdvice !ConversationAdviceTarget !WardenAdvice !Buffer | SidebarWarden !WardenSettingsRef !WardenMode | SidebarSystemOne !SystemOneChoice | SidebarPopupForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -181,14 +182,14 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d) (Left "No captured conversation session.") (Left "No captured conversation operation.") (Left "No captured conversation agent.")
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d) (Left "No captured conversation session.") (Left "No captured conversation operation.") (Left "No captured conversation agent.") (Left "Select an empty conversation draft to review Warden advice.")
 
 -- | Shallow immutable menu input for this same form owner. It retains no desktop,
 -- source contents or Undo. The menu owner supplies its captured session receipt.
 sidebarInvocationContext :: Menu.MenuOrigin -> Desktop -> SidebarContext
 sidebarInvocationContext origin d=SidebarContext origin workspace workspace Nothing []
   (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] 0 (sessionAttachment d)
-  (Left "No captured conversation session.") (Left "No captured conversation operation.") (Left "No captured conversation agent.")
+  (Left "No captured conversation session.") (Left "No captured conversation operation.") (Left "No captured conversation agent.") (Left "Select an empty conversation draft to review Warden advice.")
   where workspace=startingDirectory d
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
@@ -796,6 +797,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarForm{})->d {status="Sidebar form expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
               Right (Right SidebarPopupForm{})->d {status="Popup form requires its captured menu owner."}
+              Right (Right SidebarWardenAdvice{})->d {status="Warden advice requires its captured human menu owner."}
               Right (Right SidebarWarden{})->d {status="Warden settings require their submitted human form."}
               Right (Right SidebarSystemOne{})->d {status="Supplier selection requires its submitted human form."}
               Right (Right SidebarConversation{})->d {status="Conversation session result requires its menu owner."}

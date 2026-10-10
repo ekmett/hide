@@ -175,8 +175,25 @@ justified-action scores, supplier/model provenance and static failure reasons.
 These are recorded judgments, not model-written explanations or proof that the
 action is correct.
 
+Choose **Tools > Review Warden advice** in a conversation with an empty draft
+when you want to check an agent's progress. The review uses recent editor-owned
+results and, when available, the completed agent reply. It distinguishes a
+failed operation from a returned response, a captured buffer and an actual
+process exit. A returned response does not prove the work succeeded; a missing
+result does not prove it failed.
+
+Advice goes into the existing composer for you to edit and send with Query or
+Steer. It is never sent automatically and cannot overwrite a newer draft.
+Changing the task, agent, supplier or Warden settings expires the review.
+Repeated reviews are bounded; this is a progress check, not an interruption after
+every tool call. Expand its Warden activity to inspect the observed result IDs
+and scores. Missing, private or incomplete reply evidence is reported as
+unavailable.
+
 The editor can gate only actions it owns. An agent's own shell or external tools
 run under that provider's permissions; ACP notifications cannot stop them.
+Warden outcomes are bounded evidence, not a complete execution log. Some
+requests canceled before completion have no recorded result.
 
 ## Continue later
 

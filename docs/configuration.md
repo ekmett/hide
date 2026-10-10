@@ -500,8 +500,11 @@ disabled tool or replace human approval.
 
 Task, rule text and action arguments go to the human-selected supplier. Known
 private values and oversized inputs refuse judgment. Enforce holds failed or
-stale judgments and requests without a supplier. See
-[conversations](conversations.md#acp-warden) for the activity display and limits.
+stale judgments and requests without a supplier. A human-requested review also
+sends bounded recent outcomes and an available completed reply to that supplier;
+it prepares advice for you to edit and send. It never sends steering on its own.
+See [conversations](conversations.md#acp-warden) for the review, activity display
+and limits.
 
 ## Autocomplete
 

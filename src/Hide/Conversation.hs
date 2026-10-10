@@ -20,7 +20,7 @@
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, captureConversationOperation, captureConversationChoices, withConversationAt, withGuardedConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, captureConversationOperation, captureConversationChoices, captureConversationAdvice, adoptConversationAdvice, withConversationAt, withGuardedConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
 import Hide.ConversationBody
@@ -77,7 +77,7 @@ import qualified Hide.Plugin.Transcript as Transcript
 import Hide.Session (checkpointPath)
 import Hide.AgentFiles
 import Hide.Buffer
-import Hide.Plugin.BufferHost (versionCurrent)
+import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Hide.AgentSidebarTypes
 import Hide.Model hiding (prompt)
 import qualified Hide.Plugin.EditorHost as Editor
@@ -91,7 +91,7 @@ import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import System.Environment (lookupEnv)
 import Hide.Syntax (Style(..),styledText)
-import Hide.WardenRuntime (WardenRuntime,WardenBinding,WardenReceipt,wardenProvider,captureWardenBinding,wardenEnforces,runWarden,checkWarden,WardenOutcome(..),recordWardenOutcome)
+import Hide.WardenRuntime (WardenRuntime,WardenBinding,WardenReceipt,wardenProvider,captureWardenBinding,wardenEnforces,runWarden,checkWarden,WardenOutcome(..),recordWardenOutcome,wardenAgent,WardenAdvice,checkWardenAdvice)
 
 -- One configured stdio provider; its protocol supplies models and tools.
 data Phase = Prompting | CancellingPrompt deriving Eq
@@ -669,6 +669,62 @@ captureConversationChoices (ConversationState _ _ _ agents) d=case activeWindow 
         target<-evaluate (ChoicePopupTarget (windowId w) view ready frame x (y+1))
         pure (Right target)
   _->pure (Left "Select a conversation window.")
+
+-- | Capture a real empty composer and the original trusted Warden task at
+-- human menu admission. Only small immutable identities escape; this operation
+-- does not load a supplier, prepare text or invoke an input command.
+captureConversationAdvice :: ConversationState -> Desktop -> IO (Either Text (ConversationAdviceTarget,WardenBinding))
+captureConversationAdvice (ConversationState _ ref _ agents) d=do
+  s<-readIORef ref
+  case (conversationWarden s,activeWindow d,activeEditorMount d) of
+    _ | questionsClosed s->pure (Left unavailableConversation)
+    (Nothing,_,_)->pure (Left "ACP Warden is unavailable in this session.")
+    (Just warden,Just window,Just mount)
+      | activeConversation d,editingInput d==MountedInput,not (questionActive d),dialog d==Nothing->do
+          editors<-readIORef (conversationEditors s)
+          let target=T.copy (conversationTarget d)
+              who=if T.null target then AR.primaryAgent agents else AH.AgentId target
+          owned<-Editor.mountCurrent mount
+          if not owned || maybe True ((/=mount).conversationEditorMount) (M.lookup target editors)
+            then pure (Left "Conversation input expired; open it again.")
+            else if bufferLength (composerBuffer d)/=0 then pure (Left "Review Warden advice requires an empty conversation draft.") else do
+              config<-AH.agentConfiguration (AR.agentHub agents) who
+              case config of
+                Left err->pure (Left err)
+                Right (receipt,_)->do
+                  ready<-evaluate receipt
+                  version<-captureVersion (composerBuffer d)
+                  owner<-evaluate (sessionIdentity s)
+                  frame<-evaluate (windowId window)
+                  _<-evaluate (T.length target+T.length (AH.agentIdText who))
+                  binding<-captureWardenBinding (wardenAgent warden who) >>= evaluate
+                  captured<-evaluate (ConversationAdviceTarget owner target frame mount version ready)
+                  pure (Right (captured,binding))
+    _->pure (Left "Select an empty conversation draft to review Warden advice.")
+
+-- | Install worker-prepared advice only into the same unchanged empty input.
+-- The advice receipt independently checks task, settings, supplier and evidence.
+-- This grants no send/steer authority: the human edits and submits normally.
+adoptConversationAdvice :: ConversationState -> ConversationAdviceTarget -> WardenAdvice -> Buffer -> Desktop -> IO Desktop
+adoptConversationAdvice (ConversationState _ ref _ agents)
+    (ConversationAdviceTarget owner target frame mount version config) advice prepared d=do
+  s<-readIORef ref
+  editors<-readIORef (conversationEditors s)
+  mounted<-Editor.mountCurrent mount
+  currentVersion<-versionCurrent version (composerBuffer d)
+  currentProvider<-AH.agentConfigurationCurrent (AR.agentHub agents) config
+  let current=not (questionsClosed s) && owner==sessionIdentity s && activeConversation d &&
+        conversationTarget d==target && fmap windowId (activeWindow d)==Just frame &&
+        activeEditorMount d==Just mount && editingInput d==MountedInput && not (questionActive d) && dialog d==Nothing &&
+        maybe False ((==mount).conversationEditorMount) (M.lookup target editors) &&
+        mounted && currentVersion && bufferLength (composerBuffer d)==0 && currentProvider
+  if not current then pure d {status="Warden advice target changed; review it again from an empty draft."} else do
+    checked<-checkWardenAdvice advice
+    pure $ case checked of
+      Left err->d {status=err}
+      Right ()->let end=bufferLength prepared in
+        (setComposerInput prepared (Selection end end) True d)
+          {status="Warden advice prepared. Review it, then use Steer or Query."}
 
 -- This is the owning lifecycle operation, not a text command adapter. Admission
 -- is serialized with provider ticks; a stale form never cancels a question,
