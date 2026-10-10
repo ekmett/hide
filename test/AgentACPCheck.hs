@@ -234,6 +234,35 @@ checks=bracket temporary removePathForcibly $ \root -> do
     failed<-timeout 2000000 (awaitProviderReply (providerTurnReply broken))
     check "failed content and closed-event publication still resolve the original turn"
       (case failed of Just (Left _)->True; _->False)
+    writeIORef publicationFailure False
+  -- Hold natural pump finalization where the host is publishing retirement.
+  -- Explicit stop must complete that publication even if cancelling the pump
+  -- interrupts its callback. Synchronize on the callback, not elapsed time.
+  closingEntered<-newEmptyMVar
+  closingRelease<-newEmptyMVar
+  closedEvents<-newIORef (0::Int)
+  let closingEvent ProviderClosed=do
+        first<-tryPutMVar closingEntered ()
+        when first (readMVar closingRelease)
+        atomicModifyIORef' closedEvents (\n->(n+1,()))
+      closingEvent _=pure ()
+      brokenContent _ ProviderTurnBoundary{}=ioError (userError "held final publication")
+      brokenContent _ _=pure ()
+  closingIdentity<-newProviderIdentity
+  closing<-startACPProvider PrimaryProvider closingIdentity launch [] ""
+    (ProviderHost denyPermission Nothing Nothing (Just brokenContent)) request closingEvent >>= right "closing provider"
+  flip finally (void (tryPutMVar closingRelease ()) >> driverStop closing) $ do
+    pendingClose<-bracket newProviderSubmission retireProviderSubmission $ \submission->do
+      turn<-newProviderTurnId
+      driverDeliver closing turn (HubMessage 8 Human "ordinary" True) [] submission >>= right "closing prompt admission"
+    _<-timeout 2000000 (readMVar closingEntered) >>= maybe (error "closing callback not reached") pure
+    stopped<-timeout 2000000 (driverStop closing)
+    check "stop joins interrupted retirement publication" (stopped==Just ())
+    check "stop publishes retirement exactly once" . (==1) =<< readIORef closedEvents
+    driverStop closing
+    check "repeated stop does not repeat retirement" . (==1) =<< readIORef closedEvents
+    settled<-pollProviderReply (providerTurnReply pendingClose)
+    check "stop settles pending prompt" (case settled of Just (Left _)->True; _->False)
   let forked=request {startSpec=spec {spawnContext=Fork (AgentId "parent")},startSource=Just (PrivateSource (AgentId "parent") "private-parent-key")}
   beforeFork<-length <$> logs
   unsupported<-startChild launch [] "" denyPermission forked emit

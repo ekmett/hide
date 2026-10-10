@@ -83,8 +83,8 @@ startACPProvider kind _identity launch endpoints context host request emit=safel
   client<-A.startClient launch root
   runtime<-Runtime client <$> newMVar M.empty <*> newTVarIO True <*> newTVarIO False <*> newIORef False
     <*> newIORef Nothing <*> pure (startResume request <|> (sourceSessionKey <$> startSource request)) <*> pure bearerKeys <*> pure emit <*> pure host
-    <*> newMVar [] <*> newTVarIO 0 <*> newEmptyMVar <*> newIORef Null <*> newMVar () <*> newIORef (startResume request==Nothing) <*> newIORef ("",False) <*> newIORef M.empty <*> newIORef Null <*> pure kind <*> newIORef Nothing <*> pure root
-  worker<-async (pump runtime `finally` (publish runtime ProviderClosed `finally` failPending runtime "ACP connection closed."))
+    <*> newMVar [] <*> newTVarIO 0 <*> newEmptyMVar <*> newIORef Null <*> newMVar () <*> newIORef (startResume request==Nothing) <*> newIORef ("",False) <*> newIORef M.empty <*> newIORef Null <*> pure kind <*> newIORef Nothing <*> pure root <*> newMVar False
+  worker<-async (pump runtime `finally` (publishClosed runtime `finally` failPending runtime "ACP connection closed."))
   putMVar (pumpWorker runtime) worker
   restore (setup runtime root) `onException` close runtime
   where
@@ -142,7 +142,7 @@ data Runtime = Runtime
   , nativeReplies :: MVar [NativeReply], nativeEpoch :: TVar Int, pumpWorker :: MVar (Async ())
   , configuration :: IORef Value, serial :: MVar (), firstPrompt :: IORef Bool
   , output :: IORef (Text,Bool), streamTails :: IORef (M.Map Text Text), initializeInfo :: IORef Value
-  , providerKind :: !ProviderKind, activeTurn :: IORef (Maybe (ProviderTurnId,Int)), providerDirectory :: !FilePath }
+  , providerKind :: !ProviderKind, activeTurn :: IORef (Maybe (ProviderTurnId,Int)), providerDirectory :: !FilePath, closePublished :: MVar Bool }
 
 -- Existing pump correlation owns pending host results, including lightweight
 -- exit waiters. No per-result worker or second host ingress is created.
@@ -192,6 +192,14 @@ failPending runtime reason=modifyMVar_ (pending runtime) $ \requests -> do
     mapM_ (\(_,reply)->void (tryPutTMVar reply (Left reason))) (M.elems requests)
   pure M.empty
 
+-- A successful close publication belongs to the connection, not the pump's
+-- lifetime. Cancellation may interrupt a blocked callback; explicit close then
+-- finishes it after joining that worker. Mask through publication and its mark
+-- so a completed callback cannot be repeated at the cancellation boundary.
+publishClosed :: Runtime -> IO ()
+publishClosed runtime=mask_ $ modifyMVar_ (closePublished runtime) $ \sent->
+  if sent then pure True else publish runtime ProviderClosed >> pure True
+
 close :: Runtime -> IO ()
 close runtime=mask_ $ do
   first<-atomicModifyIORef' (closed runtime) (\was->(True,not was))
@@ -199,9 +207,9 @@ close runtime=mask_ $ do
     atomically (writeTVar (cancelled runtime) True)
     failPending runtime "Agent session ended."
     cancelPermission runtime
-    readMVar (pumpWorker runtime) >>= cancel
-    cancelPermission runtime
-    A.stopClient (client runtime)
+    (readMVar (pumpWorker runtime) >>= cancel)
+      `finally` (publishClosed runtime
+        `finally` (cancelPermission runtime `finally` A.stopClient (client runtime)))
 
 cancelPermission :: Runtime -> IO ()
 cancelPermission runtime=do
@@ -384,7 +392,7 @@ pump runtime=do
             atomically (void (tryPutTMVar reply completed))
             pure (M.delete ident requests)
           _->pure requests
-    handle (A.Disconnected _)=publish runtime ProviderClosed >> failPending runtime "ACP provider disconnected."
+    handle (A.Disconnected _)=publishClosed runtime `finally` failPending runtime "ACP provider disconnected."
     handle (A.Notification "session/update" params)=do
       expected<-readIORef (sessionKey runtime)
       when (expected/=Nothing && field "sessionId" params==expected) $ do
