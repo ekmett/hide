@@ -7,7 +7,9 @@
 -- exact context and coordinates: no fuzzy matching or external patch command.
 -- Search and strict diff preparation run on reply/permission workers. Diff adoption
 -- runs in the owning permission tick; filesystem mutations remain initial-phase IO.
-module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, PatchSource, PreparedPatch, capturePatchSource, capturePatchRequest, preparePatch, commitPatch) where
+module Hide.WorkspaceFilesMCP (fileTools, fileToolNames, fileTool, applyUnifiedDiff, PatchSource, PreparedPatch, capturePatchSource, capturePatchRequest, preparePatch, commitPatches) where
+
+import Hide.FileIO (withFileRead)
 
 import Hide.WorkspaceRename (checkedPath,operationPath,within)
 import qualified Hide.WorkspaceRename as Rename
@@ -28,7 +30,7 @@ import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.Exit (ExitCode(..))
 import System.FilePath
-import System.IO (IOMode(ReadMode), withBinaryFile, hClose)
+import System.IO (hClose)
 import System.IO.Error (catchIOError)
 import System.Process
 import System.Timeout (timeout)
@@ -49,7 +51,7 @@ fileTools :: [Value]
 fileTools=
   [describe "workspace_search" "Literal line search of ignore-respecting workspace files, or Git tracked files only. Live buffers replace disk contents, including unsaved text; default search also includes untitled buffers. Matches are paged, lines/columns start at 1. Files over 1 MiB and binary files are skipped; total scan is capped at 32 MiB and 10000 files/matches." True ["query"]
     [("query",string),("trackedOnly",boolean),("offset",integer),("limit",integer)]
-  ,describe "buffer_apply_diff" "Apply one strict unified diff to a live text buffer at the given revision. Context and hunk positions must match exactly. The entire patch is atomic and undoable; no file is saved. File headers are optional and identify only this buffer, never disk paths." False ["bufferId","revision","diff"]
+  ,describe "buffer_apply_diff" "Apply one strict unified diff to a live text buffer at the given revision. Context and hunk positions must match exactly. This permission also covers linked plugin batches for several buffers; every patch in a batch is applied atomically with ordinary Undo per buffer. No file is saved. File headers are optional and identify only the target buffer, never disk paths." False ["bufferId","revision","diff"]
     [("bufferId",integer),("revision",integer),("diff",string)]
   ,describe "workspace_files" "Create a directory or empty file, delete a file/empty directory, or rename a workspace path. Paths must stay inside the project; Git metadata and symlink endpoints are protected. Refuses overwrite and dirty open descendants. Delete closes clean views; rename updates open buffer paths. No recursive deletion." False ["operation","path"]
     [("operation",object ["type" .= ("string"::Text),"enum" .= (["mkdir","create_file","delete","rename"]::[Text])]),("path",string),("to",string)]]
@@ -212,17 +214,24 @@ patchArguments= either (Left . T.pack) Right . parseEither
     unless (all (`elem` ["bufferId","revision","diff"]) (KM.keys o)) (fail "Unknown argument")
     (,,) <$> o .: "bufferId" <*> o .: "revision" <*> o .: "diff")
 
--- | Recheck current editability and install exactly once through the shared
--- all-target owner. The caller has rechecked ticket lifetime, actor and policy.
-commitPatch :: PreparedPatch -> Desktop -> IO (Either Text (Desktop,DiffResult))
-commitPatch (PreparedPatch bid patch modified prepared) desktop=case M.lookup bid (buffers desktop) of
-  Just doc | textBuffer (documentBuffer doc),documentLabel doc==Nothing->do
-    adopted<-commitEdits [prepared] desktop
+-- | Recheck every target's current editability, then install the entire batch
+-- once through the shared all-target owner. The caller has rechecked ticket
+-- lifetime, actor and policy. Results preserve the prepared patches' input order.
+commitPatches :: [PreparedPatch] -> Desktop -> IO (Either Text (Desktop,[DiffResult]))
+commitPatches patches desktop=case mapM_ editable patches of
+  Left err->pure (Left err)
+  Right ()->do
+    adopted<-commitEdits [prepared | PreparedPatch _ _ _ prepared<-patches] desktop
     pure $ do
       (updated,_)<-adopted
-      let next=updated {windows=map (\w->if bufferId w==Just (bid) then w {windowHexLow=False} else w) (windows updated)}
-      pure (next,DiffResult (revision (documentBuffer (buffers next M.! bid))) patch modified)
-  _->pure (Left "Diff target is no longer an editable text buffer")
+      let targets=M.fromList [(bid,()) | PreparedPatch bid _ _ _<-patches]
+          next=updated {windows=map (\w->if maybe False (`M.member` targets) (bufferId w) then w {windowHexLow=False} else w) (windows updated)}
+          results=[DiffResult (revision (documentBuffer (buffers next M.! bid))) patch modified | PreparedPatch bid patch modified _<-patches]
+      pure (next,results)
+  where
+    editable (PreparedPatch bid _ _ _)=case M.lookup bid (buffers desktop) of
+      Just doc | textBuffer (documentBuffer doc),documentLabel doc==Nothing->Right ()
+      _->Left "Diff target is no longer an editable text buffer"
 
 -- | Validate and apply a single-file unified diff with exact old/new line counts.
 -- Return new text and original half-open character edits; reject all bad context
@@ -336,7 +345,7 @@ loadCandidates desktop root live budget (path:rest)=do
                       | textBuffer (documentBuffer doc) -> pure (Just (Just (bid,revision (documentBuffer doc)),contents (documentBuffer doc)))
                       | otherwise -> pure Nothing
         Nothing -> do
-          bytes<-(try (withBinaryFile canonical ReadMode (\h -> BS.hGet h 1048577)) :: IO (Either IOException BS.ByteString))
+          bytes<-(try (withFileRead canonical (\h -> BS.hGet h 1048577)) :: IO (Either IOException BS.ByteString))
           pure $ case bytes of
             Right value | BS.length value<=1048576,not (BS.elem 0 value),Right text<-TE.decodeUtf8' value -> Just (Nothing,text)
             _ -> Nothing

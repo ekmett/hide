@@ -12,6 +12,8 @@
 -- content adopts into the same display slot; closing never reopens from output.
 module Hide.Debugger (Debugger, Core, withDebugger, withDebuggerConsoles, withDownloadsCommands, withDebuggerClock, withDebuggerHdb, hdbOfferDialog, debuggerEffects, tickDebugger, tickPreparedDebug, debuggerTool, debuggerSidebarEpoch, debuggerSidebarSession, debuggerSidebarRead, debuggerWatches, withDebuggerWatchProvider) where
 
+import Hide.FileIO (withFileRead)
+
 import qualified Hide.Plugin.Window as W
 import qualified Hide.Plugin.Menu as Menu
 import Hide.PluginWindowHost (adoptWindowUpdate,replaceWindowUpdate)
@@ -44,7 +46,7 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import GHC.Clock (getMonotonicTimeNSec)
 import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory, removeFile)
-import System.IO (IOMode(ReadMode), withBinaryFile, openTempFile, hClose)
+import System.IO (openTempFile, hClose)
 import System.IO.Error (tryIOError)
 import Hide.PackageSidebar (packageBuildManifestCurrent)
 import System.FilePath (isAbsolute, takeFileName, takeExtension, takeDirectory, makeRelative, (</>))
@@ -715,12 +717,14 @@ debuggerTool runtime@(Debugger ref _ _ _ _) d name arguments = do
     immediate desktop result=pure (desktop,pure (result >>= boundedResult))
     snapshot desktop=do
       current<-readIORef ref
+      value<-debuggerStatus current
       pure (desktop,case failure current of
         Just err->pure (Left err)
-        Nothing->publicDebuggerStatus (root current) (privateFilePaths desktop) (merge (object ["accepted" .= True]) (debuggerStatus current)))
+        Nothing->publicDebuggerStatus (root current) (privateFilePaths desktop) (merge (object ["accepted" .= True]) value))
     run ToolStatus=do
       current<-readIORef ref
-      pure (d,publicDebuggerStatus (root current) (privateFilePaths d) (debuggerStatus current))
+      value<-debuggerStatus current
+      pure (d,publicDebuggerStatus (root current) (privateFilePaths d) value)
     run (ToolStart action values)=do
       desktop<-perform runtime action values d
       current<-readIORef ref
@@ -904,9 +908,17 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       pure (ToolInspect command args)
     _ -> fail "Unknown debugger tool"
 
-debuggerStatus :: State -> Value
-debuggerStatus s=object
-  ["generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
+debuggerStatus :: State -> IO Value
+debuggerStatus s=do
+  -- Observe completion without joining or forcing the prepared Buffer. A ready
+  -- result stays owned by the next UI tick, which may defer it behind a modal.
+  preparation<-case sourcePreparing s of
+    Nothing->pure ("idle"::Text)
+    Just (SourcePreparation _ _ _ _ _ _ worker)->do
+      result<-poll worker
+      pure (if isJust result then "ready" else "preparing")
+  pure $ object
+   ["sourcePreparation" .= preparation,"generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
    "finishing" .= (isJust (client s) && isJust (endedAt s)),"exitCode" .= programExitCode s,"connected" .= connected s,
    "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,"follow" .= followSource s,
    "threadId" .= thread s,"frame" .= frame s,"source" .= (frame s >>= (field "source" :: Value -> Maybe Value)),
@@ -1009,7 +1021,7 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
       result<-try $ do
         directory<-resolveBuildRoot d
         let path=if isAbsolute (T.unpack configPath) then T.unpack configPath else directory </> T.unpack configPath
-        bytes<-withBinaryFile path ReadMode (\h -> BS.hGet h (1024*1024+1))
+        bytes<-withFileRead path (\h -> BS.hGet h (1024*1024+1))
         if BS.length bytes>1024*1024 then pure (Left "Debugger configuration exceeds 1 MiB.") else
           case eitherDecodeStrict' bytes >>= parseEither parseLaunch of
             Left err -> pure (Left (T.pack err))
@@ -1954,7 +1966,7 @@ hdbContext d=do
   pure (Build.buildSource d,defaultDirectory d,treeRoot <$> sideTree d,fromMaybe GHC (toolchain d),identities)
   where identity (bid,doc)=do
           buffer<-evaluate (documentBuffer doc)
-          stable<-makeStableName buffer
+          stable<-makeStableName $! buffer
           pure (bid,filePath <$> documentFile doc,revision buffer,stable,documentModified doc)
 hdbCurrent :: GhcLaunch -> HdbContext -> Bool
 hdbCurrent PackageLaunch{} _=False

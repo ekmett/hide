@@ -1,5 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
 module LinksCheck (checks) where
+import qualified Codec.Picture as Picture
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.Text.Encoding as TE
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Exception (bracket)
 import Control.Monad (unless,forM_)
@@ -23,7 +27,7 @@ checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do
   createDirectory (root </> "docs")
   writeFile (root </> "README.md") "# Project\n\nRead [Installation](docs/install.md).\n"
-  writeFile (root </> "docs/install.md") "# Installation\n\n[Home](../README.md)\n\n## Linux fonts\n\nInstall fonts.\n"
+  writeFile (root </> "docs" </> "install.md") "# Installation\n\n[Home](../README.md)\n\n## Linux fonts\n\nInstall fonts.\n"
   let d=(initialDesktop (80,25)) {defaultDirectory=Just root}
       check label ok=unless ok (error label)
       field key=parseMaybe (withObject "packet" (.: key))
@@ -33,7 +37,7 @@ checks=bracket temporary removePathForcibly $ \root->do
   check "Markdown opens inside editor" (packet==Nothing && "Installation" `T.isInfixOf` text help && not ("docs/install.md" `T.isInfixOf` text help))
   check "help retains clickable target and source base" (documentMarkdownPath (doc help)==Just (root </> "README.md") && map (\(_,_,u)->u) (documentLinks (doc help))==["docs/install.md"])
   (installation,_)<-followLink True help (documentMarkdownPath (doc help)) "docs/install.md#linux-fonts"
-  check "relative doc and anchor navigation" (documentMarkdownPath (doc installation)==Just (root </> "docs/install.md") && maybe False ((>0).scrollRow) (activeWindow installation))
+  check "relative doc and anchor navigation" (documentMarkdownPath (doc installation)==Just (root </> "docs" </> "install.md") && maybe False ((>0).scrollRow) (activeWindow installation))
   (home,_)<-followLink True installation (documentMarkdownPath (doc installation)) "../README.md"
   check "nested link resolves against current document" (documentMarkdownPath (doc home)==Just (root </> "README.md"))
   let a=case documentLinks (doc help) of (start,_,_):_->start; []->error "missing link"
@@ -61,6 +65,12 @@ checks=bracket temporary removePathForcibly $ \root->do
   BS.writeFile (root </> "picture.png") (BS.pack [137,80,78,71])
   (_,picture)<-followLink True d (Just (root </> "picture.png")) ""
   check "image packet carries bounded bytes, not server path" ((picture >>= field "mime") == Just ("image/png"::T.Text) && (picture >>= field "data") == Just ("iVBORw=="::T.Text))
+  let jpeg=BL.toStrict (Picture.encodeJpegAtQuality 95 (Picture.generateImage (\_ _->Picture.PixelYCbCr8 140 90 210) 5 3))
+  forM_ ["photograph.bin","misnamed.png","misnamed.md"] $ \name->do
+    BS.writeFile (root </> name) jpeg
+    (_,resource)<-followLink True d (Just (root </> name)) ""
+    check "external image MIME follows the signature and preserves encoded source"
+      ((resource >>= field "mime")==Just ("image/jpeg"::T.Text) && (resource >>= field "data")==Just (TE.decodeUtf8 (B64.encode jpeg)))
   forM_ ["javascript:alert(1)","data:text/html,test","https://", "https://example.com/\n"] $ \urlText->do
     check "unsafe URL rejected" (not (validWebURL urlText))
     result<-openResource (object ["url" .= (urlText::T.Text)])

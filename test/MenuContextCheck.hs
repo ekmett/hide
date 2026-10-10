@@ -11,6 +11,8 @@ import Data.Aeson.Types (parseEither)
 import Data.List (findIndex)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import qualified Data.ByteString as BS
 import qualified Graphics.Vty as V
 import System.Directory
 import System.FilePath ((</>),takeDirectory)
@@ -51,7 +53,7 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
       run d requests=do
         (_,pending)<-menuEffects host (\_ _->error "context action missed scoped worker") d requests
         pollUntil (\next->status next/=status pending || not (problemsFocused next)) pending
-  writeFile path "disk\n😀text\n"
+  BS.writeFile path (TE.encodeUtf8 "disk\n😀text\n")
   metadata<-Plugin.menuSnapshot (menuContributions host)
   let source=insertText "unsaved " (addDocument (Just (FileState path Nothing)) (newBuffer "memory\n😀source\n") (initialDesktop (80,25)))
       opaque=source {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc) {B.undoStack=error "navigation retained Undo",B.redoStack=error "navigation retained Redo"}}) (buffers source)}

@@ -7,6 +7,8 @@
 -- receive argument vectors; their process exit is reaped asynchronously.
 module Hide.Links (followLink, prepareLink, prepareMarkdown, LinkResult, applyLink, openResource, validWebURL) where
 
+import Hide.FileIO (withFileRead)
+
 import Control.Concurrent (forkIO)
 import Control.Exception (IOException, try, evaluate)
 import Control.Monad (unless, void)
@@ -24,8 +26,9 @@ import Network.URI (parseURIReference,uriScheme,uriAuthority,uriRegName,uriPath,
 import System.Directory (canonicalizePath,getTemporaryDirectory)
 import System.FilePath ((</>),takeDirectory,takeExtension,isAbsolute,normalise)
 import System.Info (os)
-import System.IO (withBinaryFile,IOMode(ReadMode),hFileSize,openBinaryTempFile,hClose)
+import System.IO (hFileSize,openBinaryTempFile,hClose)
 import System.Process (createProcess,proc,waitForProcess,CreateProcess(..),StdStream(NoStream))
+import Hide.Plugin.Canvas (imageContentFormat)
 import Hide.Buffer (Buffer(revision),Selection(..),bufferLength)
 import Hide.LSP (uriFilePath)
 import Hide.Markdown (renderMarkdownWithShellBlocks)
@@ -61,17 +64,28 @@ prepareLink stream columns directory origin target=do
     run | validWebURL target=external (object ["type" .= ("open-resource"::Text),"url" .= target])
         | otherwise=do
           (path,fragment)<-localTarget
-          if map toLower (takeExtension path) `elem` [".md",".markdown"] then do
-            text<-boundedRead path >>= either (const (ioError (userError "Invalid UTF-8 Markdown"))) pure . TE.decodeUtf8'
-            prepareMarkdown columns path fragment text
-          else case lookup (map toLower (takeExtension path)) formats of
-            Just mime | stream->do
-              bytes<-boundedRead path
-              let encoded=TE.decodeUtf8 (B64.encode bytes)
-              _<-evaluate (T.length encoded)
-              external (object ["type" .= ("open-resource"::Text),"mime" .= mime,"data" .= encoded])
-            Just _->launch path >> pure (LinkExternal "Opened in the default application." Nothing)
-            Nothing->pure (LinkExternal "Open link supports Markdown, web URLs, images and PDF files." Nothing)
+          -- Match ordinary image opening even when a supported image has an
+          -- unusual extension. Detection reads only this bounded prefix.
+          prefix<-withFileRead path (\handle->BS.hGet handle 8)
+          let detected=imageMime prefix
+              extension=map toLower (takeExtension path)
+          case detected of
+            Just mime->openTyped path mime
+            Nothing | extension `elem` [".md",".markdown"]->do
+              text<-boundedRead path >>= either (const (ioError (userError "Invalid UTF-8 Markdown"))) pure . TE.decodeUtf8'
+              prepareMarkdown columns path fragment text
+            Nothing->case lookup extension formats of
+              Just mime->openTyped path mime
+              Nothing->pure (LinkExternal "Open link supports Markdown, web URLs, images and PDF files." Nothing)
+    openTyped path mime
+      | stream || lookup (map toLower (takeExtension path)) formats/=Just mime=do
+          bytes<-boundedRead path
+          let encoded=TE.decodeUtf8 (B64.encode bytes)
+              actualMime=fromMaybe mime (imageMime bytes)
+          _<-evaluate (T.length encoded)
+          external (object ["type" .= ("open-resource"::Text),"mime" .= actualMime,"data" .= encoded])
+      | otherwise=launch path >> pure (LinkExternal "Opened in the default application." Nothing)
+    imageMime bytes=imageContentFormat bytes >>= (`lookup` [("PNG","image/png"),("JPEG","image/jpeg")])
     external packet | stream=pure (LinkExternal "Opening link on the client." (Just packet))
                     | otherwise=do result<-openResource packet; pure (LinkExternal (either id (const "Opened in the browser.") result) Nothing)
     localTarget=do
@@ -118,7 +132,7 @@ formats :: [(String,Text)]
 formats=[(".png","image/png"),(".jpg","image/jpeg"),(".jpeg","image/jpeg"),(".gif","image/gif"),(".webp","image/webp"),(".bmp","image/bmp"),(".svg","image/svg+xml"),(".pdf","application/pdf")]
 
 boundedRead :: FilePath -> IO BS.ByteString
-boundedRead path=withBinaryFile path ReadMode $ \h->do
+boundedRead path=withFileRead path $ \h->do
   size<-hFileSize h
   unless (size<=8388608) (ioError (userError "Link exceeds 8 MiB"))
   bytes<-BS.hGet h 8388609

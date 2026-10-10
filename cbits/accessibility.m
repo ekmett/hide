@@ -181,6 +181,99 @@ invalid:
     clearCanvasAccessibility(); return 0;
 }
 
+/* A copied visible excerpt. Static text supplies no text-range, editing or
+ * focus interface, and never reads source buffers or hidden editor state. */
+@interface HideAXSource : NSView
+@property(copy) NSDictionary *record;
+@end
+static HideAXSource *sourceHost;
+static BOOL sourceIdentity(id value) {
+    if (![value isKindOfClass:NSArray.class] || [value count]!=3 || ![value[0] isEqual:@"source"]) return NO;
+    for (NSUInteger i=1;i<3;++i) {
+        id part=value[i];
+        if (!text(part,20,YES) || ([part length]>1 && [part characterAtIndex:0]=='0')) return NO;
+        for (NSUInteger j=0;j<[part length];++j) {
+            unichar c=[part characterAtIndex:j];if (c<'0' || c>'9') return NO;
+        }
+    }
+    return YES;
+}
+static BOOL sourceText(id value,NSUInteger limit,BOOL multiline,NSUInteger *lines) {
+    if (!text(value,limit,NO)) return NO;
+    NSUInteger count=1,column=0;
+    for (NSUInteger i=0;i<[value length];++i) {
+        unichar c=[value characterAtIndex:i];
+        if (multiline && c=='\n') { ++count;column=0; }
+        else {
+            if (c<32 || (c>=127 && c<=159)) return NO;
+            if (multiline && !CFStringIsSurrogateLowCharacter(c) && ++column>2048) return NO;
+        }
+    }
+    if (lines) *lines=count;
+    return YES;
+}
+@implementation HideAXSource
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return NO; }
+- (NSView *)hitTest:(NSPoint)point { (void)point;return nil; }
+- (BOOL)isAccessibilityElement { return self.record!=nil; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityStaticTextRole; }
+- (NSString *)accessibilityLabel { return self.record[@"name"]; }
+- (id)accessibilityValue { return self.record[@"value"]; }
+- (id)accessibilityParent { return self.record ? self.superview : nil; }
+- (NSRect)accessibilityFrame { return screenFrame(self,self.record[@"bounds"]); }
+- (NSArray *)accessibilityChildren { return self.record ? @[] : nil; }
+- (BOOL)isAccessibilityFocused { return NO; }
+- (NSString *)accessibilityHelp {
+    if (!self.record) return nil;
+    return [NSString stringWithFormat:@"Read-only visible source excerpt, line %@, display column %@.%@",
+        self.record[@"firstLine"],self.record[@"firstColumn"],
+        [self.record[@"truncated"] boolValue] ? @" Some visible content is omitted." : @""];
+}
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector {
+    if (!self.record) return NO;
+    // A StaticText role must not inherit NSView's optional text-range API.
+    return (selector==@selector(isAccessibilityElement) || selector==@selector(accessibilityRole) ||
+        selector==@selector(accessibilityRoleDescription) || selector==@selector(accessibilityLabel) ||
+        selector==@selector(accessibilityValue) || selector==@selector(accessibilityHelp) ||
+        selector==@selector(accessibilityParent) || selector==@selector(accessibilityFrame) ||
+        selector==@selector(accessibilityChildren) || selector==@selector(isAccessibilityFocused)) &&
+        [super isAccessibilitySelectorAllowed:selector];
+}
+@end
+static void clearSourceAccessibility(void) {
+    NSView *parent=sourceHost.superview;
+    sourceHost.record=nil;[sourceHost removeFromSuperview];sourceHost=nil;
+    if (parent) NSAccessibilityPostNotification(parent,NSAccessibilityLayoutChangedNotification);
+}
+static int updateSourceAccessibility(void *native_window,NSDictionary *wrapper,size_t length) {
+    NSArray *size=wrapper[@"size"];NSDictionary *snapshot=wrapper[@"source"];
+    if (length>262144 || ![size isKindOfClass:NSArray.class] || size.count!=2 || !integer(size[0],512) || !integer(size[1],256) ||
+        [size[0] integerValue]<1 || [size[1] integerValue]<1 || ![snapshot isKindOfClass:NSDictionary.class] ||
+        !boolean(snapshot[@"present"]) || !boolean(snapshot[@"readOnly"]) || ![snapshot[@"readOnly"] boolValue]) goto invalid;
+    if (![snapshot[@"present"] boolValue]) { clearSourceAccessibility();return 1; }
+    @autoreleasepool {
+        NSUInteger lines=0;
+        if (!sourceIdentity(snapshot[@"id"]) || !integer(snapshot[@"revision"],9007199254740991) || !sourceText(snapshot[@"name"],256,NO,NULL) ||
+            snapshot[@"bounds"]==NSNull.null || !bounds(snapshot[@"bounds"],[size[0] integerValue],[size[1] integerValue]) ||
+            !integer(snapshot[@"firstLine"],9007199254740991) || [snapshot[@"firstLine"] integerValue]<1 ||
+            !integer(snapshot[@"firstColumn"],9007199254740991) || !integer(snapshot[@"lineCount"],256) || [snapshot[@"lineCount"] integerValue]<1 ||
+            [snapshot[@"lineCount"] integerValue]>[snapshot[@"bounds"][3] integerValue] ||
+            [snapshot[@"firstLine"] unsignedLongLongValue]>9007199254740991ULL-[snapshot[@"lineCount"] unsignedLongLongValue]+1 ||
+            !sourceText(snapshot[@"value"],32768,YES,&lines) || lines!=[snapshot[@"lineCount"] unsignedIntegerValue] || !boolean(snapshot[@"truncated"])) goto invalid;
+        NSWindow *window=(__bridge NSWindow *)native_window;
+        if (sourceHost && (sourceHost.window!=window || ![sourceHost.record[@"id"] isEqual:snapshot[@"id"]])) clearSourceAccessibility();
+        if (!sourceHost) {
+            sourceHost=[[HideAXSource alloc] initWithFrame:window.contentView.bounds];
+            sourceHost.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[window.contentView addSubview:sourceHost];
+        }
+        sourceHost.record=snapshot;
+        NSAccessibilityPostNotification(sourceHost,NSAccessibilityLayoutChangedNotification);return 1;
+    }
+invalid:
+    clearSourceAccessibility();return 0;
+}
+
 static void clearSidebarAccessibility(void) {
     NSView *parent=host.superview;
     for (HideAXRow *row in host.rows) [row retire];
@@ -350,7 +443,7 @@ static int updateDialogAccessibility(void *native_window,NSDictionary *wrapper) 
             if (parent!=root) goto invalid;
         }
         dialogPresent=[snapshot[@"present"] boolValue];
-        if (dialogPresent) { clearSidebarAccessibility();clearCanvasAccessibility(); }
+        if (dialogPresent) { clearSidebarAccessibility();clearCanvasAccessibility();clearSourceAccessibility(); }
         if (!values.count) { clearDialogAccessibility();return 1; }
         NSWindow *window=(__bridge NSWindow *)native_window;
         if (dialogHost && dialogHost.window!=window) clearDialogAccessibility();
@@ -377,14 +470,15 @@ static int updateDialogAccessibility(void *native_window,NSDictionary *wrapper) 
         NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification);return 1;
     }
 invalid:
-    clearDialogAccessibility();clearSidebarAccessibility();clearCanvasAccessibility();dialogPresent=YES;return 0;
+    clearDialogAccessibility();clearSidebarAccessibility();clearCanvasAccessibility();clearSourceAccessibility();dialogPresent=YES;return 0;
 }
 void thc_accessibility_close(void) {
-    clearDialogAccessibility();dialogPresent=NO;clearCanvasAccessibility();clearSidebarAccessibility();
+    clearDialogAccessibility();dialogPresent=NO;clearCanvasAccessibility();clearSidebarAccessibility();clearSourceAccessibility();
 }
 void thc_accessibility_geometry_changed(void) {
     if (host.rows.count) NSAccessibilityPostNotification(host,NSAccessibilityLayoutChangedNotification);
     if (canvasHost.images.count) NSAccessibilityPostNotification(canvasHost,NSAccessibilityLayoutChangedNotification);
+    if (sourceHost.record) NSAccessibilityPostNotification(sourceHost,NSAccessibilityLayoutChangedNotification);
     if (dialogHost.record) { [dialogHost updateTrackingAreas];NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification); }
 }
 int thc_accessibility_update(void *native_window, const char *json, size_t length) {
@@ -395,6 +489,7 @@ int thc_accessibility_update(void *native_window, const char *json, size_t lengt
         NSDictionary *snapshot=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:json length:length] options:0 error:nil];
         if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"dialog"]) return updateDialogAccessibility(native_window,snapshot);
         if (dialogPresent) return 1;
+        if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"source"]) return updateSourceAccessibility(native_window,snapshot,length);
         if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"images"]) return updateCanvasAccessibility(native_window,snapshot);
         if (![snapshot isKindOfClass:NSDictionary.class] || !boolean(snapshot[@"readOnly"]) || ![snapshot[@"readOnly"] boolValue] || !integer(snapshot[@"revision"],9007199254740991)) goto invalid;
         NSArray *layout=snapshot[@"layout"],*values=snapshot[@"nodes"];
@@ -415,7 +510,7 @@ int thc_accessibility_update(void *native_window, const char *json, size_t lengt
             else if ([node[@"role"] isEqual:@"treeitem"] && [key[0] isEqual:@"tree"] && identity(node[@"parent"]) && [node[@"level"] integerValue]>0 && [node[@"posInSet"] integerValue]>0) [ordered addObject:node];
             else goto invalid;
         }
-        if (!ordered.count || ![snapshot[@"visibleCount"] integerValue]) { thc_accessibility_close(); return 1; }
+        if (!ordered.count || ![snapshot[@"visibleCount"] integerValue]) { clearSidebarAccessibility(); return 1; }
         if (!root || root[@"bounds"]==NSNull.null) goto invalid;
         for (NSDictionary *node in ordered) {
             NSDictionary *parent=records[node[@"parent"]]; NSInteger level=1;

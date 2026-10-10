@@ -1,5 +1,7 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
-module Main where
+-- | Existing checks run serially because fixtures change process environment
+-- and working directory. Optional JUnit output records actual case outcomes.
+module Main (main) where
 #ifdef WITH_WEB
 import qualified WebCheck
 import qualified RemoteWebCheck
@@ -72,7 +74,9 @@ import qualified DebuggerCheck
 import qualified CompletionCheck
 import qualified DownloadsCheck
 import qualified HdbAcquisitionCheck
+#ifndef mingw32_HOST_OS
 import qualified DebuggerAcquisitionCheck
+#endif
 import qualified CompilersCheck
 import qualified BuildCheck
 import qualified PackageSidebarCheck
@@ -84,7 +88,16 @@ import qualified ConversationCheck
 import qualified AgentFilesCheck
 import qualified TerminalCheck
 import qualified ConsolesCheck
-import Control.Monad (unless)
+import Control.Monad (unless, when)
+import System.FilePath ((</>), normalise)
+import AllocationProfile (AllocationProfile(..), withinBudget)
+import Data.Proxy (Proxy(..))
+import Test.Tasty (defaultMainWithIngredients, includingOptions, askOption, withResource, inOrderTestGroup, TestTree)
+import Test.Tasty.Options (OptionDescription(..))
+import Test.Tasty.HUnit (testCase)
+import Test.Tasty.Ingredients (composeReporters)
+import Test.Tasty.Ingredients.Basic (listingTests, consoleTestReporter)
+import Test.Tasty.Runners.AntXML (antXMLRunner)
 import qualified Data.Text as T
 import Hide.App (demoDesktop)
 import qualified BufferViewCheck
@@ -120,90 +133,146 @@ import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import qualified Graphics.Vty as V
 import qualified Data.Map.Strict as M
-import qualified Data.Vector as Vec
+import Data.Foldable (toList)
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error name)
 
 main :: IO ()
-main = do
-  FileExportCheck.checks
-  FileDragHelperCheck.checks
-  BindingsCheck.checks
-  HintComposerCheck.checks
-  AutocompleteCheck.checks
-  InlineCheck.checks
-  InlineRenderCheck.checks
-  AutocompleteACPCheck.checks
-  CopilotCheck.checks
-  HighlightingCheck.checks
-  AgentSidebarCheck.checks
-  SessionSidebarCheck.checks
-  AgentIntegrationCheck.checks
-  AgentAccessCheck.checks
-  AgentRuntimeCheck.checks
-  AgentHubCheck.checks
-  AgentACPCheck.checks
-  AgentMCPCheck.checks
-  AgentWorkspaceCheck.checks
+main = defaultMainWithIngredients
+  [includingOptions [Option (Proxy :: Proxy AllocationProfile)]
+  , listingTests, composeReporters consoleTestReporter antXMLRunner] tests
+
+-- Exclude overlapping ownership of process-wide environment and cwd.
+-- Groups remain independent; no group requires a predecessor to have run.
+tests :: TestTree
+tests = askOption $ \profile->withResource
+  (when (profile==Instrumented) (putStrLn "Instrumented allocation profile: counters are measured; optimized limits are enforced by the separate normal run."))
+  (const (pure ())) $ \_->inOrderTestGroup (if profile==Instrumented then "editor-instrumented" else "editor")
+  [ testCase "FileExport" FileExportCheck.checks
+  , testCase "FileDragHelper" FileDragHelperCheck.checks
+  , testCase "Bindings" BindingsCheck.checks
+  , testCase "HintComposer" HintComposerCheck.checks
+  , testCase "Autocomplete" AutocompleteCheck.checks
+  , testCase "Inline" InlineCheck.checks
+  , testCase "InlineRender" InlineRenderCheck.checks
+  , testCase "AutocompleteACP" AutocompleteACPCheck.checks
+  , testCase "Copilot" CopilotCheck.checks
+  , testCase "Highlighting" (HighlightingCheck.checks profile)
+  , testCase "AgentSidebar" AgentSidebarCheck.checks
+  , testCase "SessionSidebar" SessionSidebarCheck.checks
+  , testCase "AgentIntegration" AgentIntegrationCheck.checks
+  , testCase "AgentAccess" AgentAccessCheck.checks
+  , testCase "AgentRuntime" AgentRuntimeCheck.checks
+  , testCase "AgentHub" AgentHubCheck.checks
+  , testCase "AgentACP" AgentACPCheck.checks
+  , testCase "AgentMCP" AgentMCPCheck.checks
+  , testCase "AgentWorkspace" AgentWorkspaceCheck.checks
 #ifdef WITH_REMOTE
-  RemoteCheck.checks
-  RemoteWindowCheck.checks
-  RemoteTerminalCheck.checks
-  GuestAccessCheck.checks
-  StreamerCheck.checks
-  ClipboardMCPCheck.checks
-  TypedBufferDiffsCheck.checks
-  TypedBufferReadsCheck.checks
-  BufferReadsCheck.checks
-  WorkerDiffCheck.checks
-  BufferEditsCheck.checks
-  PluginBufferCheck.checks
-  AccessibilityCheck.checks
-  PluginTreeCheck.checks
-  SidebarCheck.checks
-  PluginCommandCheck.checks
-  PluginMenuCheck.checks
-  MenuCommandsCheck.checks
-  MenuContextCheck.checks
-  DocsMCPCheck.checks
-  EnvironmentCheck.checks
-  ControlMCPCheck.checks
-  DefaultsCheck.checks
-  MCPPermissionsCheck.checks
-  EditorMCPCheck.checks
-  HistoryMCPCheck.checks
-  RuntimeMCPCheck.checks
-  ScreenCaptureCheck.checks
-  WorkspaceMCPCheck.checks
-  WorkspaceFilesMCPCheck.checks
-  TestsMCPCheck.checks
+  , testCase "Remote" RemoteCheck.checks
+  , testCase "RemoteWindow" RemoteWindowCheck.checks
+  , testCase "RemoteTerminal" (RemoteTerminalCheck.checks profile)
+  , testCase "GuestAccess" GuestAccessCheck.checks
+  , testCase "Streamer" StreamerCheck.checks
+  , testCase "ClipboardMCP" ClipboardMCPCheck.checks
+  , testCase "TypedBufferDiffs" TypedBufferDiffsCheck.checks
+  , testCase "TypedBufferReads" (TypedBufferReadsCheck.checks profile)
+  , testCase "BufferReads" BufferReadsCheck.checks
+  , testCase "WorkerDiff" (WorkerDiffCheck.checks profile)
+  , testCase "BufferEdits" BufferEditsCheck.checks
+  , testCase "PluginBuffer" PluginBufferCheck.checks
+  , testCase "Accessibility" AccessibilityCheck.checks
+  , testCase "PluginTree" PluginTreeCheck.checks
+  , testCase "Sidebar" SidebarCheck.checks
+  , testCase "PluginCommand" PluginCommandCheck.checks
+  , testCase "PluginMenu" PluginMenuCheck.checks
+  , testCase "MenuCommands" MenuCommandsCheck.checks
+  , testCase "MenuContext" MenuContextCheck.checks
+  , testCase "DocsMCP" DocsMCPCheck.checks
+  , testCase "Environment" EnvironmentCheck.checks
+  , testCase "ControlMCP" ControlMCPCheck.checks
+  , testCase "Defaults" DefaultsCheck.checks
+  , testCase "MCPPermissions" MCPPermissionsCheck.checks
+  , testCase "EditorMCP" (EditorMCPCheck.checks profile)
+  , testCase "HistoryMCP" HistoryMCPCheck.checks
+  , testCase "RuntimeMCP" RuntimeMCPCheck.checks
+  , testCase "ScreenCapture" ScreenCaptureCheck.checks
+  , testCase "WorkspaceMCP" WorkspaceMCPCheck.checks
+  , testCase "WorkspaceFilesMCP" WorkspaceFilesMCPCheck.checks
+  , testCase "TestsMCP" TestsMCPCheck.checks
 #endif
 #ifdef WITH_PROTOCOL
-  RequestedPasteCheck.checks
-  ProtocolCheck.checks
+  , testCase "RequestedPaste" RequestedPasteCheck.checks
+  , testCase "Protocol" (ProtocolCheck.checks profile)
 #endif
 #ifdef WITH_WEB
-  WebCheck.checks
-  RemoteWebCheck.checks
+  , testCase "Web" WebCheck.checks
+  , testCase "RemoteWeb" RemoteWebCheck.checks
 #endif
-  HexCheck.checks
-  DAPCheck.checks
-  DebuggerCheck.checks
-  DebuggerWatchesCheck.checks
-  DebuggerSidebarCheck.checks
-  DebuggerSourcePolicyCheck.checks
-  CompletionCheck.checks
-  DownloadsCheck.checks
-  HdbAcquisitionCheck.checks
-  DebuggerAcquisitionCheck.checks
-  CompilersCheck.checks
-  BuildCheck.checks
-  RunCheck.checks
-  ConversationCheck.checks
-  AgentFilesCheck.checks
-  TerminalCheck.checks
-  ConsolesCheck.checks
+  , testCase "Hex" HexCheck.checks
+  , testCase "DAP" DAPCheck.checks
+  , testCase "Debugger" DebuggerCheck.checks
+  , testCase "DebuggerWatches" DebuggerWatchesCheck.checks
+  , testCase "DebuggerSidebar" DebuggerSidebarCheck.checks
+  , testCase "DebuggerSourcePolicy" DebuggerSourcePolicyCheck.checks
+  , testCase "Completion" CompletionCheck.checks
+  , testCase "Downloads" DownloadsCheck.checks
+  , testCase "HdbAcquisition" HdbAcquisitionCheck.checks
+#ifndef mingw32_HOST_OS
+  -- Official hdb bindists are POSIX-only; there is no Windows acquisition check.
+  , testCase "DebuggerAcquisition" DebuggerAcquisitionCheck.checks
+#endif
+  , testCase "Compilers" CompilersCheck.checks
+  , testCase "Build" (BuildCheck.checks profile)
+  , testCase "Run" RunCheck.checks
+  , testCase "Conversation.drafts" ConversationCheck.draftReceiptChecks
+  , testCase "Conversation" (ConversationCheck.checks profile)
+  , testCase "AgentFiles" AgentFilesCheck.checks
+  , testCase "Terminal" TerminalCheck.checks
+  , testCase "Consoles" ConsolesCheck.checks
+  , testCase "Main.model" modelChecks
+  , testCase "Unicode" (UnicodeCheck.checks profile)
+#ifdef WITH_REMOTE
+  , testCase "Recovery" RecoveryCheck.checks
+#endif
+  , testCase "BufferView" BufferViewCheck.checks
+  , testCase "BufferTree" (BufferTreeCheck.checks profile)
+  , testCase "LSP" (LSPCheck.checks profile)
+  , testCase "Tooling.allocations" (ToolingCheck.allocationChecks profile)
+  , testCase "Tooling" ToolingCheck.checks
+  , testCase "DialogMouse" (DialogMouseCheck.checks profile)
+  , testCase "GitOperations" GitOperationsCheck.checks
+  , testCase "Git" GitCheck.checks
+  , testCase "MarkdownView" MarkdownViewCheck.checks
+  , testCase "WideText" WideTextCheck.checks
+  , testCase "TextStyle" TextStyleCheck.checks
+  , testCase "PluginForm" PluginFormCheck.checks
+  , testCase "PluginWindows" PluginWindowsCheck.checks
+  , testCase "PluginWindows.rows" PluginWindowsCheck.rowsChecks
+  , testCase "Window" WindowCheck.checks
+#ifdef WITH_FONT
+  , testCase "Font" FontCheck.checks
+#endif
+  , testCase "Main.browser" browserChecks
+  , testCase "Help" HelpCheck.checks
+  , testCase "Browser" BrowserCheck.checks
+  , testCase "PackageSources" PackageSourcesCheck.checks
+  , testCase "PackagePaths" PackagePathsCheck.checks
+  , testCase "PackageSidebar" PackageSidebarCheck.checks
+  , testCase "ProjectBrowser" ProjectBrowserCheck.checks
+  , testCase "Files" FilesCheck.checks
+  , testCase "External" ExternalCheck.checks
+  , testCase "Reconcile" ReconcileCheck.checks
+  , testCase "ACP" ACPCheck.checks
+  , testCase "Links" LinksCheck.checks
+  , testCase "Markdown" MarkdownCheck.checks
+  , testCase "Markdown.performance" MarkdownCheck.performanceChecks
+  ]
+
+modelChecks :: IO ()
+modelChecks = do
+  check "normal allocation profile keeps strict optimized limits" (withinBudget Normal 9 10 && not (withinBudget Normal 10 10))
+  check "instrumented allocation profile separates numeric limits" (withinBudget Instrumented 10 10 && withinBudget Instrumented 20 10)
   let b = newBuffer "hello\nworld"
       edited = replaceSelection (Selection 0 5) "λ" b
   check "selection replacement" (contents edited == "λ\nworld")
@@ -230,7 +299,7 @@ main = do
     ["", "\n", "\n\n", "module Main where\r\n\tmain = print \"λ界\"\r\n", "x = '\\x03bb'", "x = [1..10] -- unfinished", "{- open comment\n"]
   let python=highlightDocument $ newDocument (newBuffer "def f():\n    return 42\n") (Just (FileState "test.py" Nothing))
       renamed=highlightDocument $ restyle python {documentFile=Just (FileState "notes.unknown" Nothing)}
-  let sourceStyles doc=maybe [] (concatMap (\row->sourceStylesAt row 0) . Vec.toList) (documentSourceRows doc)
+  let sourceStyles doc=maybe [] (concatMap (\row->sourceStylesAt row 0) . toList) (documentSourceRows doc)
   check "document filename chooses syntax" (take 3 (sourceStyles python) == replicate 3 Keyword)
   check "renaming refreshes syntax" (sourceStyles renamed == replicate (T.length "def f():    return 42") Plain)
   check "CRLF input is highlighted, not just preserved" (take 6 (scalarStyles (highlight "module Main where\r\n")) == replicate 6 Keyword)
@@ -310,57 +379,30 @@ main = do
       undoneTree=fst (runCommand Undo focusedTree)
   check "tree focus blocks background paste" (buffers pastedTree == buffers focusedTree)
   check "tree focus blocks background undo" (buffers undoneTree == buffers focusedTree)
-  UnicodeCheck.checks
-#ifdef WITH_REMOTE
-  RecoveryCheck.checks
-#endif
-  BufferViewCheck.checks
-  BufferTreeCheck.checks
-  LSPCheck.checks
-  ToolingCheck.checks
-  DialogMouseCheck.checks
-  GitOperationsCheck.checks
-  GitCheck.checks
-  MarkdownViewCheck.checks
-  WideTextCheck.checks
-  TextStyleCheck.checks
-  PluginFormCheck.checks
-  PluginWindowsCheck.checks
-  PluginWindowsCheck.rowsChecks
-  WindowCheck.checks
-#ifdef WITH_FONT
-  FontCheck.checks
-#endif
-  let fileMenu = n {menu=Just (0,0)}
+
+browserChecks :: IO ()
+browserChecks = do
+  let d=initialDesktop (80,25)
+      n=fst (runCommand New d)
+      key k ms s=fst (handleEvent (V.EvKey k ms) s)
+      base=normalise "/tmp"
+      fileMenu = n {menu=Just (0,0)}
   check "File Exit mnemonic is X" (snd (handleEvent (V.EvKey (V.KChar 'x') []) fileMenu) == [Exit])
   check "File Save as mnemonic is A" (case dialog (key (V.KChar 'a') [] fileMenu) of Just dg -> dialogTitle dg == "Save file as"; _ -> False)
   check "status shortcut is red" ("color:rgb(170,0,0);background:rgb(170,170,170)'>F1" `T.isInfixOf` snapshotHtml d)
   let entries = [Entry "src" True Nothing Nothing, Entry "Main.hs" False (Just 12) (Just (read "1992-10-30 08:00:00"))]
-      browsing = openBrowser "/tmp" "*.hs" entries d
+      browsing = openBrowser base "*.hs" entries d
       chosen = browsing {dialog=fmap (\dg -> dg {focus=1,fields=[Input "Name" "*.hs" 4,FileList entries 1]}) (dialog browsing)}
   check "file browser selection is white on green" ("color:rgb(255,255,255);background:rgb(0,170,0)'> Main.hs" `T.isInfixOf` snapshotHtml chosen)
-  check "file browser shows path size and local timestamp" (all (`T.isInfixOf` snapshot chosen) ["/tmp/*.hs","Main.hs","12 bytes","Oct 30, 1992 08:00"])
-  check "browser enter opens selected file" (snd (handleEvent (V.EvKey V.KEnter []) chosen) == [OpenFile PluginMenu.HumanMenu "/tmp/Main.hs"])
+  check "file browser shows path size and local timestamp" (all (`T.isInfixOf` snapshot chosen) [T.pack (base </> "*.hs"),"Main.hs","12 bytes","Oct 30, 1992 08:00"])
+  check "browser enter opens selected file" (snd (handleEvent (V.EvKey V.KEnter []) chosen) == [OpenFile PluginMenu.HumanMenu (base </> "Main.hs")])
   let naming=browsing {dialog=fmap (\dg -> dg {focus=0}) (dialog browsing)}
       erased=key (V.KChar 'u') [V.MCtrl] naming
       named=foldl (\state ch -> key (V.KChar ch) [] state) erased ("Other.hs" :: String)
       openButton=iterate (key (V.KChar '\t') []) named !! 2
-  check "keyboard Open honors typed filename" (snd (handleEvent (V.EvKey V.KEnter []) openButton) == [OpenChoice PluginMenu.HumanMenu "/tmp" "Other.hs" "*.hs"])
-  let docked = installSidebar (emptySidebar "/tmp" 24 True) n
+  check "keyboard Open honors typed filename" (snd (handleEvent (V.EvKey V.KEnter []) openButton) == [OpenChoice PluginMenu.HumanMenu base "Other.hs" "*.hs"])
+  let docked = installSidebar (emptySidebar base 24 True) n
   check "tree reserves editor space" (all ((>=treeWidthOf docked) . left . bounds) (windows docked))
   check "closing tree returns full editor width" (map bounds (windows (fst (runCommand ToggleTree docked))) == map bounds (windows n))
   let help = addHelp "Documentation" n
   check "help text cannot be edited" (activeText (insertText "x" help) == "Documentation")
-  HelpCheck.checks
-  BrowserCheck.checks
-  PackageSourcesCheck.checks
-  PackagePathsCheck.checks
-  PackageSidebarCheck.checks
-  ProjectBrowserCheck.checks
-  FilesCheck.checks
-  ExternalCheck.checks
-  ReconcileCheck.checks
-  ACPCheck.checks
-  LinksCheck.checks
-  MarkdownCheck.checks
-  putStrLn "editor checks passed"

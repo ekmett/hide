@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 module WorkerDiffCheck (checks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
@@ -29,8 +30,8 @@ import Hide.Model
 import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import Hide.WorkspaceFilesMCP (fileTools)
 
-checks :: IO ()
-checks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly $ \directory -> do
+checks :: AllocationProfile -> IO ()
+checks profile=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly $ \directory -> do
   let path=directory </> "config.toml"
       enable=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
       promptPolicy=TIO.writeFile path "[editor.mcp.permissions]\nbuffer_apply_diff = 'prompt'\n"
@@ -157,7 +158,7 @@ checks=withBufferDiffCommands $ \commands->bracket temporary removePathForcibly 
     before<-getAllocationCounter
     (_,pending)<-call runtime large "buffer_apply_diff" (args largePatch)
     after<-getAllocationCounter
-    check "large diff admission performs bounded caller allocation" (before-after<2000000)
+    check "large diff admission performs bounded caller allocation" (withinBudget profile (before-after) (2000000))
     _<-timeout 10000 pending
     pure ()
   putStrLn "worker diff checks passed"

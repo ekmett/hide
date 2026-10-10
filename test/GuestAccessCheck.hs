@@ -16,6 +16,7 @@ import Hide.GuestAccess
 import Hide.Commands (platformBindings, configuredBindings)
 import Hide.Bindings (BindingPlatform(TerminalPlatform))
 import SidebarFixture
+import Hide.Sidebar (treeFocused)
 import Hide.Model
 import qualified Hide.Protocol as P
 import qualified Hide.Plugin.Editor as E
@@ -50,7 +51,7 @@ checksWithBody conversation=do
       hidden=(newDocument poison Nothing) {documentLabel=Just "Agent request",documentHighlight=error "guest guard forced highlighting",documentSourceRows=error "guest guard forced source rows"}
       q=ChatQuestion 42 "Human question" ["Yes"] Nothing poison (Selection 0 0) False
       conflict=Conflict 1 0 (FileState "/public/source.hs" (Just (error "guest guard forced disk baseline"))) (Just (error "guest guard forced disk conflict"))
-      retained=(setComposerInput poison (Selection 0 0) False conversation) {windows=windows base,buffers=M.insert 99 hidden (buffers conversation),autocompleteDraft=poison,chatQuestion=Just q,
+      retained=(setComposerInput poison (Selection 0 0) False conversation) {windows=windows base,buffers=M.insert 99 hidden (buffers conversation),chatQuestion=Just q,
         dialog=Just (Dialog "Conflict" (DiskConflict conflict) [Input "Name" "source.hs" 0] 0 ["OK"] [])}
   (_,reply)<-controlTool (\d _->pure (False,d)) retained "editor_input"
     (object ["events" .= [object ["type" .= ("blur"::T.Text)]]])
@@ -61,7 +62,6 @@ checksWithBody conversation=do
          retained {buffers=M.adjust (\doc->doc {documentLabel=Just "Public"}) 99 (buffers retained)},
          retained {buffers=M.delete 99 (buffers retained)},
          setComposerInput (newBuffer "replacement") (Selection 0 0) False retained,
-         retained {autocompleteDraft=newBuffer "replacement"},
          retained {chatQuestion=Just q {questionBuffer=newBuffer "replacement"}},
          retained {editorDrafts=M.map (\draftState->draftState {editorDraftSelection=Selection 1 1}) (editorDrafts retained)},
          retained {editorDrafts=M.map (\draftState->draftState {editorDraftFocused=True}) (editorDrafts retained)},
@@ -211,6 +211,40 @@ checksWithBody conversation=do
   check "host authority paths protect human-open buffers and input"
     (protectedBuffer privateSource privateId && sanitizedBuffer privateSource privateId==Nothing && not (readableAt privateSource (px+2) (py+2)) && not (streamerReadableAt privateSource (px+2) (py+2)))
   checkDenied "private source rejects pasted text" privateSource [P.Paste "replace"]
+  forM_ [Copy,Cut] $ \command->do
+    let row=case [i | (i,MenuItem _ _ action)<-zip [0..] (menuItemsFor privateSource 1),action==command] of
+          i:_->i
+          []->error "missing clipboard menu action"
+        view=(modifyActive (\w->w {selection=Selection 0 16}) privateSource) {menu=Just (1,row)}
+        r=menuRect view 1
+    checkDenied "private source rejects pointer clipboard menu actions" view
+      [P.Mouse "down" (left r+2) (top r+1+row) 0 1 []]
+    let publicView=(modifyActive (\w->w {selection=Selection 0 4}) base) {menu=Just (1,row)}
+        publicRect=menuRect publicView 1
+    check "ordinary source retains pointer clipboard actions" . not =<< denied publicView
+      (P.Mouse "down" (left publicRect+2) (top publicRect+1+row) 0 1 [])
+  withFiles<-sidebarFixture "/project" [("Source.hs","/project/Source.hs")] privateSource
+  let filesFocused=withFiles {sideTree=fmap (\tree->tree {treeFocused=True}) (sideTree withFiles)}
+      unrelatedDialog=privateSource {dialog=Just (Dialog "Notice" Information [] 0 ["OK"] [])}
+  forM_ [filesFocused,unrelatedDialog] $ \view->
+    checkDenied "clipboard checks its private source target across pane focus" view
+      [P.MenuCommand Copy,P.MenuCommand Cut,P.MenuCommand CopyLocation]
+  let publicField=chat {dialog=Just (Dialog "Find" (Searching False "")
+        [SelectedInput "Text" "needle" (Selection 0 6)] 0 ["Find"] [])}
+  check "public dialog owns clipboard commands above a focused composer"
+    (guestCommandAllowedIn publicField Copy && guestCommandAllowedIn publicField Cut &&
+     clipboard (fst (runCommand Copy publicField))=="needle")
+  let publicMessages=(setProblemsVisible True conversation)
+        {problemsFocused=True,diagnostics=[Diagnostic "/project/Source.hs" Nothing 0 0 1 "public diagnostic"]}
+      messageCopy=fst (runCommand Copy publicMessages)
+  check "Messages copy retains its own target over a plugin window"
+    (guestCommandAllowedIn publicMessages Copy && "public diagnostic" `T.isInfixOf` clipboard messageCopy)
+  let sharedPath="/project/recovered.txt"
+      first=addDocument (Just (FileState sharedPath Nothing)) (newBuffer "private draft") base
+      flagged=first {buffers=M.adjust (\doc->doc {documentPrivate=True}) (nextId base) (buffers first)}
+      generatedDoc=(newDocument (newBuffer "private draft") Nothing) {documentOrigin=Just sharedPath}
+  check "generated views inherit saved private draft provenance"
+    (privateDocument flagged generatedDoc)
   let child=addDocument (Just (FileState "/authority/nested/secret.hs" Nothing)) (newBuffer "private") base {guestPrivatePaths=["/authority"],streamerMode=True}
       projectConfig=addDocument (Just (FileState "/project/THC.toml" Nothing)) (newBuffer "private") base {streamerMode=True}
   check "streamer titles share canonical descendant and project-authority rules"
@@ -246,7 +280,7 @@ checksWithBody conversation=do
       browserDialog=maybe (error "missing browser") id (dialog browser)
       fileRect=case fieldRects browser browserDialog of _:r:_->r; _->error "missing browser list"
   check "private browser names and selected details share guest and Streamer masks"
-    (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+12)) && readableAt browser (left fileRect+2) (top fileRect+3))
+    (not (readableAt browser (left fileRect+2) (top fileRect+2)) && not (streamerReadableAt browser (left fileRect+2) (top fileRect+height fileRect-1)) && readableAt browser (left fileRect+2) (top fileRect+3))
   forM_ [Opening "/authority" "*" [],ChangingDirectory "/authority" []] $ \browserPurpose ->
     forM_ [Input "Name" "/authority/secret.hs" 0,SelectedInput "Name" "/authority/secret.hs" (Selection 0 20)] $ \nameField -> do
       let protectedNameDialog=Dialog "Browser" browserPurpose [nameField] 0 ["OK"] []

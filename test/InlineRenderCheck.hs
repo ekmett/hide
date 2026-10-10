@@ -2,7 +2,7 @@
 module InlineRenderCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
-import EditorFixture (installAutocompleteFixture)
+import EditorFixture (withAutocompleteFixture)
 import Control.Exception (evaluate)
 import Control.Monad (forM_,unless)
 import Data.Foldable (toList)
@@ -26,8 +26,7 @@ import Hide.Syntax
 import Hide.Unicode (displayOpsForPic)
 
 checks :: IO ()
-checks=W.withWindowScope $ \scope->do
-  ref<-E.newDraftRef
+checks=E.withDraftRef $ \ref->do
   chatBody<-W.prepareTextWindow "Chat" ""
   let source="before\nlet old tail\nfollowing\nlast"
       b=newBuffer source
@@ -84,46 +83,49 @@ checks=W.withWindowScope $ \scope->do
          opaque {inlinePreview=fmap (\v->v {inlineIndex=inlineIndex v+1}) (inlinePreview opaque)}] $ \changed->do
     next<-renderKey changed
     check "inline identity, dismissal and validation epoch invalidate redraw" (key/=next)
-  hintBase<-installAutocompleteFixture scope "completion trace" colored
-  let hint=hintBase {autocompleteACPEnabled=True,autocompleteDraft=newBuffer "    hint",autocompleteSelection=Selection 2 2,
-        autocompleteFocused=True,inlinePreview=Nothing,
-        conversationViews=M.singleton "" (ConversationView (InertBody chatBody) "Chat" ref Nothing Nothing FollowEnd 0 0 Nothing Nothing Nothing Nothing),
-        editorDrafts=M.singleton ref (EditorDraft (newBuffer "CHAT_ONLY") (Selection 0 0) True Nothing)}
-      hintRect=autocompleteComposerRect hint (fromJust (activeWindow hint))
-  check "ACP hint composer retains plain indentation and does not render the chat draft"
-    ("    hint" `T.isInfixOf` snapshot hint && not ("CHAT_ONLY" `T.isInfixOf` snapshot hint) &&
-      V.picCursor (renderDesktop hint)==V.Cursor (left hintRect+2) (top hintRect))
-  check "disabling ACP hides the independent hint composer"
-    (not ("hint" `T.isInfixOf` snapshot hint {autocompleteACPEnabled=False}))
-  hintKey<-renderKey hint
-  hintSame<-renderKey hint
-  check "unchanged hint draft keeps redraw identity" (hintKey==hintSame)
-  forM_ [hint {autocompleteWindow=Nothing},hint {autocompleteDraft=newBuffer "other hint"},hint {autocompleteSelection=Selection 3 3},
-         hint {autocompleteFocused=False},hint {autocompleteACPEnabled=False}] $ \changed->do
-    next<-renderKey changed
-    check "hint contents, selection, focus and availability invalidate redraw" (hintKey/=next)
-  autocomplete<-installAutocompleteFixture scope "Completion transcript" colored
-  let acpId=nextId colored
-      terminal=addDocument Nothing (newBuffer "Terminal output") autocomplete
-      terminalId=nextId autocomplete
-      docked=layoutBottomWindows terminal
-        {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal 1"}) terminalId (buffers terminal),
-         dockedTerminals=M.fromList [(ident,(Rect 0 1 30 8,Nothing)) | ident<-[acpId,terminalId]],
-         bottomTerminal=Just acpId,problemsVisible=True}
-      sourceFocused=focusWindow (windowId w) docked
-      borders d=let Rect x y _ h=problemsRect d; picture=T.lines (snapshot d)
-                in [T.index (picture!!rowIndex) x | rowIndex<-[y,y+1,y+h-1]]
-  forM_ [acpId,terminalId] $ \ident->do
-    let unfocused=sourceFocused {bottomTerminal=Just ident}
-        focused=focusWindow ident unfocused
-    check "unfocused docked window tab strip and body use single borders" (borders unfocused=="┌│└")
-    check "focused docked window tab strip and body use double borders" (borders focused=="╔║╚")
-  let messages=sourceFocused {bottomTerminal=Nothing}
-  check "unfocused Messages tab strip and body use single borders" (borders messages=="┌│└")
-  check "focused Messages tab strip and body use double borders" (borders messages {problemsFocused=True}=="╔║╚")
-  let sourceTree=sourceFocused {sideTree=Just (emptySidebar "/project" 20 True)}
-  check "tree focus leaves selected docked tab with single borders"
-    (borders (focusWindow acpId sourceFocused) {sideTree=sideTree sourceTree}=="┌│└")
+  withAutocompleteFixture "completion trace" colored $ \hintBase->do
+    let hiddenChat=hintBase
+          {inlinePreview=Nothing,
+           conversationViews=M.singleton "" (ConversationView (InertBody chatBody) "Chat" ref Nothing Nothing FollowEnd 0 0 Nothing Nothing Nothing Nothing),
+           editorDrafts=M.insert ref (EditorDraft (newBuffer "CHAT_ONLY") (Selection 0 0) True Nothing) (editorDrafts hintBase)}
+        hint=setComposerInput (newBuffer "    hint") (Selection 2 2) True hiddenChat
+        hintRect=composerRect hint (fromJust (activeWindow hint))
+        disabled=modifyActive (\frame->frame {windowEditorMount=Nothing}) hint {autocompleteACPEnabled=False}
+    check "ACP hint composer retains plain indentation and does not render the chat draft"
+      ("    hint" `T.isInfixOf` snapshot hint && not ("CHAT_ONLY" `T.isInfixOf` snapshot hint) &&
+        V.picCursor (renderDesktop hint)==V.Cursor (left hintRect+2) (top hintRect))
+    check "disabling ACP hides its detached hint composer"
+      (not ("hint" `T.isInfixOf` snapshot disabled))
+    hintKey<-renderKey hint
+    hintSame<-renderKey hint
+    check "unchanged hint draft keeps redraw identity" (hintKey==hintSame)
+    forM_ [hint {autocompleteWindow=Nothing},setComposerInput (newBuffer "other hint") (Selection 2 2) True hint,
+           setComposerInput (composerBuffer hint) (Selection 3 3) True hint,
+           setComposerInput (composerBuffer hint) (composerSelection hint) False hint,disabled] $ \changed->do
+      next<-renderKey changed
+      check "hint contents, selection, focus and availability invalidate redraw" (hintKey/=next)
+  withAutocompleteFixture "Completion transcript" colored $ \autocomplete->do
+    let acpId=nextId colored
+        terminal=addDocument Nothing (newBuffer "Terminal output") autocomplete
+        terminalId=nextId autocomplete
+        docked=layoutBottomWindows terminal
+          {buffers=M.adjust (\doc->doc {documentLabel=Just "Terminal 1"}) terminalId (buffers terminal),
+           dockedTerminals=M.fromList [(ident,(Rect 0 1 30 8,Nothing)) | ident<-[acpId,terminalId]],
+           bottomTerminal=Just acpId,problemsVisible=True}
+        sourceFocused=focusWindow (windowId w) docked
+        borders d=let Rect x y _ h=problemsRect d; picture=T.lines (snapshot d)
+                  in [T.index (picture!!rowIndex) x | rowIndex<-[y,y+1,y+h-1]]
+    forM_ [acpId,terminalId] $ \ident->do
+      let unfocused=sourceFocused {bottomTerminal=Just ident}
+          focused=focusWindow ident unfocused
+      check "unfocused docked window tab strip and body use single borders" (borders unfocused=="┌│└")
+      check "focused docked window tab strip and body use double borders" (borders focused=="╔║╚")
+    let messages=sourceFocused {bottomTerminal=Nothing}
+    check "unfocused Messages tab strip and body use single borders" (borders messages=="┌│└")
+    check "focused Messages tab strip and body use double borders" (borders messages {problemsFocused=True}=="╔║╚")
+    let sourceTree=sourceFocused {sideTree=Just (emptySidebar "/project" 20 True)}
+    check "tree focus leaves selected docked tab with single borders"
+      (borders (focusWindow acpId sourceFocused) {sideTree=sideTree sourceTree}=="┌│└")
   forM_ [DarkMode,LightMode] $ \mode->do
     let terminalBase=(addDocument Nothing (newBuffer "retained terminal output") (initialDesktop (80,25)))
           {appearance=mode}

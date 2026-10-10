@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP, OverloadedStrings #-}
 module RemoteTerminalCheck (checks,packetChecks) where
+import AllocationProfile (AllocationProfile, withinBudget)
 import Control.Monad (unless)
 import Control.Exception (evaluate)
 import Control.DeepSeq (force)
@@ -20,6 +21,10 @@ import qualified Data.Vector as Vec
 import Graphics.Vty.Span (SpanOp(..))
 import qualified Graphics.Vty as V
 import Hide.TextStyle (textForeground,textFlags)
+import Hide.Browser (Entry(..))
+import Hide.Model (initialDesktop,openBrowser,dialog,fieldRects,Rect(..),Effect(..))
+import qualified Hide.Plugin.Menu as Menu
+import System.FilePath ((</>))
 import Hide.RemoteTerminal
 import Hide.RemoteWindow (parseRemoteFrame, RemoteFrame(..), RemoteCell(..))
 import qualified Hide.Protocol as P
@@ -32,16 +37,17 @@ import Hide.FileExport (withFileExports)
 import Hide.Remote (RemotePeer(..))
 import System.Directory
 import System.Environment (lookupEnv,setEnv,unsetEnv)
-import System.FilePath ((</>),takeFileName,takeExtension)
+import System.FilePath (takeFileName,takeExtension)
 import System.Info (os)
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
 import qualified Data.ByteString.Lazy as BL
 #endif
 
-checks :: IO ()
-checks = do
+checks :: AllocationProfile -> IO ()
+checks profile = do
   packetChecks
+  doubleClickChecks
   let check name good=unless good (error name)
       parsed event=terminalEventInput event >>= either (const Nothing) Just . parseEither P.parseInput
   check "terminal shift tab uses shared key protocol" (parsed (V.EvKey V.KBackTab [])==Just (P.Key "Tab" [V.MShift]))
@@ -81,7 +87,7 @@ checks = do
     RemoteScript x y paint text natural _->x+y+textFlags paint+T.length text+natural | cell<-remoteCells dense])
   after<-getAllocationCounter
   check "dense receiver retains 55 runs within a 1.5 MB allocation budget"
-    (length (remoteCells dense)==55 && occupied==21285 && before-after<1500000)
+    (length (remoteCells dense)==55 && occupied==21285 && withinBudget profile (before-after) (1500000))
   let (cursor,ops)=remoteTerminalDisplay (40,12) (Just frame) ""
       rowWidth values=sum [n | TextSpan _ n _ _<-Vec.toList values]
       rowText values=T.concat [TL.toStrict text | TextSpan _ _ _ text<-Vec.toList values]
@@ -131,6 +137,39 @@ checks = do
   overlay<-readIORef captured
   check "direct writer banner changes only bottom row and suppresses cursor" ("Hi" `BS.isInfixOf` overlay && not (TE.encodeUtf8 "界" `BS.isInfixOf` overlay) && not ("S" `BS.isInfixOf` overlay))
 
+-- Feed the same press/release packets that the terminal frontend sends into the
+-- ordinary dialog dispatcher. Timestamps are inputs, never sleep-based evidence.
+doubleClickChecks :: IO ()
+doubleClickChecks=do
+  let check label good=unless good (error label)
+      initial=openBrowser "/project" "*" [Entry "folder" True Nothing Nothing,Entry "Main.hs" False Nothing Nothing] (initialDesktop (80,25))
+      list=case dialog initial of Just dg->fieldRects initial dg !! 1; _->error "missing file picker"
+      x=left list+2; y=top list+2
+      down px py=V.EvMouseDown px py V.BLeft []
+      up px py=V.EvMouseUp px py (Just V.BLeft)
+      run events=let (_,_,effects)=foldl step (noTerminalClicks,initial,[]) events in effects
+      step (clicks,desktop,effects) (ms,event)=
+        let (next,value)=terminalEventAt (ms*1000000) event clicks
+            (updated,more)=case value >>= either (const Nothing) Just . parseEither P.parseInput of
+              Just input->P.applyInput input desktop
+              Nothing->(desktop,[])
+        in (next,updated,effects++more)
+      pair row=[(0,down x row),(40,up x row),(180,down x row),(220,up x row)]
+  check "terminal double click drills into the selected directory"
+    (run (pair y)==[BrowsePath ("/project" </> "folder") "*"])
+  check "terminal double click opens the selected file"
+    (run (pair (y+1))==[OpenFile Menu.HumanMenu ("/project" </> "Main.hs")])
+  check "terminal unknown-button release still completes a click"
+    (run [(0,down x y),(40,V.EvMouseUp x y Nothing),(180,down x y)]==[BrowsePath ("/project" </> "folder") "*"])
+  mapM_ (\events->check "terminal held motion, another row, expired clicks and interrupted pairs never open a file" (null (run events)))
+    [[(0,down x y),(20,down x y)],
+     [(0,down x y),(20,down (x+1) y),(40,up x y),(180,down x y)],
+     [(0,down x y),(40,up x y),(180,down x (y+1))],
+     [(0,down x y),(40,up x y),(600,down x y)],
+     [(0,down x y),(40,up x y),(80,V.EvKey V.KHome []),(180,down x y)],
+     [(0,down x y),(40,up x y),(80,V.EvLostFocus),(180,down x y)],
+     [(0,down x y),(40,up x y),(80,V.EvResize 80 25),(180,down x y)]]
+
 -- | Exercise the production terminal receiver with actual binary payload pairs,
 -- local staging and a live helper. No terminal or editor UI is needed.
 packetChecks :: IO ()
@@ -162,6 +201,8 @@ packetChecks=unless (os=="mingw32") $ bracket temporary removePathForcibly $ \ro
     let peer=RemotePeer
           { peerSend = \_->error "terminal receiver sent a transport packet"
           , peerSendBatch = \_->error "terminal receiver sent a transport batch"
+          , peerAttachment=pure 0
+          , peerSession=pure ""
           , peerReceive=atomicModifyIORef' packets (\pending->case pending of []->([],Nothing); packet:rest->(rest,Just packet))
           }
     withFileExports $ \exports->do

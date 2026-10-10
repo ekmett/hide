@@ -13,8 +13,8 @@ import Data.List (find)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
-import Hide.GuestAccess (sanitizedBufferContent,privateDocument)
-import Hide.Model (Desktop(..),Document(..),Window(..),WindowContent(..),conversationTargetFor,conversationLogicalBody,captureDocumentModified,snapshotDocumentModified)
+import Hide.GuestAccess (sanitizedBufferContent)
+import Hide.Model (Desktop(..),Document(..),Window(..),WindowContent(..),conversationTargetFor,conversationLogicalBody,captureDocumentModified,snapshotDocumentModified,privateFilePaths,privateDocumentWith,privatePreparedWindow)
 import Hide.ConversationBody (LogicalBody,logicalBodyIdentity)
 import Hide.BufferReadAdmission (ReadAdmission,resolveReadReference,readReference)
 import Hide.Plugin.BufferHost (BufferRef,CapturedRead(..),BufferMetadata(..),ListedBuffer(..))
@@ -55,12 +55,13 @@ captureBuffer admission desktop reference=do
 listBuffers :: ReadAdmission -> Desktop -> IO (Either Text [ListedBuffer])
 listBuffers admission desktop=sequence <$> traverse capture (M.toAscList (buffers desktop))
   where
+    privatePaths=privateFilePaths desktop
     capture (ident,doc)=do
       reference<-readReference admission ident
       case reference of
         Left err->pure (Left err)
         Right ref->do
-          let private=privateDocument desktop doc
+          let private=privateDocumentWith privatePaths doc
           sourcePath<-if private then pure Nothing else traverse (evaluate . filePath) (documentFile doc)
           changed<-evaluate (captureDocumentModified doc)
           let title=if private then "[private]" else fromMaybe (maybe "Untitled" T.pack sourcePath) (documentLabel doc)
@@ -91,7 +92,7 @@ windowReadTarget desktop ident=do
     Nothing->Right Nothing
     Just target->maybe (Left "Conversation text is not ready.") (Right . Just)
       (conversationLogicalBody target desktop)
-  if W.preparedWindowDisclosure prepared/=W.ReadableWindow then Left "This window is private." else
+  if privatePreparedWindow desktop prepared then Left "This window is private." else
     case W.preparedWindowRows prepared of
       W.RowsDetails{}->Left "Rows and Details are not a text body."
       _->Right (WindowReadTarget ident reference prepared logical)

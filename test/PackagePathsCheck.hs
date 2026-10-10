@@ -16,7 +16,7 @@ checks=withSystemTempDirectory "hide-package-paths" $ \root->do
   let package=root </> "pkg"
   createDirectory package
   createDirectory (root </> "shared")
-  writeFile (root </> "shared/Shared.hs") "module Shared where\n"
+  writeFile (root </> "shared" </> "Shared.hs") "module Shared where\n"
   mapM_ (createDirectory . (package </>)) ["src","windows","unix","cbits"]
   writeFile (package </> "src/Main.hs") "main = pure ()\n"
   writeFile (package </> "windows/Platform.hs") "module Platform where\n"
@@ -37,11 +37,11 @@ checks=withSystemTempDirectory "hide-package-paths" $ \root->do
   let files source=[path | candidate<-values,candidateSource candidate==source,path<-candidatePaths candidate]
       present source=[path | row<-files source,Just path<-[existingPath row]]
   canonical<-canonicalizePath package
-  unless (present (MainSource "Main.hs")==[canonical </> "src/Main.hs"])
+  unless (present (MainSource "Main.hs")==[canonical </> "src" </> "Main.hs"])
     (fail "main-is uses package source directories, not the workspace root")
-  unless (present (ModuleSource "Shared" False)==[root </> "shared/Shared.hs"])
+  unless (present (ModuleSource "Shared" False)==[root </> "shared" </> "Shared.hs"])
     (fail "Shared sources outside a package but inside the workspace remain available")
-  unless (present (PackageFileSource "cbits/helper.c")==[canonical </> "cbits/helper.c"])
+  unless (present (PackageFileSource "cbits/helper.c")==[canonical </> "cbits" </> "helper.c"])
     (fail "Foreign sources use the package root")
   unless (all ((/=Lit True).pathCondition) [row | row<-files (ModuleSource "Platform" False),existingPath row/=Nothing]
        && length (present (ModuleSource "Platform" False))==2)
@@ -50,7 +50,7 @@ checks=withSystemTempDirectory "hide-package-paths" $ \root->do
        && any ((==ModuleSource "Paths_paths" True).candidateSource) values)
     (fail "Missing and generated sources remain in the package tree")
   private<-resolveSources root [canonical </> "src"] package component
-  unless (case private of Right rows->all (all ((/=Just (canonical </> "src/Main.hs")).existingPath).candidatePaths) rows; _->False)
+  unless (case private of Right rows->all (all ((/=Just (canonical </> "src" </> "Main.hs")).existingPath).candidatePaths) rows; _->False)
     (fail "Private sources are never openable from the public package projection")
   withSystemTempDirectory "hide-package-outside" $ \outside->do
     writeFile (outside </> "Main.hs") "private\n"

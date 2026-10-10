@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE OverloadedStrings #-}
 module FilesCheck (checks) where
 
@@ -8,16 +9,17 @@ import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openBinaryTempFile)
 import Hide.Buffer
 import Hide.Files
+import Hide.FileIO (withFileRead, replaceFile)
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error name)
 
 right :: String -> Either String a -> IO a
-right name = either (error . ((name ++ ": ") ++)) pure
+right name = either (error . ((name ++ ": ") ++) . show) pure
 
 isLeft :: Either a b -> Bool
 isLeft (Left _) = True
@@ -28,16 +30,21 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   let path = dir </> "source.hs"
       original = "x = \206\187\r\nlast" :: BS.ByteString
   BS.writeFile path original
+#ifndef mingw32_HOST_OS
+  -- Windows infers executability from the filename rather than a mode bit.
   permissions <- getPermissions path
   setPermissions path (permissions { executable = True })
+#endif
   (state, buffer) <- loadFile path >>= right "load UTF-8"
   check "load preserves CRLF and absent final newline" (contents buffer == "x = λ\r\nlast")
   check "load keeps byte baseline" (diskBytes state == Just original)
   savedState <- saveFile state buffer >>= right "roundtrip save"
   bytes <- BS.readFile path
   check "save preserves exact bytes" (bytes == original && diskBytes savedState == Just original)
+#ifndef mingw32_HOST_OS
   savedPermissions <- getPermissions path
   check "save preserves executable permission" (executable savedPermissions)
+#endif
   BS.writeFile path "changed outside editor"
   conflict <- saveFile savedState (newBuffer "overwrite")
   bytesAfterConflict <- BS.readFile path
@@ -71,15 +78,20 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   check "NUL input opens in hex mode" (byteMode binary && bufferBytes binary==BS.pack [97,0,98])
   folder <- loadFile dir
   check "directory read is rejected" (isLeft folder)
+#ifndef mingw32_HOST_OS
+  -- The portable directory-read failure above remains checked on Windows.
   invalidPermissions <- getPermissions invalid
   bracket (setPermissions invalid (invalidPermissions { readable = False }))
           (const (setPermissions invalid invalidPermissions)) $ \_ -> do
     unreadable <- loadFile invalid
     check "unreadable input is rejected" (isLeft unreadable)
+#endif
 
   (failureState, _) <- loadFile path >>= right "load before failure"
   before <- BS.readFile path
   beforeEntries <- sort <$> listDirectory dir
+#ifndef mingw32_HOST_OS
+  -- System.Directory cannot deny directory writes through Permissions on Windows.
   dirPermissions <- getPermissions dir
   bracket (setPermissions dir (dirPermissions { writable = False }))
           (const (setPermissions dir dirPermissions)) $ \_ -> do
@@ -89,6 +101,7 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   afterEntries <- sort <$> listDirectory dir
   check "failed save keeps original bytes and cleans temporary files"
     (before == after && beforeEntries == afterEntries)
+#endif
   binarySave <- saveFile failureState (newBuffer "a\NULb")
   binarySaveBytes <- BS.readFile path
   binarySaveEntries <- sort <$> listDirectory dir
@@ -145,6 +158,40 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
   hexBytes <- BS.readFile hexPath
   check "hex pieces retain all bytes including NUL and invalid UTF-8"
     (hexBytes == hexExpected && diskBytes hexSaved == Just hexExpected)
+  let sharedPath = dir </> "shared-λ.bin"
+  BS.writeFile sharedPath "old bytes"
+  (sharedState, _) <- loadFile sharedPath >>= right "load shared file"
+  withFileRead sharedPath $ \reader -> do
+    _ <- saveFile sharedState (newBuffer "new bytes") >>= right "save while reader is open"
+    previous <- BS.hGetContents reader
+    current <- BS.readFile sharedPath
+    check "replacement preserves reader bytes and updates the path"
+      (previous=="old bytes" && current=="new bytes")
+  let longPath = foldl (</>) dir (replicate 6 ('\x1f4c1':replicate 47 'p')) </> "shared-λ.bin"
+  createDirectoryIfMissing True (takeDirectory longPath)
+  replaceFile sharedPath longPath
+  withFileRead longPath $ \reader -> do
+    (longState, _) <- loadFile longPath >>= right "load long-path file"
+    entriesBefore <- sort <$> listDirectory (takeDirectory longPath)
+    savedLong <- saveFile longState (newBuffer "latest bytes") >>= right "save long-path file"
+    previous <- BS.hGetContents reader
+    current <- BS.readFile longPath
+    check "long-path save preserves overlapping readers and updates the baseline"
+      (previous=="new bytes" && current=="latest bytes" && diskBytes savedLong==Just current)
+    interrupted <- try (saveFile savedLong (newBuffer (error "long-path encoding interrupted")))
+      :: IO (Either SomeException (Either String FileState))
+    afterInterrupted <- BS.readFile longPath
+    entriesAfter <- sort <$> listDirectory (takeDirectory longPath)
+    check "long-path successful and interrupted saves leave no temporary sibling"
+      (isLeft interrupted && afterInterrupted==current && entriesAfter==entriesBefore)
+  -- A failed replacement must not unlink either side, including its source.
+  let destinationDirectory = dir </> "occupied"
+  createDirectory destinationDirectory
+  failedReplacement <- try (replaceFile longPath destinationDirectory) :: IO (Either SomeException ())
+  afterReplacement <- BS.readFile longPath
+  directoryRemains <- doesDirectoryExist destinationDirectory
+  check "failed replacement preserves both paths"
+    (isLeft failedReplacement && afterReplacement=="latest bytes" && directoryRemains)
   putStrLn "file checks passed"
   where
     makeDirectory = do

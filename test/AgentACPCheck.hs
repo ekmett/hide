@@ -34,6 +34,10 @@ checks=bracket temporary removePathForcibly $ \root -> do
       check label ok=unless ok (error label)
       right label result=either (error . ((label++": ")++) . T.unpack) pure result
       prompt text=HubMessage 1 (Agent (AgentId "sibling")) text False
+  check "fork is never inferred from absent marker" (not (supportsFork (parseCapabilities (object []) (object []))))
+  let initialized=object ["agentCapabilities" .= object ["sessionCapabilities" .= object ["fork" .= object []]]]
+      advertisedOptions=object ["configOptions" .= [object ["id" .= ("model"::T.Text),"type" .= ("select"::T.Text),"category" .= ("model"::T.Text),"currentValue" .= ("m"::T.Text),"options" .= [object ["name" .= ("Group"::T.Text),"options" .= [object ["value" .= ("m"::T.Text),"name" .= ("Model"::T.Text)]]]]]]]
+  check "actual advertised nested choices and fork supported" (supportsFork (parseCapabilities initialized advertisedOptions) && length (configChoices (parseCapabilities initialized advertisedOptions))==1)
   writeFile script fixture
   events<-newIORef ([]::[(T.Text,Value)])
   asked<-newEmptyMVar

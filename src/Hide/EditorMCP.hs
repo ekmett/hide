@@ -172,11 +172,10 @@ responseTools includeBuiltins extra desktop request = case request of
     dispatch "tools/call" params = do
       (name,args)<-parameters (withObject "tool call" $ \o -> (,) <$> o .: "name" <*> o .:? "arguments" .!= object []) params
       case if includeBuiltins then builtinTool desktop name args else Left "Unknown tool" of
-        Left err -> pure (result True (String err))
-        Right value -> pure (result False value)
+        Left err -> pure (toolResult False (Left err))
+        Right value -> pure (toolResult False (Right value))
     dispatch _ _=Left (-32601,"Method not found")
     parameters parser = either (Left . (-32602,) . T.pack) Right . parseEither parser
-    result failed value=object ["isError" .= failed,"content" .= [object ["type" .= ("text"::T.Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode value))]]]
     sameTool (Object a) (Object b)=KM.lookup "name" a==KM.lookup "name" b
     sameTool _ _=False
 
@@ -300,16 +299,16 @@ editorResponseUsing includeBuiltins extra execute desktop request = case request
         "tools/call" -> case parseEither (withObject "tool call" $ \o -> (,) <$> o .: "name" <*> o .:? "arguments" .!= object []) params of
           Left err -> bad err
           Right (name,args) | Just descriptor<-find (named name) extra
-            , Left err<-validateArguments descriptor args -> pure (desktop,pure (reply (toolResult (Left err))))
-          Right (name,args) | any (named name) extra -> do
+            , Left err<-validateArguments descriptor args -> pure (desktop,pure (reply (toolResult False (Left err))))
+          Right (name,args) | Just descriptor<-find (named name) extra -> do
             started<-try (execute desktop name args)
             case started of
-              Left (err::IOException) -> pure (desktop,pure (reply (toolResult (Left (T.pack (show err))))))
+              Left (err::IOException) -> pure (desktop,pure (reply (toolResult False (Left (T.pack (show err))))))
               Right (updated,finish) -> pure (updated, do
                 result<-try finish
                 pure (reply (case either (Left . T.pack . show) id (result::Either IOException (Either T.Text Value)) of
                   Right value | name=="editor_screen" -> value
-                  outcome -> toolResult outcome)))
+                  outcome -> toolResult (structured descriptor) outcome)))
           _ -> fallback
         "resources/read" -> case parseEither (withObject "resource" (.: "uri")) params of
           Left err -> bad err
@@ -325,6 +324,8 @@ editorResponseUsing includeBuiltins extra execute desktop request = case request
     fallback=pure (desktop,pure (responseTools includeBuiltins extra desktop request))
     named name (Object fields)=KM.lookup "name" fields==Just (String name)
     named _ _=False
+    structured (Object fields)=KM.member "outputSchema" fields
+    structured _=False
 
 -- The schema is also enforced at dispatch, so misspelled optional arguments
 -- cannot silently turn a requested operation into a different one.
@@ -343,10 +344,11 @@ validateArguments _ _=Left "Tool arguments must be an object"
 skillURI :: T.Text
 skillURI="hide://debugging"
 
-toolResult :: Either T.Text Value -> Value
-toolResult (Right value) | BL.length (encode value)>4194304=toolResult (Left "Tool result exceeds 4 MiB; request a smaller page.")
-toolResult outcome=object ["isError" .= either (const True) (const False) outcome,
+toolResult :: Bool -> Either T.Text Value -> Value
+toolResult _ (Right value) | BL.length (BL.take 4194305 (encode value))>4194304=toolResult False (Left "Tool result exceeds 4 MiB; request a smaller page.")
+toolResult structured outcome=object (["isError" .= either (const True) (const False) outcome,
   "content" .= [object ["type" .= ("text"::T.Text),"text" .= TE.decodeUtf8 (BL.toStrict (encode (either String id outcome)))]]]
+  ++["structuredContent" .= value | structured,Right value@(Object _)<-[outcome]])
 
 debugTools :: [Value]
 debugTools =

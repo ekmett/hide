@@ -194,7 +194,7 @@ always wins. Other runners retain suite-level results without guessed cases.
 
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
-| `debug_status` | R | `{}` | Adapter readiness, stopped state, generation, selected frame, follow mode, capabilities, breakpoints, recent output, `terminated`, `finishing`, nullable `exitCode` |
+| `debug_status` | R | `{}` | Adapter readiness, stopped state, generation, selected frame, follow mode, `sourcePreparation` (`idle` / `preparing` / `ready`), capabilities, breakpoints, recent output, `terminated`, `finishing`, nullable `exitCode` |
 | `debug_present` | W | `follow?`, `view?`, `generation?` | Set automatic UI following; reveal `source`, `stack`, `scopes` or `output` from the shared session |
 | `debug_launch` | X | `adapterConfig?`, `port?` | Configured THC target or general DAP JSON config; refuses an already active session |
 | `debug_attach` | X | `host?`, `port?` | Loopback adapter; defaults to `127.0.0.1:4711` |
@@ -487,6 +487,11 @@ remain open with an error and apply
 nothing. A successful prompted patch returns `appliedDiff`, `userModified` and
 the resulting `revision`, so the requesting agent sees the human's actual edit.
 The buffer remains unsaved; approval never writes the file to disk.
+
+The same `buffer_apply_diff` permission covers linked plugins' atomic batches of
+up to 16 open buffers. Their approval shows one editable diff per file. Allow
+applies all of them together or none; the single-buffer MCP arguments above are
+unchanged.
 
 A pending approval can be cancelled; cancellation does not undo an operation
 already executed. Questions return pending without waiting for the human. HLS

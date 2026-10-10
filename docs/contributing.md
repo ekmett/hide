@@ -3,6 +3,29 @@
 Build the editor, run the checks and exercise the frontend affected by a change.
 The source stays separate from THC's compiler and runtime.
 
+The root Cabal project builds five linked packages. `hide` owns the editor;
+`packages/hide-agent-api` contains provider contracts, typed directory reads and
+bound orchestration services; `packages/hide-plugin-api` owns scoped commands,
+tool exposure, forms, menus and tree contracts;
+`plugins/hide-acp` implements ACP transport and the provider adapter;
+`plugins/hide-agents` contributes the Agents tree and orchestration tools through
+public plugin APIs. The executable selects linked UI plugins in `app/Main.hs`. The ACP package
+depends on the contract, not the editor or its frontend libraries.
+Ordinary `cabal build` and `cabal test` use the linked packages from this checkout.
+To build only ACP, without resolving the editor's native dependencies, use its
+smaller project:
+
+```sh
+cabal build --project-dir=plugins/hide-acp all
+```
+
+The agent UI and tools also build without the editor or native frontend
+dependencies:
+
+```sh
+cabal build --project-dir=plugins/hide-agents all
+```
+
 ## Build and check
 
 From the repository root:
@@ -35,6 +58,70 @@ disk baselines or Undo. Equal numeric revisions do not authorize replacement.
 Human input remains a pure model transition; screen permission hints run on the
 capture worker and do not replace admission checks.
 
+
+## Coverage and test results
+
+[CI](https://github.com/ekmett/hide/actions/workflows/ci.yml) builds the optimized
+editor checks and runs correctness and allocation checks once.
+[Coverage](https://github.com/ekmett/hide/actions/workflows/coverage.yml) builds a
+small HPC driver covering editing, file I/O, display transport, Markdown,
+settings, plugin commands and recovery. It reuses inexpensive bounded contract
+checks, with short end-to-end paths for transport and recovery.
+It does not repeat the correctness suite or its allocation and process-lifetime
+fixtures. Coverage measures the paths exercised, not an exhaustive behavioral
+matrix.
+
+Both workflows use GHC 9.14.1 on Linux x64, macOS ARM64 and native Windows x64.
+Each host uploads JUnit results to
+[Codecov](https://app.codecov.io/github/ekmett/hide) under its own platform flag;
+the coverage job also uploads source coverage. Missing reports and upload errors
+fail the workflow. A failed test still uploads the reports it produced; canceled
+jobs do not invent results. Documentation-only changes use the documentation job.
+
+The common configuration enables the browser and shared editor services, omitting
+SDL windows and Ghostty terminals. HPC measures Haskell execution, not C or
+shaders; native frontend and terminal checks belong to their feature builds.
+Coverage uses an unoptimized build: HPC counters change optimization and allocation,
+so the optimized CI job owns allocation budgets.
+
+Run the optimized checks locally:
+
+```sh
+cabal test editor-tests --builddir=build/allocation --disable-coverage -O1 -f-window -f-terminal
+```
+
+Select a check with `--test-options="--pattern=BufferTree"`. Each invocation owns
+its temporary resources. The runner excludes overlapping execution where checks
+temporarily own the process environment or working directory; no check depends on
+a preceding check's results or side effects.
+
+Generate coverage reports from the repository root:
+
+```sh
+cabal install hpc-codecov-0.6.4.1
+reports=$(mktemp -d "${TMPDIR:-/tmp}/hide-coverage.XXXXXX")
+cabal build coverage-smoke --builddir=build/coverage --enable-coverage -O0 -f-window -f-terminal
+test_exe=$(cabal list-bin coverage-smoke --builddir=build/coverage --enable-coverage -O0 -f-window -f-terminal)
+test_exe=${test_exe%$'\r'}
+HPCTIXFILE="$reports/editor-tests.tix" cabal exec --builddir=build/coverage --enable-coverage -O0 -f-window -f-terminal -- "$test_exe" --xml="$reports/tests.xml" +RTS --read-tix-file=no -RTS
+python3 tools/coverage.py --output "$reports"
+```
+
+The workflows have separate build caches. Completed builds are cached before
+tests, so a test failure does not discard them. The macOS compiler installation is
+cached separately. `HPCTIXFILE` keeps counts in the invocation's report directory;
+`--read-tix-file=no` prevents accumulation on repeated execution. No cleanup is
+needed to repeat a run or convert its reports. Each platform converts its own
+matching instrumentation; Codecov combines the commit's reports without carrying
+old platform coverage forward.
+
+Download the `coverage-<platform>` artifact and open `hpc-html/hpc_index.html` for
+expression coverage, columns and Boolean outcomes. The artifact retains matching
+`.mix` files, raw `.tix` counts, HTML, LCOV, JUnit and host/toolchain metadata for
+seven days. HPC spans retain one-based character columns and inclusive ends, with
+tabs expanded to stops of eight columns. Codecov receives the coarser LCOV
+line/branch report; its upload does not preserve those column spans.
+
 ## Source documentation
 
 Each `Hide.*` module starts with an overview of its role, ownership and notable
@@ -50,14 +137,13 @@ Generate the initial API reference and linked source with:
 cabal haddock lib:hide --haddock-html --haddock-hyperlink-source
 ```
 
-Coverage is preliminary, especially the model's internal helpers and native FFI
-exports. A documentation build checks parsing and links, not the truth of the
+API documentation is preliminary, especially the model's internal helpers and
+native FFI exports. A documentation build checks parsing and links, not the truth of the
 contracts: review those against implementation and the relevant behavioral tests.
 
 ## Plugin command implementation
 
-`Hide.Plugin.Command` is the first implemented part of the
-[plugin design](design/haskell-plugins.md). Define a typed `CommandDef` with input
+Define a typed `CommandDef` from `Hide.Plugin.Command` with input
 and output codecs and a narrow host-supplied context. `withRegistry` scopes live
 registrations; `registerCommand` rejects duplicate names. Native callers use the
 typed handle with `invoke`. Wire adapters capture a `CommandRef` before queueing
@@ -71,11 +157,40 @@ run outside the registry lock. Errors are forced before return; successful typed
 values remain lazy and their consumers own later evaluation. Registration grants no authority and does not
 automatically expose an MCP tool.
 
-The first consumer is `hide.docs.read` in `Hide.Documentation`. Its context only
+`hide.docs.read` in `Hide.Documentation` is a small working example. Its context only
 resolves a documentation corpus root; it neither imports nor receives `Desktop`.
 `Hide.DocsMCP` owns the session registration and adapts the explicit `docs_read`
 tool to it, retaining permission checks and deferred filesystem work. Listing and
 search are not yet registered commands.
+
+## Plugin tool exposure
+
+`Hide.Plugin.Tool` exposes selected typed commands as MCP tools. A `Tool` declares
+its wire name, read-only policy hint and `CommandDef`; registration alone grants
+no authority. `withTools` scopes an immutable set around the session. It rejects
+collisions with host tools, duplicate wire or command names, and malformed metadata
+before discovery. Input schemas declare strict object fields; output schemas
+describe objects. Codecs enforce their field types and bounds.
+
+`callTool` invokes the exact registration on the tool worker after host policy
+admission. Arguments are limited to 1 MiB and results to 4 MiB, matching the MCP
+transport. Oversized results fail explicitly rather than returning a truncated
+success. Object results appear as both structured content and JSON text. Closing
+the scope rejects retained calls; a missing tool has no fallback interpreter.
+
+The linked `hide-agents` package declares the nine directory, spawn, rename,
+message, wait, cancel, end, history and search tools in `Hide.AgentTools`.
+`Hide.Plugin.AgentServices` supplies their host-bound actor and workspace.
+Arguments cannot replace either: the adapter rejects a different spawn directory
+before reservation, and the Hub rechecks caller liveness on each operation.
+Ancestry, limits, provider lifetime, worktree isolation and task tickets remain
+Hub-owned. These tools receive no human approval or settings capability.
+
+The executable's plugin list determines discovery and permission registration.
+The primary route exposes editor tools plus these declarations; a child's
+coordination route exposes only these declarations. Autocomplete keeps its
+separate restricted route. Conversation presentation and the broader editor-tool
+surface remain in the editor.
 
 ## Immutable plugin buffer reads
 
@@ -147,9 +262,10 @@ switch it preserves the exact existing encoding comparison, deferred to the
 worker from narrow current/baseline text inputs, without retaining Buffer/Undo. The receipt does not grant edit authority or create a public
 plugin CallContext.
 
-This is an implementation slice, not a complete plugin SDK. Plugin
-activation/task scopes, arbitrary prepared-edit grants, subscriptions/events
-and custom widget/window types remain tracked in
+Session activation and teardown are available through `Hide.Plugin.Session`.
+Buffer and window APIs still live in the editor library. Moving those boundaries
+into independently buildable packages, along with broader subscriptions and
+custom widget/window types, remains tracked in
 [the delivery plan](https://github.com/ekmett/hide/issues/1).
 
 ## Host checked edit ownership
@@ -215,11 +331,31 @@ joining workers outside the session lock. `DiffResult` reports exact appliedDiff
 userModified and resulting revision; formatting the wire result stays on the worker.
 Retiring the command rejects later invocation without redirecting retained handles.
 
-This exposes one strict single-buffer diff operation, not arbitrary prepared-edit
-commit grants. Generic plugin activation/event lifetimes and wider authority
-contexts remain part of [the buffer service work](https://github.com/ekmett/hide/issues/4).
-Configuration policy still reads/parses once per owner admission batch and at
-approval/adoption; moving that IO off the UI owner remains separate work.
+For edits across buffers, use the same service in one call:
+
+```haskell
+applyBufferDiffs editor
+  [ BufferDiff (capturedRef first)  (capturedVersion first)  firstPatch
+  , BufferDiff (capturedRef second) (capturedVersion second) secondPatch
+  ]
+```
+
+`applyBufferDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])`
+accepts 1–16 distinct open text buffers with at most 1 MiB characters across all
+patches. Results follow input order. One invalid, stale, private or closed target
+rejects the entire batch; success adds one ordinary Undo per changed buffer and
+saves nothing. The singleton API follows this same path.
+
+A batch uses one `buffer_apply_diff` permission ticket. In Prompt mode, each
+fixed target gets its own editable diff; the user can navigate between them
+with Tab. Allow validates every review version and original source, then installs
+all prepared changes together. Correcting a diff cannot change the target list.
+Review buffers are prepared before queueing, and full patch validation stays on
+the worker. Policy IO also runs on its worker at admission, approval and adoption.
+
+These are checked strict-diff requests, not reusable prepared-edit grants.
+Generic plugin activation/event lifetimes remain part of
+[the buffer service work](https://github.com/ekmett/hide/issues/4).
 
 ## Frontend command routing
 
@@ -289,7 +425,9 @@ Other context slots and full first-party routing through the typed registry rema
 open in #2. This is not a frozen extension SDK.
 
 `sh tools/check-native.sh` checks the SDL event queue and software glyph rendering
-without opening a visible window. Set `HIDE_TEST_GPU=metal` or
+without opening a visible window. Each run owns a temporary directory for its
+binaries and captures, removed when the run exits; concurrent runs do not share
+outputs or need preparatory cleanup. Set `HIDE_TEST_GPU=metal` or
 `HIDE_TEST_GPU=vulkan` to also check the actual GPU backend: atlas growth,
 clipping, decorations and reuse of uploaded glyphs. Vulkan needs a display server
 that supports GPU presentation; a headless Wayland compositor works, while Xvfb
@@ -298,7 +436,9 @@ headless machine so a software Vulkan driver cannot stand in for the GPU.
 
 On macOS the script also checks an unshown application menu for duplicate
 enablement and retained old menu-item stamps. These checks do not start an editor
-session.
+session. To also verify restoring a minimized window, set
+`HIDE_TEST_DOCK_RESTORE=1`; that additional macOS check opens and restores a real
+window, then closes it.
 
 ## Native Windows terminals
 
@@ -587,8 +727,9 @@ resource rows with unresolved hints, so another restart does not lose them.
 actual keyboard input, delayed/collapsed loads, paging, retirement, privacy and
 filesystem observation refresh. Other domain providers remain subsequent work.
 
-`Hide.AgentSidebar` consumes this tree for the Agents root. Its scoped typed actions
-return only closed `AgentSidebarRequest` values. After exact hit/lifetime/modal
+`Hide.AgentUI` in `hide-agents` consumes this tree for the Agents root. Its scoped
+actions return typed `DirectoryRequest` values with opaque host receipts. The host
+specializes these as `AgentSidebarRequest`. After exact hit/lifetime/modal
 validation, `tickSidebar` dispatches one `AgentSidebarAction` through the existing
 Conversation interpreter. Plugin handlers receive no Desktop or unrestricted
 effect-list callback. Conversation owns captured-ID views and one creation attempt; AgentHub owns
@@ -600,13 +741,20 @@ closed RenameAgentTo result. Form metadata refresh carries no callback, cannot
 open a modal, and preserves draft/selection through resize. Scope retirement or
 a newer modal rejects a delayed reply. `PluginFormCheck` exercises public
 lifetime laws; `AgentSidebarCheck` covers the real input/adoption route.
+`ConfirmationFormSpec` uses the same lifecycle with no input field and an empty
+submission. Sessions uses it to confirm deletion on the sidebar action worker;
+the deletion rechecks catalog identity and liveness under the daemon lifetime
+lock. Recovery rechecks checkpoint existence under that lock before publishing
+a daemon, so a pending recovery spawn cannot recreate a deleted session.
 
-A single metadata worker prepares only names, parent IDs and states from
-`agentSummaries`; tasks, histories, transcripts and private provider keys never
-enter its snapshot. Ticks compare the worker revision and invalidate at most four
-scoped nodes via `refreshTreeFromHost`, which reuses ordinary request generations,
-worker cancellation and page adoption. `SelectedInput` supplies a reusable
-single-line selected range; ordinary caret-only Input behavior is unchanged.
+A single metadata worker reads the public agent directory and compares its small
+snapshot of names, parent IDs, states and advertised-choice availability. Tasks,
+histories, transcripts and private provider keys never enter that snapshot. The
+worker publishes changed-node invalidations through the bounded sidebar queue;
+there is no plugin callback on the UI tick. The host drains at most four deltas
+per tick, reusing ordinary request generations, cancellation and page adoption.
+Closing the host wakes blocked publishers and rejects later publications.
+`SelectedInput` supplies a reusable single-line selected range; ordinary caret-only Input behavior is unchanged.
 
 ## Prepared plugin windows
 
@@ -641,19 +789,22 @@ publication while retaining an inert read-only snapshot. Its old references cann
 refresh or reopen it. A content owner may retain the closed snapshot for an
 explicit later opening under a fresh reference.
 
-`prepareImageWindow title disclosure origin png` prepares a PNG on the same
+`prepareImageWindow title disclosure origin encoded` prepares a PNG or JPEG on a
 worker and publishes through `openWindow`. The optional canonical origin remains
 host metadata: the current protected-path policy can hide a formerly readable
 image. Preparation caps compressed input at 16 MiB, dimensions at 4096 per side,
-and decoded area at 4 megapixels. Host admission allows 64 image views and 64 MiB
-of distinct decoded resources. Closing or scope retirement releases image bytes;
+and decoded area at 4 megapixels. JPEG frame bounds are checked before decoding;
+EXIF orientation is applied on that worker while original encoded bytes stay
+intact. Host admission allows 64 image views and 64 MiB of distinct decoded
+resources. Closing or scope retirement releases image bytes;
 retirement retains only the small text fallback.
 
-PNG windows use Fit by default, `F` to fit again, `1` for actual size, plus/minus
+Image windows use Fit by default, `F` to fit again, `1` for actual size, plus/minus
 or the wheel to zoom, and arrows or a content drag to pan. Host chrome and modal
 input retain their normal owners. Terminal fallback reports dimensions and offers
-an explicit Open externally link for file-backed images. Original PNG bytes and
-active image resources are never checkpointed.
+an explicit Open externally link for file-backed images. Recovery retains the
+inert `hide.image` description; it restores no links and never reloads the file.
+Original encoded bytes and active image resources are never checkpointed.
 
 `renderCellRowsAndCanvas` produces fallback cells and image ownership in one
 composition. Each mask cell is little-endian uint16: a frame-local image slot in
@@ -692,9 +843,9 @@ changes the selected conversation to dispatch. The primary's redacted provider
 output, bounded tool/plan updates and context usage also enter the shared Hub
 history/status APIs. Exact connection replacement retires its event sink, while
 capability refresh preserves the provider lifetime and outstanding controls.
-Conversation consumes the Hub's typed `HistoryPage`/`HistoryEvent` values directly;
-AgentMCP owns the public JSON response. Both use the same retention, byte/count
-limits and exclusive event cursors. Checkpoints preserve those event identities.
+Conversation consumes the typed `HistoryPage`/`HistoryEvent` values from
+`Hide.Plugin.AgentServices` directly; `Hide.AgentTools` owns the tool response.
+Both use the same retention, byte/count limits and exclusive event cursors. Checkpoints preserve those event identities.
 New Agent startup uses the existing runtime's single pending launch slot. Its
 mailbox completion retains the Hub ID and initial task ticket; Conversation keeps
 human form/workspace admission and status display. Shutdown joins acquisition
@@ -781,5 +932,28 @@ publishes forced scalar window IDs/titles through `editorWindowEntries` and
 compares separate catalog/window revisions, invalidating at most two nodes.
 Closed `SessionSidebarRequest` values pass the ordinary tree hit/lifetime/modal
 checks, then the live session owner rechecks session identity and window
-availability via `activateEditorWindow`. No new permission map or attachment
-manager is introduced. Cross-frontend explicit resume remains the next slice.
+availability via `activateEditorWindow`. Switch/Recover also captures the display
+attachment epoch: a late sidebar reply cannot move a replacement display. Delete
+uses the existing confirmation form and rechecks the saved record under the
+session lifetime lock before removing a stopped checkpoint.
+
+Recover buffers here reads a stopped same-project checkpoint on that action
+worker under the same lifetime lock. `RecoveredSources` contains validated source
+documents and views only; decoding never installs plugin or conversation owners.
+Adoption checks the captured display attachment and project, then assigns fresh
+IDs and clamps windows to the current workspace. Duplicate paths become unnamed
+copies with their saved baseline, history and privacy origin intact. If retaining
+two different origins would require discarding provenance, the whole import is
+refused. Count and identity limits are checked before adoption; neither existing
+buffer contents nor histories are compared.
+
+`withSessionPeer` owns handoff within the existing frontend callback. It prepares
+a candidate with a fresh input journal while continuing to receive the old
+session's committed replies. Candidate admission waits for a complete reset frame
+after applying the frontend, theme and dimensions. The transport owner then
+selects the target and retires the old attachment. Preparation failure leaves the
+old session usable; a later target failure reconnects only to that target.
+Frontend queues stamp inputs with their displayed attachment, and admission
+rejects old stamps. Native and terminal event queues also discard input collected
+during the transition. These checks use scalar lifetimes and the three display
+settings; they do not compare desktops, buffers or undo history.

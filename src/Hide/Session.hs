@@ -6,14 +6,14 @@
 -- remote records remain discoverable while offline. Display prefixes can be short,
 -- but endpoint operations require the complete session identity.
 module Hide.Session
-  (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity, shortSessionId) where
+  (SessionRecord(..), newSessionRecord, rememberSession, forgetSession, deleteStoppedSession, withStoppedSession, listSessions, loadSession, sessionStoreDirectory, checkpointPath, sessionState, sessionActivity, shortSessionId) where
 
 import Control.Exception (IOException, bracket, bracketOnError, catch, finally)
 import Control.Monad (filterM, unless)
 import Data.Aeson (FromJSON, ToJSON, Value, object, (.=), eitherDecodeStrict', encode)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
-import Data.List (sortOn, nub, find, isPrefixOf)
+import Data.List (sortOn, find, isPrefixOf)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Ord (Down(..))
 import Data.Time (UTCTime, getCurrentTime)
@@ -24,7 +24,7 @@ import System.IO (IOMode(ReadMode), hClose, hFileSize, openBinaryTempFile, withB
 import System.IO.Error (isDoesNotExistError)
 import System.Timeout (timeout)
 import Hide.Protocol (WirePacket(..), writePacket, readPacket)
-import Hide.RemoteEndpoint (sessionEndpoint, connectEndpoint, randomIdentity, privateDirectory)
+import Hide.RemoteEndpoint (sessionEndpoint, connectEndpoint, randomIdentity, privateDirectory, withSessionLock)
 
 -- Each record describes the host which owns the editor state. Remote records
 -- remain available while offline; local records include recoverable checkpoints.
@@ -99,16 +99,46 @@ forgetSession :: String -> IO ()
 forgetSession ident = do
   path <- recordPath ident
   checkpoint <- checkpointPath ident
-  legacy <- (++".json") <$> sessionEndpoint ident
   mapM_ (\target -> removeFile target `catch` \(err::IOException) ->
-    unless (isDoesNotExistError err) (ioError err)) [path,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json",legacy]
+    unless (isDoesNotExistError err) (ioError err)) [path,checkpoint,checkpoint++".agent.json",checkpoint++".agents.json"]
+
+-- | Delete a captured, stopped local session from its owning sidebar worker.
+-- 'withStoppedSession' checks ownership before 'forgetSession' removes saved data;
+-- the endpoint and lifetime lock file remain in place.
+deleteStoppedSession :: Maybe String -> SessionRecord -> IO ()
+deleteStoppedSession current captured=withStoppedSession current captured (const (forgetSession (sessionId captured)))
+
+-- | Hold the lifetime lock of the exact captured, stopped local session while
+-- using its checkpoint path. Refuse current/remote records, a live or unresponsive
+-- endpoint, an occupied lock, or changed metadata before invoking the callback.
+-- No daemon is started/stopped and the lock file is never removed.
+--
+-- The owning sidebar worker serializes these operations. POSIX locks are
+-- process-scoped: the current identity must be supplied and concurrent calls
+-- for one session within a process are not supported. Failures are 'IOException'.
+withStoppedSession :: Maybe String -> SessionRecord -> (FilePath -> IO a) -> IO a
+withStoppedSession current captured use=do
+  unless (current/=Just ident) (ioError (userError "Cannot use the current editor session as a stopped session."))
+  unless (sessionHost captured==Nothing) (ioError (userError "Cannot use a remote saved session from this host."))
+  endpoint<-sessionEndpoint ident
+  stopped endpoint
+  checkpoint<-checkpointPath ident
+  withSessionLock (checkpoint++".lock") $ do
+    stopped endpoint
+    latest<-loadSession ident
+    unless (latest==Just captured) (ioError (userError "The saved session changed or disappeared; refresh Sessions before continuing."))
+    use checkpoint
+  where
+    ident=sessionId captured
+    stopped endpoint=do
+      result<-timeout 1000000 $ (bracket (connectEndpoint endpoint) hClose (const (pure True)))
+        `catch` \(_::IOException)->pure False
+      unless (result==Just False) (ioError (userError "The session is running or its endpoint did not respond; stop it before continuing."))
 
 loadSession :: String -> IO (Maybe SessionRecord)
 loadSession ident = do
   path <- recordPath ident
-  legacy <- (++".json") <$> sessionEndpoint ident
-  current <- readRecord path
-  maybe (readRecord legacy) (pure . Just) current
+  readRecord path
   where
     readRecord path=(withBinaryFile path ReadMode $ \handle -> do
       size <- hFileSize handle
@@ -121,9 +151,8 @@ loadSession ident = do
 listSessions :: IO [SessionRecord]
 listSessions = do
   directory <- sessionStoreDirectory
-  legacy <- takeDirectory <$> sessionEndpoint (replicate 48 '0')
-  names <- concat <$> mapM listDirectory [directory,legacy]
-  records <- mapM loadSession (nub [ident | name<-names, takeExtension name==".json", let ident=dropExtension name, length ident==48, all (`elem` ("0123456789abcdef"::String)) ident])
+  names <- listDirectory directory
+  records <- mapM loadSession [ident | name<-names, takeExtension name==".json", let ident=dropExtension name, length ident==48, all (`elem` ("0123456789abcdef"::String)) ident]
   sortOn (Down . sessionCreated) <$> filterM (fmap (/="ended") . sessionState) (catMaybes records)
 
 -- | Choose an unambiguous display prefix within the supplied session inventory.

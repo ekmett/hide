@@ -7,6 +7,8 @@
 -- captured editor/disk baselines and use checked saving; they preserve Undo.
 module Hide.AgentFiles (Snapshot, captureFile, snapshotPath, snapshotText, acceptWrite, SourceIdentity, sourceIdentity, sourceSnapshots, contextText) where
 
+import Hide.FileIO (withFileRead)
+
 import Control.Exception (IOException, try, evaluate)
 import Control.Monad (unless, when)
 import qualified Data.ByteString as BS
@@ -17,7 +19,6 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath)
 import System.FilePath (isAbsolute, makeRelative, splitDirectories)
-import System.IO (IOMode(ReadMode), withBinaryFile)
 import System.Mem.StableName (StableName, makeStableName)
 import System.IO.Error (catchIOError, isDoesNotExistError)
 import Hide.Buffer
@@ -81,7 +82,7 @@ captureFile root path d = do
       Nothing -> do
         -- Bound the read itself: checking size before an unbounded read races
         -- with a file growing between stat and read.
-        bytes <- catchIOError (Just <$> withBinaryFile resolved ReadMode (\handle -> BS.hGet handle (fileLimit+1)))
+        bytes <- catchIOError (Just <$> withFileRead resolved (\handle -> BS.hGet handle (fileLimit+1)))
           (\err -> if isDoesNotExistError err then pure Nothing else ioError err)
         let raw=maybe BS.empty id bytes
         when (BS.length raw>fileLimit) (ioError (userError "ACP text files are limited to 16 MiB."))

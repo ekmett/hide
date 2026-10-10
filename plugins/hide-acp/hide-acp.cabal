@@ -1,0 +1,14 @@
+cabal-version: 3.0
+name: hide-acp
+version: 0.1.0.0
+synopsis: Linked ACP transport and agent provider for hide
+license: BSD-3-Clause
+build-type: Simple
+
+library
+  default-language: GHC2021
+  ghc-options: -Wall
+  hs-source-dirs: src
+  exposed-modules: Hide.ACP, Hide.AgentACP
+  build-depends: base >=4.18 && <4.23, hide-agent-api ==0.1.0.0,
+    text >=2.0, containers, bytestring, directory, process, async, stm, aeson, vector

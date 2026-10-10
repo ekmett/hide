@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module RequestedPasteCheck (checks) where
 
-import EditorFixture (withEditorFixture)
+import EditorFixture (withEditorFixture,withAutocompleteFixture)
 import Control.Monad (unless,forM_)
 import Data.Aeson (object,(.=))
 import Data.Aeson.Types (parseEither)
@@ -112,4 +112,27 @@ checks=do
         retained=setComposerInput poisonDraft (composerSelection chat) True chat
     _<-token retained
     refreshRequestedPaste requests retained
+  withAutocompleteFixture "readable completion trace" source $ \mounted->do
+    let hint=setComposerInput (newBuffer "hint") (Selection 4 4) True mounted
+        unchangedHint d=contents (composerBuffer d)=="hint" && composerSelection d==Selection 4 4
+    matching<-token hint
+    (inserted,_)<-applyRequestedPaste requests matching "\n    literal hint" hint
+    check "hint requested paste uses the ordinary mounted plain-text editor"
+      (contents (composerBuffer inserted)=="hint\n    literal hint" && activeText inserted==activeText hint)
+    lostFocus<-token hint
+    refreshRequestedPaste requests (setComposerInput (composerBuffer hint) (composerSelection hint) False hint)
+    (focusedAgain,_)<-applyRequestedPaste requests lostFocus "stale" hint
+    check "hint focus departure permanently expires a requested paste" (unchangedHint focusedAgain)
+    changedVersion<-token hint
+    refreshRequestedPaste requests (setComposerInput (newBuffer "replacement") (composerSelection hint) True hint)
+    (restoredHint,_)<-applyRequestedPaste requests changedVersion "stale" hint
+    check "hint immutable replacement expires requested paste despite matching numeric revision" (unchangedHint restoredHint)
+    oldMount<-token hint
+    let closedHint=closeActive hint
+    refreshRequestedPaste requests closedHint
+    withAutocompleteFixture "replacement completion trace" closedHint $ \replacementHint->do
+      let next=setComposerInput (composerBuffer hint) (composerSelection hint) True replacementHint
+      (reopened,_)<-applyRequestedPaste requests oldMount "stale" next
+      check "hint frame replacement cannot revive requested paste"
+        (activeEditorMount next/=activeEditorMount hint && unchangedHint reopened)
   putStrLn "requested paste checks passed"

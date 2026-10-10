@@ -20,12 +20,15 @@ import System.Timeout (timeout)
 import qualified Hide.ACP as ACP
 import Hide.AgentAccess
 import Hide.AgentHub
-import Hide.AgentMCP (agentTool)
+import qualified Hide.AgentUI
+import Hide.AgentServicesHost (agentServices)
+import qualified Hide.Plugin.Session as Plugin
+import qualified Hide.Plugin.Tool as Tool
 import Hide.AgentRuntime
 import Hide.Session
 
 checks :: IO ()
-checks = bracket temporary removePathForcibly $ \root -> do
+checks = Tool.withTools [] (Plugin.pluginAgentTools Hide.AgentUI.plugin) $ \tools -> bracket temporary removePathForcibly $ \root -> do
   let config = root </> "config"
       project = root </> "project"
       policy = config </> "thc" </> "config.toml"
@@ -102,10 +105,10 @@ checks = bracket temporary removePathForcibly $ \root -> do
         _<-drainAgentRequests runtime
         pure ()
       _<-syncPrimary runtime project Nothing "private-primary" (Capabilities True True False []) False >>= right
-      noGit <- agentTool hub (Agent primary) project "agent_spawn" (object ["name" .= ("No Git default"::T.Text),"task" .= ("Independent work"::T.Text)])
+      noGit <- Tool.callTool tools (agentServices hub (Agent primary) project) "agent_spawn" (object ["name" .= ("No Git default"::T.Text),"task" .= ("Independent work"::T.Text)])
       assert "omitted workspace refuses non-Git without shared fallback" (either (const True) (const False) noGit)
       assert "failed isolated default starts no editor" . null =<< readIORef opened
-      childResult <- agentTool hub (Agent primary) project "agent_spawn" (object ["name" .= ("child"::T.Text),"task" .= ("Inspect code"::T.Text),"workspace" .= object ["mode" .= ("shared"::T.Text)]]) >>= right
+      childResult <- Tool.callTool tools (agentServices hub (Agent primary) project) "agent_spawn" (object ["name" .= ("child"::T.Text),"task" .= ("Inspect code"::T.Text),"workspace" .= object ["mode" .= ("shared"::T.Text)]]) >>= right
       child <- spawnedId childResult
       record <- agentSession runtime child >>= maybe (error "Missing shared editor") pure
       assert "shared child uses existing editor session" (sessionId record==session)
@@ -144,7 +147,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
       callProcess "git" ["-C",project,"add","source.txt"]
       callProcess "git" ["-C",project,"-c","user.name=Runtime Test","-c","user.email=test@example.invalid","-c","commit.gpgsign=false","commit","-qm","fixture"]
       writeFile (project </> "source.txt") "dirty\n"
-      isolatedResult <- agentTool hub Human project "agent_spawn" (object ["name" .= ("worktree"::T.Text),"task" .= ("Inspect committed source"::T.Text)]) >>= right
+      isolatedResult <- Tool.callTool tools (agentServices hub Human project) "agent_spawn" (object ["name" .= ("worktree"::T.Text),"task" .= ("Inspect committed source"::T.Text)]) >>= right
       isolated <- spawnedId isolatedResult
       workspace <- agentSession runtime isolated >>= maybe (error "Missing worktree editor") pure
       assert "worktree owns independent editor and directory" (sessionId workspace/=session && sessionDirectory workspace/=project)

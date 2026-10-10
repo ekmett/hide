@@ -1,10 +1,10 @@
 # Accessibility for the native and browser frontends
 
-Status: visible sidebar, PNG image descriptions and current modal dialogs have
-read-only projections for browser ARIA and macOS accessibility. `editor_screen`
-uses the same host projection with the agent privacy policy. No actions,
-offscreen reads, source-text references or second widget registry are added.
-The wider desktop bridge and Windows/Linux adapters below remain proposed.
+Status: the visible sidebar, image descriptions, current modal dialogs and the
+focused ordinary source view have read-only projections for browser ARIA and
+macOS accessibility. `editor_screen` uses the same host projections with the
+agent privacy policy. These snapshots carry no input authority. The wider desktop
+bridge, offscreen text requests and Windows/Linux adapters remain proposed.
 
 `semanticSidebar` carries at most 256 viewport rows and 512 nodes, including
 required ancestors. Identity combines the opaque provider registration, sidebar
@@ -20,6 +20,32 @@ Dialog values follow central privacy policy before serialization. Text areas
 read only measured visible rows; preparation never flattens a source buffer or
 Undo history. Keep the existing renderer and derive semantics from the model,
 not painted character cells.
+
+`semanticSource` names the focused source view and its buffer, with the displayed
+line span, horizontal display offset and clipped cell bounds. Use the browser's
+**Source excerpt** region or the corresponding macOS static text element to read
+it, then return to the editor controls to move or scroll. Reading this excerpt
+does not move the editor caret or send keystrokes to the host.
+
+The excerpt contains at most 256 visible rows, 2,048 scalars per row and 32,768
+scalars including line separators. Each row also caps consumed source at 4,096
+scalars, so zero-width controls cannot force a scan of the whole line. Tabs are
+expanded; a glyph cut by the viewport is replaced by spaces. Measured line and
+horizontal seeks avoid flattening the file or its Undo history. Ordinary visible
+runs borrow source slices; masks, tabs and control placeholders allocate only
+their replacement text. IDs survive scrolling and moving the same view; split
+views have different IDs. Frontends retain reading focus while replacing the
+bounded text snapshot. Source editing, range queries and selection APIs are not
+yet exposed through accessibility.
+
+Menus, dialogs, sidebar/Messages focus, private views under the applicable policy,
+and views with inline completion proposals clear the source excerpt. Markdown,
+change views, hex, terminals and plugin windows need their own semantic content;
+they are not reported as ordinary source. Detach and invalid metadata clear the
+previous text. An explicit absent snapshot clears the source; ordinary frame
+deltas retain unchanged semantics. Owner displays obey Streamer Mode; agent
+captures always apply protected-buffer policy before reading a title or source
+text.
 
 The [plugin design](haskell-plugins.md#semantic-tree-and-accessibility-transport)
 uses the same retained tree for standard widgets and canvas descriptions. Track
@@ -50,9 +76,9 @@ sessions. The daemon in [Remote.hs](../../src/Hide/Remote.hs) owns `Desktop`;
 the display receives frames. Adding AppKit hooks only to `Window.runWindow`
 would miss that path. Extend [Protocol.hs](../../src/Hide/Protocol.hs) with
 optional semantic updates and actions alongside the existing display transport.
-The browser currently has a canvas and an offscreen input textarea in
-[assets/web](../../assets/web/index.html); those expose neither the desktop
-structure nor the source document.
+The browser keeps its canvas and input textarea in
+[assets/web](../../assets/web/index.html), with separate read-only semantic
+regions. These regions do not dispatch editing gestures to the host.
 
 ## Shared semantic contract
 

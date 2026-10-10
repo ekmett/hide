@@ -9,7 +9,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
   , c_accessibility, c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
-  , emptyDialogAccessibility, installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
+  , emptySourceAccessibility, emptyDialogAccessibility, installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
   , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_power_mode, c_power_mode_burst, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
@@ -18,17 +18,17 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #endif
   ) where
 import Hide.Frontend
-import qualified Hide.Plugin.Menu as PluginMenu
 import Hide.Model
 import Hide.Commands (builtinCommands, builtinAction)
 import Hide.Bindings (readChord)
 import qualified Data.Text as Text
 import qualified Graphics.Vty as Keys
 import Data.Char (chr, toLower)
+import qualified Data.Bits as Bits
 import Data.Maybe (mapMaybe)
 #ifdef WITH_WINDOW
+import qualified Hide.Plugin.Menu as PluginMenu
 import Data.List (elemIndex)
-import qualified Data.Bits as Bits
 import Data.IORef
 import qualified Data.Map.Strict as M
 import Data.Aeson (object,(.=),encode)
@@ -53,7 +53,7 @@ import Hide.Unicode (Script(..), CellSpan(..), clusterWidth)
 import Hide.TextStyle
 import Hide.Font
 import Hide.Render
-import Hide.Accessibility (SemanticAudience(..),dialogSemantics)
+import Hide.Accessibility (SemanticAudience(..),dialogSemantics,sourceSemantics)
 
 #endif
 
@@ -155,6 +155,10 @@ check context action = do
 -- | Lend a temporary NUL-terminated UTF-8 C string for the callback only.
 utf8 :: T.Text -> (CString -> IO a) -> IO a
 utf8 text = BS.useAsCString (TE.encodeUtf8 text)
+
+-- | Clear the read-only source excerpt without changing SDL focus.
+emptySourceAccessibility :: BS.ByteString
+emptySourceAccessibility="{\"source\":{\"present\":false,\"readOnly\":true},\"size\":[40,12]}"
 
 -- | The complete dismissed modal snapshot; clearing it never changes SDL focus.
 emptyDialogAccessibility :: BS.ByteString
@@ -308,6 +312,8 @@ draw font canvasOwner d = allocaArray 16 $ \scratch -> do
       dialogBytes=BL.toStrict (encode (object ["dialog" .= dialogSemantics OwnerSemantics d,"size" .= screenSize d,"hapticFeedback" .= hapticFeedback d]))
   BS.useAsCStringLen dialogBytes $ \(ptr,len)->check "Update local dialog accessibility" (c_accessibility ptr (fromIntegral len))
   updateNativeCanvas canvasOwner modal (screenSize d) scene
+  let sourceBytes=BL.toStrict (encode (object ["source" .= sourceSemantics OwnerSemantics d,"size" .= screenSize d]))
+  BS.useAsCStringLen sourceBytes $ \(ptr,len)->check "Update local source accessibility" (c_accessibility ptr (fromIntegral len))
   check "Present window frame" c_present
   where
     go :: Ptr Word16 -> Int -> Int -> [CellSpan] -> IO ()
@@ -539,4 +545,4 @@ nativeChordShortcut chords=case mapMaybe encodeChord chords of value:_ -> value;
           _->lookup key [(Keys.KEnter,"\r"),(Keys.KEsc,"\ESC"),(Keys.KBS,"\DEL"),(Keys.KDel,[chr 0xf728]),(Keys.KIns,[chr 0xf727]),
             (Keys.KUp,[chr 0xf700]),(Keys.KDown,[chr 0xf701]),(Keys.KLeft,[chr 0xf702]),(Keys.KRight,[chr 0xf703]),
             (Keys.KHome,[chr 0xf729]),(Keys.KEnd,[chr 0xf72b]),(Keys.KPageUp,[chr 0xf72c]),(Keys.KPageDown,[chr 0xf72d])]
-        pure (name,foldr (.|.) 0 [mask | (modifier,mask)<-[(Keys.MShift,1),(Keys.MCtrl,2),(Keys.MAlt,4),(Keys.MMeta,8)],modifier `elem` mods])
+        pure (name,foldr (Bits..|.) 0 [mask | (modifier,mask)<-[(Keys.MShift,1),(Keys.MCtrl,2),(Keys.MAlt,4),(Keys.MMeta,8)],modifier `elem` mods])

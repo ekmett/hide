@@ -1,12 +1,92 @@
 // SPDX-License-Identifier: BSD-3-Clause
-/* Checked no-replace filesystem rename. No fallback may overwrite a target. */
+/* File identity, checked no-replace rename, and atomic replacement. */
 #define _GNU_SOURCE
+/* FileRenameInfoEx is part of the supported Windows 10 API. */
+#if defined(_WIN32) && (!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0A00)
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <stddef.h>
+#include <wchar.h>
+#include <io.h>
+#include <fcntl.h>
+
+/* The caller transfers ownership only when a descriptor is returned. */
+int hide_read_descriptor(HANDLE handle) {
+  return _open_osfhandle((intptr_t)handle, _O_RDONLY | _O_BINARY);
+}
+
+/* directory has length UTF-16 units; name has length+40 wchar_t entries.
+ * CreateFileW owns exclusivity;
+ * neither a collision nor failure may open or remove an existing file. The
+ * caller owns the returned CRT descriptor and path after success. */
+DWORD hide_create_temporary_file(wchar_t const *directory, size_t length, wchar_t *name, int *fd) {
+  HCRYPTPROV provider;
+  if (!CryptAcquireContextW(&provider, NULL, NULL, PROV_RSA_AES,
+      CRYPT_VERIFYCONTEXT | CRYPT_SILENT)) return GetLastError();
+  memcpy(name, directory, length * sizeof(wchar_t));
+  if (length && name[length-1] != L'\\') name[length++] = L'\\';
+  memcpy(name+length, L".hide-", 6 * sizeof(wchar_t));
+  length += 6;
+  DWORD error = ERROR_SUCCESS;
+  for (;;) {
+    BYTE random[16];
+    if (!CryptGenRandom(provider, sizeof random, random)) {
+      error = GetLastError(); break;
+    }
+    for (size_t i=0; i<sizeof random; ++i) {
+      name[length+2*i] = L"0123456789abcdef"[random[i] >> 4];
+      name[length+2*i+1] = L"0123456789abcdef"[random[i] & 15];
+    }
+    name[length+32] = L'\0';
+    HANDLE handle = CreateFileW(name, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+      CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (handle == INVALID_HANDLE_VALUE) {
+      error = GetLastError();
+      if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS) continue;
+      break;
+    }
+    error = ERROR_SUCCESS;
+    *fd = _open_osfhandle((intptr_t)handle, _O_RDWR | _O_BINARY);
+    if (*fd < 0) {
+      error = errno == EMFILE ? ERROR_TOO_MANY_OPEN_FILES : ERROR_INVALID_HANDLE;
+      CloseHandle(handle);
+      DeleteFileW(name);
+    }
+    break;
+  }
+  CryptReleaseContext(provider, 0);
+  return error;
+}
+
+/* MoveFileEx cannot replace an open destination, even with delete sharing.
+ * POSIX rename leaves existing readers on the old file object. Never fall back
+ * to a delete/copy sequence: on failure both paths must retain their contents. */
+DWORD hide_replace_file(wchar_t const *source, wchar_t const *destination) {
+  HANDLE handle = CreateFileW(source, DELETE,
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+    FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (handle == INVALID_HANDLE_VALUE) return GetLastError();
+  size_t bytes = wcslen(destination) * sizeof(wchar_t);
+  size_t size = sizeof(FILE_RENAME_INFO) + bytes;
+  FILE_RENAME_INFO *info = calloc(1, size);
+  if (!info) { CloseHandle(handle); return ERROR_NOT_ENOUGH_MEMORY; }
+  info->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+  info->FileNameLength = (DWORD)bytes;
+  memcpy(info->FileName, destination, bytes);
+  BOOL ok = SetFileInformationByHandle(handle, FileRenameInfoEx, info, (DWORD)size);
+  DWORD error = ok ? ERROR_SUCCESS : GetLastError();
+  free(info);
+  CloseHandle(handle);
+  return error;
+}
+
 static wchar_t *wide_path(char const *path) {
   int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
   if (!n) { errno = EINVAL; return NULL; }

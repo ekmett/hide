@@ -7,7 +7,7 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 --
--- Read-only sidebar and modal semantics from current host presentation. A complete
+-- Read-only sidebar, modal and source semantics from current host presentation. A complete
 -- bounded projection accompanies a frame; it adds no action authority and never
 -- reads unrelated document payloads. Resource annotations enter central privacy policy but
 -- are never serialized.
@@ -15,6 +15,7 @@ module Hide.Accessibility
   ( SemanticAudience(..)
   , sidebarSemantics
   , dialogSemantics
+  , sourceSemantics
   ) where
 
 import Data.Aeson (Value, object, (.=))
@@ -24,12 +25,17 @@ import Data.Maybe (isJust)
 import qualified Data.Sequence as S
 import Data.Text (Text)
 import qualified Data.Text as T
-import Hide.GuestAccess (protectedPath,privateDialogField,readableAt,streamerReadableAt)
+import qualified Data.Text.Unsafe as TU
+import Hide.GuestAccess (protectedFilePath,privateDialogFieldWith,readableAtWith,streamerReadableAtWith)
 import Hide.Model (Desktop(..), Dialog(..), Field(..), Purpose(..), Rect(..), problemsHeight, treeContentRows,
-  dialogRect,fieldRects,buttonRects,textAreaRect,openComboBox,comboBoxRect,inside)
-import Hide.Buffer (caret,displayColumn,bufferContent,contentSourceLinesFrom,sourceLineWindow)
+  dialogRect,fieldRects,fileListRows,buttonRects,textAreaRect,openComboBox,comboBoxRect,inside,
+  Document(..),Window(..),activeWindow,windowFocused,bufferId,windowDocument,
+  syntaxDocument,windowPresentation,windowTitle,windowContentRows,treeWidthOf,privateDocument,privateFilePaths)
+import Hide.BufferView (BufferView(..))
+import qualified Hide.Buffer as Buffer
+import Hide.Buffer (caret,displayColumn,bufferContent,contentSourceLinesFrom,sourceLineWindow,sourceLineLength)
 import Hide.Browser (Entry(..))
-import Hide.Unicode (displayItems,itemDisplayText,itemSourceText,itemWidth,sourceItemAdvance)
+import Hide.Unicode (DisplayItem,itemScalarCount,itemOverflow,displayItems,itemDisplayText,itemSourceText,itemWidth,sourceItemAdvance)
 import Data.Char (isControl)
 import Hide.Plugin.Tree
 import Hide.Sidebar
@@ -71,7 +77,8 @@ sidebarSemantics audience d=case sideTree d of
               Just chain | all (\(_,state)->allowed (stateInfo state) && maybe True (allowed . rowInfo) (M.lookup (stateAddress state) (treeRows current))) chain,
                 let combined=M.union retained (M.fromList chain),M.size combined<=511->combined
               _->retained
-      allowed info=not maskPrivate || maybe True (not . protectedPath d) (infoResource info)
+      privatePath=protectedFilePath (privateFilePaths d)
+      allowed info=not maskPrivate || maybe True (not . privatePath) (infoResource info)
       maskPrivate=audience==GuestSemantics || streamerMode d
       host current=object
         ["id" .= (["sidebar"]::[Text]),"parent" .= (Nothing::Maybe [Text]),"role" .= ("tree"::Text),
@@ -152,9 +159,12 @@ dialogSemantics audience desktop=case dialog desktop of
         Nothing->Nothing
       obscured x y=maybe False (\(_,rect)->inside rect x y) popup
       visible popupChild x y=onGrid x y && allowed x y && (popupChild || not (obscured x y))
+      privatePaths=privateFilePaths desktop
+      guestReadable=readableAtWith privatePaths desktop
+      ownerReadable=streamerReadableAtWith privatePaths desktop
       allowed x y=case audience of
-        GuestSemantics->readableAt desktop x y
-        OwnerSemantics->not (streamerMode desktop) || streamerReadableAt desktop x y
+        GuestSemantics->guestReadable x y
+        OwnerSemantics->not (streamerMode desktop) || ownerReadable x y
       onGrid x y=x>=0 && y>=0 && x<columns && y<rows
       -- The frame corner is outside all field/value rectangles. Central policy
       -- can hide this cell only by hiding the whole modal (approval/private form).
@@ -181,7 +191,7 @@ dialogSemantics audience desktop=case dialog desktop of
         Just bounds->
           let ident=["dialog","field",number i]
               focused=focus dg==i
-              private=(audience==GuestSemantics || streamerMode desktop) && privateDialogField desktop dg field
+              private=(audience==GuestSemantics || streamerMode desktop) && privateDialogFieldWith privatePaths desktop dg field
               caption at labelText=shown False contentBounds at 0 labelText
               name=case field of
                 Input label _ _->caption (Rect x y w 1) label
@@ -242,12 +252,12 @@ dialogSemantics audience desktop=case dialog desktop of
                     _->[]
               in container "combobox" (textValue (Rect x (y+1) (max 0 (w-2)) 1) 0 chosen) Nothing Nothing
                 (state (Rect x y w 1) (maybe False (const True) preview)) False options
-            FileList entries selected->let cw=max 1 ((w-3) `div` 2); start=max 0 selected `div` 16*16 in
+            FileList entries selected->let cw=max 1 ((w-3) `div` 2); count=fileListRows rect; start=max 0 selected `div` (2*count)*(2*count) in
               container "listbox" Nothing Nothing Nothing Nothing False
                 (concat [option False "option" index (index==selected) False
-                  (Rect (x+2+(offset `div` 8)*(cw+1)) (y+2+offset `mod` 8) (max 0 (cw-1)) 1)
+                  (Rect (x+2+(offset `div` count)*(cw+1)) (y+2+offset `mod` count) (max 0 (cw-1)) 1)
                   (entryName entry<>if entryDirectory entry then "/" else "")
-                  | (offset,(index,entry))<-zip [0::Int ..] (take 16 (drop start (zip [0::Int ..] entries)))])
+                  | (offset,(index,entry))<-zip [0::Int ..] (take (2*count) (drop start (zip [0::Int ..] entries)))])
       fullyReadable popupChild rect=case clip screen rect of
         Nothing->False
         Just (Rect x y w h)->and [visible popupChild cx cy | cy<-[y..y+h-1],cx<-[x..x+w-1]]
@@ -262,23 +272,9 @@ dialogSemantics audience desktop=case dialog desktop of
         Nothing->""
         Just clipped->T.stripEnd (renderItems (\cx->inside clipped cx y && visible popupChild cx y) x w offset False 0 (displayItems text))
       sourceText rect@(Rect x y w _) column line=
-        let (_,start,groups)=sourceLineWindow line column
-        in T.stripEnd (renderItems (\cx->inside rect cx y && visible False cx y) x w column True start (concatMap snd groups))
-      renderItems permit x width offset source start=go start 0
-        where
-          go column count _ | column>=offset+width || count>=2048=""
-          go _ _ []=""
-          go column count (item:rest)=paint<>go (column+advance) (count+T.length paint) rest
-            where
-              advance=if source then sourceItemAdvance column item else itemWidth item
-              at=x+column-offset
-              unmasked=column>=offset && column+advance<=offset+width && all permit [at..at+advance-1]
-              text=itemDisplayText item
-              paint | advance<=0=""
-                    | not unmasked=T.replicate (max 0 (min (offset+width) (column+advance)-max offset column)) " "
-                    | source && itemSourceText item=="\t"=T.replicate advance " "
-                    | T.any isControl text="�"
-                    | otherwise=text
+        T.stripEnd (fst (visibleSourceLine 2048 (\cx->inside rect cx y && visible False cx y) x w column line))
+      renderItems permit x width offset source start items=
+        fst (visibleItems 2048 permit x width offset source start items)
   where
     (columns,rows)=screenSize desktop
     screen=Rect 0 0 columns rows
@@ -303,3 +299,131 @@ dialogSemantics audience desktop=case dialog desktop of
     bounded left budget ((size,shortened,value):rest)
       | left<=0 || size>budget=([],True)
       | otherwise=let (values,cut)=bounded (left-1) (budget-size) rest in (value:values,shortened || cut)
+
+
+-- | Read-only excerpt of the focused ordinary source view. Privacy and view
+-- admission precede title or content reads. One measured line seek is followed
+-- by at most 256 visible rows and 32768 text scalars; saved text and Undo are
+-- never inspected. IDs name the view and buffer within the current attachment.
+--
+-- A covered, private or unsupported view emits an absent replacement. This is
+-- display text, including expanded tabs and omitted partial wide glyphs, not an
+-- editable document or an offscreen text API.
+sourceSemantics :: SemanticAudience -> Desktop -> Value
+sourceSemantics audience d
+  | isJust (dialog d) || isJust (menu d) || isJust (contextMenu d)=absent
+  | Just w<-activeWindow d,windowFocused d w,Just bid<-bufferId w,
+    Just doc<-windowDocument (buffers d) w,
+    not (maskPrivate && privateDocument d doc),
+    bufferView w==CurrentView,syntaxDocument doc,
+    Nothing<-windowPresentation d w,Nothing<-inlinePreview d,
+    let Rect wx wy ww _=bounds w,
+    Just area@(Rect x y cw ch)<-intersection available
+      (Rect (wx+1) (wy+1) (max 0 (ww-2)) (windowContentRows d doc w))=
+      let first=max 0 (scrollRow w)+y-wy-1
+          column=max 0 (scrollColumn w)+x-wx-1
+          content=bufferContent (documentBuffer doc)
+          visible=take (min 256 ch) (contentSourceLinesFrom content first)
+          (texts,cut)=excerpt 32768 column cw visible
+          title=T.take 256 (T.map (\c->if isControl c then ' ' else c) (windowTitle d w))
+      in object ["present" .= True,"readOnly" .= True,
+        "id" .= (["source",T.pack (show (windowId w)),T.pack (show bid)]::[Text]),
+        "revision" .= max 0 (Buffer.revision (documentBuffer doc)),"name" .= title,
+        "bounds" .= rectangle area,"firstLine" .= (first+1),"firstColumn" .= column,
+        "lineCount" .= max 1 (length texts),"value" .= T.intercalate "\n" texts,
+        "truncated" .= (cut || ch>256)]
+  | otherwise=absent
+  where
+    maskPrivate=audience==GuestSemantics || streamerMode d
+    (cols,rows)=screenSize d
+    paneLeft=treeWidthOf d+if isJust (sideTree d) then 1 else 0
+    available=Rect paneLeft 1 (max 0 (cols-paneLeft)) (max 0 (rows-problemsHeight d-2))
+    absent=object ["present" .= False,"readOnly" .= True]
+    rectangle (Rect x y w h)=[x,y,w,h]
+    excerpt _ _ _ []=([],False)
+    excerpt budget column width (line:rest)
+      | budget<=0=([],True)
+      | otherwise=
+          let (raw,cut)=visibleSourceLine (min 2048 budget) (const True) 0 width column line
+              text=T.stripEnd raw
+              (texts,tailCut)=excerpt (budget-T.length text-1) column width rest
+          in (text:texts,cut || tailCut)
+
+-- Shared modal/source display projection. Whole display items are admitted so
+-- clipping or the scalar budget cannot reveal part of a grapheme. Work stops at
+-- the right edge, without demanding the rest of a long line.
+visibleItems :: Int -> (Int -> Bool) -> Int -> Int -> Int -> Bool -> Int -> [DisplayItem] -> (Text,Bool)
+visibleItems budget permit x width offset source start items=
+  let (pieces,cut)=go 0 0 start items in (T.concat pieces,cut)
+  where
+    go _ _ column _ | column>=offset+width=([],False)
+    go _ _ _ []=([],False)
+    go count consumed column (item:rest)
+      | size>budget-count || consumed+itemScalarCount item>4096=([],True)
+      | otherwise=let (suffix,cut)=go (count+size) (consumed+itemScalarCount item) (column+advance) rest in (paint:suffix,cut)
+      where
+        advance=if source then sourceItemAdvance column item else itemWidth item
+        at=x+column-offset
+        unmasked=column>=offset && column+advance<=offset+width && all permit [at..at+advance-1]
+        text=itemDisplayText item
+        paint | advance<=0=""
+              | not unmasked=T.replicate (max 0 (min (offset+width) (column+advance)-max offset column)) " "
+              | source && itemSourceText item=="\t"=T.replicate advance " "
+              | source=T.map (\c->if isControl c then '·' else c) text
+              | T.any isControl text="�"
+              | otherwise=text
+        size=T.length paint
+
+-- Physical storage chunks may retain CR/LF. The cached source extent excludes
+-- them, so both modal and source readers stop before the terminator. Ordinary
+-- visible items borrow one contiguous run per storage group; only masking,
+-- tabs, controls and overflow need replacement text. No second segmentation or
+-- per-character output allocation is needed.
+visibleSourceLine :: Int -> (Int -> Bool) -> Int -> Int -> Int -> Buffer.SourceLine -> (Text,Bool)
+visibleSourceLine budget permit x width offset line=
+  let (scalar,start,groups)=sourceLineWindow line offset
+  in next 0 0 start (sourceLineLength line-scalar) [] groups
+  where
+    right=offset+width
+    done pieces cut=(T.concat (reverse pieces),cut)
+    next count consumed column remaining pieces groups
+      | column>=right || remaining<=0=done pieces False
+      | otherwise=case groups of
+          []->done pieces False
+          (text,items):more->scan count consumed column remaining pieces text 0 0 items more
+    -- [begin,byte) is an admitted run in this group's original Text array.
+    flush pieces text begin byte
+      | byte<=begin=pieces
+      | otherwise=TU.takeWord8 (byte-begin) (TU.dropWord8 begin text):pieces
+    scan count consumed column remaining pieces text begin byte items more
+      | column>=right || remaining<=0=done (flush pieces text begin byte) False
+      | otherwise=case items of
+          []->next count consumed column remaining (flush pieces text begin byte) more
+          item:rest
+            | n>remaining->done (flush pieces text begin byte) False
+            | consumed+n>4096 || size>budget-count->done (flush pieces text begin byte) True
+            | ordinary->scan (count+n) (consumed+n) (column+advance) (remaining-n)
+                pieces text begin end rest more
+            | otherwise->scan (count+size) (consumed+n) (column+advance) (remaining-n)
+                (if T.null paint then flushed else paint:flushed) text end end rest more
+            where
+              n=itemScalarCount item
+              original=itemSourceText item
+              shown=itemDisplayText item
+              end=byte+TU.lengthWord8 original
+              advance=sourceItemAdvance column item
+              at=x+column-offset
+              unmasked=column>=offset && column+advance<=right && all permit [at..at+advance-1]
+              ordinary=advance>0 && unmasked && not (itemOverflow item) && not (T.any isControl original)
+              paint | advance<=0=""
+                    | not unmasked=T.replicate (max 0 (min right (column+advance)-max offset column)) " "
+                    | original=="\t"=T.replicate advance " "
+                    | otherwise=T.map (\c->if isControl c then '·' else c) shown
+              size=if ordinary then n else T.length paint
+              flushed=flush pieces text begin byte
+
+intersection :: Rect -> Rect -> Maybe Rect
+intersection (Rect ax ay aw ah) (Rect bx by bw bh)
+  | w<=0 || h<=0=Nothing
+  | otherwise=Just (Rect x y w h)
+  where x=max ax bx; y=max ay by; w=min (ax+aw) (bx+bw)-x; h=min (ay+ah) (by+bh)-y

@@ -22,12 +22,12 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
-import Hide.Accessibility (SemanticAudience(GuestSemantics), sidebarSemantics, dialogSemantics)
+import Hide.Accessibility (SemanticAudience(GuestSemantics), sidebarSemantics, dialogSemantics, sourceSemantics)
 import Hide.Font
 import Hide.Frontend (modeHeight)
 import Hide.Commands (commandIdentifier)
-import Hide.Model (Desktop(..), MenuItem(..), menus, commandEnabled)
-import Hide.GuestAccess (CellAccess(..), cellAccess, guestKeyboardAllowed, beginGuestInput, guestKeyCombinations)
+import Hide.Model (Desktop(..), MenuItem(..), menus, commandEnabled, privateFilePaths)
+import Hide.GuestAccess (CellAccess(..), cellAccessWith, guestKeyboardAllowed, beginGuestInput, guestKeyCombinations)
 import qualified Hide.Protocol as P
 import Hide.Render (renderCursor, renderCellRowsAndCanvas)
 import Hide.Plugin.Canvas
@@ -77,8 +77,9 @@ capture font desktop includeImage
     spanClusters (CellScript attr text natural script)=[(text,1,attr,Just (natural,script))]
     spanClusters (CellGlyph attr text full start shown)=
       [(if start/=0 || shown/=full then T.replicate shown " " else text,shown,attr,Nothing)]
+    accessAt=cellAccessWith (privateFilePaths desktop) desktop
     maskCluster y x (text,width,attr,script)=
-      let access=[cellAccess desktop column y | column<-[x..x+width-1]]
+      let access=[accessAt column y | column<-[x..x+width-1]]
           (shown,safeAccess)=redactCluster text access
           readable=all cellReadable safeAccess
           shownAttr=if readable then attr else V.defAttr `V.withForeColor` V.RGBColor 0 0 0 `V.withBackColor` V.RGBColor 0 0 0
@@ -110,6 +111,7 @@ capture font desktop includeImage
       "commandPermissions" .= commands,
       "semanticSidebar" .= sidebarSemantics GuestSemantics desktop,
       "semanticDialog" .= dialogSemantics GuestSemantics desktop,
+      "semanticSource" .= sourceSemantics GuestSemantics desktop,
       "semanticCanvas" .= [object ["id" .= canvasId surface,"role" .= ("image"::Text),
         "name" .= canvasName surface,"description" .= canvasDescription surface,"bounds" .= canvasRect surface]
         | dialog desktop==Nothing,surface<-canvasSurfaces canvas,IS.member (canvasSlot surface) visibleImageSlots],

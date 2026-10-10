@@ -19,6 +19,7 @@ import Hide.App (applyEffects)
 import Hide.Files (filePath)
 import Hide.Buffer
 import Hide.Model
+import qualified Hide.LSP as L
 import Hide.Tooling
 
 main :: IO ()
@@ -31,7 +32,7 @@ main = bracket temporary removePathForcibly $ \root -> do
   let warning="{-# OPTIONS_GHC -Wtype-defaults #-}\nmodule Live where\nwarn :: String\nwarn = show (read \"1\" + 1)\n"
   T.writeFile file warning
   (_,existing)<-applyEffects (initialDesktop (120,40)) [ReadPath file]
-  withTooling $ \tooling -> do
+  withTooling L.startClient $ \tooling -> do
     warned<-await "warning in pre-existing file without saving" (tickTooling tooling applyEffects)
       (any ((==2).diagnosticSeverity) . diagnostics) existing
     check "initial warnings do not need an editor save" (not (dirty (buffer warned)) && revision (buffer warned)==0)
@@ -41,7 +42,7 @@ main = bracket temporary removePathForcibly $ \root -> do
   T.writeFile file bad
   (_,loaded) <- applyEffects (initialDesktop (120,40)) [ReadPath file]
   check "fixture loaded through App" (activeText loaded == bad)
-  withTooling $ \tooling -> do
+  withTooling L.startClient $ \tooling -> do
     let tick = tickTooling tooling applyEffects
         effects = toolingEffects tooling applyEffects
         command cmd desktop = uncurry (\updated pending -> snd <$> effects updated pending) (runCommand cmd desktop)
@@ -103,7 +104,7 @@ crossFileRename parent = do
   T.writeFile provider source
   T.writeFile consumer usage
   (_,loaded) <- applyEffects (initialDesktop (120,40)) [ReadPath consumer]
-  withTooling $ \tooling -> do
+  withTooling L.startClient $ \tooling -> do
     let tick = tickTooling tooling applyEffects
         effects = toolingEffects tooling applyEffects
     indexed <- await "cross-file consumer indexing" tick (T.isInfixOf "Int" . typeHint) (moveTo False (lineOffset usage 5+8) loaded)

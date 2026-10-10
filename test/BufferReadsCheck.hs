@@ -21,6 +21,7 @@ import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 import System.Timeout (timeout)
 import Hide.Buffer
+import Hide.Files (FileState(..))
 import Hide.AgentAccess
 import qualified Hide.AgentHub as AH
 import Hide.BufferReads
@@ -117,6 +118,20 @@ checks=bracket temporary removePathForcibly $ \directory -> do
         (either (const False) (\value->case parseMaybe (withObject "read result" (.: "text")) value of
           Just output->not ("private-token" `T.isInfixOf` output) && not ("unsent-secret" `T.isInfixOf` output) && "public λ" `T.isInfixOf` output
           Nothing->False) maskedResult)
+    let origin="/project/recovered-input.txt"
+    originBody<-W.prepareSemanticTextWindow "Preview" [("private draft",Plain)]
+      (W.TextSemantics W.CopyText (Just origin) V.empty V.empty W.ReadableWindow V.empty V.empty V.empty)
+      >>= either (error . T.unpack) pure
+    W.withWindowScope $ \scope->do
+      update<-W.openWindow scope originBody >>= maybe (error "origin window opening failed") pure
+      (reference,_)<-W.admitWindowUpdate False update >>= maybe (error "origin window admission failed") pure
+      let readable=addPluginWindow reference originBody base
+          ident=maybe (error "missing origin frame") windowId (activeWindow readable)
+          savedInput=addDocument (Just (FileState origin Nothing)) (newBuffer "private draft") readable
+          restricted=savedInput {buffers=M.adjust (\doc->doc {documentPrivate=True}) (nextId readable) (buffers savedInput)}
+      target<-either (error . T.unpack) pure (windowReadTarget readable ident)
+      check "readable declarations do not override private saved provenance" (isLeft (windowReadTarget restricted ident))
+      check "prepared reads recheck current private paths on admission" . isLeft =<< captureWindow restricted target
     TIO.writeFile path "[editor.mcp.permissions]\nread_buffer = 'prompt'\n"
     (approvalPrompt,pending)<-begin reader base
     check "read policy Prompt uses owning approval queue" (dialog approvalPrompt/=Nothing)

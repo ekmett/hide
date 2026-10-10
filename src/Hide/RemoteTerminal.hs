@@ -6,7 +6,7 @@
 -- input; local detach remains available. Clipboard export uses OSC 52 and does
 -- not read the terminal host clipboard.
 module Hide.RemoteTerminal
-  (runRemoteTerminal, terminalEventInput, remoteTerminalDisplay, terminalClipboard
+  (runRemoteTerminal, terminalEventInput, TerminalClicks, noTerminalClicks, terminalEventAt, remoteTerminalDisplay, terminalClipboard
 #ifdef WITH_REMOTE
   , Incoming(..), receiveTerminalFrames
 #endif
@@ -22,6 +22,7 @@ import qualified Graphics.Vty as V
 import qualified Data.IntMap.Strict as IM
 import qualified Data.Vector as Vec
 import Data.Char (isPrint)
+import Data.Word (Word64)
 import Graphics.Vty.Span (DisplayOps)
 import Hide.Links (openResource)
 import Hide.Remote (RemotePeer)
@@ -30,6 +31,8 @@ import Hide.RemoteWindow (RemoteFrame(..), RemoteCell(..), remoteBindingInput)
 import Hide.Unicode (CellSpan(..),cellDisplayOps,displayItems,itemDisplayText,itemWidth)
 #ifdef WITH_REMOTE
 import Control.Concurrent.Async (withAsync, poll)
+import Data.IORef (newIORef,readIORef,writeIORef)
+import GHC.Clock (getMonotonicTimeNSec)
 import Control.Concurrent.STM
 import Control.Exception (bracket, finally, throwIO)
 import Control.Monad (forever, forM_, unless, when)
@@ -42,7 +45,7 @@ import System.IO (stdout, stderr, hPutStrLn, hFlush, openBinaryTempFile, hClose)
 import System.Timeout (timeout)
 import Hide.Protocol (WirePacket(..), decodeFrame,parseClipboardRequest,clipboardReplyInput)
 import Hide.FileExport (FileExports,withFileExports,startHelperFileExport)
-import Hide.Remote (peerReceive, peerSend)
+import Hide.Remote (peerReceive, peerSend, peerAttachment)
 import Hide.RemoteWindow (parseRemoteFrame, sanitizeDownloadName)
 import Hide.Unicode (updateDisplayOps)
 #endif
@@ -74,6 +77,41 @@ terminalEventInput event = case event of
     mods ms = [name | (modifier,name)<-[(V.MShift,"shift"::T.Text),(V.MCtrl,"ctrl"),(V.MAlt,"alt"),(V.MMeta,"alt")],modifier `elem` ms]
     mouse x y action button modifiers = Just (object ["type" .= ("mouse"::T.Text),"action" .= (action::T.Text),
       "x" .= max (-1) (min 511 x),"y" .= max (-1) (min 255 y),"button" .= (case button of V.BRight -> 2; V.BMiddle -> 1; _ -> 0::Int),"clicks" .= (1::Int),"mods" .= mods modifiers])
+
+-- | One terminal-local click sequence. Vty reports presses, releases and held
+-- motion, but no click count. A completed click can pair with the next press;
+-- dragging or any unrelated input retires it. No desktop contents are retained.
+data TerminalClicks = NoTerminalClicks
+  | ClickPressed !Word64 !Int !Int ![V.Modifier]
+  | ClickReleased !Word64 !Int !Int ![V.Modifier]
+  | ClickDragged
+
+-- | Empty gesture state, also used after disconnect or session handoff.
+noTerminalClicks :: TerminalClicks
+noTerminalClicks=NoTerminalClicks
+
+-- | /O(1)/. Encode an event at a monotonic nanosecond timestamp. Two left
+-- presses at the same cell/modifiers within 500 ms form one double click.
+-- A release is required; held motion never advances the click count. A third
+-- press starts a new pair, so drilling into a directory cannot chain a triple.
+terminalEventAt :: Word64 -> V.Event -> TerminalClicks -> (TerminalClicks,Maybe Value)
+terminalEventAt now event previous=(next,if double then fmap twice encoded else encoded)
+  where
+    encoded=terminalEventInput event
+    (next,double)=case event of
+      V.EvMouseDown x y V.BLeft modifiers -> case previous of
+        ClickReleased began px py old | (x,y)==(px,py),modifiers==old,
+          now>=began,now-began<=500000000 -> (ClickDragged,True)
+        ClickPressed began px py old | (x,y)==(px,py),modifiers==old -> (ClickPressed began px py old,False)
+        ClickPressed{} -> (ClickDragged,False)
+        ClickDragged -> (ClickDragged,False)
+        _ -> (ClickPressed now x y modifiers,False)
+      V.EvMouseUp x y button | button==Nothing || button==Just V.BLeft -> case previous of
+        ClickPressed began px py modifiers | (x,y)==(px,py) -> (ClickReleased began px py modifiers,False)
+        _ -> (NoTerminalClicks,False)
+      _ -> (NoTerminalClicks,False)
+    twice (Object fields)=Object (KM.insert "clicks" (toJSON (2::Int)) fields)
+    twice value=value
 
 -- | Project validated remote cells directly at the actual terminal bounds.
 -- Sparse gaps and partial glyphs occupy blanks. A notice covers only its bottom
@@ -149,19 +187,31 @@ runRemoteTerminal peer = withFileExports $ \exports -> bracket (mkVty V.defaultC
   incoming <- newTBQueueIO 8
   outgoing <- newTBQueueIO 64
   queued <- newTVarIO (0::Int)
+  attachment<-peerAttachment peer >>= newTVarIO
+  clicks<-newIORef noTerminalClicks
   let send value = do
-        let size=fromIntegral (BL.length (encode value))
         accepted <- atomically $ do
+          serial<-readTVar attachment
+          let tagged=case value of Object fields->Object (KM.insert "attachment" (toJSON serial) fields);_->value
+              size=fromIntegral (BL.length (encode tagged))
           full <- isFullTBQueue outgoing
           bytes <- readTVar queued
           if full || bytes+size>33554432 then pure False else do
-            writeTBQueue outgoing (size,value)
+            writeTBQueue outgoing (size,tagged)
             writeTVar queued (bytes+size)
             pure True
         unless accepted (ioError (userError "Remote terminal input queue is full"))
       drain = do
         sent <- timeout 2000000 (atomically (readTVar queued >>= check . (==0)))
         when (sent==Nothing) (hPutStrLn stderr "Some terminal input could not be handed to the session before detaching.")
+      retireInput value=do
+        writeIORef clicks noTerminalClicks
+        serial<-parseIO (withObject "attachment" (\o->o .:? "attachment")) value
+        atomically $ do
+          forM_ serial (writeTVar attachment)
+          abandoned<-flushTBQueue outgoing
+          modifyTVar' queued (subtract (sum (map fst abandoned)))
+      drainEvents=V.nextEventNonblocking vty >>= maybe (pure ()) (const drainEvents)
       resize = V.displayBounds (V.outputIface vty) >>= \(w,h) -> forM_ (terminalEventInput (V.EvResize w h)) send
       render frame message = do
         size <- V.displayBounds (V.outputIface vty)
@@ -179,8 +229,15 @@ runRemoteTerminal peer = withFileExports $ \exports -> bracket (mkVty V.defaultC
             kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text
             case kind of
               "closed" -> pure ()
+              "session" -> do
+                retireInput value
+                drainEvents
+                render Nothing "Switching session; Ctrl+] detaches"
+                loop receiver sender Nothing False Nothing ""
               "connection" -> do
+                retireInput value
                 live <- parseIO (withObject "connection" (.: "connected")) value
+                drainEvents
                 when live resize
                 render frame (if live then "" else "Reconnecting; Ctrl+] detaches")
                 loop receiver sender frame live clipboard ""
@@ -210,7 +267,12 @@ runRemoteTerminal peer = withFileExports $ \exports -> bracket (mkVty V.defaultC
             case event of
               Just (V.EvKey (V.KChar ']') [V.MCtrl]) -> pure ()
               _ -> do
-                when connected (forM_ (event >>= \input->maybe (terminalEventInput input) (\value->remoteBindingInput value input (terminalEventInput input)) frame) send)
+                forM_ event $ \input->when (connected || case input of V.EvResize{}->True;_->False) $ do
+                  now<-getMonotonicTimeNSec
+                  previous<-readIORef clicks
+                  let (next,encoded)=terminalEventAt now input previous
+                  writeIORef clicks next
+                  forM_ (maybe encoded (\value->remoteBindingInput value input encoded) frame) send
                 when (connected && event/=Nothing && not (T.null notice)) (render frame "")
                 loop receiver sender frame connected clipboard (if event==Nothing then notice else "")
   resize
@@ -254,6 +316,7 @@ receiveTerminalFrames exports peer queue = go [] (object []) Nothing
           "canvas-resource" -> go rows metadata download
           "canvas-release" -> go rows metadata download
           "download" -> parseIO (withObject "download" $ \o->(,) <$> o .: "name" <*> o .:? "purpose") value >>= go rows metadata . Just
+          "session" -> emit (Control value) >> go [] (object []) Nothing
           "connection" -> emit (Control value) >> go rows metadata Nothing
           _ -> emit (Control value) >> go rows metadata download
       Just (BinaryPacket bytes) -> case download of

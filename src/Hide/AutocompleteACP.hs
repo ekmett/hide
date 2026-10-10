@@ -31,7 +31,8 @@ import System.Timeout (timeout)
 import System.Environment (getEnvironment)
 import Hide.GuestAccess (sensitiveLabel)
 import qualified Hide.ACP as ACP
-import Hide.AgentHub (ConfigChoice(..), Capabilities(..), parseCapabilities, filterPrivateCapabilities)
+import Hide.Plugin.Agent (ConfigChoice(..), Capabilities(..))
+import Hide.AgentACP (parseCapabilities, filterPrivateCapabilities)
 import Hide.Buffer (lineColumn)
 import Hide.InlineTypes
 

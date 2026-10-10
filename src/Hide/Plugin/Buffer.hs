@@ -8,19 +8,19 @@
 -- worker. Strict diff requests use a separate host-bound editor; no mutable
 -- desktop, saving or arbitrary prepared-edit grant is exposed.
 module Hide.Plugin.Buffer
-  ( BufferEditor, applyBufferDiff, DiffResult, diffRevision, appliedDiff, userModified
+  ( BufferDiff(..), BufferEditor, applyBufferDiffs, applyBufferDiff, DiffResult, diffRevision, appliedDiff, userModified
   , BufferReader, listBuffers, ListedBuffer, listedRef, listedMetadata, listedBinary
   , captureBuffer, CapturedRead, capturedRef, capturedVersion, capturedContent
   , capturedRedacted, capturedMetadata, BufferMetadata, bufferIdentifier, displayName, path, modified, editRevision
   , BufferRef, BufferRead, ContentVersion, CharOffset(..), ByteOffset(..), LineNumber(..)
   , TextRange(..), ByteRange(..), RangeError(..), BufferRepresentation(..)
-  , representation, readLength, readLineCount, readText, readBytes, readLines, readLine
+  , representation, readLength, readLineCount, lineRange, readText, readBytes, readLines, readLine
   ) where
 
 import Data.ByteString (ByteString)
 import Data.Text (Text)
 import qualified Hide.Buffer as B
-import Hide.Plugin.BufferHost (BufferRef,ContentVersion,BufferReader,requestCapture,requestListing,ListedBuffer(..),CapturedRead(..),BufferMetadata(..),BufferEditor,requestDiff,DiffResult(..))
+import Hide.Plugin.BufferHost (BufferRef,ContentVersion,BufferReader,requestCapture,requestListing,ListedBuffer(..),CapturedRead(..),BufferMetadata(..),BufferDiff(..),BufferEditor,requestDiffs,requestDiff,DiffResult(..))
 
 -- | Immutable content reference with no structural Eq/Show instance.
 type BufferRead = B.BufferContent
@@ -73,6 +73,23 @@ readLines b (LineNumber row) count=do
         z=B.contentLineOffset b (row+count)
     pure (B.contentSlice b a (z-a))
 
+-- | Locate one editor row without reading its text, excluding trailing CR/LF.
+-- Uses cached tree measures; rejects missing rows and byte buffers. Offsets are
+-- absolute Unicode character positions in this immutable read, including a
+-- zero-length range for the final empty row after a newline.
+--
+-- @(lineRange b row >>= readText b) == readLine b row@
+--
+-- A bounded reader can shorten the returned end before calling 'readText'; it
+-- need not flatten a long row to discover or limit its extent.
+lineRange :: BufferRead -> LineNumber -> Either RangeError TextRange
+lineRange b (LineNumber row)=do
+  total<-readLineCount b
+  if row<0 || row>=total then Left InvalidRange else do
+    let start=B.contentLineOffset b row
+        size=B.sourceLineLength (B.contentSourceLineAt b row)
+    pure (TextRange (CharOffset start) (CharOffset (start+size)))
+
 -- | Read one editor row without its LF/CRLF terminator; rejects missing rows.
 readLine :: BufferRead -> LineNumber -> Either RangeError Text
 readLine b (LineNumber row)=do
@@ -103,11 +120,19 @@ listBuffers = requestListing
 captureBuffer :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)
 captureBuffer = requestCapture
 
--- | Submit a strict unified diff against the exact version from an admitted read.
--- Call on a worker, outside the session lock. Current actor, policy, target and
--- privacy are checked at admission and adoption. Approval may edit the diff on
--- the same ticket. Success is atomic, adds ordinary Undo and never saves/rebases.
--- Cancellation and session closure terminally resolve this request; a stale
--- version, including equal-revision replacement before admission, is rejected.
+-- | Submit 1..16 strict unified diffs for distinct targets in one session. The
+-- aggregate patch text is limited to 1 MiB characters. Call on a worker, outside
+-- the session lock; approval may edit each diff on the same permission ticket.
+-- Current actor, policy, versions and privacy are checked at admission/adoption.
+--
+-- Success installs every patch with one ordinary Undo per changed buffer and
+-- returns one result per input, in input order. Failure installs none. No file
+-- is saved and no patch is fuzzily matched or rebased. Cancellation and session
+-- closure terminally resolve the request. Equal-revision replacement is stale.
+applyBufferDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])
+applyBufferDiffs = requestDiffs
+
+-- | Singleton convenience over 'applyBufferDiffs' with one 'BufferDiff'. The
+-- same admission, approval and atomicity laws apply; exactly one result is required.
 applyBufferDiff :: BufferEditor -> BufferRef -> ContentVersion -> Text -> IO (Either Text DiffResult)
 applyBufferDiff = requestDiff

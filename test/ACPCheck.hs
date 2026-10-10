@@ -38,7 +38,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
         events<-waitEvents client (any (\event->case event of Notification "environment" _->True; _->False))
         check "explicit environment is exact while ordinary launch inherits" (Notification "environment" (Bool absent) `elem` events)
   let server = root </> "fake.py"
-      launch = Launch python [server] [("THC_ACP_CHECK", "λ")]
+      launch = Launch python ["-X", "utf8", server] [("THC_ACP_CHECK", "λ")]
       start = startClient launch root
   BS.writeFile server (TE.encodeUtf8 (T.pack fakeServer))
   bracket start stopClient $ \client -> do
@@ -105,12 +105,13 @@ checks = bracket temporary removePathForcibly $ \root -> do
     queued <- timeout 2000000 (replicateM 64 (request client "blocked" (String (T.replicate (1024*1024) "x"))))
     check "blocked provider never blocks caller" (maybe False ((== 64) . length) queued)
     check "blocked writer stops promptly" . (== Just ()) =<< timeout 2000000 (stopClient client)
-  -- Burst consumption yields to input without dropping or reordering frames.
+  -- Thirty-three notifications cross the 32-item batch bound. The payload sizes
+  -- exercise the byte budget, one oversized frame and accounting reset to zero.
   writeFile server $ unlines
     [ "import json,sys"
     , "for line in sys.stdin:"
     , " r=json.loads(line); size=r['params']"
-    , " for n in range(80): print(json.dumps(dict(jsonrpc='2.0',method=str(n),params='x'*size)),flush=True)"
+    , " for n in range(33): print(json.dumps(dict(jsonrpc='2.0',method=str(n),params='x'*size)),flush=True)"
     , " print(json.dumps(dict(jsonrpc='2.0',id=r['id'],result=True)),flush=True)"
     ]
   bracket start stopClient $ \client -> forM_ [0,100000,300000,0] $ \size -> do
@@ -124,7 +125,7 @@ checks = bracket temporary removePathForcibly $ \root -> do
           if hasResponse ident combined then pure combined else threadDelay 1000 >> drain combined
     result<-timeout 10000000 (drain [])
     check "ACP batches preserve FIFO and byte accounting across bursts"
-      (fmap (\events->[name | Notification name _<-events]) result==Just (map (T.pack.show) [0::Int ..79]))
+      (fmap (\events->[name | Notification name _<-events]) result==Just (map (T.pack.show) [0::Int ..32]))
   strict<-try (prepareResponse (String "strict") (Right (String (error "deferred response encoding")))) :: IO (Either ErrorCall PreparedResponse)
   check "preparing a response forces JSON encoding before enqueue" (case strict of Left _->True; _->False)
   writeFile server $ unlines

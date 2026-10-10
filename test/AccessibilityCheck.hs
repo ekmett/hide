@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module AccessibilityCheck (checks) where
 
-import Control.Monad (unless)
+import Control.Monad (unless,forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as Key
@@ -13,6 +13,7 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Hide.Buffer (newBuffer,Selection(..),Buffer(saved,undoStack,redoStack))
+import Hide.BufferView (BufferView(..))
 import Hide.Browser (Entry(..))
 import Hide.Accessibility
 import Hide.Model
@@ -100,7 +101,10 @@ checks=do
   check "failure placeholders never expose provider error strings"
     (not ("secret-failure" `BS.isInfixOf` BL.toStrict (encode (project OwnerSemantics failed))))
   let unseen=keyOf (rowHit (fromMaybe (error "missing unseen row") (rowAt 3 tree)))
-      poison=base {windows=error "semantics forced windows",buffers=error "semantics forced buffers",
+      -- Privacy may inspect document metadata, but never its contents/history.
+      privateDoc=(newDocument (newBuffer "") Nothing)
+        {documentPrivate=True,documentOrigin=Just "/private-draft.txt",documentBuffer=error "semantics forced buffer contents"}
+      poison=base {windows=error "semantics forced windows",buffers=M.singleton 1 privateDoc,
         pluginWindows=error "semantics forced plugin windows",editorDrafts=error "semantics forced drafts",
         diagnostics=error "semantics forced diagnostics",sideTree=Just tree {treeScroll=0,
           treeRows=Lazy.adjust (const (error "semantics forced an offscreen row")) [0,2] (treeRows tree),
@@ -114,6 +118,7 @@ checks=do
      all (within (512,1000)) (items boundedProjection) && all (within (20,7)) (items shiftedProjection))
   privateIdentityChecks
   dialogChecks
+  sourceChecks
   putStrLn "sidebar and dialog semantic checks passed"
 
 
@@ -235,6 +240,17 @@ dialogChecks=do
         [FileList [Entry "secret.txt" False Nothing Nothing] 0] 0 ["Open"] [])}
   check "file chooser option names inherit canonical protected-path masking"
     (not ("secret.txt" `BS.isInfixOf` BL.toStrict (encode (dialogSemantics GuestSemantics files))))
+  forM_ [(80,25),(160,50)] $ \size->do
+    let entries=[Entry (T.pack (show n)<>".hs") False Nothing Nothing | n<-[0..99::Int]]
+        chooser=openBrowser "/public" "*" entries (initialDesktop size)
+        page=chooser {dialog=fmap (\picker->picker {fields=[Input "Name" "*" 1,FileList entries 45]}) (dialog chooser)}
+        dg=fromMaybe (error "missing picker") (dialog page)
+        options=[item | item<-items (project page),field "role" item==Just ("option"::T.Text)]
+        agrees item=case field "bounds" item of
+          Just [x,y,_,_] | Just (_,index)<-fileEntryAt x y page dg -> field "name" item==Just (entryName (entries !! index))
+          _->False
+    check "resized picker accessibility options match hit testing on later pages"
+      (length options==2*fileListRows (fieldRects page dg !! 1) && all agrees options)
   let clipped=modal [Input "Offscreen" "OFFSCREEN-VALUE" 0,Input "Focused" "shown" 0] 1
       shifted=project clipped {screenSize=(30,8)}
   check "scrolled-off modal fields do not publish their values"
@@ -249,3 +265,62 @@ dialogChecks=do
       textSize=sum [T.length (nameOf n)+maybe 0 T.length (field "value" n::Maybe T.Text) | n<-items bounded]
   check "modal metadata stays bounded independently of oversized field catalogues"
     (field "truncated" bounded==Just True && length (items bounded)<=256 && textSize<=32768 && all (within (200,1000)) (items bounded))
+
+
+sourceChecks :: IO ()
+sourceChecks=do
+  let original=newBuffer "alpha 中é🙂\nsecond\nthird"
+      poisoned=original {saved=error "source excerpt forced saved text",undoStack=error "source excerpt forced Undo",redoStack=error "source excerpt forced Redo"}
+      base=addDocument Nothing poisoned (initialDesktop (80,25))
+      ready=base {windows=map (\w->w {bounds=Rect 2 2 28 7}) (windows base)}
+      project=sourceSemantics OwnerSemantics
+      shown=project ready
+      text value=fromMaybe "" (field "value" value::Maybe T.Text)
+      absent d=field "present" (project d)==Just False
+      moved=ready {windows=map (\w->w {bounds=Rect 3 3 24 5,scrollRow=1}) (windows ready)}
+  check "source semantics reads visible Unicode without saved text or histories"
+    (text shown=="alpha 中é🙂\nsecond\nthird" && field "firstLine" shown==Just (1::Int) &&
+      field "lineCount" shown==Just (3::Int) && field "readOnly" shown==Just True)
+  check "source identity survives move and scrolling while the excerpt follows"
+    ((field "id" shown::Maybe [T.Text])==field "id" (project moved) && text (project moved)=="second\nthird" &&
+      field "bounds" (project moved)==Just ([4,4,22,3]::[Int]) && field "firstLine" (project moved)==Just (2::Int))
+  let sibling=ready {windows=case windows ready of w:_->w {windowId=42}:windows ready; _->[]}
+  check "split source views have distinct identity even for the same buffer"
+    ((field "id" (project sibling)::Maybe [T.Text])/=field "id" shown)
+  check "source excerpt clears under menus, modals, pane focus and alternate views"
+    (all absent [ready {menu=Just (0,0)},ready {contextMenu=Just (Rect 0 0 1 1,0)},
+      ready {dialog=Just (Dialog "Covered" Widgets [] 0 ["OK"] [])},ready {problemsFocused=True},
+      ready {windows=map (\w->w {bufferView=ChangesView}) (windows ready)}])
+  let hidden=ready {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc
+        {documentOrigin=Just "/authority/source.hs",documentSuggestedName=Just (error "private title read"),
+         documentBuffer=error "private source payload read"}) (buffers ready)}
+  check "source privacy precedes both title and payload"
+    (field "present" (sourceSemantics GuestSemantics hidden)==Just False && absent hidden {streamerMode=True})
+  let publicPrivate=ready {guestPrivatePaths=["/authority"],buffers=M.map (\doc->doc {documentOrigin=Just "/authority/source.hs"}) (buffers ready)}
+  check "owner may read private source with streamer mode off"
+    (text (project publicPrivate)==text shown)
+  let partial=addDocument Nothing (newBuffer "中x") (initialDesktop (80,25))
+      partialView=partial {windows=map (\w->w {bounds=Rect 2 2 4 4,scrollColumn=1}) (windows partial)}
+  check "source clipping never reveals a partial wide glyph"
+    (text (project partialView)==" x" && field "firstColumn" (project partialView)==Just (1::Int))
+  let long=addDocument Nothing (newBuffer (T.replicate 100000 "a"<>"TARGET\nnext")) (initialDesktop (80,25))
+      sought=long {windows=map (\w->w {bounds=Rect 2 2 14 3,scrollColumn=100000}) (windows long)}
+  check "source horizontal seek returns only its viewport"
+    (text (project sought)=="TARGET")
+  let crlf=addDocument Nothing (newBuffer (T.replicate 1000 "a"<>"END\r\nnext")) (initialDesktop (80,25))
+      crlfView=crlf {windows=map (\w->w {bounds=Rect 2 2 14 3,scrollColumn=1000}) (windows crlf)}
+  check "chunked source strips CRLF storage terminators" (text (project crlfView)=="END")
+  let unusual=addDocument Nothing (newBuffer ("x"<>T.replicate 100000 "\r"<>"y")) (initialDesktop (80,25))
+      bounded=project unusual
+  check "zero-width source items cannot evade the per-row work budget"
+    (text bounded=="x" && field "truncated" bounded==Just True)
+  let tabs=addDocument Nothing (newBuffer "\ta\7b") (initialDesktop (80,25))
+  check "source excerpt expands tabs and uses the source control placeholder"
+    (text (project tabs)=="        a·b")
+  let dense=addDocument Nothing (newBuffer (T.intercalate "\n" (replicate 300 (T.replicate 600 "a")))) (initialDesktop (800,400))
+      full=dense {windows=map (\w->w {bounds=Rect 0 1 700 350}) (windows dense)}
+      limited=project full
+  check "source projection enforces combined text and row budgets"
+    (T.length (text limited)<=32768 && maybe False (<=256) (field "lineCount" limited::Maybe Int) && field "truncated" limited==Just True)
+  check "terminal output does not masquerade as source accessibility"
+    (absent ready {buffers=M.map (\doc->doc {documentLabel=Just "Terminal 1"}) (buffers ready)})

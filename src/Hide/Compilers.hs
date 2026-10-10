@@ -31,7 +31,7 @@ import System.IO (hClose)
 import System.Process
 import System.Timeout (timeout)
 import Text.Read (readMaybe)
-import Hide.Process (processCleanup)
+import Hide.Process (processCleanup,waitProcessExit)
 import Hide.Downloads (managedToolRoot)
 
 data Compiler = Compiler { compilerVersion :: T.Text, compilerPath :: FilePath } deriving (Eq,Show)
@@ -161,11 +161,12 @@ debuggerCompilerInfo root project command = do
             Right actualPath | actualPath/=executable->pure (Left "Cabal's project compiler conflicts with the selected GHC. Select that compiler in Run > Target or change Cabal's with-compiler setting.")
             _ | not exists->pure (Left "The selected GHC reported an invalid library directory.")
               | otherwise->do
-                  versioned<-findExecutable ("hdb-"++T.unpack (compilerVersion compiler))
+                  let versionedName="hdb-"++T.unpack (compilerVersion compiler)++if os=="mingw32" then ".exe" else ""
+                  versioned<-findExecutable versionedName
                   external<-maybe (findExecutable "hdb") (pure . Just) versioned
                   managed<-managedToolRoot
                   adapter<-case (external,managed) of
-                    (Nothing,Right cache)->findExecutable (cache </> "bin" </> ("hdb-"++T.unpack (compilerVersion compiler)))
+                    (Nothing,Right cache)->findExecutable (cache </> "bin" </> versionedName)
                     _->pure external
                   pure (Right (compiler {compilerPath=executable},fmap (\binary->(binary,overrides)) adapter))
         (Left err,_) -> pure (Left err)
@@ -184,7 +185,7 @@ queryWithin :: Int -> Maybe [(String,String)] -> FilePath -> FilePath -> [String
 queryWithin micros environment root command args=do
   result<-try $ bracket acquire release $ \(output,errors,process,stop) ->
     withAsync (capture (1024*1024) output) $ \out -> withAsync (capture 65536 errors) $ \err ->
-      timeout micros ((,,) <$> waitForProcess process <*> wait out <*> wait err) `finally` stop
+      timeout micros ((,,) <$> waitProcessExit process <*> wait out <*> wait err) `finally` stop
   pure $ case (result :: Either IOException (Maybe (ExitCode,BS.ByteString,BS.ByteString))) of
     Right (Just (ExitSuccess,output,_)) -> Right (T.unpack (TE.decodeUtf8With lenientDecode output))
     Right (Just (_,_,err)) -> Left (T.take 1000 (T.strip (TE.decodeUtf8With lenientDecode err)))

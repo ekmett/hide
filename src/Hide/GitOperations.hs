@@ -23,7 +23,8 @@ import System.Directory (canonicalizePath, doesFileExist)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
 import System.FilePath (takeDirectory)
-import System.Process (proc, readCreateProcessWithExitCode, cwd, env)
+import System.Process (proc, cwd, env)
+import Hide.Process (readProcessUtf8)
 import Hide.Buffer
 import Hide.Files
 import Hide.Model
@@ -49,16 +50,15 @@ withGitOperations terminalLaunch = bracket (GitOperations <$> newIORef Nothing <
   where
     close (GitOperations ref _ _ _ _) = readIORef ref >>= mapM_ (\(Worker _ _ thread done) -> killThread thread >> void (readMVar done))
 
--- readCreateProcessWithExitCode owns and closes its pipes and terminates its child
--- on cancellation; a normal Quit is deferred until the Git operation completes.
+-- UTF-8 capture owns its pipes and process group through cancellation.
+-- A normal Quit is deferred until the Git operation completes.
 runGit :: FilePath -> [String] -> IO (ExitCode,T.Text,T.Text)
 runGit root args = do
   inherited <- getEnvironment
   let cleared = ["GIT_DIR","GIT_WORK_TREE","GIT_INDEX_FILE","GIT_COMMON_DIR","GIT_TERMINAL_PROMPT","GIT_MERGE_AUTOEDIT"]
       environment = [("GIT_TERMINAL_PROMPT","0"),("GIT_MERGE_AUTOEDIT","no")] ++ filter ((`notElem` cleared) . fst) inherited
-  (code,out,err) <- readCreateProcessWithExitCode
+  readProcessUtf8
     ((proc "git" (["--no-pager","--literal-pathspecs","-c","core.fsmonitor=false","-C",root] ++ args)) {cwd=Just root,env=Just environment}) ""
-  pure (code,T.pack out,T.pack err)
 
 checkedGit :: FilePath -> [String] -> IO T.Text
 checkedGit root args = do

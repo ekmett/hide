@@ -23,7 +23,7 @@ checks=do
   deliveries<-newTVarIO []
   stops<-newTVarIO (0::Int)
   gate<-newTVarIO True
-  let caps=Capabilities True True False [ConfigChoice "model-id" "model" "small" [("small","Small"),("large","Large")],ConfigChoice "effort-id" "thought_level" "low" [("low","Low"),("high","High")]]
+  let caps=Capabilities True True False [ConfigChoice "model-id" "model" "small" [("small","Small"),("large","Large")],ConfigChoice "effort-id" "thought_level" "low" [("low","Low"),("high","High")],ConfigChoice "format-id" "output_format" "text" [("text","Text")]]
       driver ident=AgentDriver directory ("private-provider-key-"<>agentIdText ident) caps
         (\_->pure (Right caps))
         (\message->do atomically (modifyTVar' deliveries (++[(ident,message)])); atomically (readTVar gate >>= check); pure (Right (String (messageText message))))
@@ -52,6 +52,12 @@ checks=do
     ensure "child cannot end parent" (isLeft deniedParent)
     renamed<-renameAgent hub (Agent second) first "Parse source"
     ensure "agents can ascribe names to others" (renamed==Right ())
+    selected<-agentSummary hub first >>= right
+    summaries<-agentSummaries hub
+    unknownSummary<-agentSummary hub (AgentId "missing")
+    ensure "typed directory reads preserve exact identity, renamed label and ancestry"
+      (summaryId selected==first && summaryName selected=="Parse source" && summaryParent selected==Just root &&
+        any (\entry->summaryId entry==first && summaryName entry==summaryName selected) summaries && isLeft unknownSummary)
     duplicate<-renameAgent hub Human first " renderer "
     ensure "names are unique ignoring case and outer spaces" (isLeft duplicate)
     badName<-renameAgent hub Human first "bad\nname"
@@ -86,6 +92,10 @@ checks=do
     savedHistory<-historyAgent hub Human first 0 100 >>= right
     snap<-snapshotHub hub
     restored<-restoreHub (HubLimits 4 2) (\_ _->error "recovery must never start a process") snap >>= right
+    restoredStatus<-statusAgent restored Human chosen >>= right
+    beforeStatus<-statusAgent hub Human chosen >>= right
+    ensure "checkpoint capabilities preserve provider-specific categories without an ACP adapter"
+      ((field "capabilities" restoredStatus :: Maybe Value)==field "capabilities" beforeStatus)
     restoredHistory<-historyAgent restored Human first 0 100 >>= right
     ensure "checkpoint recovery preserves typed public events and cursors" (restoredHistory==savedHistory)
     recovered<-statusAgent restored Human forked >>= right
@@ -298,10 +308,6 @@ checks=do
         ,("reconnect updates the authenticated workspace",reconnectPath)
         ,("async cancellation escapes provider error handling",interruptEscapes)], not passed]
   ensure (unlines failures) (null failures)
-  ensure "fork is never inferred from absent marker" (not (supportsFork (parseCapabilities (object []) (object []))))
-  let initialized=object ["agentCapabilities" .= object ["sessionCapabilities" .= object ["fork" .= object []]]]
-      options=object ["configOptions" .= [object ["id" .= ("model"::T.Text),"type" .= ("select"::T.Text),"category" .= ("model"::T.Text),"currentValue" .= ("m"::T.Text),"options" .= [object ["name" .= ("Group"::T.Text),"options" .= [object ["value" .= ("m"::T.Text),"name" .= ("Model"::T.Text)]]]]]]]
-  ensure "actual advertised nested choices and fork supported" (supportsFork (parseCapabilities initialized options) && length (configChoices (parseCapabilities initialized options))==1)
   finished<-timeout 1000000 (pure ())
   ensure "test completes" (finished==Just ())
   controlChecks directory

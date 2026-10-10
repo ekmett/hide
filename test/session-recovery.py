@@ -65,6 +65,12 @@ with tempfile.TemporaryDirectory(prefix='thc-recovery-live-') as directory:
     ident = secrets.token_hex(24)
     checkpoint = root/'data/thc-edit/sessions'/f'{ident}.checkpoint'
     endpoint = pathlib.Path(f'/tmp/thc-edit-{os.geteuid()}')/ident
+    # The relay may already have spawned recovery when deletion wins its lock.
+    # An absent checkpoint must fail before publishing a new desktop or endpoint.
+    rejected = subprocess.run([binary, '--remote-daemon', ident, '--require-checkpoint', str(source)],
+        cwd=root, env=env, capture_output=True, text=True, timeout=20)
+    assert rejected.returncode != 0, rejected
+    assert not checkpoint.exists() and not endpoint.exists(), rejected
     log = open(root/'daemon.log', 'w')
     daemon = subprocess.Popen([binary, '--remote-daemon', ident, str(source)], cwd=root, env=env, stdout=log, stderr=log)
     bridge = None

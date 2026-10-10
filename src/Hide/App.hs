@@ -10,7 +10,8 @@ module Hide.App (main, demoDesktop, applyEffects) where
 
 import Hide.Sidebar
 import Hide.PackageSidebar
-import Hide.AgentSidebar
+import qualified Hide.Plugin.Session as Plugin
+import qualified Hide.AgentDirectoryHost as AgentDirectory
 import Hide.SessionSidebar
 import Hide.SidebarCommands
 import Control.Applicative ((<|>))
@@ -34,9 +35,11 @@ import Hide.ClipboardMCP
 import Hide.Links (followLink)
 import Hide.Environment
 import Hide.ControlMCP
-import Control.Exception (bracket, finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
-import Control.Concurrent (myThreadId, throwTo, threadDelay)
+import Control.Exception (finally, catch, AsyncException(UserInterrupt), Exception, throwIO)
+import Control.Concurrent (threadDelay)
 #ifndef mingw32_HOST_OS
+import Control.Concurrent (myThreadId,throwTo)
+import Control.Exception (bracket)
 import System.Posix.Signals (installHandler, Handler(Catch), sigTERM, sigHUP)
 #endif
 import Data.Aeson (Value(..), object, (.=), withObject, (.:), (.:?), (.!=))
@@ -53,7 +56,8 @@ import Hide.ProjectBrowser
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
 import Hide.AgentAccess (resolveAgentAccess,resolveActiveAgentAccess)
-import Hide.AgentMCP (agentTools, agentToolNames, agentTool)
+import Hide.AgentServicesHost (agentServices)
+import qualified Hide.Plugin.Tool as PluginTool
 import Hide.BufferReadCommand (withBufferReadCommands)
 import Hide.BufferDiffCommand (withBufferDiffCommands,bufferDiffTool)
 import Hide.EditorMCP (runEditorMCP, editorResponseOnly, rpcError, editorResponseWith, debugTools, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool)
@@ -63,12 +67,13 @@ import Hide.Completion (bashCompletion)
 import Hide.RemoteTerminal (runRemoteTerminal)
 import Text.Read (readMaybe)
 import Data.IORef (newIORef, readIORef, writeIORef)
-import Control.Monad (foldM, when)
+import Control.Monad (foldM, when, unless)
 import System.IO (hPutStrLn, stderr, hFlush, stdout, stdin, hIsTerminalDevice)
 import Hide.Debugger
 import Hide.DebuggerSidebar
 import Hide.Conversation
 import Hide.SessionServices hiding (sessionDirectory)
+import qualified Hide.LSP as L
 import Hide.Tooling
 import Hide.GitOperations
 import qualified Data.Map.Strict as M
@@ -77,8 +82,8 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Graphics.Vty as V
 import System.Console.GetOpt
-import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, doesDirectoryExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
-import System.FilePath ((</>), takeDirectory, takeExtension)
+import System.Directory (XdgDirectory(..), getXdgDirectory, canonicalizePath, doesDirectoryExist, doesFileExist, getCurrentDirectory, getHomeDirectory, setCurrentDirectory, listDirectory)
+import System.FilePath ((</>), takeDirectory, takeExtension, equalFilePath)
 import Control.Exception (try, IOException)
 import Paths_hide (getDataFileName)
 import Hide.Browser
@@ -97,7 +102,7 @@ import Hide.Render
 import Hide.Files
 import Hide.Reconcile
 
-data Option = Daemon | Sessions | MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
+data Option = Daemon | Sessions | MCPBridge String | Resume (Maybe String) | SSH String | RemoteSession String | RemoteDaemon String | RequireCheckpoint | Use Backend | Scale String | Size String | Mode String | ColorMode String | Demo | CRT | NoCRT | MaterialIcons | ClassicIcons | WordStar | StandardKeys | CursorBlink Bool | Pixelate Bool | Streamer Bool | Snapshot | Html | Scene String | Usage deriving Eq
 options :: [OptDescr Option]
 options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Document/terminal colors (default THC_EDIT_APPEARANCE or system)"
           ,Option [] ["metal"] (NoArg (Use Metal)) "Open a Metal window"
@@ -133,21 +138,22 @@ options = [Option [] ["appearance"] (ReqArg ColorMode "light|dark|system") "Docu
           ,Option [] ["scene"] (ReqArg Scene "desktop|menu|about|gallery|split|open|tree|help|diff|preferences") "Preview scene (with --demo)"
           ,Option ['h'] ["help"] (NoArg Usage) "Show help"]
 
--- | Parse launch options and enter a frontend, session daemon, snapshot, or MCP bridge.
-main :: IO ()
-main = do
+-- | Compose linked plugins, parse launch options and enter a frontend, session
+-- daemon, snapshot or MCP bridge. The executable selects the plugin list.
+main :: [Plugin.Plugin] -> IO ()
+main plugins = do
   args<-getArgs
   case args of
     "--bash-completion":request -> bashCompletion options request >>= mapM_ putStrLn
-    _ -> runEditor args
+    _ -> runEditor plugins args
 
-runEditor :: [String] -> IO ()
-runEditor args = do
+runEditor :: [Plugin.Plugin] -> [String] -> IO ()
+runEditor plugins args = do
   backendEnvironment<-lookupEnv "THC_EDIT_BACKEND"
   scaleEnvironment<-lookupEnv "THC_EDIT_SCALE"
   appearanceEnvironment<-lookupEnv "THC_EDIT_APPEARANCE"
   terminalColors<-lookupEnv "COLORFGBG"
-  let (flags,paths,errors)=getOpt Permute (options++[Option [] ["mcp-editor"] (ReqArg MCPBridge "ID") "Internal editor introspection bridge",Option [] ["remote-daemon"] (ReqArg RemoteDaemon "ID") "Internal remote session process"]) (resumeArguments args)
+  let (flags,paths,errors)=getOpt Permute (options++[Option [] ["mcp-editor"] (ReqArg MCPBridge "ID") "Internal editor introspection bridge",Option [] ["remote-daemon"] (ReqArg RemoteDaemon "ID") "Internal remote session process",Option [] ["require-checkpoint"] (NoArg RequireCheckpoint) "Internal recovery precondition"]) (resumeArguments args)
   if not (null errors) then die (concat errors)
   else if Usage `elem` flags then putStr (usageInfo "Usage: hide [OPTIONS] [--] [FILE.hs ...]\n\nHaskell source editor.\nF2 Save, F3 Open, F10 Menu, Alt+X Exit.\n" options)
   else if [ident | MCPBridge ident<-flags]/=[] then case flags of
@@ -170,6 +176,7 @@ runEditor args = do
         appearanceDefault=appearanceEnvironment <|> defaultAppearance defaults
         flagBool yes no fallback=fromMaybe fallback (lastMaybe [value | flag<-flags, Just value<-[if flag==yes then Just True else if flag==no then Just False else Nothing]])
     daemon <- case [sid | RemoteDaemon sid<-flags] of []->pure Nothing; [sid]->pure (Just sid); _->die "Specify --remote-daemon once."
+    when (RequireCheckpoint `elem` flags && daemon==Nothing) (die "--require-checkpoint requires --remote-daemon.")
     resume <- case [ident | Resume ident<-flags] of
       [] -> pure Nothing
       [ident] -> do
@@ -223,6 +230,7 @@ runEditor args = do
             [ident] -> fresh {sessionId=ident}
             _ -> fresh
       wasInterrupted<-newIORef False
+      displayedSession<-newIORef (sessionId record)
       let reattach=resume/=Nothing || any isSession flags
           attach=case sessionHost record of
             Nothing -> withLocalPeer (sessionId record) reattach (sessionArguments record)
@@ -240,13 +248,14 @@ runEditor args = do
               Web -> runRemoteWeb scale (maybe "" id (sessionHost record)) peer
               _ -> runRemoteWindow backend scale dimensions screenMode (maybe "" id (sessionHost record)) peer
           report = do
-            saved<-loadSession (sessionId record)
+            ident<-readIORef displayedSession
+            saved<-loadSession ident
             detached<-readIORef wasInterrupted
-            when (saved/=Nothing || detached) $ putStrLn ("Session: "++sessionId record++"\nResume: hide --resume "++sessionId record) >> hFlush stdout
+            when (saved/=Nothing || detached) $ putStrLn ("Session: "++ident++"\nResume: hide --resume "++ident) >> hFlush stdout
       -- A local session starts beside the project that created it. Reattachment
       -- needs only its endpoint, so a removed/renamed working directory is fine.
       (withDetachSignals (do
-          attach interruptedDisplay
+          attach (\peer->interruptedDisplay peer `finally` (peerSession peer >>= writeIORef displayedSession))
           stopped <- readIORef wasInterrupted
           when (Daemon `elem` flags && not stopped) (awaitSessionDetached record))
         `catch` (\err -> writeIORef wasInterrupted True >> interrupted err)
@@ -277,9 +286,10 @@ runEditor args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          withPermissions (specs++agentTools) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> withAgentSidebar (sidebarCapabilities sidebarHost) SidebarAgent (conversationAgents conversation) autocomplete $ \agentSidebar -> do
+          PluginTool.withTools [name | spec<-specs,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]] (concatMap Plugin.pluginAgentTools plugins) $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
-            let liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
+            let agentTools=PluginTool.toolDefinitions agentToolset
+                liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
             keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
             let liveDesktop=liveBase {keyBindings=keymap}
             withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> withTextPresentation $ \textPresentation -> do
@@ -299,12 +309,11 @@ runEditor args = do
                     (quit,updated)<-policyEffects permissions core d pending
                     approvedExit<-readIORef exiting
                     pure (quit || approvedExit,updated)
-                  tickAgents current=tickAgentSidebar agentSidebar >> pure current
                   prepareBodies desktop=do
                     requests<-conversationBodyRequests conversation desktop
                     (prepared,completed)<-tickTextPresentation textPresentation requests desktop
                     adoptConversationBodies conversation completed prepared
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickAgents >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
+                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
                   inspectTool d name parameters
                     | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
@@ -354,7 +363,7 @@ runEditor args = do
                               Right root -> do
                                 questionCaller<-captureQuestionCaller conversation ident
                                 let dispatch current name parameters
-                                      | name `elem` agentToolNames = pure (current,agentTool hub (AH.Agent ident) root name parameters)
+                                      | PluginTool.hasTool agentToolset name = pure (current,PluginTool.callTool agentToolset (agentServices hub (AH.Agent ident) root) name parameters)
                                       | name `elem` chatToolNames = case questionCaller of
                                           Left err->pure (current,pure (Left err))
                                           Right caller->chatToolAs conversation (Just caller) current name parameters
@@ -367,7 +376,15 @@ runEditor args = do
                     quit<-readIORef exiting
                     pure (quit,updated,finish)
               case daemon of
-                Just sid -> runRemoteDaemonWithStartup (AR.activateAgentCheckpoint (conversationAgents conversation)) (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
+                Just sid -> do
+                  let startOwned=do
+                        -- Recovery eligibility can change after the relay spawns
+                        -- us. This callback runs under the daemon lifetime lock.
+                        when (RequireCheckpoint `elem` flags) $ do
+                          present<-checkpointPath sid >>= doesFileExist
+                          unless present (ioError (userError "Saved session was deleted before recovery started."))
+                        AR.activateAgentCheckpoint (conversationAgents conversation)
+                  runRemoteDaemonWithStartup startOwned (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
                 Nothing -> die "Missing session process identity."
 
   where
@@ -595,6 +612,7 @@ applyEffects = foldM apply . (False,)
     apply (_,d) PackageBuildAction{}=pure (False,d {status="Package build requires its running owner."})
     apply (_,d) AdoptPreparedBuild{}=pure (False,d {status="Build preparation requires its running owner."})
     apply (_,d) DownloadDocument{}=pure (False,d)
+    apply (_,d) ExportBufferDocument{}=pure (False,d {status="Buffer export requires its running owner."})
     apply (_,d) ReadBrowserClipboard=pure (False,d)
     apply (_,d) WriteBrowserClipboard{}=pure (False,d)
     apply (_,d) Exit=pure (True,d)
@@ -715,9 +733,9 @@ applyEffects = foldM apply . (False,)
           Right file->do
             let b=documentBuffer doc
                 clean=restyle doc {documentFile=Just file,documentBuffer=markSaved b}
-                -- Transfer the saved path's privacy once, including duplicate
-                -- source views; frame masks then read a stored Bool.
-                protect other | documentPrivate clean,fmap filePath (documentFile other)==Just (filePath file)=other {documentPrivate=True}
+                -- Transfer the saved path's privacy once, including source
+                -- and generated views, so protection survives closing this draft.
+                protect other | documentPrivate clean,any (maybe False (equalFilePath (filePath file))) [filePath <$> documentFile other,documentOrigin other]=other {documentPrivate=True}
                               | otherwise=other
                 updated=clampReviewWindows (normalizeDocumentViews bid d {buffers=M.map protect (M.insert bid clean (buffers d)),status="File saved."})
             (_,refreshed)<-apply (False,updated) (RefreshGit (takeDirectory (filePath file)))

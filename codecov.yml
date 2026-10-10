@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+flags:
+  Linux_X64:
+    carryforward: false
+  macOS_ARM64:
+    carryforward: false
+  Windows_X64:
+    carryforward: false
+comment: false

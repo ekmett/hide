@@ -1,4 +1,4 @@
-{-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric, ExistentialQuantification, OverloadedStrings, ScopedTypeVariables #-}
 -- | Typed commands with explicit wire codecs and revocable registrations.
 --
 -- Registration, lookup and admission hold a short registry lock. Codecs and

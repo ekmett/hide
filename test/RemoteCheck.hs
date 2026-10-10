@@ -1,13 +1,13 @@
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
 module RemoteCheck (checks) where
-import Control.Concurrent.STM (retry)
+import Control.Concurrent.STM (atomically, retry)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Concurrent.Async (withAsync, wait, link)
 import Control.Exception hiding (assert)
-import Control.Monad (unless, void, replicateM, replicateM_, forM_)
+import Control.Monad (unless, void, replicateM, forM_, foldM)
 import Data.Aeson
-import Data.Aeson.Types (parseMaybe)
+import Data.Aeson.Types (parseMaybe, parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
@@ -15,10 +15,11 @@ import qualified Network.Socket as N
 import Data.IORef
 import qualified Data.Text as T
 import System.IO
-#ifndef mingw32_HOST_OS
 import System.Directory (getTemporaryDirectory, createDirectory, removeFile, removePathForcibly)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
+#ifndef mingw32_HOST_OS
 import System.FilePath ((</>))
+import Control.Monad (replicateM_)
 import System.Posix.Files (setFileMode)
 import Data.List (isInfixOf)
 #endif
@@ -34,16 +35,12 @@ import Hide.RemoteEndpoint
 import qualified Hide.Session as S
 import Hide.Recovery (readCheckpoint)
 isolatedStore :: IO a -> IO a
-#ifndef mingw32_HOST_OS
 isolatedStore action=do
   temp<-getTemporaryDirectory
   old<-lookupEnv "XDG_DATA_HOME"
   bracket (do (path,h)<-openTempFile temp "thc-session-tests"; hClose h; removeFile path; createDirectory path; pure path)
     removePathForcibly $ \path -> bracket_ (setEnv "XDG_DATA_HOME" path)
       (maybe (unsetEnv "XDG_DATA_HOME") (setEnv "XDG_DATA_HOME") old) action
-#else
-isolatedStore action=action
-#endif
 
 checks :: IO ()
 checks = isolatedStore $ do
@@ -54,6 +51,8 @@ checks = isolatedStore $ do
   requestedPasteReconnectCheck
   linkOpenCheck
   localPeerCheck
+  localExitOwnershipCheck
+  sessionSwitchCheck
   inspectionExitCheck
   inspectionViewerExitCheck
   promptedExitCheck
@@ -361,6 +360,202 @@ localPeerCheck = do
       exists' <- S.loadSession session
       assert "explicit Exit removes session catalog" (exists'==Nothing)
 
+-- Closing a frontend does not retire a local daemon's catalog or checkpoint.
+-- Hold the endpoint owner after its close notification to expose that boundary
+-- without depending on how long an actual checkpoint write happens to take.
+localExitOwnershipCheck :: IO ()
+localExitOwnershipCheck=do
+  record<-S.newSessionRecord Nothing []
+  let session=S.sessionId record
+      bounded action=timeout 5000000 action >>= maybe (fail "Local exit ownership timed out") pure
+  path<-sessionEndpoint session
+  flip finally (S.forgetSession session) $ do
+    S.rememberSession record
+    withEndpointListener path $ \listener authenticate->do
+      let server=do
+            (sock,_)<-N.accept listener
+            (h,stop,receiveChunk)<-socketToEndpoint sock
+            flip finally (stop >> hClose h) $ do
+              authenticate h
+              void (bounded (readPacketWith receiveChunk))
+              writePacket h (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= protocolVersion,"session" .= session,"epoch" .= ("owned-exit"::T.Text),"ack" .= (0::Int)]))
+              writePacket h (JsonPacket (object ["type" .= ("assets"::T.Text)]))
+              writePacket h (JsonPacket (object ["type" .= ("closed"::T.Text)]))
+              atomically retry
+      withAsync server $ \owner->do
+        link owner
+        withLocalPeer session True [] $ \peer->do
+          let closed=peerReceive peer >>= \packet->case packet of
+                Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String "closed")->pure ()
+                Just _->closed
+                Nothing->fail "Local exit notification missing"
+          bounded closed
+          retained<-S.loadSession session
+          unless (retained==Just record) (fail "Frontend retired the local daemon's session before its owner")
+
+-- Admission keeps the old writer alive until the target has an initialized frame.
+sessionSwitchCheck :: IO ()
+sessionSwitchCheck = do
+  source<-S.newSessionRecord Nothing []
+  target<-S.newSessionRecord Nothing []
+  delayed<-S.newSessionRecord Nothing []
+  refused<-S.newSessionRecord Nothing []
+  sourceState<-newIORef (addDocument Nothing (newBuffer "source") (initialDesktop (80,25)))
+  targetState<-newIORef (addDocument Nothing (newBuffer "target") (initialDesktop (80,25)))
+  let check label good=unless good (error label)
+      bounded label action=timeout 5000000 action >>= maybe (error (label++" timed out")) pure
+      tick observed d=writeIORef observed d >> pure d
+      effects d requests=pure (Exit `elem` requests,d)
+      inspectSwitch d _ (String "reply-during-switch")=pure (False,d {clipboardExport=(fst (clipboardExport d)+1,Just "old committed copy"),pendingFileExport=(fst (pendingFileExport d)+1,Just (ExportFileCopy "old.txt" "old committed bytes" (Rect 0 0 1 1) []))},pure (Just Null))
+      inspectSwitch d _ (String ident)=pure (False,d {pendingSessionSwitch=Just ident},pure (Just Null))
+      inspectSwitch d _ _=pure (False,d,pure (Just Null))
+      ready ident=do
+        path<-sessionEndpoint ident
+        let open n=bracket (connectEndpoint path) hClose (const (pure ())) `catch` \(err::IOException)->
+              if n<=0 then throwIO err else threadDelay 10000 >> open (n-1)
+        open (300::Int)
+      receive peer expected=bounded ("switch "++T.unpack expected) $ let
+        loop=peerReceive peer >>= \packet->case packet of
+          Just (JsonPacket (Object fields)) | KM.lookup "type" fields==Just (String expected)->pure fields
+          Just _->loop
+          Nothing->error "Session switch closed the frontend"
+        in loop
+      send peer fields=peerSend peer (JsonPacket (object fields))
+      switch from to=do
+        path<-sessionEndpoint from
+        bracket (connectEndpoint path) hClose $ \h->do
+          writePacket h (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= String (T.pack to)]))
+          void (bounded "switch inspection" (readPacket h))
+      awaitState observed predicate=bounded "switch state" $ let
+        loop=readIORef observed >>= \d->if predicate d then pure d else threadDelay 10000 >> loop
+        in loop
+  flip finally (mapM_ (S.forgetSession . S.sessionId) [source,target,delayed,refused]) $
+    withAsync (runRemoteDaemon (S.sessionId source) 1 effects (tick sourceState) inspectSwitch =<< readIORef sourceState) $ \sourceDaemon->
+    withAsync (runRemoteDaemon (S.sessionId target) 1 effects (tick targetState) inspectSwitch =<< readIORef targetState) $ \targetDaemon->do
+      link sourceDaemon;link targetDaemon
+      ready (S.sessionId source);ready (S.sessionId target)
+      targetPath<-sessionEndpoint (S.sessionId target)
+      withLocalPeer (S.sessionId source) True [] $ \peer->do
+        void (receive peer "connection")
+        send peer ["type" .= ("frontend"::T.Text),"mode" .= (Nothing::Maybe Int)]
+        send peer ["type" .= ("theme"::T.Text),"dark" .= True]
+        send peer ["type" .= ("resize"::T.Text),"width" .= (91::Int),"height" .= (31::Int)]
+        void (awaitState sourceState (\d->screenSize d==(91,31) && systemDark d))
+        -- A refused attachment has no authority to receive frontend input. Keep
+        -- the rejecting peer alive until cleanup, so this checks ordering rather
+        -- than relying on an OS-specific reset when unread bytes are discarded.
+        refusedPath<-sessionEndpoint (S.sessionId refused)
+        receivedAfterHello<-newEmptyMVar
+        withEndpointListener refusedPath $ \listener authenticate->do
+          let rejectingServer=do
+                (sock,_)<-N.accept listener
+                (h,stop,receiveChunk)<-socketToEndpoint sock
+                flip finally (stop >> hClose h) $ do
+                  authenticate h
+                  void (bounded "rejected target hello" (readPacketWith receiveChunk))
+                  writePacket h (JsonPacket (object ["type" .= ("error"::T.Text),"message" .= ("Remote editor already has a writer"::T.Text)]))
+                  packet<-bounded "rejected target disconnect" (readPacketWith receiveChunk)
+                  putMVar receivedAfterHello packet
+                  atomically retry
+          withAsync rejectingServer $ \server->do
+            link server
+            switch (S.sessionId source) (S.sessionId refused)
+            refusal<-receive peer "notice"
+            check ("target refusal retains its explanation: "++show refusal)
+              (case KM.lookup "message" refusal of Just (String text)->"writer" `T.isInfixOf` text;_->False)
+            packet<-bounded "rejected target input" (takeMVar receivedAfterHello)
+            check ("refused target receives no editor input: "++show packet) (packet==Nothing)
+        bracket (connectEndpoint targetPath) hClose $ \busy->do
+          writePacket busy (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= protocolVersion,"session" .= S.sessionId target,"client" .= replicate 48 'd',"ack" .= (0::Int)]))
+          void (bounded "busy target hello" (readPacket busy))
+          switch (S.sessionId source) (S.sessionId target)
+          refusal<-receive peer "notice"
+          check ("busy target refusal explains the failed switch: "++show refusal) (case KM.lookup "message" refusal of Just (String text)->"writer" `T.isInfixOf` text;_->False)
+          liveAttachment<-peerAttachment peer
+          send peer ["type" .= ("paste"::T.Text),"text" .= (" safe"::T.Text),"seq" .= (70::Int),"attachment" .= liveAttachment]
+          void (receive peer "ack")
+          void (awaitState sourceState (\d->activeText d==" safesource"))
+        void (awaitState targetState (\d->sessionAttachment d>=2))
+        previousAttachment<-peerAttachment peer
+        switch (S.sessionId source) (S.sessionId target)
+        committed<-receive peer "session"
+        check "successful handoff reports the target session" (KM.lookup "session" committed==Just (toJSON (S.sessionId target)))
+        void (receive peer "connection")
+        currentAttachment<-peerAttachment peer
+        send peer ["type" .= ("paste"::T.Text),"text" .= (" stale"::T.Text),"attachment" .= previousAttachment]
+        send peer ["type" .= ("paste"::T.Text),"text" .= (" active"::T.Text),"seq" .= (71::Int),"attachment" .= currentAttachment]
+        ack<-receive peer "ack"
+        check "only current attachment input is acknowledged" (KM.lookup "seq" ack==Just (toJSON (71::Int)))
+        d<-awaitState targetState (\current->activeText current==" activetarget")
+        check "target receives the current frontend theme and dimensions" (videoMode d==Nothing && systemDark d && screenSize d==(91,31))
+        old<-readIORef sourceState
+        check "switch preserves old daemon and unsaved data" (activeText old==" safesource")
+        delayedPath<-sessionEndpoint (S.sessionId delayed)
+        preparing<-newEmptyMVar
+        release<-newEmptyMVar
+        configured<-newEmptyMVar
+        withEndpointListener delayedPath $ \listener authenticate->do
+          let delayedServer=do
+                (sock,_)<-N.accept listener
+                (h,stop,receiveChunk)<-socketToEndpoint sock
+                flip finally (stop >> hClose h) $ do
+                  authenticate h
+                  greeting<-bounded "delayed target hello" (readPacketWith receiveChunk)
+                  case greeting of Just (JsonPacket (Object fields))->check "candidate names the delayed target" (KM.lookup "session" fields==Just (toJSON (S.sessionId delayed)));_->error "Invalid candidate hello"
+                  putMVar preparing ()
+                  takeMVar release
+                  writePacket h (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= protocolVersion,"session" .= S.sessionId delayed,"epoch" .= ("delayed-epoch"::T.Text),"ack" .= (0::Int),"replay" .= (0::Int)]))
+                  writePacket h (JsonPacket (object ["type" .= ("assets"::T.Text)]))
+                  let batch state=do
+                        updated<-foldM (\current _->do
+                          packet<-bounded "candidate display setting" (readPacketWith receiveChunk)
+                          case packet of
+                            Just (JsonPacket value@(Object fields))->do
+                              input<-either error pure (parseEither parseInput value)
+                              serial<-maybe (error "Display setting sequence missing") pure (KM.lookup "seq" fields)
+                              writePacket h (JsonPacket (object ["type" .= ("ack"::T.Text),"seq" .= serial]))
+                              pure (fst (applyInput input current))
+                            _->error "Candidate display setting is not JSON") state [1..3::Int]
+                        pure updated
+                      showFrame serial state=do
+                        writePacket h (JsonPacket (object ["type" .= ("frame-ready"::T.Text),"seq" .= (serial::Int),"changed" .= True]))
+                        writePacket h (BinaryPacket (BL.toStrict (framePacket True [] (frameRows state) (frameMetadata "/tmp" state))))
+                  initialTarget<-batch (initialDesktop (80,25))
+                  showFrame 3 initialTarget
+                  finalTarget<-batch initialTarget
+                  putMVar configured finalTarget
+                  showFrame 6 finalTarget
+                  -- The owning async must be cancellable while its peer stays open.
+                  void (readPacketWith receiveChunk)
+          withAsync delayedServer $ \server->do
+            link server
+            switch (S.sessionId target) (S.sessionId delayed)
+            bounded "candidate preparation barrier" (takeMVar preparing)
+            preparingAttachment<-peerAttachment peer
+            send peer ["type" .= ("resize"::T.Text),"width" .= (103::Int),"height" .= (33::Int),"attachment" .= preparingAttachment]
+            send peer ["type" .= ("theme"::T.Text),"dark" .= False,"attachment" .= preparingAttachment]
+            switch (S.sessionId target) "reply-during-switch"
+            copied<-receive peer "copy"
+            check "committed old clipboard reply drains while target preparation is blocked" (KM.lookup "text" copied==Just (String "old committed copy"))
+            void (receive peer "download")
+            putMVar release ()
+            bounded "selected delayed target" $ let await=peerSession peer >>= \ident->if ident==S.sessionId delayed then pure () else threadDelay 10000 >> await in await
+            oldPayload<-bounded "old download after target commit" (peerReceive peer)
+            check "commit retains the queued old download payload" (oldPayload==Just (BinaryPacket "old committed bytes"))
+            void (receive peer "session")
+            void (receive peer "assets")
+            void (receive peer "frame-ready")
+            firstReset<-bounded "initialized reset" (peerReceive peer)
+            case firstReset of
+              Just (BinaryPacket bytes)->do
+                (metadata,_)<-decodeFrame [] bytes
+                check "first target RESET includes resize changed during preparation" (case metadata of Object fields->KM.lookup "size" fields==Just (toJSON ([103,33]::[Int])) && KM.lookup "reset" fields==Just (Bool True);_->False)
+              _->error "Candidate did not commit a reset frame"
+            finalTarget<-bounded "updated candidate configuration" (takeMVar configured)
+            check "target waits for theme changed during preparation" (not (systemDark finalTarget) && videoMode finalTarget==Nothing)
+            void (receive peer "connection")
+  putStrLn "Session handoff admission, refusal and input lifetime checks passed"
+
 inspect :: Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))
 inspect d _ request=pure (False,d,pure (editorResponse d request))
 
@@ -374,8 +569,8 @@ withBridgeHandles action=bracket (N.socket N.AF_INET N.Stream N.defaultProtocol)
   bracketOnError (N.socket N.AF_INET N.Stream N.defaultProtocol) N.close $ \client -> do
     N.connect client address
     (server,_)<-N.accept listener
-    (clientHandle,_)<-socketToEndpoint client
-    (serverHandle,shutdown)<-socketToEndpoint server
+    (clientHandle,_,_)<-socketToEndpoint client
+    (serverHandle,shutdown,_)<-socketToEndpoint server
     action serverHandle shutdown clientHandle `finally` do
       shutdown
       hClose serverHandle

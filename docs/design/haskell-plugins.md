@@ -1,15 +1,25 @@
 # Haskell plugin API
 
-Status: implemented typed command registration, immutable buffer reads and checked
-strict diffs, scoped menus/bindings, shared sidebar trees, prepared plugin text
-windows, fixed rows with readonly Details, persistent multiline editors, and
-host-owned input and choice forms.
-The current APIs are in
-`Hide.Plugin.Command`, `Buffer`, `Menu`, `Tree`, `Sidebar`, `Window`, `Editor` and
-`Form`. The signatures below sketch the broader proposed contracts and are not a
-compilable SDK. The
-approved [sidebar design](../plans/sidebar-navigation.md) supplies the navigation
-model.
+Plugins use typed commands, immutable buffer reads and checked diffs, scoped
+menus and bindings, shared sidebar trees, prepared text windows and host-owned
+forms and editors. The executable chooses its linked plugins in `app/Main.hs`.
+
+Four packages build independently of the editor's private model and native
+frontends:
+
+| Package | Contents |
+| --- | --- |
+| `hide-plugin-api` | Scoped commands, tools, forms, menus, trees and session composition |
+| `hide-agent-api` | Provider contracts, directory metadata and attributed orchestration services |
+| `hide-acp` | ACP transport and provider adapter |
+| `hide-agents` | Agents sidebar, its forms and the nine agent-coordination tools |
+
+Buffer, window and multiline-editor APIs still live in the main `hide` library.
+Conversation presentation, input bindings and the broader editor-tool surface
+are the next package boundaries. The sections below distinguish implemented APIs
+from proposed contracts; proposed signatures are design sketches, not compilable
+SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
+navigation model.
 
 **Agents > Rename** and **Files > Rename** use single-input forms. **New Agent**
 uses named Name and Task inputs. **Model** and **Effort** use choice forms for
@@ -47,9 +57,10 @@ Its `Sidebar c r` capability keeps invocation context and host reply types opaqu
 to the provider. The host supplies origin and workspace inspection, form replies
 and scoped publication; domain operations use a separate typed reply injection.
 The workspace is the editor's working directory, independent of the Files tree
-root. `AgentSidebar` uses this boundary without importing the desktop model or
-its sidebar interpreter. Agent transports and the separate API package remain
-independent work.
+root. `Hide.AgentUI` in `hide-agents` uses this boundary without importing the
+desktop model or its sidebar interpreter. `Hide.Plugin.Session` scopes its
+registrations and metadata worker; provider services retain their own session
+lifetimes. Conversation registration remains in the host.
 
 ## Direction
 
@@ -80,10 +91,11 @@ separate extension.
 
 ## Packaging and activation
 
-Start with ordinary Cabal packages linked into the editor executable. A small
-`hide-plugin-api` package would expose the public types without SDL, Ghostty or
-private `Hide.Model` constructors. A configured application chooses its packages
-at build time; TOML enables and configures the plugins that are present.
+Start with ordinary Cabal packages linked into the editor executable.
+`hide-plugin-api` exposes the command, form, menu, tree and session types without
+SDL, Ghostty or private `Hide.Model` constructors. The executable chooses linked
+plugins; see the current composition below. The broader manifest and TOML
+activation design remains a proposed extension:
 
 ```haskell
 data Plugin = Plugin
@@ -258,10 +270,23 @@ The implemented `Hide.Plugin.Buffer.listBuffers` discovers opaque session-bound
 references and shallow metadata through the existing reader and Permissions
 owner. It preserves the current `list_buffers` metadata mask, confers no capture
 authority and retains no source image or Undo. The actual MCP listing consumes
-that typed service on its reply worker. Generic plugin activation/subscriptions
-and public atomic multi-buffer preparation/commit remain proposed.
+that typed service on its reply worker. Linked callers submit atomic edits with
+`applyBufferDiffs :: BufferEditor -> [BufferDiff] -> IO (Either Text [DiffResult])`.
+Each `BufferDiff` carries a session reference, exact captured version and strict
+unified diff. The batch is bounded to 1–16 distinct open text buffers and 1 MiB
+characters of patches. One permission ticket covers all targets; Prompt shows an
+editable diff for each. Every source and review version must still match before
+one atomic commit. Results follow input order, each changed buffer gets ordinary
+Undo, and nothing is saved. `applyBufferDiff` is its singleton case. Generic
+plugin activation/subscriptions and the arbitrary prepared-edit API sketched
+above remain proposed.
 
-Measured line/range reads share the existing finger-tree machinery. Whole-buffer
+Measured line/range reads share the existing finger-tree machinery. The public
+`lineRange` query locates a row's absolute character range from cached measures,
+excluding its trailing CR/LF, without flattening the row. The shared `read_buffer`
+and `read_window` text formatter uses those ranges and bounded `readText` slices
+to enforce its 131072-character response cap before copying oversized rows;
+page metadata still describes the requested available rows. Whole-buffer
 reads are explicit worker operations. Reads from a retained snapshot remain
 stable; they are not live views that change underneath a parser.
 
@@ -383,8 +408,9 @@ alongside the draft and its history. Source capture is independent of painting:
 closed conversations retain incoming output, and suspension captures accepted
 owner output before saving. Hidden conversations need no layout during restore, and
 visible conversations reflow at their recovered width. Restored controls, links,
-shell actions and provider credentials remain inactive. This does not complete
-the separate first-party plugin package.
+shell actions and provider credentials remain inactive. These conversation
+owners still live in the host; the linked Agents sidebar and tool package uses
+the narrower public services described below.
 
 Inline questions keep public prompt structure separate from the live answer.
 The host paints the answer and selected choice only where the current viewport
@@ -533,11 +559,11 @@ cells, canvas-local coordinates, frontend logical points and device pixels. Any
 filter distortion must also participate in geometry conversion. Hit testing uses
 that same transform and capture rules. Plugins cannot paint or accept clicks over an approval dialog by enlarging their content bounds.
 
-Ordinary file opening chooses the representation from the file signature. A PNG
+Ordinary file opening chooses the representation from the file signature. A PNG or JPEG
 opens in an image window through the same Files, file dialog, command-line and
 drop routes as a source file. No separate viewing service is required.
 
-The PNG decoder prepares immutable RGBA8 on a worker through
+The PNG/JPEG decoder prepares immutable RGBA8 on a worker through
 `prepareImageWindow`, then uses `openWindow` for ordinary scoped publication.
 Additional image formats belong before that boundary: recognize the encoding,
 check allocation bounds, decode, apply orientation and color conversion, then
@@ -712,6 +738,25 @@ offering force-close.
 Tools explicitly expose selected operations. Registering a menu command does not
 make it callable by an agent.
 
+The implemented boundary is `Hide.Plugin.Tool`: an immutable `Tools c` set scopes
+explicit `Tool c` declarations over the existing typed command registry.
+`withTools` rejects host-name collisions, duplicate wire/command names and invalid
+metadata before exposing the set. Strict object codecs validate input on the
+worker; object results are published as structured content and JSON text. The
+wire limits match MCP: 1 MiB of arguments and 4 MiB of result. Scope closure
+refuses retained calls, and unknown names never reach a fallback interpreter.
+Read-only hints configure default policy; they do not authorize execution.
+
+`Hide.AgentTools` in the linked `hide-agents` package registers the existing nine
+orchestration tools. Its only execution context is `AgentServices`, supplied by
+the host for the authenticated actor and workspace after permission admission.
+The workspace guard rejects substitution before provider reservation. Every
+operation still checks live Hub authority; retaining the record cannot keep an
+ended agent alive. Hub ancestry, limits, tickets, worktree isolation and rollback
+are unchanged. The plugin receives no human approval or settings capability.
+
+The broader registration shape below remains proposed:
+
 ```haskell
 exposeTool :: ToolDef a b -> Command a b -> PluginM Registration
 
@@ -786,13 +831,13 @@ prompts nor replays transcript state during synchronization. Conversation retain
 the primary transcript, ACP request dispatch and provider recovery.
 
 `AgentHub.historyAgent` and `searchAgentHistory` return public `HistoryPage` and
-`HistoryEvent` values. Conversation reads typed event indices and host-attributed
-actors directly; AgentMCP encodes the same pages for tools. The Hub retains the
-single history: at most 1,024 events/4 MiB per agent, with 1–100 events and 1 MiB of
+`HistoryEvent` values from `Hide.Plugin.AgentServices`. Conversation reads typed
+event indices and host-attributed actors directly; `Hide.AgentTools` encodes the
+same pages for tools. The Hub retains the single history: at most 1,024 events/4 MiB per agent, with 1–100 events and 1 MiB of
 encoded events per page. Exclusive cursors preserve original indices, including
 through search and checkpoint recovery; reads do not consume events or message
 tickets. Provider details remain extensible JSON whose publisher owns redaction.
-The MCP envelope and private checkpoint format are unchanged.
+Event fields and the private checkpoint format are unchanged.
 
 New Agent acquisition also belongs to `AgentRuntime`: its host-only
 `requestAgentCreation` admits one pending launch and returns the Hub's original
@@ -825,6 +870,17 @@ than making the conversation window own transport. Model/effort choices come fro
 Fork/resume must mean actual provider support, not an invented fresh session.
 Private resume keys use a separate host credential/checkpoint service and never
 appear in public descriptions or window state.
+
+The ACP transport and driver are linked from `hide-acp`, a separate Cabal
+package in `plugins/hide-acp`. Its only Hide dependency is `hide-agent-api` in
+`packages/hide-agent-api`, which exposes `Hide.Plugin.Agent`: typed launch
+requests, attributed messages, public capabilities/events and a driver lifetime.
+The adapter does not import the hub, Model, Render or Conversation. Capability
+decoding belongs to ACP; the hub decodes its own checkpoint representation.
+The linked `hide-agents` package separately supplies the Agents sidebar and
+coordination tools through `hide-plugin-api`. Conversation presentation and the
+broader editor tools still use host types; those consumers define the remaining
+public boundaries.
 
 The hub remains the owner of agent IDs, ancestry, limits, workspaces, task tickets
 and message attribution. A provider plugin supplies a driver; a conversation
@@ -890,6 +946,35 @@ An optional service can be unavailable in a build. Plugin-specific collaboration
 can use a normal Haskell dependency and scoped handles; add a dynamic service bus
 only if a concrete need appears.
 
+`Hide.Plugin.AgentDirectory` supplies the Agents tree with typed names,
+ancestry, state and advertised settings. It lives in `hide-agent-api` alongside
+the provider contract. The tree imports public plugin interfaces only; the host
+binds reads to the Hub and autocomplete owner. Rename reads one small directory
+entry instead of serializing a conversation's status.
+
+Directory listing and lookup do not start providers, submit prompts or change
+settings. Explicit completion-choice discovery may connect the configured provider
+and refresh its metadata, on its existing worker after human input admission.
+Settings and completion requests retain opaque receipts supplied by the host;
+the tree cannot reconstruct or reinterpret them. A metadata refresh cannot
+retarget an action, and the existing host command/receipt checks still admit its
+application. These are trusted linked-plugin capabilities, not an MCP endpoint
+or a grant of human input authority. Retiring the tree releases its registration and metadata worker
+without stopping providers.
+
+The command, form, menu, tree and session contracts live in `hide-plugin-api`,
+without the editor's buffer or rendering dependencies. The real Agents tree is
+the linked `hide-agents` package. Its `Hide.AgentUI.plugin`
+uses `Hide.Plugin.Session` to scope registration and its metadata worker. The
+executable selects it with `Hide.App.main [Hide.AgentUI.plugin]`; the editor
+library does not import the plugin implementation. The metadata worker publishes
+invalidations to the same bounded, close-aware queue as trees and forms. No
+plugin callback runs on the UI tick. The host drains bounded deltas and owns
+input, geometry, forms and action admission. The same plugin declares its
+orchestration tools, which the host registers with existing per-tool policy.
+Conversation presentation and the broader editor-tool surface remain to be
+separated.
+
 `SessionServices` owns builds, compiler discovery, build settings and shared
 consoles for the editor session. Conversation receives a console handle and owns
 its provider's terminal IDs; retiring that provider releases those terminals,
@@ -913,8 +998,15 @@ owner ticks refresh only the exact installed `WindowRef`. Closing the frame
 preserves its warm provider and independent hint draft, and later trace output
 cannot reopen it. The hint pane is bound to that reference rather than the title.
 Readable output grants no input authority. Recovery retains the transcript as an
-inert private text view and clears the hint binding and draft. The hint editor
-itself remains an existing host control; its typed editor migration is separate.
+inert private text view and clears the hint binding and draft.
+
+The hint uses the same `PreparedEditor`, `DraftRef` and frame mount as conversation
+input. Its typed action runs on the existing completion worker. Enter captures
+an immutable version without clearing it; provider failure, a full queue or an
+expired mount leaves the draft intact. Successful delivery clears only that
+submitted version, including a hidden draft. Later typing survives. Configuration
+changes invalidate queued submissions rather than sending them to a replacement
+provider. The hint is ephemeral and grants no agent input authority.
 
 ## Cabal navigation as a second example
 

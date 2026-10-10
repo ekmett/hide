@@ -9,11 +9,12 @@
 module Hide.External
   ( Watcher, Observation(..), withWatcher, watchPaths, pollObservations, forceCheck ) where
 
+import Hide.FileIO (readFileBytes)
+
 import Control.Concurrent (MVar, forkIO, killThread, modifyMVar, modifyMVar_, newEmptyMVar, newMVar, takeMVar, tryPutMVar)
 import Control.Exception (bracket)
 import Control.Monad (foldM, unless, void, when)
 import Data.ByteString (ByteString)
-import qualified Data.ByteString as BS
 import Data.List (sort)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -107,7 +108,7 @@ inspectFile now forced previous (next, events, budget) (path, token) = do
       _ -> do
         bytes <- case before of
           Nothing -> pure Nothing
-          Just _ -> Just <$> BS.readFile path
+          Just _ -> Just <$> readFileBytes path
         after <- stamp path
         pure $ if before == after then Just (CachedFile after (FileObserved path token bytes) now) else Nothing
   let result = case checked of

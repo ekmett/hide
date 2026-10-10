@@ -11,6 +11,7 @@ import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile)
 import System.Timeout (timeout)
 import Hide.External
+import Hide.FileIO (replaceFile)
 import Hide.Browser (entryName)
 
 checks :: IO ()
@@ -34,7 +35,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withWatcher $ \watcher -
   watchPaths watcher [(path, 0)] [dir]
   expect "initial observation includes bytes" (FileObserved path 0 (Just "already changed"))
   BS.writeFile replacement "replacement"
-  renameFile replacement path
+  replaceFile replacement path
   automatic <- timeout 3000000 (await (== FileObserved path 0 (Just "replacement")))
   check "automatic metadata polling finds atomic replacement" (automatic == Just ())
   stamp <- getModificationTime path
@@ -64,12 +65,15 @@ checks = bracket temporary removePathForcibly $ \dir -> withWatcher $ \watcher -
     FileObserved _ token _ -> token == 2
     FileUnavailable _ token _ -> token == 2
     _ -> True) pending)
-  permissions <- getPermissions path
-  bracket (setPermissions path (permissions { readable = False }))
-          (const (setPermissions path permissions)) $ \_ -> do
-    forceCheck watcher
-    denied <- timeout 3000000 (awaitUnavailable watcher path)
-    check "read errors are not mistaken for deletion" (denied == Just ())
+  -- A directory at a watched file path is a portable read error; unlike POSIX
+  -- mode bits it also exercises FileUnavailable on native Windows.
+  removeFile path
+  createDirectory path
+  forceCheck watcher
+  denied <- timeout 3000000 (awaitUnavailable watcher path)
+  check "read errors are not mistaken for deletion" (denied == Just ())
+  removeDirectory path
+  BS.writeFile path "queued before save"
   expect "readable file recovers from error" (FileObserved path 2 (Just "queued before save"))
   let subdirectory = dir </> "nested"
   createDirectory subdirectory
