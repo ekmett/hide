@@ -17,6 +17,15 @@
       pkgs = import nixpkgs { inherit system; };
       haskellPackages = pkgs.haskell.packages.ghc9141.override {
         overrides = final: old: {
+          # Build the runtime dependency closure. Hide's installed-package check
+          # below owns acceptance; upstream suites, docs and profiling are not
+          # part of producing an editor executable.
+          mkDerivation = args: old.mkDerivation (args // {
+            doCheck = false;
+            doHaddock = false;
+            enableLibraryProfiling = false;
+            enableExecutableProfiling = false;
+          });
           # Linked packages use this same compiler and dependency set.
           hide-agent-api = final.callCabal2nix "hide-agent-api"
             (pkgs.lib.cleanSource ./packages/hide-agent-api) {};
