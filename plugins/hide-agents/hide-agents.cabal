@@ -9,6 +9,6 @@ library
   default-language: Haskell2010
   ghc-options: -Wall
   hs-source-dirs: src
-  exposed-modules: Hide.AgentUI, Hide.AgentTools, Hide.AgentTranscript, Hide.DocsTools, Hide.EnvironmentTools
+  exposed-modules: Hide.AgentUI, Hide.AgentTools, Hide.AgentTranscript, Hide.DocsTools, Hide.EnvironmentTools, Hide.BufferTools
   build-depends: base >=4.18 && <4.23, hide-plugin-api ==0.1.0.0, hide-agent-api ==0.1.0.0
-    , text >=2.0, aeson, async, deepseq, containers
+    , text >=2.0, aeson, async, bytestring, deepseq, containers

@@ -20,7 +20,10 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Hide.EditorMCP
 import Hide.BufferReads (captureWindow)
-import Hide.BufferReadCommand (withBufferReadCommands)
+import Hide.BufferReadCommand (withBufferReadCommands,bufferPage)
+import Hide.Plugin.Command (Codec(..))
+import qualified Hide.Plugin.BufferRead as R
+import qualified Hide.BufferTools as BufferTools
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import Hide.Syntax (Style(..))
@@ -38,20 +41,18 @@ checks profile = do
       call name args=editorResponse edited (rpc "tools/call" (object ["name" .= (name::T.Text),"arguments" .= args]))
       text=TE.decodeUtf8 . BL.toStrict . encode
       names=editorResponse edited (rpc "tools/list" (object []))
-      content=call "read_buffer" (object ["bufferId" .= sourceFixtureBuffer win,"startLine" .= (1::Int),"lineCount" .= (1::Int)])
-  check "MCP lists live windows and buffers" (all (\name->maybe False (T.isInfixOf name . text) names) ["list_windows","list_buffers","read_buffer","read_window","read_selection"])
-  check "MCP returns unsaved Unicode text" (maybe False (T.isInfixOf "unsaved λ" . text) content && not (maybe False (T.isInfixOf "second" . text) content))
+      content=bufferContents edited (object ["bufferId" .= sourceFixtureBuffer win,"startLine" .= (1::Int),"lineCount" .= (1::Int)])
+  check "MCP lists built-in live window tools" (all (\name->maybe False (T.isInfixOf name . text) names) ["list_windows","read_window","read_selection"])
+  check "MCP returns unsaved Unicode text" (either (const False) (T.isInfixOf "unsaved λ" . text) content && not (either (const False) (T.isInfixOf "second" . text) content))
   check "MCP does not fabricate saved paths for untitled buffers" (maybe False (T.isInfixOf "Untitled" . text) (call "list_windows" (object [])))
-  check "MCP missing buffer is a tool error" (maybe False (T.isInfixOf "Buffer not found" . text) (call "read_buffer" (object ["bufferId" .= (999::Int)])))
-  let pastEnd=call "read_buffer" (object ["startLine" .= (maxBound::Int),"lineCount" .= (1000::Int)])
-  check "MCP extreme line offsets cannot overflow" (maybe False (T.isInfixOf "lineCount\\\":0" . text) pastEnd)
-  check "MCP bounds reads" (maybe False (T.isInfixOf "lineCount" . text) (call "read_buffer" (object ["lineCount" .= (1001::Int)])))
+  check "MCP missing buffer is a tool error" (case bufferContents edited (object ["bufferId" .= (999::Int)]) of Left "Buffer not found"->True; _->False)
+  let pastEnd=bufferContents edited (object ["startLine" .= (maxBound::Int),"lineCount" .= (1000::Int)])
+  check "MCP extreme line offsets cannot overflow" (case pastEnd of Right (Object fields)->KM.lookup "lineCount" fields==Just (toJSON (0::Int)); _->False)
+  check "MCP bounds reads" (case bufferContents edited (object ["lineCount" .= (1001::Int)]) of Left _->True; _->False)
   check "MCP notifications receive no response" (editorResponse edited (object ["jsonrpc" .= ("2.0"::T.Text),"method" .= ("notifications/initialized"::T.Text)])==Nothing)
   let initialized=editorResponse edited (rpc "initialize" (object ["protocolVersion" .= ("2025-11-25"::T.Text)]))
   check "MCP initialize advertises tools" (maybe False (T.isInfixOf "capabilities" . text) initialized)
   check "MCP invalid request is protocol error" (case editorResponse edited Null of Just (Object fields)->KM.member "error" fields; _->False)
-  let decoded=content >>= parseMaybe (withObject "reply" (.: "result")) :: Maybe Value
-  check "MCP tool result envelope exists" (decoded/=Nothing)
   let conversationText="Session: provider-secret\nPublic assistant response\nOther: unsent-secret"
       answerStart=T.length "Session: provider-secret\nPublic assistant response\nOther: "
       semantics=W.TextSemantics W.CopyText Nothing V.empty V.empty W.ReadableWindow
@@ -73,16 +74,16 @@ checks profile = do
     check "MCP prepared window selections cannot bypass private redaction"
       (case builtinTool (modifyActive (\w->w {selection=Selection 0 200}) conversation) "read_selection" (object []) of Left _->True; _->False)
     check "MCP prepared windows cannot fabricate a source buffer read"
-      (M.null (buffers conversation) && case builtinTool conversation "read_buffer" (object []) of Left _->True; _->False)
+      (M.null (buffers conversation) && case bufferContents conversation (object []) of Left _->True; _->False)
   let byteDocument=addDocument Nothing (newByteBuffer (BS.pack [0,127,128,255])) (initialDesktop (80,25))
-  check "MCP byte formatting preserves original values and spacing" (case builtinTool byteDocument "read_buffer" (object []) of
+  check "MCP byte formatting preserves original values and spacing" (case bufferContents byteDocument (object []) of
     Right (Object fields)->KM.lookup "hex" fields==Just (String "00 7f 80 ff") && KM.lookup "totalBytes" fields==Just (toJSON (4::Int))
     _->False)
   let largeBytes=addDocument Nothing (newByteBuffer (BS.replicate (2*1024*1024) 120)) (initialDesktop (80,25))
       largeBuffer=documentBuffer (fromJust (activeDocument largeBytes))
   _<-evaluate (prepareBuffer largeBuffer)
   allocatedBefore<-getAllocationCounter
-  localBytes<-evaluate (case builtinTool largeBytes "read_buffer" (object ["byteOffset" .= (1048576::Int)]) of
+  localBytes<-evaluate (case bufferContents largeBytes (object ["byteOffset" .= (1048576::Int)]) of
     Right value->BL.length (encode value)
     Left err->error (T.unpack err))
   allocatedAfter<-getAllocationCounter
@@ -93,7 +94,7 @@ checks profile = do
       longDocument=addDocument Nothing longText (initialDesktop (80,25))
   _<-evaluate (prepareBuffer longText)
   textAllocatedBefore<-getAllocationCounter
-  boundedText<-evaluate (case builtinTool longDocument "read_buffer" (object []) of
+  boundedText<-evaluate (case bufferContents longDocument (object []) of
     Right (Object fields)->case KM.lookup "text" fields of
       Just (String body)->T.length body==pageLimit && KM.lookup "truncated" fields==Just (Bool True)
       _->False
@@ -118,7 +119,7 @@ checks profile = do
         rows=map (T.dropWhileEnd (=='\r')) (T.splitOn "\n" source)
         expected=T.intercalate "\n" rows
     check "MCP text paging preserves row metadata, normalized endings and exact character cap"
-      (case builtinTool pageDocument "read_buffer" (object []) of
+      (case bufferContents pageDocument (object []) of
         Right (Object fields)->KM.lookup "text" fields==Just (String (T.take pageLimit expected))
           && KM.lookup "truncated" fields==Just (Bool (T.length expected>pageLimit))
           && KM.lookup "lineCount" fields==Just (toJSON (length rows))
@@ -137,16 +138,11 @@ checks profile = do
     (case builtinTool partial "read_selection" (object []) of
       Right (Object fields)->KM.lookup "text" fields==Just (String "😀\r") && KM.lookup "truncated" fields==Just (Bool False)
       _->False)
-  let privateReview=addReadOnly "Agent request" "private-review-token" (initialDesktop (80,25))
-  check "MCP private approval buffers refuse content reads" (case builtinTool privateReview "read_buffer" (object []) of Left _->True; _->False)
-  check "MCP still lists non-secret internal buffer identifiers" (case builtinTool privateReview "list_buffers" (object []) of Right value->"bufferId" `T.isInfixOf` text value && not ("private-review-token" `T.isInfixOf` text value); _->False)
-  let normalSource=addDocument Nothing (newBuffer "Session: normal source text\nEnvironment: ordinary example") (initialDesktop (80,25))
-  check "MCP source files are not redacted by secret-like labels" (case builtinTool normalSource "read_buffer" (object []) of Right value->"normal source text" `T.isInfixOf` text value && "ordinary example" `T.isInfixOf` text value; _->False)
   let authorityPath="/authority/private-session-key.json"
       authority=addDocument (Just (FileState authorityPath Nothing)) (newBuffer "secret config") edited {guestPrivatePaths=[authorityPath]}
-  check "MCP private file metadata hides secret-bearing filenames" (all (\name->case builtinTool authority name (object []) of Right value->not ("private-session-key" `T.isInfixOf` text value) && "[private]" `T.isInfixOf` text value; _->False) ["list_buffers","list_windows"])
+  check "MCP private file metadata hides secret-bearing filenames" (all (\name->case builtinTool authority name (object []) of Right value->not ("private-session-key" `T.isInfixOf` text value) && "[private]" `T.isInfixOf` text value; _->False) ["list_windows"])
   let diskReview=addReadOnly ("Disk changes: "<>T.pack authorityPath) "private review" edited {guestPrivatePaths=[authorityPath]}
-  check "MCP disk review metadata hides protected source filenames" (all (\name->case builtinTool diskReview name (object []) of Right value->not ("private-session-key" `T.isInfixOf` text value) && "[private]" `T.isInfixOf` text value; _->False) ["list_buffers","list_windows"])
+  check "MCP disk review metadata hides protected source filenames" (all (\name->case builtinTool diskReview name (object []) of Right value->not ("private-session-key" `T.isInfixOf` text value) && "[private]" `T.isInfixOf` text value; _->False) ["list_windows"])
   invoked<-newIORef (0::Int)
   completed<-newIORef False
   let execute d _ _=do
@@ -164,8 +160,8 @@ checks profile = do
   (_,notification)<-editorResponseWith debugTools execute edited (object ["jsonrpc" .= ("2.0"::T.Text),"method" .= ("tools/call"::T.Text),"params" .= object ["name" .= ("debug_launch"::T.Text)]])
   check "MCP notifications never initiate a mutation" . (==Nothing) =<< notification
   check "MCP mutation notification leaves controller untouched" . (==1) =<< readIORef invoked
-  check "built-in read operation can be called through permission wrapper" (case builtinTool edited "list_buffers" (object []) of Right (Object fields) -> KM.member "buffers" fields; _ -> False)
-  (_,gatedRead)<-editorResponseWith builtinTools execute edited (request "list_buffers" (object []))
+  check "built-in read operation can be called through permission wrapper" (case builtinTool edited "list_windows" (object []) of Right (Object fields) -> KM.member "windows" fields; _ -> False)
+  (_,gatedRead)<-editorResponseWith builtinTools execute edited (request "list_windows" (object []))
   _<-gatedRead
   check "registered built-in reads use controller callback" . (==2) =<< readIORef invoked
   (_,registered)<-editorResponseWith builtinTools execute edited (rpc "tools/list" (object []))
@@ -231,3 +227,14 @@ checks profile = do
     tooLarge<-try (readMCPLine h BS.empty) :: IO (Either IOException (Maybe (BS.ByteString,BS.ByteString)))
     check "MCP rejects oversized unterminated input" (case tooLarge of Left _->True; _->False)
   putStrLn "editor MCP checks passed"
+
+-- Paging and presentation are pure; authority is exercised through the actual
+-- public tool/reader path in TypedBufferReadsCheck and BufferReadsCheck.
+bufferContents :: Desktop -> Value -> Either T.Text Value
+bufferContents desktop value=do
+  arguments<-codecDecode R.readInput value
+  ident<-maybe (maybe (Left "No active source buffer") Right (activeWindow desktop >>= bufferId)) Right (R.wantedBuffer arguments)
+  doc<-maybe (Left "Buffer not found") Right (M.lookup ident (buffers desktop))
+  let b=documentBuffer doc
+      info=R.BufferMetadata ident "Untitled" Nothing (documentModified doc) (byteMode b) (revision b)
+  codecEncode BufferTools.readOutput <$> bufferPage info arguments False (bufferContent b)

@@ -8,7 +8,7 @@ import qualified Control.Concurrent.STM as STM
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
 import GHC.Conc (threadStatus,ThreadStatus(..),BlockReason(..))
-import Hide.BufferReadCommand (withBufferReadCommands)
+import Hide.BufferReadCommand (withBufferReadCommands,bufferReadServices)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -25,7 +25,9 @@ import Hide.Files (FileState(..))
 import Hide.AgentAccess
 import qualified Hide.AgentHub as AH
 import Hide.BufferReads
-import Hide.EditorMCP (builtinTools,readBufferTool,readWindowTool)
+import Hide.EditorMCP (builtinTools,readWindowTool)
+import qualified Hide.BufferTools as BufferTools
+import qualified Hide.Plugin.Tool as Tool
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import Hide.Syntax (Style(..))
@@ -35,8 +37,9 @@ import qualified Hide.Plugin.Buffer as P
 import Hide.Plugin.BufferHost (versionCurrent)
 
 checks :: IO ()
-checks=bracket temporary removePathForcibly $ \directory -> do
-  let path=directory </> "config.toml"
+checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removePathForcibly $ \directory -> do
+  let specs=builtinTools++Tool.toolDefinitions toolset
+      path=directory </> "config.toml"
       base=addDocument Nothing (newBuffer "old λ\n") (initialDesktop (80,25))
       bid=maybe (error "missing initial buffer") sourceFixtureBuffer (activeWindow base)
       args=object ["bufferId" .= bid]
@@ -46,9 +49,11 @@ checks=bracket temporary removePathForcibly $ \directory -> do
         _ -> error "missing read approval"
       text image=P.readText (capturedContent image) (P.TextRange (P.CharOffset 0) (P.CharOffset 6))
   saved<-newIORef Nothing
-  withPermissionsAt path builtinTools $ \runtime -> withBufferReadCommands $ \commands->do
+  withPermissionsAt path specs $ \runtime -> withBufferReadCommands $ \commands->do
     let reader=bufferReader runtime (pure (Right ()))
-        begin reader' d=beginRequest d (readBufferTool commands reader' d "read_buffer" args)
+        begin reader' d=beginRequest d $ do
+          let context=bufferReadServices reader' (activeWindow d >>= bufferId) (nextId d)
+          context `seq` pure (d,Tool.callTool toolset context "read_buffer" args)
         beginWindow d=beginRequest d (readWindowTool commands (windowReader runtime (pure (Right ()))) d "read_window" (object []))
         beginRequest d request=do
           (_,finish)<-request
@@ -77,7 +82,7 @@ checks=bracket temporary removePathForcibly $ \directory -> do
     Just (expired,ref,image)<-readIORef saved
     check "captured read survives receipt expiry" (text image==Right "old λ\n")
     check "read receipt expires when admitted callback returns" . isLeft =<< captureBuffer expired base ref
-    withPermissionsAt (directory </> "other.toml") builtinTools $ \other -> do
+    withPermissionsAt (directory </> "other.toml") specs $ \other -> do
       (_,cross)<-settledTool other (permissionReadCall other (\admission d _ _->do
         result<-captureBuffer admission d ref
         pure (d,pure (either Left (const (Right Null)) result)))) base "read_buffer" args

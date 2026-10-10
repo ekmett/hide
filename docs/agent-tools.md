@@ -61,7 +61,7 @@ reads use a bounded declared corpus, not automatic classification of every word.
 | `list_windows` | R | `{}` | Window IDs, titles, buffer IDs, rectangles, active window and panels |
 | `read_buffer` | R | `bufferId?`, `startLine?`, `lineCount?`, `byteOffset?` | Live text; 200 lines default, 1000 maximum. Binary: up to 4096 hex bytes. Defaults to active buffer |
 | `read_window` | R | `windowId?`, `startLine?`, `lineCount?` | Readable prepared text; 200 lines default, 1000 maximum, 131072 characters. Logical `window-text` coordinates; protected spans masked. Defaults to active window |
-| `read_selection` | R | `windowId?` | Selected content and cursor offsets; `coordinateSpace` is `source` or `rendered-markdown`. Defaults to active window |
+| `read_selection` | R | `windowId?` | Up to 131,072 selected characters and cursor offsets; `truncated` reports a larger selection. `coordinateSpace` is `source` or `rendered-markdown`. Defaults to active window |
 | `workspace_project` | R | `{}` | Project root, Cabal package file, active source, unsaved buffers, existing Cabal component/dependency graph |
 | `workspace_search` | R | `query`, `trackedOnly?`, `offset?`, `limit?` | Literal line matches with live-buffer substitution; tracked-only or ignore-respecting workspace search |
 | `editor_file` | W | `action`, `bufferId?`, `windowId?`, `path?`, `revision?`, `dirtyAction?` | `open`, `save`, `close`; save/close require current revision. Dirty close requires `save` or `discard` |

@@ -34,8 +34,9 @@ import Hide.Plugin.Command
 -- Input schemas are strict objects; output schemas describe objects. Codecs
 -- must enforce their stated fields and bounds.
 -- Wire arguments have a 1 MiB ceiling and results 4 MiB, matching the host
--- transport. The host supplies the context after policy admission; arguments
--- cannot supply or replace it.
+-- transport. The host supplies an admitted context or a service that owns admission
+-- for every call (see 'Hide.Plugin.Session.PluginTool'); arguments cannot supply
+-- or replace it.
 data Tool c = forall a b. Tool Text Bool (CommandDef c a b)
 
 -- | Project a host-granted context without changing tool names, schemas,
@@ -91,7 +92,8 @@ hasTool :: Tools c -> Text -> Bool
 hasTool (Tools _ entries) name=M.member name entries
 
 -- | Invoke the captured registration on the caller's worker, after host policy
--- and actor admission. Closing the set rejects retained calls. Command codecs
+-- and actor admission, or through an explicitly self-admitting service context.
+-- Closing the set rejects retained calls. Command codecs
 -- validate typed arguments; their errors and handler failures remain explicit.
 -- An oversized reply fails rather than returning a truncated success.
 callTool :: Tools c -> c -> Text -> Value -> IO (Either Text Value)

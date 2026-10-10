@@ -5,7 +5,7 @@
 -- Tool initiation and reply waiting are separate phases so HLS, DAP and human
 -- approvals can continue while a request is pending. Actor-bound routes expose
 -- only their supplied tools, with no fallback into ordinary desktop reads.
-module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, listBuffersTool, readBufferTool, readWindowTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, openEditorFiles, readMCPLine) where
+module Hide.EditorMCP (editorResponse, editorResponseWith, editorResponseOnly, rpcError, builtinTools, builtinTool, readWindowTool, debugTools, editorServers, editorServersFor, editorServersAt, runEditorMCP, runEditorMCPWithHandles, runEditorMCPWithToken, openEditorFiles, readMCPLine) where
 
 import Hide.Sidebar
 import Control.Exception (bracket, try, IOException, finally, catch, mask, throwIO)
@@ -30,13 +30,11 @@ import System.Environment (lookupEnv, getExecutablePath)
 import System.Directory (makeAbsolute)
 import System.IO (Handle, stdin, stdout, hClose, hFlush, hSetBinaryMode)
 import Hide.Buffer
-import Hide.BufferReadCommand (BufferReadCommands,readPage,listBufferCommand,readBufferCommand,readWindowCommand,formatBufferRead)
+import Hide.BufferReadCommand (BufferReadCommands,readPage,readWindowCommand)
 import Hide.BufferReads (WindowReadTarget,CapturedWindowRead,windowReadTarget)
 import qualified Hide.Plugin.Window as W
-import Hide.Plugin.BufferHost (readerReference)
-import qualified Hide.Plugin.Buffer as P
 import Hide.Files (filePath)
-import Hide.GuestAccess (protectedWindow, sanitizedBufferContent)
+import Hide.GuestAccess (protectedWindow)
 import Hide.Model
 import Hide.BufferView (BufferView(..))
 import Hide.Protocol (WirePacket(..), readPacket, writePacket)
@@ -233,11 +231,6 @@ builtinTool desktop=tool
   where
     tool :: T.Text -> Value -> Either T.Text Value
     tool "list_windows" _=Right (object ["windows" .= (map window (windows desktop)++panels)])
-    tool "list_buffers" _=Right (object ["buffers" .= [bufferInfo ident doc | (ident,doc)<-M.toAscList (buffers desktop)]])
-    tool "read_buffer" args = do
-      (ident,doc,start,count,offset)<-readBufferRequest desktop args
-      (redacted,b)<-maybe (Left "This buffer contains private user or approval content.") Right (sanitizedBufferContent desktop ident)
-      formatBufferRead (bufferInfo ident doc) start count offset redacted b
     tool "read_window" _=Left "Window reads require the live permission owner."
     tool "read_selection" args = parseArgs (withObject "read_selection" (.:? "windowId")) args >>= \wanted -> do
       w <- maybe (maybe (Left "No active window") Right (activeWindow desktop))
@@ -275,24 +268,6 @@ builtinTool desktop=tool
     rect (Rect x y w h)=object ["x" .= x,"y" .= y,"width" .= w,"height" .= h]
     title doc | privateDocument desktop doc="[private]"
               | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
-    bufferInfo = bufferMetadata desktop
-
--- | Return the fixed typed metadata worker continuation. Discovery uses current
--- policy/actor/privacy at its own admission; no Desktop or Document is retained.
-listBuffersTool :: BufferReadCommands -> P.BufferReader -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
-listBuffersTool commands reader desktop _ _=pure (desktop,listBufferCommand commands reader)
-
--- | Capture only target identity and page coordinates while serialized. The
--- typed command queues/awaits a fresh policy decision on the returned worker;
--- no Desktop, Document, receipt or full-text thunk is retained by the callback.
-readBufferTool :: BufferReadCommands -> P.BufferReader -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
-readBufferTool commands reader desktop _ args=case readBufferRequest desktop args of
-  Left err->pure (desktop,pure (Left err))
-  Right (ident,_,start,count,offset)->case readPage start count offset of
-    Left err->pure (desktop,pure (Left err))
-    Right page->let reference=readerReference reader ident
-      in pure (desktop,readBufferCommand commands reader reference page)
-
 -- | Select one exact prepared body under serialization, then return the fixed
 -- capture/format worker continuation. No body walk or masking occurs here.
 readWindowTool :: BufferReadCommands -> (WindowReadTarget -> IO (Either T.Text CapturedWindowRead)) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
@@ -307,21 +282,6 @@ readWindowTool commands capture desktop _ args=case request of
       target<-windowReadTarget desktop ident
       page<-readPage start count 0
       pure (target,page)
-
-readBufferRequest :: Desktop -> Value -> Either T.Text (Int,Document,Int,Int,Int)
-readBufferRequest desktop args=do
-  (wanted,start,count,offset)<-either (Left . T.pack) Right $ parseEither
-    (withObject "read_buffer" $ \o -> (,,,) <$> o .:? "bufferId" <*> o .:? "startLine" .!= 1 <*> o .:? "lineCount" .!= 200 <*> o .:? "byteOffset" .!= 0) args
-  ident<-maybe (maybe (Left "No active source buffer") Right (activeWindow desktop >>= bufferId)) Right wanted
-  doc<-maybe (Left "Buffer not found") Right (M.lookup ident (buffers desktop))
-  unless (start>=1 && count>=1 && count<=1000 && offset>=0) (Left "Use startLine >= 1, lineCount 1..1000, and byteOffset >= 0")
-  pure (ident,doc,start,count,offset)
-
-bufferMetadata :: Desktop -> Int -> Document -> Value
-bufferMetadata desktop ident doc=object ["bufferId" .= ident,"title" .= title,"path" .= (if privateDocument desktop doc then Nothing else fmap filePath (documentFile doc)),
-  "modified" .= documentModified doc,"binary" .= byteMode (documentBuffer doc),"revision" .= revision (documentBuffer doc)]
-  where title | privateDocument desktop doc="[private]"
-              | otherwise=fromMaybe (maybe "Untitled" (T.pack . filePath) (documentFile doc)) (documentLabel doc)
 
 -- | Dispatch with the desktop locked and return a reply continuation.
 -- Wait for that continuation only after releasing the desktop lock.
@@ -424,10 +384,8 @@ debugTools =
 tools :: [Value]
 tools =
   [ describe "list_windows" "List editor window IDs, titles, buffer IDs, geometry, active window and side panels." []
-  , describe "list_buffers" "List open buffers with paths and unsaved-change state, including untitled buffers." []
-  , describe "read_buffer" "Read live buffer contents including unsaved edits; private conversation fields are redacted and approval buffers are unavailable. Text is paged by 1-based lines (200 default, 1000 maximum); binary buffers return up to 4096 hex bytes from byteOffset." [("bufferId","integer"),("startLine","integer"),("lineCount","integer"),("byteOffset","integer")]
   , describe "read_window" "Read an explicitly readable prepared text window by logical window-text lines; private regions are redacted. Defaults to the active window, 200 lines; maximum 1000 lines and 131072 characters. Source windows use read_buffer." [("windowId","integer"),("startLine","integer"),("lineCount","integer")]
-  , describe "read_selection" "Read selected text and cursor offsets in an editor window. coordinateSpace distinguishes source from rendered-markdown offsets; a pending Markdown view refuses the read. Defaults to the active window." [("windowId","integer")]
+  , describe "read_selection" "Read up to 131072 selected characters and cursor offsets in an editor window; truncated reports a larger selection. coordinateSpace distinguishes source from rendered-markdown offsets; a pending Markdown view refuses the read. Defaults to the active window." [("windowId","integer")]
   ]
   where
     describe :: T.Text -> T.Text -> [(T.Text,T.Text)] -> Value

@@ -179,9 +179,9 @@ collisions with host tools, duplicate wire or command names, and malformed metad
 before discovery. Input schemas declare strict object fields; output schemas
 describe objects. Codecs enforce their field types and bounds.
 
-`callTool` invokes the exact registration on the tool worker after host policy
-admission. Arguments are limited to 1 MiB and results to 4 MiB, matching the MCP
-transport. Oversized results fail explicitly rather than returning a truncated
+`callTool` invokes the exact registration on the tool worker, with an admitted
+context or an explicitly self-admitting service. Arguments are limited to 1 MiB
+and results to 4 MiB, matching the MCP transport. Oversized results fail explicitly rather than returning a truncated
 success. Object results appear as both structured content and JSON text. Closing
 the scope rejects retained calls; a missing tool has no fallback interpreter.
 
@@ -193,23 +193,39 @@ before reservation, and the Hub rechecks caller liveness on each operation.
 Ancestry, limits, provider lifetime, worktree isolation and task tickets remain
 Hub-owned. These tools receive no human approval or settings capability.
 
-Plugin declarations distinguish `EditorTool` from `CoordinationTool`, including
-their service context. Editor tools receive `EditorServices`; coordination tools
-receive an authenticated `AgentServices`. Anonymous editor connections cannot
-manufacture an agent context, and child coordination connections do not acquire
-editor tools. The host checks name collisions across both sets. The docs plugin
-uses `mapToolContext editorDocumentation` to select its narrow capability;
-context mapping preserves schemas, command identity and retirement behavior.
+Plugin declarations carry their service context. `EditorTool` receives
+`EditorServices` after admission; `CoordinationTool` receives authenticated
+`AgentServices`. `BufferReadTool` receives `BufferReadServices`, whose operations
+request fresh permission themselves. This explicit distinction prevents nested
+approvals and never follows from a read-only hint. Anonymous editor connections
+cannot manufacture an agent context, and child coordination connections do not
+acquire editor reads. The host checks name collisions across all three sets.
+The docs plugin uses `mapToolContext editorDocumentation` to select its narrow
+capability; context mapping preserves schemas, command identity and retirement.
 
 The executable's plugin list determines discovery and permission registration.
 The primary route exposes editor and coordination tools; a child's coordination
 route exposes only coordination tools. Autocomplete keeps its separate restricted
-route. Primary conversation presentation and the remaining editor tools still
-use host types.
+route. The remaining editor tools still use host types.
 
 ## Immutable plugin buffer reads
 
-`Hide.Plugin.Buffer` provides opaque `BufferRef`, `BufferRead` and `ContentVersion` values.
+`Hide.Plugin.BufferRead` in `hide-plugin-api` exposes checked page requests,
+masked metadata and immutable text/byte replies. `hide-agents` declares
+`list_buffers` and `read_buffer` through these services and owns their JSON and
+hexadecimal presentation. Each call rechecks current actor, policy and privacy
+through the host reader. Discovery grants no subsequent content access.
+
+Text pages contain at most 1,000 rows and 131,072 characters; byte pages contain
+at most 4,096 bytes. The host slices measured content before materialization,
+forces the bounded reply on its worker, and exposes no tree, document or Undo.
+An omitted buffer selector binds to the active source at dispatch. The captured
+allocation frontier excludes later-created buffers; closed IDs are never reused
+within a session. Closing the session reader rejects further captures, while the
+plugin tool scope separately retires retained tool calls.
+
+The lower-level `Hide.Plugin.Buffer` is currently a host-internal module, despite
+its namespace. It provides opaque `BufferRef`, `BufferRead` and `ContentVersion` values.
 The host adapter `Hide.Plugin.BufferHost` captures immutable measured trees without
 retaining the separate saved baseline, Undo or Redo roots. Deleted provenance
 leaves in the live tree remain retained but are invisible to reads.
@@ -235,11 +251,6 @@ actor, policy and privacy. Listing uses the same ingress, cancellation claim and
 Permissions lifetime. Its shallow metadata excludes source images and Undo;
 exceptional dirty comparison remains consumer-worker work.
 
-The actual `list_buffers` tool calls registered `hide.buffer.list` on its reply
-worker and formats the same complete metadata response. No Desktop or Document
-survives its adapter callback. The operation adds no product response limit or
-new subscription/registration owner.
-
 Linked command handlers can call
 `captureBuffer :: BufferReader -> BufferRef -> IO (Either Text CapturedRead)` from
 `Hide.Plugin.Buffer` without a Desktop. The opaque reader belongs to the running
@@ -251,11 +262,10 @@ and resolves typed replies. Cancellation withdraws one request; shutdown closes
 acceptance and terminally resolves pending replies. Only the host's fixed capture
 operation and actor check run during admission.
 
-The real `read_buffer` tool invokes `hide.buffer.read` through
-`Hide.BufferReadCommand` on its reply worker. Its typed context contains only a
-reader and target reference. The MCP admission callback captures page coordinates
-and the reference, retaining no Desktop/Document. Formatting and JSON evaluation
-remain worker work.
+The public buffer services reuse this reader's ownership rather than adding a
+second queue or command registry. Prepared `read_window` requests still use
+`Hide.BufferReadCommand` to bind their exact logical body before approval;
+source buffer pages bind document identity and capture its current contents.
 
 `BufferRef` combines the running session namespace with its once-allocated
 logical document ID. It survives ordinary edits and reload of that document;

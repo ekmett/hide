@@ -31,6 +31,7 @@ import qualified Hide.Plugin.Form as Form
 import Hide.Plugin.Command
 import Hide.Plugin.Session (Plugin(..),Session(..),PluginTool(..))
 import qualified Hide.AgentTools as AgentTools
+import qualified Hide.BufferTools as BufferTools
 import qualified Hide.DocsTools as DocsTools
 import qualified Hide.EnvironmentTools as EnvironmentTools
 import qualified Hide.AgentTranscript as AgentTranscript
@@ -46,6 +47,7 @@ plugin :: Plugin
 plugin=Plugin
   { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
   , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (DocsTools.tools++EnvironmentTools.tools)
+      ++map BufferReadTool BufferTools.tools
   , pluginConversation=Just AgentTranscript.presentConversation
   }
 

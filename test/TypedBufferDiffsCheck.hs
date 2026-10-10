@@ -27,19 +27,21 @@ import Hide.Model
 import Hide.MCPPermissions
 import Hide.WorkspaceFilesMCP (fileTools)
 import Hide.EditorMCP (builtinTools)
+import qualified Hide.BufferTools as BufferTools
+import qualified Hide.Plugin.Tool as Tool
 import Hide.Plugin.BufferHost (editorReference,captureVersion,versionCurrent)
 import qualified Hide.Plugin.Buffer as P
 import qualified Hide.Plugin.Command as C
 
 checks :: IO ()
-checks=bracket temporary removePathForcibly $ \directory->do
+checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removePathForcibly $ \directory->do
   let config=directory </> "config.toml"
       base=addDocument Nothing (newBuffer "old\n") (initialDesktop (80,25))
       ident=maybe (error "missing typed diff target") sourceFixtureBuffer (activeWindow base)
       patch="@@ -1 +1 @@\n-old\n+agent\n"
       check label ok=unless ok (error label)
   TIO.writeFile config "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
-  withPermissionsAt config (builtinTools++fileTools) $ \owner->C.withRegistry $ \registry->do
+  withPermissionsAt config (builtinTools++Tool.toolDefinitions toolset++fileTools) $ \owner->C.withRegistry $ \registry->do
     let linkedEditor=bufferEditor owner (pure (Right ()))
         linkedReference=editorReference linkedEditor ident
         codec=C.Codec Null (const (Left "typed only")) (const Null)

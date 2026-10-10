@@ -12,6 +12,7 @@ library
   exposed-modules: Hide.Plugin.Command, Hide.Plugin.Form, Hide.Plugin.Menu
     , Hide.Plugin.Tree, Hide.Plugin.Sidebar, Hide.Plugin.Session, Hide.Plugin.Tool
     , Hide.Plugin.Transcript, Hide.Plugin.Documentation, Hide.Plugin.Environment, Hide.Plugin.Services
+    , Hide.Plugin.BufferRead
   other-modules: Hide.Plugin.Identity
   build-depends: base >=4.18 && <4.23, hide-agent-api ==0.1.0.0
     , text >=2.0, filepath, bytestring, aeson, deepseq, containers, stm, vector, entropy >=0.4.1.11 && <0.5

@@ -773,12 +773,18 @@ entire batch validates before mutation; project settings override global ones,
 and existing child processes keep their environment. Captured services reject
 calls after their session registration retires.
 
-`PluginTool` distinguishes `EditorTool` and `CoordinationTool` with different
-context types. Anonymous/primary editor connections expose editor tools; only
-authenticated primary/child agents expose coordination tools. Child coordination
-connections retain their restricted catalog. The executable checks collisions
-across the two sets before installing permissions. Scope is not authorization:
-the same host policy and caller checks still admit each invocation.
+`PluginTool` distinguishes `EditorTool`, `BufferReadTool` and `CoordinationTool`
+by their service contexts. Buffer read services own fresh admission on every
+invocation; ordinary editor services are supplied after admission. This is an
+explicit declaration, never inferred from tool names or read-only metadata.
+Child coordination receives neither kind of editor service.
+
+The first-party `list_buffers` and `read_buffer` tools now consume
+`Hide.Plugin.BufferRead`: checked requests, masked metadata, and bounded
+text/byte pages. The host retains measured source trees, target identity,
+permission ownership and privacy filtering. The plugin owns tool declarations
+and wire presentation. Editable captures and exact version grants remain
+host-internal until their own boundary is extracted.
 
 The broader registration shape below remains proposed:
 

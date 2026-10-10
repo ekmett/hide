@@ -20,6 +20,7 @@ module Hide.Plugin.Session
 import Hide.Plugin.AgentDirectory (AgentDirectory,DirectoryRequest)
 import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
+import Hide.Plugin.BufferRead (BufferReadServices)
 import Hide.Plugin.Tool (Tool)
 import Hide.Plugin.Services (EditorServices)
 import Hide.Plugin.Transcript (ConversationPresenter)
@@ -37,8 +38,14 @@ data Session c r settings completion = Session
 -- available on anonymous and primary editor connections; coordination tools
 -- require the host-attributed actor and are available to primary/child agents.
 -- Visibility never replaces permission or caller checks.
+--
+-- Buffer read tools share editor visibility but receive only self-admitting read
+-- services. Each operation requests fresh permission through its host capture
+-- owner; do not wrap the tool in a second permission call or supply general
+-- editor services before admission.
 data PluginTool
   = EditorTool (Tool EditorServices)
+  | BufferReadTool (Tool BufferReadServices)
   | CoordinationTool (Tool AgentServices)
 
 -- | Scope registrations and workers around the supplied session action.
@@ -47,7 +54,8 @@ data PluginTool
 -- or exception; it must not stop session-owned agents or other shared services.
 -- Plugins publish prepared results through host queues instead of UI callbacks.
 -- Tools are declared explicitly; the host registers their policies and
--- supplies actor-bound services only after caller and permission admission.
+-- supplies actor-bound services with their declared admission contract: editor
+-- services follow permission admission; buffer read services admit each capture.
 data Plugin = Plugin
   { withPlugin :: forall c r settings completion a. Eq completion =>
       Session c r settings completion -> IO a -> IO a
