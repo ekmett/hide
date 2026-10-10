@@ -6,6 +6,9 @@
 -- not authorize an action. Prepared results must still match source identity and
 -- privacy policy. Child cancellation/configuration/steering completes through ticks.
 --
+-- Completed replies belong to their exact prompt, independently of transcript
+-- layout or trailing tool activity. Safe chunks are retained only for that turn.
+--
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
@@ -111,6 +114,10 @@ data QueuedQuery = SubmittedQuery !Text | QuestionQuery !Int !AH.AgentId !Provid
 data QuestionTicket = QuestionTicket !Int !AH.AgentId !(Maybe ProviderReceipt)
 data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 
+-- Reversed safe chunks give O(1) append and one concatenation on completion.
+-- The request ID scopes output to the provider prompt, never a displayed record.
+data PromptReply = PromptReply !Int [Text]
+
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe DraftReceipt), transcript :: [Record], nextRecord :: !Int
@@ -124,7 +131,7 @@ data State = State
   , deliveredContext :: Maybe Value
   , directoryAgents :: [AH.AgentId]
   , agentInitialized :: Value, agentConfig :: Value
-  , streamTails :: M.Map Text Text
+  , streamTails :: M.Map Text Text, promptReply :: Maybe PromptReply
   , lastAgentSync :: Maybe (FilePath,Maybe (StableName A.Client),Text,AH.Capabilities,Bool)
   , historyPresenter :: Maybe HistoryPresenter, childRecords :: M.Map Text TranscriptSource, childRender :: Maybe (Text,Value)
   , toolExpansions :: S.Set (Text,ToolExpansion)
@@ -173,7 +180,7 @@ withConversationAt presenter consoles root action = W.withWindowScope $ \scope->
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
     , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,directoryAgents=[]
-    , historyPresenter=preparedPresenter,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
+    , historyPresenter=preparedPresenter,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
 
@@ -187,7 +194,7 @@ conversationSessionPath directory=lookupEnv "THC_EDIT_SESSION" >>= maybe
 closeConversation :: ConversationState -> IO ()
 closeConversation (ConversationState _ ref consoles agents) = do
   s<-readIORef ref
-  writeIORef ref (abandonQuestion "Editor session closed." s) {questionsClosed=True}
+  writeIORef ref (abandonQuestion "Editor session closed." s) {questionsClosed=True,promptReply=Nothing}
   AR.failPendingPrimary agents "Editor session closed."
   mapM_ denyChild (map snd (approvals s))
   mapM_ preparationCancel (promptPreparation s)
@@ -382,7 +389,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
             mapM_ denyChild (map snd (approvals s))
             retired<-retireRequests ref
             mapM_ A.stopClient (connection s)
-            writeIORef ref retired {provider=config,connection=Nothing,session=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+            writeIORef ref retired {provider=config,connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
             pure d {status="Agent configuration saved."}
     ("show",_) -> do
       modifyIORef' ref (\state -> state {deferredApproval=False})
@@ -428,7 +435,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
       mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime Nothing d
     ("resume",_) | primaryBusy s -> pure d {status="Cancel the current reply before resuming a session."}
     ("resume",_) -> pure d {dialog=Just (Dialog "Resume conversation" (AgentDialog "load")
@@ -439,7 +446,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
       mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=[],toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
       start runtime (Just (T.strip sid)) d
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
@@ -493,7 +500,7 @@ start (ConversationState _ ref _ _) resume d = do
       writeIORef ref s {queuedPrompt=Nothing}
       pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
     Right (root,client,ident) -> do
-      writeIORef ref s {provider=launch,connection=Just client,project=root,deliveredContext=Nothing,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,pending=M.singleton ident (Initializing resume)}
+      writeIORef ref s {provider=launch,connection=Just client,project=root,deliveredContext=Nothing,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,pending=M.singleton ident (Initializing resume)}
       pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
 
 restorePrimaryDraft :: Text -> Desktop -> Desktop
@@ -561,7 +568,8 @@ pollPromptPreparation runtime@(ConversationState _ ref _ _) d = do
                       meta=["_meta" .= object ["steering" .= object ["idleBehavior" .= ("promptRequired"::Text)]] | steering]
                   ident<-A.request client method (object (["sessionId" .= sid,"prompt" .= blocks]++meta))
                   modifyIORef' ref (\state -> state {queuedPrompt=if steering then queuedPrompt state else Nothing,
-                    pending=M.insert ident (maybe Prompting (Steering text) control) (pending state),deliveredContext=Just context})
+                    pending=M.insert ident (maybe Prompting (Steering text) control) (pending state),deliveredContext=Just context,
+                    promptReply=if steering then promptReply state else Just (PromptReply ident [])})
                   cleared<-if steering then pure d else clearSubmittedDraft receipt d
                   pure cleared {status=if steering then "Steering request sent; draft kept until accepted." else "Agent is replying...",agentReplying=True}
             _ -> do
@@ -780,7 +788,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
       mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
       retired<-retireRequests ref
       writeIORef ref (appendRecords [activity "Connection closed" (object ["message" .= redact reason])]
-        retired {transcript=transcript current,connection=Nothing,session=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty})
+        retired {transcript=transcript current,connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty})
       pure (dismissPermission cleared) {status="Agent disconnected.",agentSteering=False}
     A.Response ident result -> do
       writeIORef ref s {pending=M.delete ident (pending s)}
@@ -849,7 +857,7 @@ receive runtime@(ConversationState _ ref consoles _) d event = do
             pure stopped {status="Steering ownership was not confirmed; provider stopped. Draft kept; queued turns cancelled without replay."}
         (Just phase,Right value,_) | isPrompt phase -> do
           current<-readIORef ref
-          let text=case reverse (transcript current) of Record _ _ (Reply "Agent" body):_ -> body; _ -> ""
+          let text=case promptReply current of Just (PromptReply request chunks) | request==ident->T.concat (reverse chunks); _->""
           redact<-conversationRedactor runtime current
           completeConversationDelivery runtime (Right (object ["text" .= redact text,"stopReason" .= fmap redact (field "stopReason" value :: Maybe Text)]))
           pure d {status="Agent: "<>redact (fromMaybe "finished" (field "stopReason" value))}
@@ -944,7 +952,10 @@ appendRecords values state=foldl' append state values
 
 recordChunk :: Text -> Text -> State -> State
 recordChunk role text state=let revision=nextRecord state in state
-  {transcript=appendChunk (BodyItemId revision) revision role text (transcript state),nextRecord=revision+1}
+  {transcript=appendChunk (BodyItemId revision) revision role text (transcript state),nextRecord=revision+1
+  ,promptReply=case (role,promptReply state) of
+      ("Agent",Just (PromptReply request chunks))->Just (PromptReply request (text:chunks))
+      _->promptReply state}
 
 recordToolUpdate :: Value -> State -> State
 recordToolUpdate update state=let revision=nextRecord state in state
@@ -1522,7 +1533,7 @@ drainConversationAgents runtime@(ConversationState _ ref _ agents) d=do
       _<-retireRequests ref
       mapM_ A.stopClient (connection s)
       AR.failPendingPrimary agents "Agent session ended."
-      modifyIORef' ref (\state -> state {connection=Nothing,session=Nothing,streamTails=M.empty,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries state),approvals=[],presented=Nothing})
+      modifyIORef' ref (\state -> state {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries state),approvals=[],presented=Nothing})
       pure cleared {status="Agent session ended."}
     apply desktop (AR.AgentCreated result)=pure desktop {status=either id (const "Agent created; task queued.") result}
     apply desktop (AR.AgentReconnected ident result)=do
@@ -1701,7 +1712,7 @@ recentChildHistory hub ident next=go (max 0 (next-101)) [] False
 -- worker can dequeue another peer in the gap before the editor's next tick.
 completeConversationDelivery :: ConversationState -> Either Text Value -> IO ()
 completeConversationDelivery (ConversationState _ ref _ agents) result=do
-  s<-readIORef ref
+  s<-atomicModifyIORef' ref (\state->(state {promptReply=Nothing},state))
   void (AR.completePrimaryDelivery agents (connection s) (session s) (busy s || queryCount "" (queuedQueries s)>0) result)
 
 pruneChildApprovals :: ConversationState -> Desktop -> IO Desktop

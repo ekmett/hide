@@ -140,6 +140,19 @@ checks=bracket temporary removePathForcibly $ \root ->
       peerConfigurations<-newIORef (0::Int)
       peer<-AH.registerAgent hub "Peer" root (AH.AgentDriver root "private-peer-key" (AH.Capabilities False False False [])
         (\_ ->modifyIORef' peerConfigurations (+1) >> pure (Right (AH.Capabilities False False False []))) (\_ ->pure (Right Null)) (modifyIORef' peerCancels (+1)) (pure ()) (\_ ->pure (Left "unsupported"))) >>= right
+      -- Completion belongs to the exact Hub delivery, independently of the
+      -- last displayed record or whether its prepared body has been adopted.
+      let primaryResult request expected desktop=do
+            receipt<-AH.sendAgent hub (AH.Agent peer) primary request >>= right
+            settled<-testUntil (T.unpack request++" delivery") (\_->do
+              answer<-AH.waitAgent hub AH.Human primary receipt 0 >>= right
+              pure (field "status" answer==Just ("completed"::T.Text))) desktop
+            answer<-AH.waitAgent hub AH.Human primary receipt 0 >>= right
+            ensure (T.unpack request++" returns its own exact assistant output")
+              ((field "result" answer >>= field "text")==Just (expected::T.Text))
+            pure settled
+      afterTools<-primaryResult "result-after-tools" "First chunk, second chunk." expanded
+      withoutOutput<-primaryResult "result-no-output" "" afterTools
       ticket<-AH.sendAgent hub (AH.Agent peer) primary "Count files" >>= right
       -- The submitted prompt already contains "Count files". Provider completion
       -- and adoption of its reply are separate receipts; recovery must compare
@@ -148,7 +161,7 @@ checks=bracket temporary removePathForcibly $ \root ->
         result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right
         if field "status" result/=Just ("completed"::T.Text) then pure False else do
           text<-canonicalWindowText d
-          pure (maybe False (`T.isSuffixOf` text) (field "result" result >>= field "text"))) connected
+          pure (maybe False (`T.isSuffixOf` text) (field "result" result >>= field "text"))) withoutOutput
       result<-AH.waitAgent hub AH.Human primary ticket 0 >>= right
       ensure "peer message reaches the primary provider and returns text" (maybe False (T.isInfixOf "Count files") (field "result" result >>= field "text"))
       ensure "peer output cannot publish private provider references" (not ("private-main-key" `T.isInfixOf` T.pack (show result)))
@@ -501,6 +514,12 @@ fixture=unlines
   ," elif m=='session/prompt':"
   ,"  text=\"\\n\".join(block['text'] for block in p['prompt'])+' private-main-key '+str(tokens)"
   ,"  send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'usage_update','used':120,'size':1000}}})"
+  ,"  if any(block['text'].strip().endswith('result-after-tools') for block in p['prompt']):"
+  ,"   for chunk in ['First chunk, ','second chunk.']: send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':chunk}}}})"
+  ,"   for kind,status in [('tool_call','pending'),('tool_call_update','completed')]: send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':kind,'toolCallId':'trailing-result-tool','title':'Trailing tool','status':status}}})"
+  ,"   send({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'}}); continue"
+  ,"  if any(block['text'].strip().endswith('result-no-output') for block in p['prompt']):"
+  ,"   send({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'}}); continue"
   ,"  if any(block['text'].strip().endswith('steer-wait') for block in p['prompt']):"
   ,"   pending=r['id']; send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'private-main-key','update':{'sessionUpdate':'usage_update','used':121,'size':1000}}}); continue"
   ,"  if 'private-configuration' in text:"
