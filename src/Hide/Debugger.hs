@@ -91,7 +91,7 @@ data OutputSlot = OutputSlot !Int !Int !(Maybe W.WindowRef) !Bool !Bool !(Maybe 
 -- Capping/concatenating output is deliberately lazy until the worker prepares
 -- a copied bounded report; request admission forces only the small receipt.
 -- Until that receipt returns, the existing bounded DAP inbox holds later events.
-data OutputRequest = OutputRequest !Int !Int !(Maybe W.WindowRef) !Bool Text
+data OutputRequest = OutputRequest !Int !Int !(Maybe W.WindowRef) !Bool Text !(Maybe Text)
 data OutputPublication = OutputPublication !Int !Int !(Maybe W.WindowRef)
   !(Either Text Text) !(Maybe (Either Text W.WindowUpdate))
 
@@ -104,7 +104,7 @@ newOutputOwner scope=mask_ $ do
   pure (OutputOwner scope slot desired latest worker)
   where
     loop desired latest=do
-      OutputRequest epoch revision target prepareView value<-atomically $ do
+      OutputRequest epoch revision target prepareView value supplement<-atomically $ do
         next<-readTVar desired
         maybe retry (\request->writeTVar desired Nothing >> pure request) next
       report<-(Right <$> evaluate (T.copy (T.takeEnd 16384 value))) `catch` synchronous "Debugger output preparation failed."
@@ -112,7 +112,9 @@ newOutputOwner scope=mask_ $ do
         Left _->pure Nothing
         Right _ | not prepareView->pure Nothing
         Right bounded->Just <$> ((do
-          prepared<-W.prepareRecoverableTextWindow "hide.debug-output" 1 W.PrivateWindow "Debugger output" bounded
+          let display=maybe bounded (\extra->T.copy (T.takeEnd 16384 (bounded<>"\n"<>extra))) supplement
+          _<-evaluate (T.length display)
+          prepared<-W.prepareRecoverableTextWindow "hide.debug-output" 1 W.PrivateWindow "Debugger output" display
           case prepared of
             Left err->pure (Left err)
             Right snapshot->do
@@ -154,12 +156,12 @@ resetOutputOwner (Debugger _ _ _ _ (OutputOwner _ slot desired latest _)) deskto
   obsolete<-atomically (writeTVar desired Nothing >> tryTakeTMVar latest)
   mapM_ retireOutputOpening obsolete
 
-queueOutput :: Debugger -> Bool -> Text -> IO ()
-queueOutput (Debugger ref _ _ _ (OutputOwner _ slot desired _ _)) opening value=do
+queueOutput :: Debugger -> Bool -> Maybe Text -> Text -> IO ()
+queueOutput (Debugger ref _ _ _ (OutputOwner _ slot desired _ _)) opening supplement value=do
   OutputSlot epoch revision target requested focus frozen<-readIORef slot
   let next=revision+1
       prepareView=opening || requested || isJust target
-      request=OutputRequest epoch next target prepareView value
+      request=OutputRequest epoch next target prepareView value supplement
   writeIORef slot (OutputSlot epoch next target (opening || requested) focus frozen)
   modifyIORef' ref (\state->state {outputPending=True})
   request `seq` atomically (writeTVar desired (Just request))
@@ -177,7 +179,7 @@ revealOutput runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ _ _)) desktop=do
     when (old==Nothing) (mapM_ W.retireWindowRef frozen)
     writeIORef slot (OutputSlot epoch revision Nothing True True old)
     accepted<-readIORef ref
-    unless (outputPending accepted) (queueOutput runtime True (output accepted))
+    unless (outputPending accepted) (queueOutput runtime True Nothing (output accepted))
     pure current
 
 -- Idle ticks inspect only the exact owned slot and a publication receipt; no
@@ -202,7 +204,7 @@ tickOutputOwner runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ latest _)) des
     pure desktop
   else do
     let prepareRequested report=when (requestedOpen && target==Nothing) $
-          forM_ (either (const Nothing) Just report) (queueOutput runtime False)
+          forM_ (either (const Nothing) Just report) (queueOutput runtime False Nothing)
     updated<-case next of
       Nothing->pure desktop
       Just publication@(OutputPublication issued version captured report result)
@@ -1255,7 +1257,7 @@ assistOperation caller runtime@(Debugger ref clock _ _ _) command goal steps bud
     "stop"->revokeAssistance runtime "finished" "requested-stop" >> pauseAssistance runtime desktop
     "reveal"->do
       modifyIORef' ref (\s->s {sidebarVisible=True,followSource=True})
-      forM_ (assistance state) $ \run->queueOutput runtime True (output state<>"\n"<>assistanceReport run)
+      forM_ (assistance state) $ \run->queueOutput runtime True (Just (assistanceReport run)) (output state)
       shown<-revealOutput runtime desktop
       maybe (pure shown) (openFrame runtime True (Just (privateFilePaths desktop)) shown) (frame state)
     _->pure desktop
@@ -1623,7 +1625,7 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _ _) original = do
   -- The pending payload lives only in this already-bounded transport batch and
   -- then the output worker. Public State.output is always the accepted copy.
   (receivedEvents,batch,changed,opening)<-foldM receiveBatch (reporting,accepted,False,False) events
-  when changed (queueOutput runtime opening batch)
+  when changed (queueOutput runtime opening Nothing batch)
   sourced<-tickSourcePreparation runtime receivedEvents
   received<-tickWatchPreparation runtime sourced
   updated<-tickOutputOwner runtime received

@@ -28,7 +28,9 @@ import qualified Data.Text.IO as TIO
 import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
 import qualified Hide.DebugAssistance as A
-import Hide.Buffer (newBuffer)
+import Hide.Buffer (newBuffer,contentSlice,contentLength)
+import qualified Hide.Plugin.Window as W
+import qualified Data.Map.Strict as M
 import Hide.Debugger
 import Hide.Model
 import Hide.Plugin.SystemOne
@@ -181,8 +183,16 @@ stallRevealCheck=withSystemOne $ \owner->do
         field "threadId" observation==Just (7::Int) && isJust (field "location" observation :: Maybe Value) &&
         isJust (field "source" observation :: Maybe Value)) observations)
     (revealing,_)<-tool runtime finished "debug_assist" ["command" .= ("reveal"::T.Text)]
-    (shown,_)<-awaitState "revealed evidence output receipt" runtime
-      (\s->pure ("Assisted debugger observation" `T.isInfixOf` maybe "" id (field "output" s))) revealing
+    let awaitReport current=do
+          next<-tickDebugger runtime current
+          let reports=[W.preparedWindowText prepared | prepared<-M.elems (pluginWindows next),
+                W.preparedWindowRecovery prepared==Just ("hide.debug-output",1)]
+          if any (\content->"Assisted debugger observation" `T.isInfixOf` contentSlice content 0 (min 512 (contentLength content))) reports
+            then pure next else yield >> awaitReport next
+    shown<-barrier "revealed evidence output-window receipt" (awaitReport revealing)
+    public<-state runtime shown
+    check "revealing private evidence never rewrites the program's raw output"
+      (not ("Assisted debugger observation" `T.isInfixOf` maybe "" id (field "output" public)))
     commands<-requests path
     check "inspect and reveal never send a step, continue, evaluate or mutation"
       (all (\r->commandOf r `notElem` map Just ["next","stepIn","stepOut","continue","evaluate","setVariable"]) commands)
