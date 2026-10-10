@@ -18,6 +18,7 @@ import System.Environment
 import System.FilePath ((</>))
 import System.IO (openTempFile,hClose)
 import System.Timeout (timeout)
+import GHC.Stack (HasCallStack,callStack,prettyCallStack)
 import Hide.Autocomplete (withAutocomplete,autocompleteEffects,tickAutocomplete)
 import Hide.MCPPermissions (readAutocompleteFor)
 import qualified Hide.AgentUI
@@ -314,9 +315,36 @@ checks=bracket temporary removePathForcibly $ \root->
       Just dg | SelectedInput _ value sel:_<-fields dg->Just (value,sel)
       _->Nothing
     fmapDialog f d=d {dialog=fmap f (dialog d)}
+    await :: HasCallStack => (Desktop -> IO Desktop) -> (Desktop -> Bool) -> Desktop -> IO Desktop
     await tick done=awaitIO tick (pure . done)
-    awaitIO tick done initial=timeout 10000000 (go initial) >>= maybe (error "Agent sidebar timeout") pure
-      where go d=do next<-tick d; ready<-done next; if ready then pure next else threadDelay 10000 >> go next
+    awaitIO :: HasCallStack => (Desktop -> IO Desktop) -> (Desktop -> IO Bool) -> Desktop -> IO Desktop
+    awaitIO tick done initial=do
+      observed<-newIORef initial
+      result<-timeout 10000000 (go observed initial)
+      case result of
+        Just ready->pure ready
+        Nothing->do
+          lastSeen<-readIORef observed
+          error ("Agent sidebar timeout\n"++observation lastSeen++prettyCallStack callStack)
+      where
+        go observed d=do
+          next<-tick d
+          writeIORef observed next
+          ready<-done next
+          if ready then pure next else threadDelay 10000 >> go observed next
+    -- Format only on failure; retain no sequence of desktop snapshots.
+    observation d=unlines
+      [ "Last status: "++show (T.take 256 (status d))
+      , "Last dialog: "++show (fmap (\dg->(T.take 128 (dialogTitle dg),dialogOwner dg)) (dialog d))
+      , "Conversation target: "++show (T.take 128 (conversationTarget d))
+      , "Sidebar (revision, projection, focused): "++show (fmap (\sidebar->(treeRevision sidebar,treeProjectionRevision sidebar,treeFocused sidebar)) (sideTree d))
+      ]
+    dialogOwner dg=case purpose dg of
+      PluginInputForm reference->"input "++show reference
+      PluginInputsForm reference _->"inputs "++show reference
+      PluginChoiceForm reference revision->"choice "++show (reference,revision)
+      AgentDialog action->"agent "++show (T.take 64 action)
+      _->"other"
 
 temporary :: IO FilePath
 temporary=do root<-getTemporaryDirectory; (path,h)<-openTempFile root "hide-agent-sidebar"; hClose h; removeFile path; createDirectory path; canonicalizePath path
