@@ -241,7 +241,10 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "old numeric submission cannot choose a different ID after reorder"
           (formRef staleIndex==formRef selectedLarge && any (\option->settingId option=="model" && settingCurrent option=="small") (agentSettings staleIndex))
         let capturedPrimary=handleEvent (V.EvKey V.KEnter []) staleIndex
-        primaryUpdated<-act capturedPrimary >>= await tick (any (\option->settingId option=="model" && settingCurrent option=="large") . agentSettings)
+            primaryLarge desktop=do
+              pending<-AH.agentControlPending hub primary
+              pure (not pending && any (\option->settingId option=="model" && settingCurrent option=="large") (agentSettings desktop))
+        primaryUpdated<-act capturedPrimary >>= awaitIO tick primaryLarge
         stalePrimary<-refuseReplay primaryUpdated (snd capturedPrimary)
         ensure "Primary model change retains its exact conversation" (T.null (conversationTarget stalePrimary))
         -- Real named form remains private, preserves drafts and captures workspace.
@@ -304,8 +307,14 @@ checks=bracket temporary removePathForcibly $ \root->
         childChoices<-act (chooseMenuAt 1 "Child  idle" idleChild) >>= await tick (maybe False agentChoicePurpose . dialog)
         let selectedChild=fmapDialog (\dg->dg {fields=[ListBox "Provider choices" ["Small","Large"] 1]}) childChoices
             capturedChild=handleEvent (V.EvKey V.KEnter []) selectedChild
-            childLarge _=fmap (\current->case current of Right (_,options)->any (\option->AH.configId option=="model" && AH.configCurrent option=="large") options; _->False) (AH.agentConfiguration hub childId)
-        childUpdated<-act capturedChild >>= awaitIO tick childLarge
+            -- Advertised values can precede the control's final configuration commit.
+            childModelReady value _=do
+              current<-AH.agentConfiguration hub childId
+              pending<-AH.agentControlPending hub childId
+              pure (not pending && case current of
+                Right (_,options)->any (\option->AH.configId option=="model" && AH.configCurrent option==value) options
+                _->False)
+        childUpdated<-act capturedChild >>= awaitIO tick (childModelReady "large")
         refusedChild<-refuseReplay childUpdated (snd capturedChild)
         ensure "sidebar child setting never selects that conversation" (T.null (conversationTarget refusedChild))
         ensure "child setting does not change Primary settings" (any (\option->settingId option=="model" && settingCurrent option=="large") (agentSettings refusedChild))
@@ -340,7 +349,7 @@ checks=bracket temporary removePathForcibly $ \root->
         freshCategories<-act (runCommand AgentChoose selectedChildAgain) >>= await tick hasPopup
         freshValues<-act (selectedPopup 0 freshCategories) >>= await tick (nextPopup freshCategories)
         let freshSubmission=selectedPopup 0 freshValues
-        childSmall<-act freshSubmission >>= awaitIO tick (\_->fmap (\current->case current of Right (_,options)->any ((=="small").AH.configCurrent) options; _->False) (AH.agentConfiguration hub childId))
+        childSmall<-act freshSubmission >>= awaitIO tick (childModelReady "small")
         ensure "a fresh child popup configures its captured child"
           (conversationTarget childSmall==AH.agentIdText childId && not (guestEffectsAllowed (snd freshSubmission)))
         replayedPopup<-refuseReplay childSmall (snd freshSubmission)

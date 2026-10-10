@@ -14,13 +14,14 @@ frontends:
 | --- | --- |
 | `hide-plugin-api` | Scoped commands, tools, forms, input declarations, menus, trees and session composition |
 | `hide-agent-api` | Provider contracts, conversation input delivery, directory metadata and attributed orchestration services |
-| `hide-acp` | ACP transport and provider adapter |
-| `hide-agents` | Agents sidebar/forms, conversation menus/input and transcripts, completion hints and editor tools |
+| `hide-acp` | ACP transport, agent adapter and persistent private completion provider |
+| `hide-agents` | Agents sidebar/forms, conversation menus/input and transcripts, completion tools/hints and editor tools |
 
 Buffer/window ownership and the multiline-editor interpreter still live in the
 main `hide` library. ACP completion and primary/child conversations declare their
-input and acknowledged commands through the public API. The remaining first-party
-migration covers ACP provider composition and autocomplete. Generic build, debug,
+input and acknowledged commands through the public API. ACP autocomplete also
+uses a contributed provider and private tool declarations. The remaining
+first-party migration covers primary/child ACP provider composition. Generic build, debug,
 LSP and editor operations can remain explicit permission-controlled host services.
 The sections below distinguish implemented APIs from proposed contracts;
 proposed signatures are design sketches, not compilable SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
@@ -119,8 +120,8 @@ Keep three responsibilities distinct:
 Plugins run on the session host, including an SSH host or detached daemon. A
 frontend disconnect does not unload them. A browser or Metal client does not need
 the plugin's Haskell package: it receives cell updates, named actions, prepared
-canvas resources and a semantic widget tree from the host. Retained PNG image
-windows provide the first portable canvas path; custom rendering remains a
+canvas resources and semantic projections from the host. Retained PNG and JPEG
+image windows provide the portable canvas path; custom rendering remains a
 separate extension.
 
 ## Packaging and activation
@@ -547,28 +548,31 @@ prevent the host from offering cancellation or forced shutdown.
 
 ## Semantic tree and accessibility transport
 
-The prepared `View` becomes a retained tree shared by rendering, input routing,
-automation and accessibility. Think of it as a small virtual DOM for the editor's
-widgets, with no dependency on HTML. The host adds window chrome and modal
-structure around plugin content. Do not reverse-engineer this tree from pixels or
-painted cells. This work is tracked in [#13](https://github.com/ekmett/hide/issues/13);
-[the accessibility plan](accessibility.md) covers platform adapters and text APIs.
+The implemented semantic foundation publishes bounded sidebar, modal and focused
+source projections alongside the matching frame. Image canvases supply semantic
+names and checked viewport actions. Browser and macOS consumers retain that
+metadata; reset or disconnect clears it. This delivered the scope of
+[#13](https://github.com/ekmett/hide/issues/13).
 
-A node carries its scoped identity and lifetime, parent, role, name, current
-state/value, supported actions and sensitivity. Layout supplies bounds, clipping
-and reading order. Text nodes refer to a buffer identity/revision and range;
-selection and focus belong to the view. A logical tree item keeps its identity
-when its visible row changes. Closing/reopening a dialog or recycling a widget
-for a different item creates a new lifetime.
+The current wire fields carry complete bounded snapshots when changed. Clients
+retain omitted fields and replace a field when it arrives; equal content
+revisions do not imply equal geometry or privacy. Sidebar identities follow their
+provider/pane lifetimes. Modal IDs are snapshot coordinates, not callable
+capabilities. Readable semantics never grant editing or approval authority.
 
-Publish the visible tree and its ancestors alongside cell frames, with explicit
-insert/update/remove patches. Include changed focus/selection and logical child
-counts for virtualized regions. Structural, content and layout revisions identify
-what changed; a cursor blink does not invalidate the document. Never compare
-whole desktops, buffer contents or undo histories to construct a patch. Prepare
-payloads off the interaction thread. Coalesce complete prepared states, then
-regenerate patches against the acknowledged base; do not drop arbitrary deltas
-whose successors refer to them. A missing base requests a fresh snapshot.
+Projection follows host geometry, clipping and the centralized privacy policy.
+Owner metadata follows streamer mode; agent captures always mask protected
+content. Focused source reads touch only the visible measured slices. The
+implementation never compares whole desktops, buffers or undo histories to
+construct a semantic update.
+
+### Further semantic and platform extensions
+
+The [accessibility plan](accessibility.md) describes broader text APIs and platform
+adapters. Generic insert/update/remove node patches, offscreen range queries,
+complete conversation/message/menu subtrees, Windows UI Automation and Linux
+AT-SPI are extensions to the delivered foundation, not open requirements of #13.
+A future general tree should preserve these contracts:
 
 Cells, semantic geometry and canvas surfaces commit against one layout revision.
 A drag can immediately transform an existing ready surface and its semantics;
@@ -579,16 +583,16 @@ identify the node lifetime and any relevant text/layout revision. The host check
 current modal state, availability and caller authority again before dispatch.
 An unrelated frame update must not reject an otherwise valid action.
 
-Visible nodes are the minimum transport, not a claim of complete accessibility.
-Offscreen children and text ranges remain discoverable through bounded queries
-against measured buffers and provider indexes. Native synchronous text APIs may
-require an asynchronously maintained local document replica. A viewport excerpt
+Visible nodes are the current transport, not a claim of complete accessibility.
+Full offscreen children and text ranges would need bounded queries against
+measured buffers and provider indexes. Native synchronous text APIs may require
+an asynchronously maintained local document replica. A viewport excerpt
 cannot masquerade as complete document text; its limited state must be explicit
 until the adapter can satisfy full-range requests. Range queries must not block
 on a remote round trip from a native accessibility callback.
 
-Map this tree into NSAccessibility on macOS, UI Automation on Windows, AT-SPI on
-Linux and a semantic DOM beside WebGL in the browser. All share node identities,
+Extend the existing macOS and browser consumers, and add UI Automation on
+Windows and AT-SPI on Linux through the same semantics. Preserve node identities,
 focus and actions; each still needs platform text/IME, Unicode offset, geometry
 and notification handling. Accessibility and agent projections share semantics
 but retain caller-specific policy. Redact secrets before transmission. A platform
@@ -598,9 +602,9 @@ protected approvals and agent settings through those adapters.
 
 ## Canvas windows
 
-A canvas is another window content view, tracked in
-[#14](https://github.com/ekmett/hide/issues/14). A PNG viewer is the first concrete
-consumer: pan and zoom an image inside ordinary editor chrome. Later plugins can
+A canvas is another window content view. The portable retained image path
+completed [#14](https://github.com/ekmett/hide/issues/14): open, pan and zoom PNG
+and JPEG images inside ordinary editor chrome. Later plugins can
 supply plots, diagrams or custom GPU content. Canvas views contribute semantic
 names, descriptions and actions to the same tree; selectable regions can expose
 text or structured copy behavior.
@@ -647,9 +651,12 @@ with input and interactive presentation updates taking priority. Animated conten
 requests frames while active; a static canvas does not force continuous desktop
 redraws.
 
-Keep a deliberate route for plugin-defined rendering pipelines alongside that
-portable path. Arbitrary Haskell callbacks on an SSH host cannot run inside a
-browser, and Metal/Vulkan/WebGL do not share shader formats. Such a plugin must
+### Future custom rendering
+
+Plugin-defined rendering pipelines can extend the portable path when a concrete
+consumer needs them; they are not part of the completed image milestone.
+Arbitrary Haskell callbacks on an SSH host cannot run inside a browser, and
+Metal/Vulkan/WebGL do not share shader formats. Such a plugin must
 provide frontend-executable resources/commands or an explicitly installed
 renderer extension for the chosen backend. The compositor renders plugin output
 into a host-controlled target and applies the final stencil itself; it does not
@@ -661,23 +668,21 @@ custom GPU work within a frame budget; arbitrary installed callbacks still need
 cooperative limits. Native renderer extensions are trusted installed code, not a
 sandbox.
 
-The host also owns color space and filter placement. A canvas can request crisp
-image presentation or participation in the editor's CRT effect without changing
-cell rendering globally. Final screenshots composite both cell and canvas layers;
-text captures use the canvas's semantic description and available actions. A
-stencil is not a confidentiality boundary: apply audience/redaction policy before
-sending image resources or semantics. Agent screenshots capture only the
-authorized masked composite, never underlying private canvas textures. Text
-terminals receive a useful named fallback with image metadata and Open Externally,
-not an empty source buffer pretending to display pixels.
+Color-space and per-canvas filter requests belong in that future renderer
+contract, with the host controlling their composition with the editor's CRT pass.
 
-The first PNG slice uses the shared window ownership contract. It includes
-resources, clipping, identity/lifecycle and the shared wire path. Image semantics
-include Fit Image, Actual Size, Zoom In and Zoom Out through browser buttons and
-macOS accessibility actions. The host checks their exact view/resource target and
-current visible anchor before using its viewport operations. Add backend-specific
-rendering extensions with concrete consumers. Keep the accessibility work
-independently useful for ordinary windows throughout.
+### Image actions and capture
+
+The portable image path includes resources, clipping, identity/lifecycle and the
+shared wire path. Image semantics expose Fit Image, Actual Size, Zoom In and Zoom
+Out through browser buttons and macOS accessibility actions. The host checks the
+exact view/resource and current visible anchor before applying viewport changes.
+
+Screenshots composite cells and canvases; text captures use semantic descriptions
+and available actions. A stencil is not a confidentiality boundary: apply audience
+policy before transmitting resources or semantics. Agent screenshots expose the
+authorized masked composite, never underlying private textures. Text terminals
+retain a named image fallback with metadata and Open Externally.
 
 ## Sidebar contributions
 
@@ -1160,10 +1165,45 @@ that presentation is present, so service results also refresh the conversation's
 layout. Session teardown joins pending acquisition cleanup before closing jobs
 and consoles.
 
-The shared terminal tools use the public service described above. ACP provider
-composition and autocomplete are the remaining first-party migration units.
+The shared terminal tools use the public service described above. Primary/child
+ACP provider composition and its native service bridge remain in progress.
 Build planning and generic editor operations retain their host-owned interfaces.
 ACP, Ghostty and DAP retain their existing workers and protocols.
+
+### Private autocomplete provider
+
+`Hide.AgentUI.plugin` contributes one `CompletionProvider` implemented in
+`hide-acp`, plus four `CompletionTool` declarations from `hide-agents`:
+`submit_completion`, `read_completion_context`, `read_completion_file` and
+`read_completion_skill`. The host registers these only at the authenticated
+private completion endpoint. They never enter the ordinary agent tool catalogue.
+Missing contributions start no fallback ACP process. Copilot keeps its existing
+provider and authentication path.
+
+The host prepares an immutable `CompletionInput` on its completion worker: the
+current file, caret, nearby numbered lines and bounded recent edits. It retains
+the source identity used to reject stale responses; the plugin gets neither a
+mutable buffer nor an undo tree. `CompletionContext` is the same typed snapshot
+in the prompt and the context tool reply. Explicit file reads return at most
+8,192 characters from that captured file and accept no other path.
+
+The provider's existing request slot admits all four tools. Every call checks the
+exact active request ID, including calls through a retained service. Hint turns,
+idle providers and cancelled or completed requests expose no source snapshot.
+Submission consumes one slot for up to eight whole-line replacement alternatives,
+with 128 KiB of UTF-8 replacement text in total. A submission is a preview, not an
+edit: only a completed provider turn can return it, and only the host can accept
+it into the source buffer through ordinary Undo.
+
+`CompletionStart` supplies the directory, private endpoint, configured model and
+effort, and a host-owned launch callback. Each actual lazy acquisition freezes
+its effective environment and redaction values off the UI thread. `ProviderLaunch`
+carries executable, arguments and environment without shell interpretation.
+The persistent side-chat, prompt/configuration serialization, feedback and
+cancellation stay in the same provider owner; this boundary adds no scheduler.
+Configuration receipts identify the exact client incarnation and advertisement.
+A stale receipt cannot acquire or configure a replacement client. Leaving the
+provider scope invalidates its tools and joins its work.
 
 The ACP completion transcript uses a scoped prepared text window. Its existing
 trace worker prepares the latest 65,536 characters after provider redaction;
@@ -1298,52 +1338,48 @@ buffers wherever possible. Migration failure does not discard the original state
 Buffer/window IDs are session handles; restore resolves durable references before
 handing fresh handles to plugins.
 
-## Bringing it into the current code
+## Delivery boundary
 
-Delivery is staged in [the plugin tracking issue](https://github.com/ekmett/hide/issues/1).
-The interfaces remain proposed until their implementation PRs establish parity:
+[The plugin milestone](https://github.com/ekmett/hide/issues/1) covers delivery
+stages #2–#10. Commands and configurable bindings, scoped buffer services, standard
+windows, stacked sidebar roots, agent/session navigation, debugger navigation and
+Cabal targets are implemented. The linked `hide-agents` and `hide-acp` packages
+are the first-party consumers, rather than an additional demonstration project.
 
-1. Put a named, typed command registry behind the current `Command`/`Effect`
-   dispatch. Keep existing constructors internally while menus and configurable
-   keys adopt stable IDs. Stop using native-menu list indices as identities.
-2. Give the approved sidebar a generic root/node provider interface immediately,
-   so Files and Debug are its first consumers rather than special cases to undo.
-3. Separate buffer ownership from window content and add standard semantic views.
-   Replace title-based privacy checks with explicit host-owned view/control roles.
-4. Wrap existing resource owners in scoped service handles and checked buffer
-   operations. Preserve the MCP initiation/deferred-wait split.
-5. Move the agent directory, conversation presentation, menus and ACP registration
-   through the public API as the first complete proof. Exercise primary and child
-   agents through the same consumer instead of retaining a privileged primary UI.
+[#10](https://github.com/ekmett/hide/issues/10) has a fixed remainder: ACP
+primary/child provider composition with its existing filesystem, terminal and
+permission bridge; then a parity evidence index and API docs. Shared-terminal
+tools and private ACP autocomplete are complete. Generic build, debug, LSP, Git and editor
+services can stay permission-controlled host operations. The host continues to
+own state, authority and lifetimes; the plugin packages cannot import private
+Desktop, Render or Conversation internals.
 
-Only after this proof should we freeze a small public `Hide.Plugin.*` surface or
-publish a standalone SDK. Today the package exposes most implementation modules;
-that exposure should not accidentally become the compatibility promise.
+The semantic-tree and portable canvas milestones (#13 and #14) are independently
+delivered extensions. Future layout grammars, rendering pipelines, platform
+accessibility adapters, live sharing and additional provider families do not
+extend the first-party milestone. They need their own concrete workflow.
 
-## Checks that would make the design credible
+## Verification
 
-- A separate Haskell package adds a window, sidebar root, command, menu and tool
-  without importing `Hide.Model`, `Hide.Render` or private conversation state.
-- The same plugin works through terminal, Metal/Vulkan, browser and SSH display;
-  disconnect/reconnect does not restart its service.
-- A delayed edit rejects equal-revision buffer replacement, a changed buffer,
-  revoked authority and a closed/recovered session, without partial installation.
-- A slow or failed provider leaves source selection, sidebar scroll and window
-  dragging responsive. Render invalidation cannot force plugin state or histories.
-- Closing a view cancels view tasks but retains its intentionally session-owned
-  agent; plugin disable resolves pending tool calls and cannot resurrect UI.
-- An agent cannot use a plugin command or rebound key to approve itself, type into
-  the human composer, alter agent policy or extract a private resume key.
-- Missing plugins and failed checkpoint migrations preserve recoverable data.
-- Our agent integration uses the documented API, including hidden child sessions,
-  user-edited approval diffs and provider-specific model/effort capabilities.
+Reuse the existing checks at the changed boundary:
 
-## Decisions to revisit after the first proof
+- Command, form, menu, tree and window checks exercise the linked contributions
+  without granting access to private host state.
+- Typed buffer checks cover bounded reads, immutable identities, changed/replaced
+  buffers, revoked authority and atomic checked edits.
+- Agent, conversation and autocomplete checks cover provider ownership, queueing,
+  steering, cancellation, configuration receipts, private input and recovery.
+- Frontend/transport checks cover retained presentation and detach/reconnect;
+  the closeout includes one actual provider identity or request surviving detach.
+- Allocation checks retain the prohibition on forcing whole desktop payloads or
+  histories during interaction and rendering.
 
-The recommendation is trusted, linked Haskell packages first. If installation
-without rebuilding becomes essential, compare a separate-process Haskell SDK
-against runtime GHC loading rather than quietly promising both. Similarly, keep
-canvas implementation in its own tracked stage after widget ownership. Live
-code reload remains outside the initial implementation. Neither blocks agent
-hooks or the stacked sidebar; the semantic contract must already accommodate
-canvas content so it does not acquire a separate accessibility/input system.
+Record the relevant existing results in the milestone closeout. Do not create a
+second integration project, an exhaustive new platform matrix or a new fixture
+framework to establish the same behavior. A new failure needs a focused causal
+check; unchanged evidence can be reused.
+
+Trusted, Cabal-linked Haskell packages remain the implementation model. Dynamic
+GHC loading, a separate-process SDK and live code reload are separate decisions
+if a concrete installation workflow eventually needs them. The current public
+interfaces remain free to improve with their first-party consumers.
