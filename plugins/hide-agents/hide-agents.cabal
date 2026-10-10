@@ -5,7 +5,7 @@ name: hide-agents
 version: 0.1.0.0
 synopsis: First-party agent directory plugin for hide
 license: BSD-2-Clause OR Apache-2.0
-license-files: LICENSE-BSD-2-Clause.md, LICENSE-APACHE.md
+license-files: LICENSE.md
 build-type: Simple
 
 library

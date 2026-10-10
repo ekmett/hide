@@ -6,7 +6,7 @@ synopsis: Build and check the hide documentation site
 version: 0.1.0.0
 build-type: Simple
 license: BSD-2-Clause OR Apache-2.0
-license-files: LICENSE-BSD-2-Clause.md, LICENSE-APACHE.md
+license-files: LICENSE.md
 
 executable hide-docs
   main-is: Main.hs
