@@ -1382,8 +1382,7 @@ observeAssistance runtime services state run receipt opened private forced budge
             "sourceBufferId" .= fmap fst opened,"location" .= A.compactFrame selectedPublic,"source" .= either (\reason->object ["unavailable" .= reason]) id nearby,
             "stack" .= either (const []) (map A.compactFrame . take 8 . items "stackFrames") stack,
             "locals" .= concatMap (either (const []) (mapMaybe (A.compactVariable secrets) . take 8 . items "variables")) pages,
-            "output" .= T.copy (T.takeEnd 2048 (output state)),"outputExcerpt" .= True,"supportedActions" .= actions,
-            "limits" .= (["Lazy values are not evaluated or expanded.","Only bounded eager scope roots are inspected.","Missing source and adapter failures do not prove the goal."]::[Text]),
+            "output" .= T.copy (T.takeEnd 2048 (output state)),"outputExcerpt" .= True,
             "inspectionFailures" .= [reason | Left reason<-scopes:pages]]
           identity=assistanceId run<>":"<>tshow (sidebarSession state)<>":"<>tshow (generation state)<>":"<>tshow (fromMaybe 0 (thread state))<>":"<>tshow (frameRevision state)<>":"<>tshow (assistanceDecisions run)
       current<-assistanceCaller run

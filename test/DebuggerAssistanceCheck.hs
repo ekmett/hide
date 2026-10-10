@@ -17,7 +17,7 @@ import Control.Concurrent.Async (withAsync,poll,wait)
 import Control.Concurrent.MVar
 import qualified Control.Concurrent.STM as STM
 import Control.Exception (bracket,finally)
-import Control.Monad (unless,void)
+import Control.Monad (forM_,unless,void)
 import Data.IORef
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe,Pair)
@@ -38,7 +38,7 @@ import Hide.Plugin.SystemOne
 import Hide.SystemOne
 
 checks :: IO ()
-checks=projectionPrivacyCheck >> stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck >> historyPrivacyCheck
+checks=projectionPrivacyCheck >> evidencePrivacyCheck >> stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck >> historyPrivacyCheck
 
 -- Crop boundaries must not turn a complete known credential into a leaked
 -- prefix or suffix. Test the actual buffer/value projections used by the worker.
@@ -57,6 +57,38 @@ projectionPrivacyCheck=do
     (object ["name" .= ("pending"::T.Text),"value" .= ("do not expose"::T.Text),"presentationHint" .= object ["lazy" .= True]]) of
       Just value->field "value" value==Just ("<unevaluated>"::T.Text) && field "unevaluated" value==Just True
       _->False)
+
+-- Host control metadata does not become adapter evidence merely because its
+-- action name equals a credential. Adapter values retain privacy at every depth.
+evidencePrivacyCheck :: IO ()
+evidencePrivacyCheck=withSystemOne $ \owner->do
+  calls<-newIORef (0::Int)
+  let provider=DecisionProvider description $ \_ use->use (DecisionDriver $ \input _->do
+        atomicModifyIORef' calls (\n->(n+1,()))
+        pure (Right (choose "next" input)))
+      neutral=object ["source" .= object ["lines" .= (["value = 1"]::[T.Text])]]
+      historical=object ["generation" .= (1::Int),"action" .= ("next"::T.Text)]
+      decide identity evidence recent=do
+        cancelled<-STM.newTVarIO False
+        ticket<-STM.newTVarIO Nothing
+        A.decideAssistance (systemOneServices owner) identity "Investigate the calculation."
+          ["root","next"] ["inspect","next"] evidence recent Nothing 1000 cancelled ticket
+  void (selectDecisionProvider owner (Just provider) >>= right)
+  accepted<-decide "public-history" neutral [historical]
+  invoked<-readIORef calls
+  check "a retained host action matching a credential still reaches the selected supplier"
+    (invoked==1 && case accepted of Right result->A.assistedAction result=="next";_->False)
+  forM_ [
+    ("source",object ["source" .= object ["lines" .= (["root"]::[T.Text])]],[]),
+    ("locals",object ["locals" .= [object ["value" .= ("next"::T.Text)]]],[]),
+    ("recent-location",neutral,[object ["location" .= object ["name" .= ("root"::T.Text)]]]),
+    ("recent-locals",neutral,[object ["locals" .= [object ["value" .= ("next"::T.Text)]]]]),
+    ("adapter-action",object ["locals" .= [object ["action" .= ("root"::T.Text)]]],[]),
+    ("recent-adapter-action",neutral,[object ["locals" .= [object ["action" .= ("next"::T.Text)]]]])] $ \(label,evidence,recent)->do
+      refused<-decide label evidence recent
+      after<-readIORef calls
+      check (T.unpack label<>" private adapter evidence is refused before supplier invocation")
+        (after==invoked && case refused of Left "private-observation"->True;_->False)
 
 -- A sent step is only an admission: the run must observe this command's new
 -- stopped generation before reporting its step budget as completed.
