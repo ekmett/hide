@@ -507,7 +507,7 @@ drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue _) _) d=forM
     case ingress of
       ReadAssistance receipt command args reply
         | not (assistanceReceiptCurrent s receipt) ->void (tryPutMVar reply (Left "Assisted debugger stop expired."))
-        | command=="admit" ->void (tryPutMVar reply (if maybe False (protectedPath d) (field "path" args) || maybe False (protectedBuffer d) (field "bufferId" args)
+        | command=="admit" ->void (tryPutMVar reply (if any (protectedPath d) (fromMaybe [] (field "paths" args)) || any (protectedBuffer d) (fromMaybe [] (field "bufferIds" args))
             then Left "Assisted observation became private." else Right Null))
         | command=="variables" && M.lookup (integer "variablesReference" args) (variableRefs s)/=Just False ->void (tryPutMVar reply (Left "Lazy or expired variable handle."))
         | command=="source" && not (M.member (integer "sourceReference" args) (sourceReferences s)) ->void (tryPutMVar reply (Left "Debugger source handle expired."))
@@ -778,11 +778,11 @@ debuggerToolWithCaller caller runtime@(Debugger ref _ _ _ _) d name arguments = 
       value<-debuggerStatus current
       pure (desktop,case failure current of
         Just err->pure (Left err)
-        Nothing->publicDebuggerStatus (root current) (privateFilePaths desktop) (merge (object ["accepted" .= True]) value))
+        Nothing->publicDebuggerStatus (root current) (privateFilePaths desktop) (protectedBuffer desktop) (merge (object ["accepted" .= True]) value))
     run ToolStatus=do
       current<-readIORef ref
       value<-debuggerStatus current
-      pure (d,publicDebuggerStatus (root current) (privateFilePaths d) value)
+      pure (d,publicDebuggerStatus (root current) (privateFilePaths d) (protectedBuffer d) value)
     run (ToolStart action values)=do
       desktop<-perform runtime action values d
       current<-readIORef ref
@@ -1017,8 +1017,8 @@ debuggerStatus s=do
 
 -- Public metadata is prepared on the waiting tool worker. Entire private rows
 -- are omitted: frame names and breakpoint messages can also reveal their source.
-publicDebuggerStatus :: FilePath -> [FilePath] -> Value -> IO (Either Text Value)
-publicDebuggerStatus base private value=case boundedResult value of
+publicDebuggerStatus :: FilePath -> [FilePath] -> (Int -> Bool) -> Value -> IO (Either Text Value)
+publicDebuggerStatus base private privateBuffer value=case boundedResult value of
   Left err->pure (Left err)
   Right (Object objectValue)->do
     visibleFrame<-visibleRow base private (fromMaybe Null (field "frame" value))
@@ -1037,7 +1037,7 @@ publicDebuggerStatus base private value=case boundedResult value of
     publicObservation observation=do
       selected<-visibleRow base private (fromMaybe Null (field "location" observation))
       stack<-mapM (visibleRow base private) (items "stack" observation)
-      pure (selected && and stack)
+      pure (selected && and stack && not (maybe False privateBuffer (field "sourceBufferId" observation)))
 
 publicStack :: FilePath -> [FilePath] -> Value -> IO (Either Text Value)
 publicStack base private value=do
@@ -1355,15 +1355,15 @@ observeAssistance runtime services state run receipt opened private forced budge
           eager row=integer "variablesReference" row>0 && not (flag "expensive" row) && not (maybe False (flag "lazy") (field "presentationHint" row)) && not (sensitiveLabel (text "name" row))
       pages<-mapM (\scope->readAssistance runtime run receipt "variables" (object ["variablesReference" .= integer "variablesReference" scope,"start" .= (0::Int),"count" .= (8::Int)])) (filter eager scopeRows)
       nearby<-case opened of
-        Just (_,buffer)->pure (Right (A.sourceExcerpt (integer "line" selected) buffer))
+        Just (_,buffer)->pure (A.sourceExcerpt secrets (integer "line" selected) buffer)
         Nothing | integer "sourceReference" source>0->do
           body<-readAssistance runtime run receipt "source" (object ["sourceReference" .= integer "sourceReference" source])
-          pure (body >>= \value->maybe (Left "Adapter source unavailable.") (Right . A.sourceExcerpt (integer "line" selected) . newBuffer) (field "content" value))
+          pure (body >>= \value->maybe (Left "Adapter source unavailable.") (A.sourceExcerpt secrets (integer "line" selected) . newBuffer) (field "content" value))
         Nothing | Just file<-canonical->do
           bytes<-tryIOError (withFileRead file (\handle->BS.hGet handle (1024*1024+1)))
           pure $ case bytes of
             Right value | BS.length value<=1024*1024->case TE.decodeUtf8' value of
-              Right content->Right (A.sourceExcerpt (integer "line" selected) (newBuffer content))
+              Right content->A.sourceExcerpt secrets (integer "line" selected) (newBuffer content)
               _->Left "Source is not UTF-8."
             _->Left "Source unavailable within the 1 MiB read bound."
         _->pure (Left "No adapter or local source.")
@@ -1372,18 +1372,26 @@ observeAssistance runtime services state run receipt opened private forced budge
             _->selected
           actions=["inspect","next","stepIn"]++["stepOut" | length (take 2 (frames state))>1]++["continue","stop","hypothesis"]
           observation=object ["session" .= sidebarSession state,"threadId" .= thread state,"generation" .= generation state,"frameRevision" .= frameRevision state,
-            "location" .= A.compactFrame selectedPublic,"source" .= either (\reason->object ["unavailable" .= reason]) id nearby,
+            "sourceBufferId" .= fmap fst opened,"location" .= A.compactFrame selectedPublic,"source" .= either (\reason->object ["unavailable" .= reason]) id nearby,
             "stack" .= either (const []) (map A.compactFrame . take 8 . items "stackFrames") stack,
-            "locals" .= concatMap (either (const []) (mapMaybe A.compactVariable . take 8 . items "variables")) pages,
-            "output" .= T.copy (T.takeEnd 2048 (output state)),"supportedActions" .= actions,
+            "locals" .= concatMap (either (const []) (mapMaybe (A.compactVariable secrets) . take 8 . items "variables")) pages,
+            "output" .= T.copy (T.takeEnd 2048 (output state)),"outputExcerpt" .= True,"supportedActions" .= actions,
             "limits" .= (["Lazy values are not evaluated or expanded.","Only bounded eager scope roots are inspected.","Missing source and adapter failures do not prove the goal."]::[Text]),
             "inspectionFailures" .= [reason | Left reason<-scopes:pages]]
           identity=assistanceId run<>":"<>tshow (sidebarSession state)<>":"<>tshow (generation state)<>":"<>tshow (fromMaybe 0 (thread state))<>":"<>tshow (frameRevision state)<>":"<>tshow (assistanceDecisions run)
       current<-assistanceCaller run
-      admission<-readAssistance runtime run receipt "admit" (object ["path" .= canonical,"bufferId" .= fmap fst opened])
+      let observationPaths value=mapMaybe (\row->field "source" row >>= field "path")
+            (fromMaybe Null (field "location" value):items "stack" value) :: [FilePath]
+          includedPaths=concatMap observationPaths (observation:take 4 (assistanceEvidence run))
+          privateRaw=A.hasPrivateText secrets (output state) || A.hasPrivateValue secrets selected ||
+            either (const False) (A.hasPrivateValue secrets) stack || any (either (const False) (A.hasPrivateValue secrets)) (scopes:pages)
+          includedBuffers=mapMaybe (field "sourceBufferId") (observation:take 4 (assistanceEvidence run)) :: [Int]
+      admission<-readAssistance runtime run receipt "admit" (object ["paths" .= includedPaths,"bufferIds" .= includedBuffers])
       case (current,admission) of
         (Left _,_)->pure (Left "caller-retired")
         (_,Left _)->pure (Left "observation-expired-or-private")
+        (Right (),Right _) | privateRaw->pure (Left "private-observation")
+        (Right (),Right _) | (case nearby of Left reason->reason=="Nearby source contains a known private value.";_->False)->pure (Left "private-observation")
         (Right (),Right _)->A.decideAssistance services identity (assistanceGoal run) secrets actions observation (assistanceEvidence run) forced budget (assistanceCancelled run) (assistanceTicket run)
 
 readAssistance :: Debugger -> Assistance -> AssistanceReceipt -> Text -> Value -> IO (Either Text Value)

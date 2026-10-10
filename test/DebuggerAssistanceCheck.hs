@@ -27,13 +27,33 @@ import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 import qualified Data.Text.Encoding as TE
 import System.Timeout (timeout)
+import qualified Hide.DebugAssistance as A
+import Hide.Buffer (newBuffer)
 import Hide.Debugger
 import Hide.Model
 import Hide.Plugin.SystemOne
 import Hide.SystemOne
 
 checks :: IO ()
-checks=stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck
+checks=projectionPrivacyCheck >> stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck
+
+-- Crop boundaries must not turn a complete known credential into a leaked
+-- prefix or suffix. Test the actual buffer/value projections used by the worker.
+projectionPrivacyCheck :: IO ()
+projectionPrivacyCheck=do
+  let secret="provider-secret-0123456789"
+      source=A.sourceExcerpt [secret] 1 (newBuffer (T.replicate 250 "x"<>secret<>"\n"))
+      raw=object ["name" .= ("value"::T.Text),"value" .= (T.replicate 250 "x"<>secret),"variablesReference" .= (0::Int)]
+      output=secret<>T.replicate 2040 "y"
+  check "source credential crossing the 256-character boundary is refused" (case source of Left _->True;_->False)
+  check "local credential crossing its value crop is omitted" (A.compactVariable [secret] raw==Nothing)
+  check "complete output privacy precedes the last-2048-character crop" (A.hasPrivateText [secret] output)
+  check "CRLF private text follows ordinary normalized admission"
+    (A.hasPrivateText ["private\r\nvalue"] "prefix private\nvalue suffix")
+  check "a lazy local remains explicit without target evaluation" (case A.compactVariable []
+    (object ["name" .= ("pending"::T.Text),"value" .= ("do not expose"::T.Text),"presentationHint" .= object ["lazy" .= True]]) of
+      Just value->field "value" value==Just ("<unevaluated>"::T.Text) && field "unevaluated" value==Just True
+      _->False)
 
 -- A sent step is only an admission: the run must observe this command's new
 -- stopped generation before reporting its step budget as completed.
