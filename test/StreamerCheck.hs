@@ -5,6 +5,7 @@ import Data.Aeson
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import EditorFixture (agentSettingsReply)
 import Hide.Conversation
 import qualified Hide.Consoles as C
 import Hide.Model
@@ -22,11 +23,13 @@ checks=do
   check "disabling streamer restores visible values" (snapshot (hidden {streamerMode=False})==snapshot original)
   let statusOnly=(initialDesktop (80,25)) {status="Session private-session-key",streamerMode=True}
   check "streamer mode covers session status" (not ("private-session-key" `T.isInfixOf` snapshot statusOnly))
-  C.withConsoles $ \consoles -> withConversation Nothing Nothing Nothing consoles $ \runtime -> do
+  retained<-C.withConsoles $ \consoles -> withConversation Nothing Nothing Nothing consoles $ \runtime -> do
     let state=(initialDesktop (80,25)) {agentSettings=[AgentSetting "model" "Model" "model" "model-public" [("model-public","Public model")],AgentSetting "token" "API token" "private" "private-value" [("private-value","private-choice")]]}
-    (unchanged,finish)<-chatTool runtime state "agent_settings" (object [])
+    finish<-agentSettingsReply runtime state
     result<-finish
     let text=TE.decodeUtf8 (BL.toStrict (encode result))
-    check "agent settings reads do not mutate desktop" (unchanged==state)
     check "public agent settings readable and secrets redacted" ("model-public" `T.isInfixOf` text && not ("private-value" `T.isInfixOf` text) && not ("private-choice" `T.isInfixOf` text))
+    agentSettingsReply runtime state
+  retired<-retained
+  check "retired conversation settings cannot read configuration" (case retired of Left _->True; Right _->False)
   putStrLn "streamer and public agent settings checks passed"

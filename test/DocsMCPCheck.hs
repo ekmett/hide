@@ -21,15 +21,13 @@ import qualified System.Posix.Files as Posix
 import qualified Hide.Documentation as Host
 import qualified Hide.Plugin.Documentation as Docs
 import qualified Hide.Plugin.Tool as Tool
-import Hide.Plugin.Services (EditorServices(..))
 import qualified Hide.DocsTools as DocsTools
 import qualified Hide.Plugin.Command as Commands
 import Hide.DocumentationHost
-import Hide.Environment (withEnvironmentCommands,environmentServices)
 import Hide.Model
 
 checks :: IO ()
-checks=Tool.withTools [] DocsTools.tools $ \tools->withDocsCommands $ \commands->withEnvironmentCommands $ \environment->bracket temporary removePathForcibly $ \root->do
+checks=Tool.withTools [] DocsTools.tools $ \tools->withDocsCommands $ \commands->bracket temporary removePathForcibly $ \root->do
   let editor=root </> "editor"
       compiler=root </> "compiler"
       configuration=root </> "config"
@@ -38,7 +36,7 @@ checks=Tool.withTools [] DocsTools.tools $ \tools->withDocsCommands $ \commands-
       check label condition=unless condition (error label)
       run name arguments=do
         context<-captureDocsContext d
-        Tool.callTool tools (EditorServices (docsServices commands context) (environmentServices environment root)) name (object arguments)
+        Tool.callTool tools (docsServices commands context) name (object arguments)
       value name reply=case reply of Right object'->parseMaybe (withObject "reply" (.: name)) object'; _->Nothing
       failed (Left _)=True
       failed _=False
@@ -78,7 +76,7 @@ checks=Tool.withTools [] DocsTools.tools $ \tools->withDocsCommands $ \commands-
     resolutions<-newIORef (0::Int)
     deferred<-withDocsCommands $ \scoped->do
       let context _=modifyIORef' resolutions (+1) >> pure editor
-          services=EditorServices (docsServices scoped context) (environmentServices environment root)
+          services=docsServices scoped context
       pure [Tool.callTool tools services name (object arguments) | (name,arguments)<-
         [("docs_read",["path" .= ("README.md"::T.Text)]),("docs_list",[]),("docs_search",["query" .= ("Needle"::T.Text)])]]
     closed<-sequence deferred

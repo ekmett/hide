@@ -13,6 +13,7 @@ module Hide.Plugin.Services
   ) where
 
 import Hide.Plugin.Documentation (DocsServices)
+import Hide.Plugin.AgentSettings (AgentSettingsServices)
 import Hide.Plugin.Environment (EnvironmentServices)
 
 -- | Host-granted editor capabilities captured after permission admission.
@@ -21,4 +22,5 @@ import Hide.Plugin.Environment (EnvironmentServices)
 data EditorServices = EditorServices
   { editorDocumentation :: !DocsServices
   , editorEnvironment :: !EnvironmentServices
+  , editorAgentSettings :: !AgentSettingsServices
   }

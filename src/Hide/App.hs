@@ -344,9 +344,10 @@ runEditor plugins args = do
                     | PluginTool.hasTool editorToolset name = do
                         context<-captureDocsContext d
                         directory<-evaluate (startingDirectory d)
+                        settings<-captureAgentSettings conversation d
                         pure (d,PluginTool.callTool editorToolset
                           (PluginServices.EditorServices (docsServices docsCommands context)
-                            (environmentServices environmentCommands directory)) name parameters)
+                            (environmentServices environmentCommands directory) settings) name parameters)
                     | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
                     | name `elem` chatToolNames = chatTool conversation d name parameters
                     | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters

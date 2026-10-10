@@ -778,10 +778,12 @@ the host for the authenticated actor and workspace after permission admission.
 The workspace guard rejects substitution before provider reservation. Every
 operation still checks live Hub authority; retaining the record cannot keep an
 ended agent alive. Hub ancestry, limits, tickets, worktree isolation and rollback
-are unchanged. The plugin receives no human approval or settings capability.
+are unchanged. Coordination receives no human approval or provider-configuration
+capability.
 
 `Hide.DocsTools` declares the three offline documentation tools over
-`EditorServices`. Its checked request types and codecs live in
+`DocsServices`, composed through `EditorServices.editorDocumentation`. Its
+checked request types and codecs live in
 `Hide.Plugin.Documentation`; the host retains corpus selection, path confinement,
 native file access and read/search budgets. Help invokes the same session-scoped
 read registration. List, search and read all reject deferred calls after their
@@ -795,6 +797,16 @@ same mutation owner, with no human validation switch exposed to plugins. The
 entire batch validates before mutation; project settings override global ones,
 and existing child processes keep their environment. Captured services reject
 calls after their session registration retires.
+
+`Hide.AgentSettingsTools` declares `agent_settings` through
+`EditorServices.editorAgentSettings`. The host captures public primary metadata
+and the selected directory without filesystem access or retaining the Desktop.
+The scoped read resolves a disconnected build root and reads configured agent
+context on the tool worker. Provider arguments, environment values and session
+keys are absent; sensitive option values stay redacted. Changing the selected
+child does not change the primary scope. Deferred reads reject after retirement;
+already admitted reads may finish with their captured metadata. This service has
+no configuration write operation.
 
 `PluginTool` distinguishes `EditorTool`, `RequestTool` and `CoordinationTool`
 by their service contexts. Request services own fresh admission on every

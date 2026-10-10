@@ -20,6 +20,7 @@ import System.Mem.StableName (makeStableName)
 import GHC.Stack (HasCallStack,callStack,prettyCallStack)
 import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.ConversationInput as ConversationInput
+import EditorFixture (agentSettingsReply)
 import Hide.Conversation
 import Hide.TextPresentation (TextPresentation,withTextPresentation,textPresentationEffects,tickTextPresentation)
 import qualified Hide.Consoles as C
@@ -139,7 +140,7 @@ checks=bracket temporary removePathForcibly $ \root ->
           draft text selected d=setComposerInput (newBuffer text) selected True d
           send text d=submit QuerySubmit (draft text (Selection (T.length text) (T.length text)) d)
           primarySettled marker d=do
-            (_,reply)<-chatTool conversation d "agent_settings" (object [])
+            reply<-agentSettingsReply conversation d
             value<-reply >>= right
             pure (field "replying" value==Just False && bufferLength (composerBuffer d)==0 && marker `T.isInfixOf` activeText d)
           tickUntil :: HasCallStack => (Desktop -> IO Bool) -> Desktop -> IO Desktop
@@ -303,7 +304,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       let primaryMetadata=childAgain {agentReplying=True,agentSteering=True,agentContextUsage=Just (42,84),agentSettings=[AgentSetting "model" "Model" "model" "primary-model" [("primary-model","Primary")]]}
       ensure "child capabilities do not inherit primary steering or model settings" (not (conversationSteering primaryMetadata) && not (commandEnabled primaryMetadata (AgentChoose "")) && not (commandEnabled primaryMetadata (AgentSet "model" "primary-model")))
       ensure "child view does not show primary context usage" (conversationContextUsage primaryMetadata==Nothing)
-      (_,settingsReply)<-chatTool conversation primaryMetadata "agent_settings" (object [])
+      settingsReply<-agentSettingsReply conversation primaryMetadata
       settingsInfo<-settingsReply >>= right
       ensure "settings snapshot identifies primary scope and does not mix child busy state" (field "scope" settingsInfo==Just ("primary"::T.Text) && field "replying" settingsInfo==Just False)
       cancellingPeer<-ui "cancel" [] afterPrimaryCancel
@@ -441,7 +442,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "recovered primary draft has a real submit action" (not (null effects))
       deniedSubmit<-apply submitted effects
       rejected "editor submit without a presenter" deniedSubmit
-      (_,settingsReply)<-chatToolAs conversation Nothing deniedSubmit "agent_settings" (object [])
+      settingsReply<-agentSettingsReply conversation deniedSubmit
       settings<-settingsReply >>= right
       ensure "rejected primary input never starts its provider" (field "connected" settings==Just False)
       let primary=AR.primaryAgent (conversationAgents conversation)

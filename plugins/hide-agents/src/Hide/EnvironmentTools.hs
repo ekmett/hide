@@ -16,14 +16,12 @@ module Hide.EnvironmentTools
 
 import Hide.Plugin.Command (CommandDef(..))
 import Hide.Plugin.Environment
-import Hide.Plugin.Services (EditorServices,editorEnvironment)
-import Hide.Plugin.Tool (Tool(..),mapToolContext)
+import Hide.Plugin.Tool (Tool(..))
 
 -- | The editor endpoint's explicit environment tools. Read-only hints remain
 -- policy metadata; every invocation still requires host permission admission.
-tools :: [Tool EditorServices]
-tools=map (mapToolContext editorEnvironment)
-  [Tool "environment_get" True (CommandDef "hide.environment.get"
+tools :: [Tool EnvironmentServices]
+tools=[Tool "environment_get" True (CommandDef "hide.environment.get"
     "Inspect the editor process environment used by newly launched builds, terminals, debuggers and agents. Optional names limits the result; absent names are null. Credential and editor authority values are always redacted. Use before prescribing shell exports or an editor restart."
     getInput getOutput environmentGet)
   ,Tool "environment_set" False (CommandDef "hide.environment.set"

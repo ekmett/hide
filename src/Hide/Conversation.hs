@@ -12,12 +12,14 @@
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationAgents, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
 import Hide.ConversationBody
 import Hide.SessionServices (persist)
 import Prelude hiding (reads)
+import Control.DeepSeq (force)
+import qualified Hide.Plugin.AgentSettings as Settings
 import Control.Exception (IOException, bracket, try, onException, mask, mask_, evaluate, finally)
 #ifdef WITH_WINDOW
 import Control.Concurrent (forkIO)
@@ -138,6 +140,8 @@ data QuestionResult = QuestionResult !AH.AgentId !(Maybe ProviderReceipt) !Value
 -- The request ID scopes output to the provider prompt, never a displayed record.
 data PromptReply = PromptReply !Int [Text]
 
+data SettingsCapture = SettingsCapture !Bool !FilePath !Settings.SettingsSnapshot
+
 data State = State
   { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe AR.PrimaryControl), transcript :: !Transcript.PrimaryTranscript, nextRecord :: !Int
@@ -163,6 +167,7 @@ data State = State
   , childInput :: Maybe (Editor.DeclaredInput ChildInputServices Editor.EditorUpdate)
   , conversationEditors :: IORef (M.Map Text ConversationEditor)
   , bodyScope :: !W.WindowScope, loadingBody :: !W.PreparedWindow
+  , settingsCommands :: !(Command.Registry SettingsCapture, Command.Command SettingsCapture () Settings.SettingsSnapshot)
   , resumeRecordPath :: FilePath
   }
 -- | Provider/transcript ownership with injected session consoles.
@@ -179,7 +184,15 @@ withConversation presenter primary child consoles action = getCurrentDirectory >
 
 -- | Load conversation configuration and scope only provider and agent workers.
 withConversationAt :: Maybe ConversationPresenter -> Maybe (InputDeclaration PrimaryInputServices) -> Maybe (InputDeclaration ChildInputServices) -> C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
-withConversationAt presenter primary child consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->Command.withRegistry $ \childRegistry->do
+withConversationAt presenter primary child consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->Command.withRegistry $ \childRegistry->Command.withRegistry $ \settingsRegistry->do
+  settingsRead<-Command.registerCommand settingsRegistry (Command.CommandDef "hide.agent-settings.read" "Read public conversation settings"
+    (Command.Codec Null (const (Right ())) (const Null))
+    (Command.Codec Null (const (Left "Host-captured settings only.")) toJSON)
+    (\(SettingsCapture connected directory snapshot) ()->do
+      base<-if connected then pure directory else B.resolveBuildRootFrom directory
+      context<-readAgentContexts base
+      pure (Right snapshot {Settings.settingsContext=either (const Null) id context,
+        Settings.settingsContextError=either Just (const Nothing) context}))) >>= either (ioError . userError . show) pure
   preparedPresenter<-traverse evaluate presenter
   registeredPrimaryInput<-traverse (\declaration->Editor.registerDeclaredInput registry declaration id >>= either (ioError . userError . show) pure) primary
   registeredChildInput<-traverse (\declaration->Editor.registerDeclaredInput childRegistry declaration id >>= either (ioError . userError . show) pure) child
@@ -200,7 +213,7 @@ withConversationAt presenter primary child consoles root action = W.withWindowSc
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
-    , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,directoryAgents=[]
+    , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,settingsCommands=(settingsRegistry,settingsRead),resumeRecordPath=resumePath,directoryAgents=[]
     , conversationPresenter=preparedPresenter,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,primaryInput=registeredPrimaryInput,childInput=registeredChildInput,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
@@ -215,6 +228,8 @@ conversationSessionPath directory=lookupEnv "THC_EDIT_SESSION" >>= maybe
 closeConversation :: ConversationState -> IO ()
 closeConversation (ConversationState _ ref consoles agents) = do
   s<-readIORef ref
+  let (registry,command)=settingsCommands s
+  void (Command.retireCommand registry (Command.commandRef command))
   writeIORef ref (abandonQuestion "Editor session closed." s) {questionsClosed=True,promptReply=Nothing}
   AR.failPendingPrimary agents "Editor session closed."
   mapM_ denyChild (map snd (approvals s))
@@ -1397,14 +1412,42 @@ conversationHeightFor target d=case [window | window<-windows d,conversationTarg
   window:_->max 1 (pluginBodyRows d window)
   []->max 1 (snd (screenSize d)-6)
 
+-- | Capture only public conversation metadata and path selection on the desktop
+-- owner. Root discovery, context reads and reply encoding belong to the caller's
+-- tool worker. The scoped command rejects deferred reads after session retirement;
+-- an already admitted read may finish with its original immutable snapshot.
+captureAgentSettings :: ConversationState -> Desktop -> IO Settings.AgentSettingsServices
+captureAgentSettings (ConversationState _ ref _ _) desktop=do
+  state<-readIORef ref
+  connected<-evaluate (not (isNothing (connection state)))
+  directory<-evaluate (if connected then project state else B.buildStartDirectory desktop)
+  executable<-evaluate (A.executable (provider state))
+  argumentCount<-evaluate (length (A.arguments (provider state)))
+  environmentNames<-evaluate (force (map (T.pack . fst) (A.environment (provider state))))
+  options<-evaluate (agentSettings desktop)
+  target<-evaluate (conversationTarget desktop)
+  snapshot<-evaluate Settings.SettingsSnapshot
+    { Settings.settingsExecutable=executable,Settings.settingsArgumentCount=argumentCount
+    , Settings.settingsEnvironmentNames=environmentNames,Settings.settingsConnected=connected
+    , Settings.settingsSelectedAgent=if T.null target then Nothing else Just target
+    , Settings.settingsReplying=primaryBusy state,Settings.settingsSteering=agentSteering desktop
+    , Settings.settingsContextUsage=agentContextUsage desktop,Settings.settingsOptions=map setting options
+    , Settings.settingsContext=Null,Settings.settingsContextError=Nothing }
+  (registry,command)<-evaluate (settingsCommands state)
+  let captured=SettingsCapture connected directory snapshot
+  pure (Settings.AgentSettingsServices (fmap (either (Left . T.pack . show) Right)
+    (Command.invoke registry command captured ())))
+  where
+    setting option=let secret=sensitiveLabel (T.unwords [settingId option,settingName option,settingCategory option]) in object
+      ["id" .= settingId option,"name" .= settingName option,"category" .= settingCategory option,
+       "current" .= (if secret then "[hidden]" else settingCurrent option),
+       "choices" .= [object ["value" .= value,"name" .= title] | (value,title)<-settingChoices option,not secret],"redacted" .= secret]
+
 chatToolNames :: [Text]
-chatToolNames=["ask_user","agent_settings"]
+chatToolNames=["ask_user"]
 
 chatTools :: [Value]
-chatTools=[object ["name" .= ("agent_settings"::Text),"description" .= ("Read provider executable, argument count, environment variable names, connection state, model/config choices and context usage. Secret-labelled values, argument values, environment values and session keys are omitted. Cannot change provider settings."::Text),
-  "inputSchema" .= object ["type" .= ("object"::Text),"properties" .= object [],"additionalProperties" .= False],
-  "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]],
-  object ["name" .= ("ask_user"::Text),"description" .= ("Create one inline human question and return questionId/status pending immediately. Continue independent work, then retrieve its status using questionId only. Answers require explicit human submission; pending replies never reveal the draft or selected choice. Only the authenticated requesting agent can retrieve results. No timeout supplies an answer or approval."::Text),
+chatTools=[object ["name" .= ("ask_user"::Text),"description" .= ("Create one inline human question and return questionId/status pending immediately. Continue independent work, then retrieve its status using questionId only. Answers require explicit human submission; pending replies never reveal the draft or selected choice. Only the authenticated requesting agent can retrieve results. No timeout supplies an answer or approval."::Text),
   "inputSchema" .= object ["oneOf" .=
     [object ["type" .= ("object"::Text),"required" .= ["question"::Text],"additionalProperties" .= False,
       "properties" .= object ["question" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (4096::Int)],
@@ -1443,21 +1486,6 @@ captureQuestionCaller (ConversationState _ ref _ agents) actor
 -- polling/admission and answer delivery. This function never waits for a human.
 chatToolAs :: ConversationState -> Maybe QuestionCaller -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
 chatToolAs (ConversationState _ ref _ agents) caller d name args
-  | name=="agent_settings" = if args/=object [] then pure (d,pure (Left "agent_settings accepts no arguments.")) else do
-      s<-readIORef ref
-      root<-if isNothing (connection s) then B.resolveBuildRoot d else pure (project s)
-      context<-readAgentContexts root
-      let launch=provider s
-          setting option=let secret=sensitiveLabel (T.unwords [settingId option,settingName option,settingCategory option]) in object
-                ["id" .= settingId option,"name" .= settingName option,"category" .= settingCategory option,
-                 "current" .= (if secret then "[hidden]" else settingCurrent option),
-                 "choices" .= [object ["value" .= value,"name" .= title] | (value,title)<-settingChoices option,not secret],"redacted" .= secret]
-      pure (d,pure (Right (object ["executable" .= A.executable launch,"argumentCount" .= length (A.arguments launch),
-        "environmentNames" .= map fst (A.environment launch),"connected" .= not (isNothing (connection s)),
-        "scope" .= ("primary"::Text),"selectedAgent" .= (if T.null (conversationTarget d) then Nothing else Just (conversationTarget d)),
-        "replying" .= primaryBusy s,"steering" .= agentSteering d,"contextUsage" .= agentContextUsage d,
-        "settings" .= map setting (agentSettings d),"context" .= either (const Null) id context,
-        "contextError" .= either Just (const (Nothing::Maybe Text)) context,"sessionKeysRedacted" .= True])))
   | name/="ask_user"=pure (d,pure (Left "Unknown chat tool."))
   | Just (QuestionCaller scope actor originalReceipt)<-caller,actor==AR.primaryAgent agents=do
       live<-AH.statusAgent (AR.agentHub agents) (AH.Agent actor) actor

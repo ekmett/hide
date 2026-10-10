@@ -2,10 +2,13 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 -- | Scoped real host editor ownership for model checks. The registry, body and
 -- draft live for the callback; joint preparation/admission uses production APIs.
-module EditorFixture (withEditorFixture, withEditorTextFixture, withEditorBodyFixture, withAutocompleteFixture, sameBufferVersions) where
+module EditorFixture (withEditorFixture, withEditorTextFixture, withEditorBodyFixture, withAutocompleteFixture, sameBufferVersions, agentSettingsReply) where
 
 import Control.Monad (unless)
-import Data.Aeson (Value(Null))
+import Data.Aeson (Value(Null), object)
+import Hide.Conversation (ConversationState,captureAgentSettings)
+import qualified Hide.AgentSettingsTools as AgentSettingsTools
+import qualified Hide.Plugin.Tool as Tool
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust)
 import Data.Text (Text)
@@ -74,3 +77,10 @@ withAutocompleteFixture text desktop run=do
           PluginContent actual->actual
           _->error "Completion fixture is not a prepared frame"
     run installed {autocompleteWindow=Just reference,autocompleteACPEnabled=True}
+
+-- Capture on the owner, then execute the actual public tool on its reply path.
+agentSettingsReply :: ConversationState -> Desktop -> IO (IO (Either Text Value))
+agentSettingsReply runtime desktop=do
+  services<-captureAgentSettings runtime desktop
+  pure (Tool.withTools [] AgentSettingsTools.tools $ \tools->
+    Tool.callTool tools services "agent_settings" (object []))

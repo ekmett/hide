@@ -13,9 +13,7 @@ import System.FilePath
 import System.IO
 import System.Process (readProcess)
 import Hide.Environment
-import Hide.DocumentationHost (withDocsCommands,docsServices)
 import qualified Hide.EnvironmentTools as EnvironmentTools
-import Hide.Plugin.Services (EditorServices(..))
 import qualified Hide.Plugin.Environment as E
 import qualified Hide.Plugin.Tool as Tool
 import Hide.GuestAccess
@@ -24,7 +22,7 @@ import Hide.Model
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->
-  Tool.withTools [] EnvironmentTools.tools $ \tools->withEnvironmentCommands $ \commands->withDocsCommands $ \docs->
+  Tool.withTools [] EnvironmentTools.tools $ \tools->withEnvironmentCommands $ \commands->
   bracket (mapM (\name->(name,) <$> lookupEnv name) names) (mapM_ restore) $ \_->do
     setEnv "XDG_CONFIG_HOME" (root </> "config")
     let configFile=root </> "config" </> "thc" </> "config.toml"
@@ -36,7 +34,7 @@ checks=bracket temporary removePathForcibly $ \root->
     let check label ok=unless ok (error label)
         good=either (const False) (const True)
         bad=not.good
-        services=EditorServices (docsServices docs (const (pure root))) (environmentServices commands root)
+        services=environmentServices commands root
         run name args=Tool.callTool tools services name args
         setBatch scope values=run "environment_set" (object ["scope" .= (scope::T.Text),"values" .= values])
         set scope value=setBatch scope (object ["THC_ENV_CHECK" .= (value::Value)])

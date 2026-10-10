@@ -15,14 +15,12 @@ module Hide.DocsTools
 
 import Hide.Plugin.Command (CommandDef(..))
 import Hide.Plugin.Documentation
-import Hide.Plugin.Services (EditorServices,editorDocumentation)
-import Hide.Plugin.Tool (Tool(..),mapToolContext)
+import Hide.Plugin.Tool (Tool(..))
 
 -- | Explicit read-only declarations for the editor endpoint. Metadata discovery
 -- performs no IO. Execution remains subject to host policy and scoped services.
-tools :: [Tool EditorServices]
-tools=map (mapToolContext editorDocumentation)
-  [Tool "docs_list" True (CommandDef "hide.docs.list"
+tools :: [Tool DocsServices]
+tools=[Tool "docs_list" True (CommandDef "hide.docs.list"
     "List offline documentation with titles and Markdown headings. Paths are relative to the selected corpus; default corpus is editor."
     listInput listOutput docsList)
   ,Tool "docs_search" True (CommandDef "hide.docs.search"

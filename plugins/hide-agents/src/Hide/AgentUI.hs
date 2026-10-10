@@ -30,6 +30,9 @@ import Hide.Plugin.AgentDirectory (AgentDirectory(..),DirectoryRequest(..),Compl
 import qualified Hide.Plugin.Form as Form
 import Hide.Plugin.Command
 import Hide.Plugin.Session (Plugin(..),Session(..),PluginTool(..))
+import qualified Hide.AgentSettingsTools as AgentSettingsTools
+import Hide.Plugin.Services (EditorServices(..))
+import Hide.Plugin.Tool (mapToolContext)
 import qualified Hide.AgentTools as AgentTools
 import qualified Hide.BufferTools as BufferTools
 import qualified Hide.DocsTools as DocsTools
@@ -48,7 +51,9 @@ data Snapshot completion = Snapshot !(M.Map A.AgentId A.AgentSummary) !(Maybe (C
 plugin :: Plugin
 plugin=Plugin
   { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
-  , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (DocsTools.tools++EnvironmentTools.tools)
+  , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (map (mapToolContext editorDocumentation) DocsTools.tools
+      ++map (mapToolContext editorEnvironment) EnvironmentTools.tools
+      ++map (mapToolContext editorAgentSettings) AgentSettingsTools.tools)
       ++map RequestTool BufferTools.tools
   , pluginConversation=Just AgentTranscript.presentConversation
   , pluginPrimaryInput=Just ConversationInput.primaryInput

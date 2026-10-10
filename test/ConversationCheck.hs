@@ -2,7 +2,7 @@
 module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
 import AllocationProfile (AllocationProfile, withinBudget)
 
-import EditorFixture (withEditorFixture,withEditorBodyFixture,sameBufferVersions)
+import EditorFixture (agentSettingsReply,withEditorFixture,withEditorBodyFixture,sameBufferVersions)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as Vec
 import Hide.TextPresentation (withTextPresentation,textPresentationEffects,tickTextPresentation,TextPresentation)
@@ -297,7 +297,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
               messages<-readMessages (root </> "messages.jsonl")
               error ("Draft receipt timeout: "++label++"; state="++show lastState++"; provider="++show (map (field "method" :: Value -> Maybe T.Text) (drop (max 0 (length messages-6)) messages)))
         primaryDone runtime label=await runtime (label++" primary acceptance") $ \d->do
-          (_,reply)<-chatTool runtime d "agent_settings" (object [])
+          reply<-agentSettingsReply runtime d
           value<-reply >>= either (error.T.unpack) pure
           pure (field "replying" value==Just False)
         fresh original=do
@@ -515,7 +515,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           maybe (error "Conversation timeout: prompt completion") pure result
           where loop d=do
                   next<-tickConversation runtime d
-                  (_,reply)<-chatTool runtime next "agent_settings" (object [])
+                  reply<-agentSettingsReply runtime next
                   value<-reply >>= either (error . T.unpack) pure
                   if field "replying" value==Just False && agentQueued next==0 then pure next
                     else threadDelay 10000 >> loop next
@@ -967,12 +967,12 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
             if any ((==Just ("initialize"::T.Text)).field "method") entries then pure ()
               else threadDelay 1000 >> waitInitialize
       timeout 8000000 waitInitialize >>= maybe (error "ACP startup did not send initialize independently of the UI") pure
-      (_,pendingReply)<-chatTool runtime started "agent_settings" (object [])
+      pendingReply<-agentSettingsReply runtime started
       pendingSettings<-pendingReply >>= either (error . T.unpack) pure
       check "ACP client acquisition waits for UI adoption without running on the UI thread"
         (field "connected" pendingSettings==Just False && field "replying" pendingSettings==Just True)
       ready<-if cancelled then send runtime "cancel" [] started >>= done runtime else done runtime started
-      (_,readyReply)<-chatTool runtime ready "agent_settings" (object [])
+      readyReply<-agentSettingsReply runtime ready
       readySettings<-readyReply >>= either (error . T.unpack) pure
       check "Cancel prevents adoption of a completed startup client"
         (field "connected" readySettings==Just (not cancelled))
@@ -1568,9 +1568,12 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       check "ACP receives global and project guidance with skill discovery"
         (all (`T.isInfixOf` sent) ["Global guidance marker","Project guidance marker","docs/agent-skills.md"])
       check "guidance is not repeated as a user chat bubble" (not ("Global guidance marker" `T.isInfixOf` conversationText guided))
-      (_,public)<-chatTool runtime guided "agent_settings" (object [])
+      public<-agentSettingsReply runtime guided
+      writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Deferred settings guidance'\n"
       info<-public
-      check "public agent settings expose effective context" (case info of Right value->"Project guidance marker" `T.isInfixOf` json value; _->False)
+      check "agent settings read context on the reply worker, not during desktop capture"
+        (case info of Right value->"Deferred settings guidance" `T.isInfixOf` json value; _->False)
+      writeFile (root </> "thc.toml") "[editor.agent]\ncontext = 'Project guidance marker'\n"
       again<-prompt runtime "stream" guided >>= done runtime
       repeated<-logged
       let latestPrompt=last [params | entry<-repeated,field "method" entry==Just ("session/prompt"::T.Text),Just params<-[field "params" entry::Maybe Value]]
@@ -1606,7 +1609,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         let childWaiting=draftAt (newBuffer "child draft") (Selection 2 4) childFixture
         let settleHidden d=do
               next<-tickConversation runtime d
-              (_,answer)<-chatTool runtime next "agent_settings" (object [])
+              answer<-agentSettingsReply runtime next
               settingsResult<-answer
               if either (const False) ((==Just False).field "replying") settingsResult
                 then pure next else threadDelay 10000 >> settleHidden next
