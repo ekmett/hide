@@ -57,6 +57,7 @@ import Hide.MCPPermissions (permissionConfigPath, projectConfigPath, readAgentCo
 import qualified Hide.AgentRuntime as AR
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentACP as AP
+import Hide.Plugin.Transcript (HistoryPresenter,AgentHistory(..),appendChunk,mergeTool)
 import Hide.Session (checkpointPath)
 import Hide.AgentFiles
 import Hide.Buffer
@@ -125,7 +126,7 @@ data State = State
   , agentInitialized :: Value, agentConfig :: Value
   , streamTails :: M.Map Text Text
   , lastAgentSync :: Maybe (FilePath,Maybe (StableName A.Client),Text,AH.Capabilities,Bool)
-  , childRecords :: M.Map Text [Record], childRender :: Maybe (Text,Int,Value)
+  , historyPresenter :: Maybe HistoryPresenter, childRecords :: M.Map Text TranscriptSource, childRender :: Maybe (Text,Value)
   , toolExpansions :: S.Set (Text,ToolExpansion)
   , agentControls :: M.Map Text (Maybe DraftReceipt,Async (Either Text ()))
   , childCancels :: M.Map Text (Async (Either Text ()))
@@ -146,12 +147,13 @@ conversationAgents (ConversationState _ _ _ agents)=agents
 defaultLaunch :: A.Launch
 defaultLaunch = A.Launch "codex-acp" [] []
 
-withConversation :: C.Consoles -> (ConversationState -> IO a) -> IO a
-withConversation consoles action = getCurrentDirectory >>= \root -> withConversationAt consoles root action
+withConversation :: Maybe HistoryPresenter -> C.Consoles -> (ConversationState -> IO a) -> IO a
+withConversation presenter consoles action = getCurrentDirectory >>= \root -> withConversationAt presenter consoles root action
 
 -- | Load conversation configuration and scope only provider and agent workers.
-withConversationAt :: C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
-withConversationAt consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->do
+withConversationAt :: Maybe HistoryPresenter -> C.Consoles -> FilePath -> (ConversationState -> IO a) -> IO a
+withConversationAt presenter consoles root action = W.withWindowScope $ \scope->Command.withRegistry $ \registry->do
+  preparedPresenter<-traverse evaluate presenter
   loading<-W.prepareSemanticTextWindow "Conversation" (styledText Comment "Preparing conversation…")
     (W.TextSemantics (W.CopyMessages W.UserBotAttribution) (Just root) V.empty V.empty W.ReadableWindow V.empty V.empty V.empty) >>= either (ioError . userError . T.unpack) pure
   command<-Command.registerCommand registry chatEditorCommand >>= either (ioError . userError . show) pure
@@ -171,7 +173,7 @@ withConversationAt consoles root action = W.withWindowScope $ \scope->Command.wi
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
     , lastSession=remembered,waitingQuestion=Nothing,questionResults=M.empty,questionsClosed=False,lastQuestion=Nothing,lastQuestionInteraction=Nothing
     , deliveredContext=Nothing,fileCaptures=[],retiringRequests=[],promptPreparation=Nothing,resumeRecordPath=resumePath,directoryAgents=[]
-    , agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
+    , historyPresenter=preparedPresenter,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,lastAgentSync=Nothing,childRecords=M.empty,childRender=Nothing,childCancels=M.empty,agentControls=M.empty,toolExpansions=S.empty,editorRegistry=registry,editorCommand=command,conversationEditors=editors,bodyScope=scope,loadingBody=loading }
   AR.withAgentRuntime root (provider <$> readIORef ref) $ \agents ->
     bracket (pure (ConversationState directory ref consoles agents)) closeConversation action
 
@@ -279,9 +281,8 @@ perform (ConversationState _ ref _ _) "toggle-tool-run" [ident] d=do
   state<-readIORef ref
   let target=conversationTarget d
       next=toggleExpansion target (RunExpansion ident) state
-      records=if T.null target then transcript next else M.findWithDefault [] target (childRecords next)
   writeIORef ref next
-  keepConversationPosition d <$> paintView target False next {transcript=records} d
+  keepConversationPosition d <$> paintView target False next d
 perform runtime action values d
   | action `elem` ["show","new"] = do
       prepared<-ensureConversationEditor runtime "" "Primary" d
@@ -399,7 +400,7 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
             Right (receipt,_)->startAgentControl runtime (AR.primaryAgent agents) Nothing
               (AH.configureAgentAt (AR.agentHub agents) receipt ident value) d
       | otherwise -> pure d {status="This conversation setting is unavailable."}
-    ("copy",_) -> pure (copyClipboard False (rawTranscript (transcript s)) d) {status="Raw conversation copied."}
+    ("copy",_) -> pure d {status="Conversation copy requires its presentation owner."}
     ("send",_:prompt:selectionFlag:fileFlag:diagnosticFlag:_) | not (T.null (T.strip prompt)),not (primaryBusy s) ->
       submitPrimaryPrompt runtime s Nothing prompt (selectionFlag=="true",fileFlag=="true",diagnosticFlag=="true") d
     ("cancel",_) -> do
@@ -646,7 +647,7 @@ captureConversationSources (ConversationState _ ref _ agents) desktop=do
   where
     capture state launch primary target view
       | T.null target,not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing (chatQuestion desktop)) || not (isNothing (conversationSource view))=do
-          source<-captureConversationSource target (PrimaryBodyProvider launch primary) (transcript state) (conversationSource view)
+          source<-captureConversationSource target (PrimaryBodyProvider launch primary) (TranscriptRecords (transcript state)) (conversationSource view)
           pure view {conversationSource=Just source}
       | not (T.null target),Just records<-M.lookup target (childRecords state)=do
           receipt<-AH.agentConfiguration (AR.agentHub agents) (AH.AgentId target)
@@ -673,8 +674,8 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
     Just reference->do
       live<-W.windowRefCurrent reference
       let question=if T.null target then chatQuestion desktop else Nothing
-          records=if T.null target then transcript state else M.findWithDefault [] target (childRecords state)
-          owns=if T.null target then not (isNothing (connection state)) || not (null records) || not (isNothing question) || not (isNothing (lastQuestion state)) else M.member target (childRecords state)
+          records=if T.null target then TranscriptRecords (transcript state) else M.findWithDefault (TranscriptRecords []) target (childRecords state)
+          owns=if T.null target then not (isNothing (connection state)) || not (null (transcript state)) || not (isNothing question) || not (isNothing (lastQuestion state)) else M.member target (childRecords state)
           visible=any ((==PluginContent reference).windowContent) (windows desktop)
           recovered=case conversationLogical view of
             Just logical | RecoveredBodyProvider{}<-logicalBodyProvider logical,not owns->Just logical
@@ -686,13 +687,13 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
       case schema of
         Just (QuestionSchema token _ _) | live->modifyIORef' ref (\current->current {lastQuestion=Just token})
         _->pure ()
-      identity<-makeStableName =<< evaluate records
+      identity<-transcriptIdentity records
       pure $ case recovered of
         Just logical | visible->[BodyRequest
           (BodyKey reference target (logicalBodyProvider logical) (logicalBodyTranscriptIdentity logical) Nothing
             (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop)
             (BodyDemand (conversationAnchor view) (conversationRowShift view) (conversationHeightFor target desktop)) expansion)
-          (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) Nothing [] Nothing S.empty (Just logical) (capturedSelection view))]
+          (BodyInput (if T.null target then "Conversation" else conversationName view) (project state) Nothing (TranscriptRecords []) Nothing S.empty (Just logical) (capturedSelection view))]
         _->case captured of
           Just owner | live && owns->
             let same=maybe True ((==owner).logicalBodyProvider) (conversationLogical view)
@@ -948,23 +949,6 @@ recordChunk role text state=let revision=nextRecord state in state
 recordToolUpdate :: Value -> State -> State
 recordToolUpdate update state=let revision=nextRecord state in state
   {transcript=mergeTool (BodyItemId revision) revision update (transcript state),nextRecord=revision+1}
-
--- A child caller supplies the actual Hub event ordinal instead of a local
--- counter. A merged reply keeps the first contributing event's item identity.
-appendChunk :: BodyItemId -> Int -> Text -> Text -> [Record] -> [Record]
-appendChunk candidate revision role text records = case reverse records of
-  Record ident _ (Reply previous body):rest | previous==role -> reverse rest++[Record ident revision (Reply role (body<>text))]
-  _ -> records++[Record candidate revision (Reply role text)]
-
-mergeTool :: BodyItemId -> Int -> Value -> [Record] -> [Record]
-mergeTool candidate revision update records = case field "toolCallId" update :: Maybe Text of
-  Nothing -> records
-  Just ident ->
-    let merge (Record item _ (Activity old (Object previous) history))
-          | old==ident, Object new<-update = Record item revision (Activity old (Object (KM.union (KM.filter (/=Null) new) previous)) (history++[update]))
-        merge other=other
-    in if any (\record -> case recordContent record of Activity old _ _ -> old==ident; _ -> False) records
-       then map merge records else records++[Record candidate revision (activity ident update)]
 
 incoming :: ConversationState -> A.Client -> Value -> Text -> Value -> Desktop -> IO Desktop
 incoming runtime@(ConversationState _ ref consoles _) client ident method params d = do
@@ -1270,9 +1254,6 @@ parseAgentSettings value=mapMaybe parseOption (fromMaybe [] (field "configOption
     choice option=case (field "value" option,field "name" option) of
       (Just choiceId,Just name) -> [(choiceId,name)]
       _ -> concatMap choice (fromMaybe [] (field "options" option))
-
-rawTranscript :: [Record] -> Text
-rawTranscript=T.intercalate "\n\n" . mapMaybe (\record -> case recordContent record of Reply role text -> Just (role<>"\n"<>text); Activity ident _ history -> Just (ident<>"\n"<>T.intercalate "\n" (map jsonText history)); Pause _ -> Nothing)
 
 field :: FromJSON a => Text -> Value -> Maybe a
 field name=parseMaybe (withObject "object" (.: K.fromText name))
@@ -1593,7 +1574,6 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
   let target=conversationTarget d
       ident=AH.AgentId target
       hub=AR.agentHub agents
-      records=M.findWithDefault [] target (childRecords state)
       text=if action=="send" then case values of _:body:_->body; _->"" else contents (composerBuffer d)
   case action of
     "send" | M.member target (agentControls state) -> pure d {status="Wait for the child operation before sending."}
@@ -1605,11 +1585,11 @@ performChild runtime@(ConversationState _ ref _ agents) action values d=do
         worker<-async (AH.cancelAgent hub AH.Human ident)
         modifyIORef' ref (\s->s {childCancels=M.insert target worker (childCancels s),queuedQueries=filter ((/=target).queryTarget) (queuedQueries s)})
         pure d {status="Cancellation requested."}
-    "copy" -> pure (copyClipboard False (if M.member target (childRecords state) then rawTranscript records else maybe "" (\body->W.copyPreparedSelection body 0 (contentLength (W.preparedWindowText body))) (conversationBodySnapshot target d)) d) {status="Conversation copied with sender attribution."}
+    "copy" -> pure d {status="Conversation copy requires its presentation owner."}
     "toggle-activity" | [activityId]<-values -> do
       let next=toggleExpansion target (ActivityExpansion activityId) state
       writeIORef ref next
-      keepConversationPosition d <$> paintView target False next {transcript=records} d
+      keepConversationPosition d <$> paintView target False next d
     _ -> pure d {status="Switch to Primary for provider settings or session controls; use Agents to reconnect a child."}
   where
     startControl submitted operation=startAgentControl runtime (AH.AgentId (conversationTarget d)) submitted operation d
@@ -1662,7 +1642,7 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
     case selected of
       Left err -> pure original {status=err,agentReplying=False,agentQueued=0,childAgentSettings=[],childAgentSteering=False,childAgentContextUsage=Nothing}
       Right entry -> do
-        let signature=(target,conversationWidth original,entry)
+        let signature=(target,entry)
             name=fromMaybe target (field "name" entry)
             busyChild=field "status" entry `elem` [Just ("running"::Text),Just "cancelling",Just "starting",Just "configuring"]
             live=field "status" entry `elem` [Just ("idle"::Text),Just "running",Just "cancelling",Just "configuring"]
@@ -1679,7 +1659,10 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
               field "status" entry `elem` [Just ("recovered"::Text),Just "ended"] &&
               maybe False (\logical->case logicalBodyProvider logical of
                 RecoveredBodyProvider{}->True; _->False) (conversationLogicalBody target projected)
-        if frozen || childRender current==Just signature then pure projected else do
+            missingPresenter=isNothing (historyPresenter current) && maybe False
+              (\view->not (isNothing (conversationLogical view)) || not (isNothing (conversationSource view)))
+              (M.lookup target (conversationViews projected))
+        if frozen || missingPresenter || childRender current==Just signature then pure projected else do
           history<-recentChildHistory hub (AH.AgentId target) (fromMaybe 1 (field "nextEvent" entry))
           case history of
             Left err -> pure projected {status=err}
@@ -1689,9 +1672,12 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
                   trimmed=fromMaybe (0::Int) (field "nextEvent" entry)>101 || dropped
                   metadata=T.intercalate " · " ([fromMaybe "" (field "status" entry)]++
                     maybe [] (\parent->["parent: "<>parent]) (field "parentName" entry)++models++["recent history" | trimmed])
-                  records=Record (BodyItemId (-1)) (fromMaybe 0 (field "nextEvent" entry)) (Pause metadata):foldl' (childHistoryRecord name) [] events
+                  capturedHistory=AgentHistory name metadata (fromMaybe 0 (field "nextEvent" entry)) events
+                  records=case historyPresenter current of
+                    Just presenter->TranscriptHistory presenter capturedHistory
+                    Nothing->TranscriptRecords [Record (BodyItemId (-1)) 0 (Pause "No agent history presenter is installed.")]
               modifyIORef' ref (\s->s {childRecords=M.insert target records (childRecords s),childRender=Just signature})
-              paintView target False current {transcript=records} projected
+              paintView target False current projected
 
 -- The Hub caps each page by bytes as well as count. Follow pages within the
 -- captured event range so a large tool event cannot hide the newest reply.
@@ -1710,26 +1696,6 @@ recentChildHistory hub ident next=go (max 0 (next-101)) [] False
               more=AH.historyHasMore value && cursor<next-1 && length combined<100
           if more && cursor>after then go cursor combined omitted
           else pure (Right (combined,omitted || more))
-
-childHistoryRecord :: Text -> [Record] -> AH.HistoryEvent -> [Record]
-childHistoryRecord name records (AH.HistoryEvent eventIndex kind author detail)=
-  let eventRecord=Record (BodyItemId eventIndex) eventIndex
-  in case kind of
-    _ | kind `elem` ["message_queued","steered"] ->
-      let human=author==AH.Human
-          who=case author of AH.Human->"Human"; AH.Agent ident->"Agent "<>AH.agentIdText ident
-          seat=if field "userSeat" detail==Just True then if human then "human user seat" else "controlling parent" else "peer message"
-      in records++[eventRecord (Reply (if human then "You" else "Peer") (who<>" ("<>seat<>")\n\n"<>fromMaybe "" (field "text" detail)))]
-    "output" -> appendChunk (BodyItemId eventIndex) eventIndex "Agent" (if lastRole records==Just "Agent" then chunk else name<>"\n\n"<>chunk) records
-      where chunk=fromMaybe "" (field "text" detail)
-    "thought" -> records -- Thoughts stay in the bounded history API.
-    "tool" -> case field "toolCallId" detail :: Maybe Text of
-      Just _ -> mergeTool (BodyItemId eventIndex) eventIndex detail records
-      Nothing -> records++[eventRecord (Activity ("event-"<>T.pack (show eventIndex)) detail [detail])]
-    "message_finished" | field "status" detail/=Just ("completed"::Text) -> records++[eventRecord (Pause (fromMaybe "Stopped" (field "error" detail)))]
-    _ -> records
-  where
-    lastRole xs=case reverse xs of Record _ _ (Reply role _):_->Just role; _->Nothing
 
 -- Publish the next human turn before releasing the Hub ticket. Otherwise its
 -- worker can dequeue another peer in the gap before the editor's next tick.

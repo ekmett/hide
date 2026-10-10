@@ -150,6 +150,10 @@ main plugins = do
 
 runEditor :: [Plugin.Plugin] -> [String] -> IO ()
 runEditor plugins args = do
+  presenter<-case [value | plugin<-plugins,Just value<-[Plugin.pluginAgentHistory plugin]] of
+    []->pure Nothing
+    [value]->pure (Just value)
+    _->die "More than one plugin contributes agent history presentation."
   parentSession<-lookupEnv "THC_EDIT_SESSION"
   backendEnvironment<-lookupEnv "THC_EDIT_BACKEND"
   scaleEnvironment<-lookupEnv "THC_EDIT_SCALE"
@@ -291,7 +295,7 @@ runEditor plugins args = do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
           let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++environmentTools++clipboardTools++docsTools++[screenTool]
-          PluginTool.withTools [name | spec<-specs,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]] (concatMap Plugin.pluginAgentTools plugins) $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
+          PluginTool.withTools [name | spec<-specs,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]] (concatMap Plugin.pluginAgentTools plugins) $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions agentToolset) $ \permissions -> withBufferReadCommands $ \bufferCommands -> withBufferDiffCommands $ \diffCommands -> withDocsCommands $ \docsCommands -> withMenuCommands docsCommands $ \menuHost -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt presenter (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
             contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
             let agentTools=PluginTool.toolDefinitions agentToolset
                 liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}

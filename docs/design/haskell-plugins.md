@@ -972,8 +972,18 @@ invalidations to the same bounded, close-aware queue as trees and forms. No
 plugin callback runs on the UI tick. The host drains bounded deltas and owns
 input, geometry, forms and action admission. The same plugin declares its
 orchestration tools, which the host registers with existing per-tool policy.
-Conversation presentation and the broader editor-tool surface remain to be
-separated.
+The plugin also contributes `Hide.AgentTranscript.presentHistory`. It turns a
+bounded, authorized `AgentHistory` snapshot into public transcript records;
+streamed replies and tool updates retain their original item identities. The
+host captures the history and presenter without evaluating them on input. Its
+existing presentation and checkpoint workers prepare the source, including for
+closed conversations; full-transcript copying uses the presentation worker too.
+
+`Hide.Plugin.Transcript` owns the immutable record vocabulary and shared update
+reducers. Provider lifetime, redaction, composer submissions, approvals and layout
+remain host-owned. The executable selects one history presenter; the host library
+does not depend on the agent plugin. Primary provider presentation and the broader
+editor-tool surface remain to be separated.
 
 `SessionServices` owns builds, compiler discovery, build settings and shared
 consoles for the editor session. Conversation receives a console handle and owns
@@ -988,8 +998,8 @@ layout. Session teardown joins pending acquisition cleanup before closing jobs
 and consoles.
 
 This is a private ownership boundary, not the finished agent plugin API.
-Conversation still owns provider permissions and presentation. Separating those
-remaining contributions is the next step; ACP, Ghostty and DAP keep their existing
+Conversation still owns provider permissions and primary presentation. Separating
+those remaining contributions is the next step; ACP, Ghostty and DAP keep their existing
 workers and protocols.
 
 The ACP completion transcript uses a scoped prepared text window. Its existing

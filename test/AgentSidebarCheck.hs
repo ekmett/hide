@@ -35,6 +35,7 @@ import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Menu as Menu
 import Hide.GuestAccess (readableAt,streamerReadableAt,guestKeyboardAllowed)
+import qualified Hide.AgentTranscript as AgentTranscript
 import Hide.Conversation
 import qualified Hide.Consoles as C
 import Hide.Model
@@ -57,7 +58,7 @@ checks=bracket temporary removePathForcibly $ \root->
     writeFile (root </> "thc.toml") (unlines ["[editor.autocomplete]","provider = 'acp'","executable = 'python3'","arguments = '"++show [script]++"'","debug = false"])
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
-    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt consoles root $ \conversation->
+    environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentHistory) consoles root $ \conversation->
       withAutocomplete root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
         createRequests<-newIORef []
         agentRequests<-newIORef []

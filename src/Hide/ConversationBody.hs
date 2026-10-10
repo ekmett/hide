@@ -1,16 +1,18 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- SPDX-License-Identifier: BSD-3-Clause
 -- | Immutable transcript preparation inputs and exact host body receipts.
--- This module owns no provider, Desktop, editable Buffer, callbacks or workers.
--- TextPresentation's existing serial worker will consume these closed requests;
+-- This module owns no provider handle, Desktop, editable Buffer or worker.
+-- Pure plugin presentation is captured without invoking it on input.
+-- TextPresentation's existing serial worker consumes these closed requests;
 -- Conversation retains task/control authority and adopts their exact results.
 module Hide.ConversationBody
   ( BodyItemId(..), Record(..), RecordContent(..), BodyPoint(..), BodyAnchor(..), BodySelection(..), BodyDemand(..), BodyViewport(..), BodyRow(..), viewportPoint, viewportOffset
   , LogicalBody, LogicalItem, logicalBodyIdentity, logicalBodyProvider, logicalBodyTranscriptIdentity, logicalBodyRead, validateLogicalPoint, clampPoint, logicalBodyItems, logicalBodyItemIndex, logicalItemRecord, logicalItemMarkdown, logicalItemBlocks, prepareLogicalBody, restoreLogicalBody, restoreLogicalViewport
-  , ConversationCopy(..), logicalBodyCopy
+  , ConversationCopy(..), copyReference, copyTarget, copyProvider, copySerial, prepareConversationCopy, logicalBodyCopy
   , ToolExpansion(..), QuestionSchema(..), QuestionProjection(..)
   , BodyProvider(..), BodyKey(..), bodyOwnerMatches, BodyInput(..)
-  , CapturedConversationSource, captureConversationSource, capturedSourceIdentity, prepareCapturedSource
+  , TranscriptSource(..), TranscriptIdentity, transcriptIdentity
+  , CapturedConversationSource, captureConversationSource, capturedSourceIdentity, capturedSourceProvider, prepareCapturedSource
   , BodyRequest(..), BodyResult(..), PreparedBody(..), HostBodyControls(..)
   , BodyControlReceipt(..), ConversationBody(..)
   , prepareConversationBody, renderReply, renderReplyWithShellBlocks, renderTimestamp, questionChoiceLines
@@ -43,15 +45,26 @@ import System.Mem.StableName (StableName,makeStableName)
 import qualified Hide.ACP as A
 import qualified Hide.AgentHub as AH
 import qualified Hide.Plugin.Window as W
+import Hide.Plugin.Transcript (BodyItemId(..),Record(..),RecordContent(..),AgentHistory,HistoryPresenter)
 import Hide.TextLayout (TextLayout,prepareTextLayout)
 
--- Item identity is allocated by the transcript/event owner, never rendering.
--- It survives chunk append/tool update and grants no provider/input authority.
-newtype BodyItemId = BodyItemId Int deriving (Eq,Ord,Show)
-data Record = Record
-  { recordId :: !BodyItemId, recordRevision :: !Int, recordContent :: !RecordContent
-  } deriving (Eq,Show)
-data RecordContent = Reply Text Text | Activity Text Value [Value] | Pause Text deriving (Eq,Show)
+-- Direct sources keep the owner's existing list identity. A plugin source is a
+-- closed history snapshot and presenter, not its result. Capturing its identity
+-- never invokes plugin code; only presentation/checkpoint/copy workers resolve it.
+data TranscriptSource = TranscriptRecords ![Record] | TranscriptHistory !HistoryPresenter !AgentHistory
+data TranscriptIdentity = DirectTranscript !(StableName [Record])
+  | PresentedTranscript !(StableName HistoryPresenter) !(StableName AgentHistory)
+  deriving Eq
+
+transcriptIdentity :: TranscriptSource -> IO TranscriptIdentity
+transcriptIdentity (TranscriptRecords records)=DirectTranscript <$> (makeStableName =<< evaluate records)
+transcriptIdentity (TranscriptHistory presenter history)=PresentedTranscript
+  <$> (makeStableName =<< evaluate presenter) <*> (makeStableName =<< evaluate history)
+
+-- Worker-only projection; host capture and admission inspect identities instead.
+transcriptRecords :: TranscriptSource -> [Record]
+transcriptRecords (TranscriptRecords records)=records
+transcriptRecords (TranscriptHistory presenter history)=presenter history
 
 -- Positions belong to the target's logical catalogue, never a painted row.
 -- Missing item IDs cannot be redirected to an unrelated surviving item.
@@ -133,7 +146,7 @@ data LogicalItem = LogicalItem !Record !(StableName Record) (Maybe LogicalParsed
 -- drops the old derived roots without parsing or laying out untouched items.
 data LogicalBody = LogicalBody
   { logicalIdentity :: !Unique, logicalTarget :: !Text
-  , logicalProvider :: !BodyProvider, logicalTranscript :: !(StableName [Record])
+  , logicalProvider :: !BodyProvider, logicalTranscript :: !TranscriptIdentity
   , logicalSession :: !(Maybe Text), logicalQuestion :: !(Maybe QuestionSchema)
   , logicalWidth :: !(Int,Bool), logicalItems :: !(V.Vector LogicalItem)
   }
@@ -146,7 +159,7 @@ logicalBodyIdentity :: LogicalBody -> Unique
 logicalBodyIdentity=logicalIdentity
 logicalBodyProvider :: LogicalBody -> BodyProvider
 logicalBodyProvider=logicalProvider
-logicalBodyTranscriptIdentity :: LogicalBody -> StableName [Record]
+logicalBodyTranscriptIdentity :: LogicalBody -> TranscriptIdentity
 logicalBodyTranscriptIdentity=logicalTranscript
 
 -- | Validate only the named item/block on a worker. Recovery never accepts a
@@ -218,12 +231,12 @@ logicalBodyItemIndex wanted body=search 0 (V.length items)
 prepareLogicalBody :: BodyKey -> BodyInput -> Maybe LogicalBody -> IO LogicalBody
 prepareLogicalBody key input previous=do
   body<-captureLogicalBody (bodyTarget key) (bodyProvider key) (bodyTranscript key)
-    (bodySession input) (bodyQuestion input) (bodyRecords input) previous
+    (bodySession input) (bodyQuestion input) (transcriptRecords (bodySource input)) previous
   withLogicalWidth (bodyWide key) (max 1 (bodyColumns key-5)) body
 
 -- Latest received immutable source is durable before any viewport job finishes.
 -- Its identity is independent of layout, and capturing it parses no item.
-data CapturedConversationSource = CapturedConversationSource !Unique !Text !BodyProvider !(StableName [Record]) ![Record]
+data CapturedConversationSource = CapturedConversationSource !Unique !Text !BodyProvider !TranscriptIdentity !TranscriptSource
 instance Eq CapturedConversationSource where
   CapturedConversationSource a _ _ _ _==CapturedConversationSource b _ _ _ _=a==b
 instance Show CapturedConversationSource where
@@ -232,9 +245,12 @@ instance Show CapturedConversationSource where
 capturedSourceIdentity :: CapturedConversationSource -> Unique
 capturedSourceIdentity (CapturedConversationSource ident _ _ _ _)=ident
 
-captureConversationSource :: Text -> BodyProvider -> [Record] -> Maybe CapturedConversationSource -> IO CapturedConversationSource
+capturedSourceProvider :: CapturedConversationSource -> BodyProvider
+capturedSourceProvider (CapturedConversationSource _ _ provider _ _)=provider
+
+captureConversationSource :: Text -> BodyProvider -> TranscriptSource -> Maybe CapturedConversationSource -> IO CapturedConversationSource
 captureConversationSource target provider records previous=do
-  root<-makeStableName =<< evaluate records
+  root<-transcriptIdentity records
   case previous of
     Just source@(CapturedConversationSource _ sameTarget sameProvider sameRoot _) | target==sameTarget && provider==sameProvider && root==sameRoot->pure source
     _->do
@@ -245,9 +261,9 @@ captureConversationSource target provider records previous=do
 -- omits transient session/question state and never requests painted rows.
 prepareCapturedSource :: CapturedConversationSource -> Maybe LogicalBody -> IO LogicalBody
 prepareCapturedSource (CapturedConversationSource _ target provider root records) previous=
-  captureLogicalBody target provider root Nothing Nothing records previous
+  captureLogicalBody target provider root Nothing Nothing (transcriptRecords records) previous
 
-captureLogicalBody :: Text -> BodyProvider -> StableName [Record] -> Maybe Text -> Maybe QuestionSchema -> [Record] -> Maybe LogicalBody -> IO LogicalBody
+captureLogicalBody :: Text -> BodyProvider -> TranscriptIdentity -> Maybe Text -> Maybe QuestionSchema -> [Record] -> Maybe LogicalBody -> IO LogicalBody
 captureLogicalBody target provider root session question records previous=case previous of
     Just body | logicalTarget body==target && logicalProvider body==provider &&
       logicalTranscript body==root && questionTokenOf (logicalQuestion body)==questionTokenOf question->pure body
@@ -323,7 +339,42 @@ logicalBodyRead body=do
 -- append may replace the catalogue but not this capture. Delivery checks the
 -- frame/provider lifetime and the shared clipboard intent serial.
 data ConversationCopy = ConversationCopy !W.WindowRef !Text !LogicalBody !BodySelection !Int
+  | ConversationTranscriptCopy !W.WindowRef !Text !CapturedConversationSource !Int
+  | ConversationLogicalCopy !W.WindowRef !Text !LogicalBody !Int
   deriving (Eq,Show)
+
+copyReference :: ConversationCopy -> W.WindowRef
+copyReference (ConversationCopy reference _ _ _ _)=reference
+copyReference (ConversationTranscriptCopy reference _ _ _)=reference
+copyReference (ConversationLogicalCopy reference _ _ _)=reference
+copyTarget :: ConversationCopy -> Text
+copyTarget (ConversationCopy _ target _ _ _)=target
+copyTarget (ConversationTranscriptCopy _ target _ _)=target
+copyTarget (ConversationLogicalCopy _ target _ _)=target
+copyProvider :: ConversationCopy -> BodyProvider
+copyProvider (ConversationCopy _ _ logical _ _)=logicalBodyProvider logical
+copyProvider (ConversationTranscriptCopy _ _ source _)=capturedSourceProvider source
+copyProvider (ConversationLogicalCopy _ _ logical _)=logicalBodyProvider logical
+copySerial :: ConversationCopy -> Int
+copySerial (ConversationCopy _ _ _ _ serial)=serial
+copySerial (ConversationTranscriptCopy _ _ _ serial)=serial
+copySerial (ConversationLogicalCopy _ _ _ serial)=serial
+
+-- | Resolve the captured source on the existing presentation worker. Full copy
+-- includes raw tool updates, independent of collapsed/visible rows.
+prepareConversationCopy :: ConversationCopy -> IO Text
+prepareConversationCopy (ConversationCopy _ _ logical selection _)=logicalBodyCopy logical selection
+prepareConversationCopy (ConversationTranscriptCopy _ _ (CapturedConversationSource _ _ _ _ source) _)=copyTranscriptRecords (transcriptRecords source)
+prepareConversationCopy (ConversationLogicalCopy _ _ logical _)=copyTranscriptRecords (map logicalItemRecord (V.toList (logicalItems logical)))
+
+copyTranscriptRecords :: [Record] -> IO Text
+copyTranscriptRecords records=do
+  let text=T.intercalate "\n\n" [value | record<-records,value<-case recordContent record of
+        Reply role reply->[role<>"\n"<>reply]
+        Activity ident _ history->[ident<>"\n"<>T.intercalate "\n" (map jsonText history)]
+        Pause _->[]]
+  _<-evaluate (T.length text)
+  pure text
 
 -- | Read only selected canonical blocks on the presentation worker. Furniture
 -- and soft wraps are absent; hard breaks/block separators belong to the parser.
@@ -392,7 +443,7 @@ data BodyProvider
 -- separates its freshness from exact owner/schema/presentation correctness.
 data BodyKey = BodyKey
   { bodyWindow :: !W.WindowRef, bodyTarget :: !Text, bodyProvider :: !BodyProvider
-  , bodyTranscript :: !(StableName [Record]), bodyQuestionToken :: !(Maybe Int)
+  , bodyTranscript :: !TranscriptIdentity, bodyQuestionToken :: !(Maybe Int)
   , bodyColumns :: !Int, bodyGraphical :: !Bool, bodyWide :: !Bool, bodyDemand :: !BodyDemand
   , bodyExpansion :: !(StableName (Set (Text,ToolExpansion)))
   } deriving Eq
@@ -410,7 +461,7 @@ bodyOwnerMatches a b=bodyWindow a==bodyWindow b && bodyTarget a==bodyTarget b &&
 -- belong to preparation, not adoption. This contains no Conversation State.
 data BodyInput = BodyInput
   { bodyTitle :: !Text, bodyProject :: !FilePath, bodySession :: !(Maybe Text)
-  , bodyRecords :: ![Record], bodyQuestion :: !(Maybe QuestionSchema)
+  , bodySource :: !TranscriptSource, bodyQuestion :: !(Maybe QuestionSchema)
   , bodyExpandedTools :: !(Set (Text,ToolExpansion)), bodyPreviousLogical :: !(Maybe LogicalBody)
   , bodySelection :: !(Maybe BodySelection)
   }
@@ -457,7 +508,7 @@ data BodyDisplay = BodyDisplay
 restoreLogicalBody :: Text -> [Record] -> IO LogicalBody
 restoreLogicalBody target records=do
   identity<-newUnique
-  root<-makeStableName =<< evaluate records
+  root<-transcriptIdentity (TranscriptRecords records)
   items<-V.fromList <$> mapM restore records
   evaluate (LogicalBody identity target (RecoveredBodyProvider identity) root Nothing Nothing (0,False) items)
   where
@@ -474,7 +525,7 @@ restoreLogicalViewport :: Bool -> Bool -> Int -> Int -> BodyAnchor -> LogicalBod
 restoreLogicalViewport graphical wide columns height anchor source=do
   logical<-withLogicalWidth wide (max 1 (columns-5)) source
   let display=BodyDisplay (logicalTarget logical) (max 1 columns) graphical wide (BodyDemand anchor 0 (max 1 height))
-      input=BodyInput "Conversation" "" Nothing (map logicalItemRecord (V.toList (logicalItems logical))) Nothing S.empty (Just logical) Nothing
+      input=BodyInput "Conversation" "" Nothing (TranscriptRecords (map logicalItemRecord (V.toList (logicalItems logical)))) Nothing S.empty (Just logical) Nothing
   fmap (\(body,_,_)->body) <$> prepareRenderedBody True display input logical
 
 -- A row is derived only while its block is demanded. Logical ranges are

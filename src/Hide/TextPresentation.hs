@@ -17,7 +17,7 @@ import Hide.Markdown (renderMarkdown)
 import Hide.Syntax (linkSpans,styleLayoutMetadata,StyledText,StyledRow,styledContents)
 import qualified Data.Text as T
 import Hide.Model
-import Hide.ConversationBody (BodyRequest(..),BodyResult(..),BodyKey,ConversationCopy(..),logicalBodyCopy,logicalBodyProvider,prepareConversationBody)
+import Hide.ConversationBody (BodyRequest(..),BodyResult(..),BodyKey,ConversationCopy(..),prepareConversationCopy,copyReference,copyTarget,copyProvider,copySerial,capturedSourceProvider,logicalBodyProvider,prepareConversationBody)
 import qualified Hide.Plugin.Window as W
 import Hide.TextLayout (prepareTextLayout)
 
@@ -42,14 +42,26 @@ textPresentationEffects (TextPresentation _ _ requested) fallback original=foldM
     step (_,desktop) (CopyConversation copy)
       | copyCurrent desktop copy=writeIORef requested (Just copy) >> pure (False,desktop)
       | otherwise=pure (False,desktop)
+    step (_,desktop) (AgentAction "copy" [])
+      | Just view<-M.lookup (conversationTarget desktop) (conversationViews desktop)
+      , Just reference<-conversationBodyRef view
+      , let serial=fst (clipboardExport desktop)+1
+      , Just copy<-case conversationSource view of
+          Just source->Just (ConversationTranscriptCopy reference (conversationTarget desktop) source serial)
+          Nothing->(\logical->ConversationLogicalCopy reference (conversationTarget desktop) logical serial) <$> conversationLogical view =do
+          let updated=desktop {clipboardExport=(serial,Nothing),status="Preparing conversation copy."}
+          if copyCurrent updated copy then writeIORef requested (Just copy) >> pure (False,updated)
+          else pure (False,desktop)
     step (_,desktop) effect=fallback desktop [effect]
 
 copyCurrent :: Desktop -> ConversationCopy -> Bool
-copyCurrent desktop (ConversationCopy reference target logical _ serial)=
-  fst (clipboardExport desktop)==serial && any ((==PluginContent reference).windowContent) (windows desktop) &&
-  case M.lookup target (conversationViews desktop) of
-    Just view | conversationBodyRef view==Just reference,Just current<-conversationLogical view->
-      logicalBodyProvider current==logicalBodyProvider logical
+copyCurrent desktop copy=
+  fst (clipboardExport desktop)==copySerial copy && any ((==PluginContent (copyReference copy)).windowContent) (windows desktop) &&
+  case M.lookup (copyTarget copy) (conversationViews desktop) of
+    Just view | conversationBodyRef view==Just (copyReference copy)->case copy of
+      ConversationTranscriptCopy{}->maybe False ((==copyProvider copy).capturedSourceProvider) (conversationSource view)
+      _->maybe False ((==copyProvider copy).logicalBodyProvider) (conversationLogical view) &&
+        maybe True ((==copyProvider copy).capturedSourceProvider) (conversationSource view)
     _->False
 
 -- | Poll/adopt complete snapshots and enqueue only when scalar targets change.
@@ -103,13 +115,13 @@ tickTextPresentation (TextPresentation pending observed requested) bodies deskto
       pure (shown,bodyResults)
 
 publishCopy :: Maybe (ConversationCopy,T.Text) -> Desktop -> Desktop
-publishCopy (Just (copy@(ConversationCopy _ _ _ _ serial),text)) desktop
-  | copyCurrent desktop copy=desktop {clipboard=text,clipboardCode=Nothing,clipboardExport=(serial,Just text),status="Conversation text copied."}
+publishCopy (Just (copy,text)) desktop
+  | copyCurrent desktop copy=desktop {clipboard=text,clipboardCode=Nothing,clipboardExport=(copySerial copy,Just text),status="Conversation text copied."}
 publishCopy _ desktop=desktop
 
 prepareCopy :: ConversationCopy -> IO (ConversationCopy,T.Text)
-prepareCopy copy@(ConversationCopy _ _ logical selection _)=do
-  text<-logicalBodyCopy logical selection
+prepareCopy copy=do
+  text<-prepareConversationCopy copy
   pure (copy,text)
 
 prepare :: Capture -> IO (Int,WindowPresentation)

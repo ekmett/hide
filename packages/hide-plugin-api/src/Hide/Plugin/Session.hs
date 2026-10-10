@@ -20,6 +20,7 @@ import Hide.Plugin.AgentDirectory (AgentDirectory,DirectoryRequest)
 import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
 import Hide.Plugin.Tool (Tool)
+import Hide.Plugin.Transcript (HistoryPresenter)
 
 -- | Capabilities for the concrete first-party directory workflow. Providers and
 -- resource owners outlive activation. Captured requests are admitted by the host;
@@ -41,6 +42,9 @@ data Plugin = Plugin
   { withPlugin :: forall c r settings completion a. Eq completion =>
       Session c r settings completion -> IO a -> IO a
   , pluginAgentTools :: [Tool AgentServices]
+  , pluginAgentHistory :: Maybe HistoryPresenter
+    -- ^ Pure presentation selected at startup and evaluated only on the host
+    -- preparation/checkpoint workers. This contribution owns no input lifetime.
   }
 
 -- | Nest resource scopes in declaration order and release them in reverse order.

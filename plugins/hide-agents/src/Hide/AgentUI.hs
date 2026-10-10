@@ -31,6 +31,7 @@ import qualified Hide.Plugin.Form as Form
 import Hide.Plugin.Command
 import Hide.Plugin.Session (Plugin(..),Session(..))
 import qualified Hide.AgentTools as AgentTools
+import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Sidebar as Sidebar
@@ -43,6 +44,7 @@ plugin :: Plugin
 plugin=Plugin
   { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
   , pluginAgentTools=AgentTools.tools
+  , pluginAgentHistory=Just AgentTranscript.presentHistory
   }
 
 rootId :: P.NodeId
