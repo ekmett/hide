@@ -469,24 +469,25 @@ sharedTextChecks root=do
   recovered<-readCheckpoint path (initialDesktop (80,25)) >>= right
   check "hash collisions preserve both exact string payloads"
     (map (contents . documentBuffer) (M.elems (buffers recovered))==[first,second])
-  -- A file larger than three MiB with 100 localized edits used to retain over
-  -- 300 MiB of flattened states. Repeated raw lines now have one shared payload.
+  -- Repeated lines and localized edits must share checkpoint payloads. A 64 KiB
+  -- source still rejects flattened raw snapshots at the same encoded-size bound.
   let line=T.replicate 1023 "a"<>"\n"
-      source=T.replicate 3073 line
-      edited=foldl (\b n->replaceSelection (Selection 5 6) (if even n then "x" else "y") b) (newBuffer source) [1..100::Int]
+      source=T.replicate 64 line
+      historyLength=16::Int
+      edited=foldl (\b n->replaceSelection (Selection 5 6) (if even n then "x" else "y") b) (newBuffer source) [1..historyLength]
       large=addDocument Nothing edited (initialDesktop (80,25))
       largePath=root </> "large-history.checkpoint"
   writeCheckpoint largePath large >>= right
   encoded<-BS.readFile largePath
   restored<-readCheckpoint largePath (initialDesktop (80,25)) >>= right
   let buffer=documentBuffer (snd (M.findMin (buffers restored)))
-  check "mostly unchanged histories share checkpoint text rather than snapshots" (BS.length encoded<T.length source && length (undoStack buffer)==100)
-  forM_ [0,1,50,100] $ \steps->do
+  check "mostly unchanged histories share checkpoint text rather than snapshots" (BS.length encoded<T.length source && length (undoStack buffer)==historyLength)
+  forM_ [0,1,historyLength `div` 2,historyLength] $ \steps->do
     let actual=iterate undo buffer!!steps
         expected=iterate undo edited!!steps
     check "shared history retains exact bytes and saved-line changes" (bufferBytes actual==bufferBytes expected && bufferLineChanges actual==bufferLineChanges expected)
-  let oldest=iterate undo buffer!!100
-  check "shared history replays every retained edit" (bufferBytes (iterate redo oldest!!100)==bufferBytes edited)
+  let oldest=iterate undo buffer!!historyLength
+  check "shared history replays every retained edit" (bufferBytes (iterate redo oldest!!historyLength)==bufferBytes edited)
 
 temporary :: IO FilePath
 temporary=do

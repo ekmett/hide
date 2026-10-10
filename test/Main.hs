@@ -238,7 +238,8 @@ tests = askOption $ \profile->withResource
   , testCase "BufferView" BufferViewCheck.checks
   , testCase "BufferTree" (BufferTreeCheck.checks profile)
   , testCase "LSP" (LSPCheck.checks profile)
-  , testCase "Tooling" (ToolingCheck.checks profile)
+  , testCase "Tooling.allocations" (ToolingCheck.allocationChecks profile)
+  , testCase "Tooling" ToolingCheck.checks
   , testCase "DialogMouse" (DialogMouseCheck.checks profile)
   , testCase "GitOperations" GitOperationsCheck.checks
   , testCase "Git" GitCheck.checks
@@ -265,6 +266,7 @@ tests = askOption $ \profile->withResource
   , testCase "ACP" ACPCheck.checks
   , testCase "Links" LinksCheck.checks
   , testCase "Markdown" MarkdownCheck.checks
+  , testCase "Markdown.performance" MarkdownCheck.performanceChecks
   ]
 
 modelChecks :: IO ()

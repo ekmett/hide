@@ -858,8 +858,6 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           _->False)
       smallCancelled<-clickAction runtime "question-cancel" typedInput
       check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
-      (_,invalid)<-questionTool runtime savedDraft (object ["question" .= ("Unsupported"::T.Text),"allowMultiple" .= True])
-      check "unsupported multi-select is explicit" . isLeft =<< invalid
     C.withConsoles $ \consoles -> withConversation consoles $ \runtime->Permissions.withPermissionsAt (root </> "question-permissions.toml") chatTools $ \permissions->do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft

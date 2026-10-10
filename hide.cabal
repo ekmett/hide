@@ -106,3 +106,14 @@ test-suite editor-tests
   main-is: Main.hs
   build-depends: JuicyPixels, base64-bytestring, blaze-builder, deepseq, hide, aeson, vector, network, async, stm
     , tasty >=1.5.4 && <1.6, tasty-hunit >=0.10.2 && <0.11, tasty-ant-xml >=1.1.9 && <1.2
+
+-- Keep the HPC driver independent of the correctness/performance fixture graph.
+test-suite coverage-smoke
+  import: settings
+  type: exitcode-stdio-1.0
+  hs-source-dirs: test/coverage, test
+  other-modules: BufferViewCheck, BrowserCheck, DefaultsCheck, FilesCheck, HexCheck, MarkdownCheck, WindowCheck, PluginCommandCheck, PluginFormCheck, PluginMenuCheck, PluginTreeCheck, GuestAccessCheck, LinksCheck, HelpCheck, CompletionCheck, BufferEditsCheck, AgentHubCheck, TextStyleCheck, MarkdownViewCheck, SourceWindowFixture, FormExtension, EditorFixture, SidebarFixture
+  main-is: Main.hs
+  ghc-options: -threaded -rtsopts
+  build-depends: hide, hide-plugin-api ==0.1.0.0, aeson, async, stm, vector, JuicyPixels, base64-bytestring
+    , tasty >=1.5.4 && <1.6, tasty-hunit >=0.10.2 && <0.11, tasty-ant-xml >=1.1.9 && <1.2

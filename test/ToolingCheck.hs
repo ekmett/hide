@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module ToolingCheck (checks, diagnosticCacheChecks, startupChecks, workspaceEditChecks, commandChecks) where
+module ToolingCheck (checks, allocationChecks, diagnosticCacheChecks, startupChecks, workspaceEditChecks, commandChecks) where
 import AllocationProfile (AllocationProfile, withinBudget)
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless, when, forM_, replicateM, foldM, void)
@@ -21,6 +21,7 @@ import System.FilePath ((</>))
 import System.IO (openTempFile, hClose)
 import System.Timeout (timeout)
 import GHC.Conc (getAllocationCounter)
+import GHC.Clock (getMonotonicTimeNSec)
 import Hide.Buffer
 import Hide.BufferView (BufferView(..))
 import qualified Hide.App as App
@@ -29,29 +30,10 @@ import Hide.Model
 import qualified Hide.LSP as L
 import Hide.Tooling
 
-checks :: AllocationProfile -> IO ()
-checks profile = do
+-- | Keep measured JumpTo behavior independently selectable from HLS integration.
+allocationChecks :: AllocationProfile -> IO ()
+allocationChecks profile = do
   let check name ok=unless ok (error name)
-      pos n=object ["line" .= (0::Int),"character" .= (n::Int)]
-      range a z=object ["start" .= pos a,"end" .= pos z]
-      edit a z text=object ["range" .= range a z,"newText" .= (text::String)]
-      item=object ["label" .= ("foobar"::String),"textEdit" .= edit 0 3 "foobar"]
-      ds=addDocument Nothing (newBuffer "foo x") (initialDesktop (80,25))
-  check "completion parses replacement" (completionItems "foo x" 3 (toJSON [item])==[Completion "foobar" [(0,3,"foobar")]])
-  check "completion rejects invalid UTF16 range" (null (completionItems "😀x" 1 (toJSON [object ["label" .= ("bad"::String),"textEdit" .= edit 1 2 "bad"]])))
-  let applied=applyCompletion [(0,3,"foobar"),(5,5,"!")] ds
-  check "completion applies simultaneous edits" (activeText applied=="foobar x!")
-  check "completion is one undo" (activeText (fst (runCommand Undo applied))=="foo x")
-  check "completion rejects overlap" (buffers (applyCompletion [(0,3,"a"),(1,2,"b")] ds)==buffers ds)
-  check "completion rejects coincident insertion ambiguity" (buffers (applyCompletion [(0,0,"a"),(0,0,"b")] ds)==buffers ds)
-  check "workspace edit rejects resource operations" (case workspaceEdits (object ["documentChanges" .= [object ["kind" .= ("delete"::String),"uri" .= ("file:///tmp/A.hs"::String)]]]) of Left _ -> True; _ -> False)
-  check "workspace edit handles versioned document" (workspaceEdits (object ["documentChanges" .= [object ["textDocument" .= object ["uri" .= ("file:///tmp/A.hs"::String),"version" .= (7::Int)],"edits" .= [edit 0 1 "a"]]]])==Right [("/tmp/A.hs",Just 7,[edit 0 1 "a"])])
-  check "hover markdown fits status" (hoverText (object ["contents" .= object ["kind" .= ("markdown"::String),"value" .= ("```haskell\nfoo :: Int\n```\n"::String)]])=="foo :: Int")
-  let hover text=hoverText (object ["contents" .= (text::T.Text)])
-  check "hover types use Unicode syntax" (hover "f :: forall a. Eq a => a->a"=="f :: ∀ a. Eq a ⇒ a→a")
-  check "hover keeps identifiers and quoted arrows" (hover "forallValue :: Proxy \"->\" -> a"=="forallValue :: Proxy \"->\" → a")
-  check "unversioned diagnostics cannot masquerade as current edits" (not (diagnosticsCurrent Nothing [1]) && diagnosticsCurrent Nothing [0] && not (diagnosticsCurrent (Just 0) [1]))
-  check "split buffer count unaffected" (M.size (buffers applied)==1)
   -- Exercise JumpTo itself without splitting preceding rows. The flat oracle
   -- and initial buffer preparation are outside the measured interaction.
   let jumpPath="/measured-jump.hs"
@@ -74,6 +56,30 @@ checks profile = do
          fmap bufferView (activeWindow moved)==Just CurrentView)
       afterJump<-getAllocationCounter
       check "JumpTo does not traverse or split preceding document rows" (withinBudget profile (beforeJump-afterJump) (1024*1024))
+
+checks :: IO ()
+checks = do
+  let check name ok=unless ok (error name)
+      pos n=object ["line" .= (0::Int),"character" .= (n::Int)]
+      range a z=object ["start" .= pos a,"end" .= pos z]
+      edit a z text=object ["range" .= range a z,"newText" .= (text::String)]
+      item=object ["label" .= ("foobar"::String),"textEdit" .= edit 0 3 "foobar"]
+      ds=addDocument Nothing (newBuffer "foo x") (initialDesktop (80,25))
+  check "completion parses replacement" (completionItems "foo x" 3 (toJSON [item])==[Completion "foobar" [(0,3,"foobar")]])
+  check "completion rejects invalid UTF16 range" (null (completionItems "😀x" 1 (toJSON [object ["label" .= ("bad"::String),"textEdit" .= edit 1 2 "bad"]])))
+  let applied=applyCompletion [(0,3,"foobar"),(5,5,"!")] ds
+  check "completion applies simultaneous edits" (activeText applied=="foobar x!")
+  check "completion is one undo" (activeText (fst (runCommand Undo applied))=="foo x")
+  check "completion rejects overlap" (buffers (applyCompletion [(0,3,"a"),(1,2,"b")] ds)==buffers ds)
+  check "completion rejects coincident insertion ambiguity" (buffers (applyCompletion [(0,0,"a"),(0,0,"b")] ds)==buffers ds)
+  check "workspace edit rejects resource operations" (case workspaceEdits (object ["documentChanges" .= [object ["kind" .= ("delete"::String),"uri" .= ("file:///tmp/A.hs"::String)]]]) of Left _ -> True; _ -> False)
+  check "workspace edit handles versioned document" (workspaceEdits (object ["documentChanges" .= [object ["textDocument" .= object ["uri" .= ("file:///tmp/A.hs"::String),"version" .= (7::Int)],"edits" .= [edit 0 1 "a"]]]])==Right [("/tmp/A.hs",Just 7,[edit 0 1 "a"])])
+  check "hover markdown fits status" (hoverText (object ["contents" .= object ["kind" .= ("markdown"::String),"value" .= ("```haskell\nfoo :: Int\n```\n"::String)]])=="foo :: Int")
+  let hover text=hoverText (object ["contents" .= (text::T.Text)])
+  check "hover types use Unicode syntax" (hover "f :: forall a. Eq a => a->a"=="f :: ∀ a. Eq a ⇒ a→a")
+  check "hover keeps identifiers and quoted arrows" (hover "forallValue :: Proxy \"->\" -> a"=="forallValue :: Proxy \"->\" → a")
+  check "unversioned diagnostics cannot masquerade as current edits" (not (diagnosticsCurrent Nothing [1]) && diagnosticsCurrent Nothing [0] && not (diagnosticsCurrent (Just 0) [1]))
+  check "split buffer count unaffected" (M.size (buffers applied)==1)
   bracket temporary removePathForcibly $ \root -> do
     let server=root </> "fake-hls"
         source=root </> "Main.hs"
@@ -581,7 +587,9 @@ codeActionChecks = bracket temporary removePathForcibly $ \root -> do
         timeout 3000000 (loop d) >>= maybe (error "Resolve never reached server") pure
   writeUtf8 source "😀 foo = 1\n"; writeUtf8 other "foo = 2\n"; writeUtf8 private "secret = 3\n"
   writeUtf8 server mcpServer
-  withTooling (launchServer server) $ \tooling -> do
+  advance <- newIORef 0
+  let clock = (+) <$> (toInteger <$> getMonotonicTimeNSec) <*> readIORef advance
+  withToolingClock clock (launchServer server) $ \tooling -> do
     (waiting,answer)<-toolingTool tooling core live "lsp_hover" (args live)
     _<-finish tooling waiting answer
     offered<-list tooling live
@@ -673,7 +681,7 @@ codeActionChecks = bracket temporary removePathForcibly $ \root -> do
     (_,uiPending)<-toolingEffects tooling core chosen effects
     let awaitApplied current=do
           next<-tickTooling tooling core current
-          if "Code action applied" `T.isPrefixOf` status next then pure next else threadDelay 1000 >> awaitApplied next
+          if rev next /= rev live then pure next else threadDelay 1000 >> awaitApplied next
     uiApplied<-timeout 3000000 (awaitApplied uiPending) >>= maybe (error "Human code action never adopted its prepared edit") pure
     check "human chooser applies the same checked action" (buffers uiApplied/=buffers live && dialog uiApplied==Nothing)
     forM_ ["resolve.requested","resolve.replied","resolve.release"] (removeFile . (root </>))
@@ -687,13 +695,12 @@ codeActionChecks = bracket temporary removePathForcibly $ \root -> do
         (timeoutChosen,timeoutEffects)=submitDialog 0 selected timeoutChoices
     (_,resolving)<-toolingEffects tooling core timeoutChosen timeoutEffects
     requestedTimeout<-awaitFile tooling resolving (root </> "resolve.requested")
-    let awaitTimeout view=do
-          next<-tickTooling tooling core view
-          if status next=="HLS request timed out" then pure next else threadDelay 10000 >> awaitTimeout next
-    timedOut<-timeout 34000000 (awaitTimeout requestedTimeout)
-    check "human sees the resolver timeout with unchanged buffers" (maybe False (\view->buffers view==buffers live) timedOut)
+    modifyIORef' advance (+31000000000)
+    timedOut<-tickTooling tooling core requestedTimeout
+    check "human sees the resolver timeout with unchanged buffers"
+      (status timedOut=="HLS request timed out" && buffers timedOut==buffers live)
     writeUtf8 (root </> "resolve.release") ""
-    timeoutReplied<-awaitFile tooling (maybe requestedTimeout id timedOut) (root </> "resolve.replied")
+    timeoutReplied<-awaitFile tooling timedOut (root </> "resolve.replied")
     (timeoutBarrier,timeoutBarrierReply)<-toolingTool tooling core timeoutReplied "lsp_hover" (args timeoutReplied)
     (afterTimeout,_)<-finish tooling timeoutBarrier timeoutBarrierReply
     check "timed-out human resolve never applies a late edit" (buffers afterTimeout==buffers live)

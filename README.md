@@ -1,7 +1,7 @@
 # hide — Haskell IDE
 
 <!-- badges:start -->
-[![build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/nixos.yml?branch=main&style=flat&label=build&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/nixos.yml?query=branch%3Amain)
+[![build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/ci.yml?branch=main&style=flat&label=build&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/ci.yml?query=branch%3Amain)
 [![coverage](https://img.shields.io/github/actions/workflow/status/ekmett/hide/coverage.yml?branch=main&style=flat&label=coverage&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/coverage.yml?query=branch%3Amain)
 [![coverage: report](https://img.shields.io/static/v1?label=coverage&message=report&color=F01F7A&style=flat&logo=codecov&logoColor=white)](https://app.codecov.io/github/ekmett/hide)
 [![docs build](https://img.shields.io/github/actions/workflow/status/ekmett/hide/docs.yml?branch=main&style=flat&label=docs+build&logo=githubactions&logoColor=white)](https://github.com/ekmett/hide/actions/workflows/docs.yml?query=branch%3Amain)
