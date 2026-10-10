@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 /* File identity, checked no-replace rename, and atomic replacement. */
 #define _GNU_SOURCE
 /* FileRenameInfoEx is part of the supported Windows 10 API. */

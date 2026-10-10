@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Workspace search, filesystem operations and exact buffer patches for agents.
+-- |
+-- Module      : Hide.WorkspaceFilesMCP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Workspace search, filesystem operations and exact buffer patches for agents.
 --
 -- Search overlays eligible open buffers on disk candidates and reports bounded
 -- results. Filesystem mutations validate canonical containment, exclude repository

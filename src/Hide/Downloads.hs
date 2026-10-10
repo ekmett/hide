@@ -1,6 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Session-owned serial download queue with progress and cancellation.
+-- |
+-- Module      : Hide.Downloads
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Session-owned serial download queue with progress and cancellation.
 --
 -- One worker handles a bounded pending queue. Cancellation is a signal; the action
 -- owns resource cleanup and must bracket it. Async exceptions propagate rather

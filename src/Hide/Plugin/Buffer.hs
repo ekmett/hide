@@ -1,4 +1,13 @@
--- | Immutable measured buffer reads for trusted linked plugins.
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+-- |
+-- Module      : Hide.Plugin.Buffer
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Immutable measured buffer reads for trusted linked plugins.
 --
 -- The host supplies reads after checking authority. A read retains live tree
 -- content and its representation, excluding separate saved baseline/Undo roots.

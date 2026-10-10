@@ -1,4 +1,5 @@
-/* SPDX-License-Identifier: BSD-3-Clause */
+/* SPDX-FileCopyrightText: 2026 Edward Kmett
+ * SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 */
 #ifndef HIDE_GLYPH_CELL_H
 #define HIDE_GLYPH_CELL_H
 /* This project has a C host, so __STDC__ deliberately joins the C++ boundary. */

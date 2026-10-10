@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Protocol and terminal integration
 
 Use the existing Haskell desktop, measured buffers, undo history and character-grid

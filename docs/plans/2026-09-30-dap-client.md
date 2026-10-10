@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # DAP client implementation plan
 
 Goal: attach the editor to Graal's stock loopback DAP instrument, preserving ACP,

@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
 -- A separately declared extension: no core command sum, Model or Render imports.
+-- |
+-- Module      : MenuExtension
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module MenuExtension (registerExtension,registerContextExtension) where
 import Data.Aeson
 import qualified Data.Text as T

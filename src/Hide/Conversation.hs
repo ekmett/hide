@@ -1,5 +1,13 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Primary ACP ownership and captured plugin transcript sources.
+-- | Module      : Hide.Conversation
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- Primary ACP ownership and captured plugin transcript sources.
 --
 -- The session tick consumes protocol and hub mailbox events. Owned workers prepare
 -- provider acquisition, prompt context, file captures and consoles before adoption; capture itself does

@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 # Keep this launcher beside hide; THC discovers it as the external edit command.
 set -eu
 launcher=$0

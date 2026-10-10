@@ -1,4 +1,12 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
+-- | Module      : ToolingCheck
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
 module ToolingCheck (checks, allocationChecks, diagnosticCacheChecks, startupChecks, workspaceEditChecks, commandChecks) where
 import AllocationProfile (AllocationProfile, withinBudget)
 import SourceWindowFixture (sourceFixtureBuffer)

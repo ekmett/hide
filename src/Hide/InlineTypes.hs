@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Shared completion-provider inputs, proposals and feedback.
+-- |
+-- Module      : Hide.InlineTypes
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Shared completion-provider inputs, proposals and feedback.
 --
 -- Replacement coordinates use zero-based Unicode-character offsets, not UTF-16
 -- or screen cells. Adapters translate their wire coordinates; the background

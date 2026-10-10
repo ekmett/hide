@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 // Immutable RGBA resources and the complete, policy-filtered character-grid scene.
 class CanvasImages {
  constructor(gl,access,send){

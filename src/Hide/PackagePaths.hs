@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Candidate paths for unconfigured Cabal components. This is a worker service:
+-- |
+-- Module      : Hide.PackagePaths
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Candidate paths for unconfigured Cabal components. This is a worker service:
 -- declarations keep their conditions, and a file's existence does not establish
 -- that its branch is selected. No directory walk, Cabal invocation or plan read
 -- is needed. Canonical workspace/privacy checks precede source-file probes.

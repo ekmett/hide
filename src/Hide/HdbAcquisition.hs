@@ -1,6 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Checksum-pinned acquisition of official hdb compiler-specific bindists.
+-- |
+-- Module      : Hide.HdbAcquisition
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings, ScopedTypeVariables
+--
+-- Checksum-pinned acquisition of official hdb compiler-specific bindists.
 --
 -- Catalog selection is exact by compiler/platform. Preparation probes without
 -- fetching; acquisition revalidates the pinned URL, restricts redirects to HTTPS,

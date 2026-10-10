@@ -1,4 +1,12 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
+-- | Module      : PluginCommandCheck
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : OverloadedStrings, ScopedTypeVariables
+--
 module PluginCommandCheck (checks) where
 
 import Control.Concurrent (forkIO)

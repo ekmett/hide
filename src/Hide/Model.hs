@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Shared desktop state, geometry and pure input transitions.
+-- |
+-- Module      : Hide.Model
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Shared desktop state, geometry and pure input transitions.
 --
 -- Documents own buffers; windows refer to documents by ID and keep independent
 -- selection, scroll and review state. The same rectangles drive painting and hit

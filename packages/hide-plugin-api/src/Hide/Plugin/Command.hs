@@ -1,5 +1,13 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE DeriveGeneric, ExistentialQuantification, OverloadedStrings, ScopedTypeVariables #-}
--- | Typed commands with explicit wire codecs and revocable registrations.
+-- | Module      : Hide.Plugin.Command
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : DeriveGeneric, ExistentialQuantification, OverloadedStrings, ScopedTypeVariables
+--
+-- Typed commands with explicit wire codecs and revocable registrations.
 --
 -- Registration, lookup and admission hold a short registry lock. Codecs and
 -- handlers run after it is released; nested invocation cannot hold that lock

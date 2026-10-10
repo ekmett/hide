@@ -1,4 +1,13 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
+-- |
+-- Module      : LinksCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+
 module LinksCheck (checks) where
 import qualified Codec.Picture as Picture
 import qualified Data.ByteString.Lazy as BL

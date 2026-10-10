@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | One scoped worker prepares styled layouts and Markdown previews outside input/render locks.
+-- |
+-- Module      : Hide.TextPresentation
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- One scoped worker prepares styled layouts and Markdown previews outside input/render locks.
 -- Captures retain immutable source content only, never Desktop or Undo. Adoption
 -- checks bounded exact window/content/version/width targets. Retired or resized
 -- styled targets use ordinary geometry until matching preparation completes;

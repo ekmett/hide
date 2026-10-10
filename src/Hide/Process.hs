@@ -1,5 +1,13 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE ScopedTypeVariables #-}
--- | UTF-8 capture and cancellable shutdown for owned subprocess groups.
+-- | Module      : Hide.Process
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : ScopedTypeVariables
+--
+-- UTF-8 capture and cancellable shutdown for owned subprocess groups.
 --
 -- Capture cleanup immediately after spawn, before another waiter can reap the
 -- PID. The returned action serializes repeated cleanup, terminates the process

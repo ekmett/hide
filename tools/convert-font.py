@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Extract VileR's original IBM VGA bitmaps; requires fonttools==4.61.1.
 
 Usage: python tools/convert-font.py oldschool_pc_font_pack_v2.2_FULL.zip

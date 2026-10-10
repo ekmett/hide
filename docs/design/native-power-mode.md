@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Native Power Mode prototype
 
 Start a Metal or Vulkan frontend with `HIDE_POWER_MODE=1` to enable colorful

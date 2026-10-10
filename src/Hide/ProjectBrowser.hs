@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Asynchronous read-only browser for an existing Cabal plan.
+-- |
+-- Module      : Hide.ProjectBrowser
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Asynchronous read-only browser for an existing Cabal plan.
 --
 -- A request token owns the loading dialog. Completed reads are adopted only while
 -- that dialog, project root and privacy paths still match; navigation uses a

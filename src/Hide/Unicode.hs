@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE ForeignFunctionInterface, OverloadedStrings, BangPatterns, UnboxedTuples, MagicHash #-}
--- | Shared grapheme segmentation, cell widths and picture composition.
+-- |
+-- Module      : Hide.Unicode
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : ForeignFunctionInterface, OverloadedStrings, BangPatterns, UnboxedTuples, MagicHash
+--
+-- Shared grapheme segmentation, cell widths and picture composition.
 --
 -- utf8proc supplies stateful, lazy segmentation; source offsets remain
 -- Unicode characters while display widths follow graphemes and editor overrides.

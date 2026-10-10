@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Development
 
 Build the editor, run the checks and exercise the frontend affected by a change.
@@ -734,7 +737,7 @@ perform it.
 
 Bundled font terms and provenance are in [assets/fonts](../assets/fonts/README.md).
 Skylighting and its bundled grammar set are GPL-2 licensed; skylighting-core is
-BSD-3-Clause. These are editor dependencies. The
+BSD-2-Clause OR Apache-2.0. These are editor dependencies. The
 [Turbo Pascal UI museum](https://ilyabirman.net/meanwhile/all/ui-museum-turbo-pascal-7-1/)
 records the interface reference.
 

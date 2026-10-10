@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 # Run from the repository root. No editor, network or user settings are touched.
 set -eu
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/hide-launchers.XXXXXX")

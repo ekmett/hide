@@ -1,8 +1,10 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE ExistentialQuantification, OverloadedStrings #-}
--- | Module      : Hide.Plugin.Form
--- Copyright   : (c) Edward Kmett 2026
--- License     : BSD-3-Clause
--- Maintainer  : Edward Kmett
+-- |
+-- Module      : Hide.Plugin.Form
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
 -- Portability : ExistentialQuantification, OverloadedStrings
 --

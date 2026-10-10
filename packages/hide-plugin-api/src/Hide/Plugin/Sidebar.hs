@@ -1,9 +1,11 @@
--- | Module      : Hide.Plugin.Sidebar
--- Copyright   : (c) Edward Kmett 2026
--- License     : BSD-3-Clause
--- Maintainer  : Edward Kmett
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+-- |
+-- Module      : Hide.Plugin.Sidebar
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
 -- Stability   : experimental
--- Portability : Haskell2010
+-- Portability : GHC2021
 --
 -- Host capabilities for scoped tree and form contributions. Registration,
 -- callable definitions and prepared metadata reuse their existing owners;

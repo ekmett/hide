@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Session tools
 
 The conversation agent should work with the same files, windows and running programs as the person using the editor. Tools use stable session IDs, live buffer revisions and the existing editor commands. Long-running replies must not block the display or language/debug protocol polling.

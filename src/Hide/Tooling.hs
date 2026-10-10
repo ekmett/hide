@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Per-project HLS orchestration and checked adoption of language edits.
+-- |
+-- Module      : Hide.Tooling
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Per-project HLS orchestration and checked adoption of language edits.
 --
 -- Owned workers discover roots, start clients, capture source and prepare patches.
 -- Synchronization keys use client and buffer identities so idle ticks do not

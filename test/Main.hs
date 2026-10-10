@@ -1,5 +1,13 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings #-}
--- | Existing checks run serially because fixtures change process environment
+-- | Module      : Main
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings
+--
+-- Existing checks run serially because fixtures change process environment
 -- and working directory. Optional JUnit output records actual case outcomes.
 module Main (main) where
 #ifdef WITH_WEB

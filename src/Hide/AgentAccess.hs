@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Ephemeral bearer capabilities for actor-bound editor bridges.
+-- |
+-- Module      : Hide.AgentAccess
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Ephemeral bearer capabilities for actor-bound editor bridges.
 --
 -- Tokens map authenticated bridge connections to hub identities within one host
 -- runtime. They are not checkpointed or publicly rendered. Resolving a token

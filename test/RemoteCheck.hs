@@ -1,4 +1,12 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE CPP, OverloadedStrings, ScopedTypeVariables #-}
+-- | Module      : RemoteCheck
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : CPP, OverloadedStrings, ScopedTypeVariables
+--
 module RemoteCheck (checks, parentOpenChecks) where
 import Control.Concurrent.STM (atomically, retry)
 import Control.Concurrent (threadDelay)

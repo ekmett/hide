@@ -1,4 +1,13 @@
--- | Directory entries for file dialogs and the Files pane.
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+-- |
+-- Module      : Hide.Browser
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : GHC2021
+--
+-- Directory entries for file dialogs and the Files pane.
 --
 -- Directories remain visible regardless of the filename filter. Entries are
 -- sorted with directories first and retain optional metadata when individual

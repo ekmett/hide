@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 // Exercise the actual browser tile builder: bitmap pixels, font selection,
 // unchanged tile geometry, and cache identity. No visible browser is launched.
 import fs from 'node:fs';

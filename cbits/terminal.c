@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 /* libghostty-vt API pinned to 76895d97b74ff6b24c2b1543bcd69ccc18048a4d. */
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Edward Kmett
+# SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 """Check headless startup, discovery and resume with no display dependencies.
 
 Usage: python3 test/daemon-session.py /absolute/path/to/hide

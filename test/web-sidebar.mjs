@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 // Exercise the production read-only sidebar consumer with its bounded DOM seam.
 import fs from 'node:fs';
 import vm from 'node:vm';

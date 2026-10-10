@@ -1,6 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Immutable transcript preparation inputs and exact host body receipts.
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+-- | Module      : Hide.ConversationBody
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Immutable transcript preparation inputs and exact host body receipts.
 -- This module owns no provider handle, Desktop, editable Buffer or worker.
 -- Pure plugin presentation is captured without invoking it on input.
 -- TextPresentation's existing serial worker consumes these closed requests;

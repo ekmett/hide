@@ -1,6 +1,15 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
--- | Bounded asynchronous Debug Adapter Protocol transport.
+-- |
+-- Module      : Hide.DAP
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings, ScopedTypeVariables
+--
+-- Bounded asynchronous Debug Adapter Protocol transport.
 --
 -- Connection/preparation can run on a worker while the client object is returned.
 -- Managed launch owns the adapter process group and refuses an already-listening

@@ -1,3 +1,5 @@
+// SPDX-FileCopyrightText: 2026 Edward Kmett
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 // Exercise production keyboard/clipboard event ownership using prepared frame
 // chords. The protocol checks independently verify their resolved editor effects.
 import fs from 'node:fs';

@@ -1,7 +1,14 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
--- SPDX-License-Identifier: BSD-3-Clause
--- | Binary file access that permits concurrent atomic replacement.
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+-- | Module      : Hide.FileIO
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : CPP, ForeignFunctionInterface
+--
+-- Binary file access that permits concurrent atomic replacement.
 --
 -- Readers keep the opened file object when its path is replaced; new opens see
 -- the replacement. Windows' POSIX I/O manager needs explicit deletion sharing,

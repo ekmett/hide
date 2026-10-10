@@ -1,5 +1,5 @@
 // SPDX-FileCopyrightText: 2026 Edward Kmett
-// SPDX-License-Identifier: BSD-3-Clause
+// SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 #ifndef HIDE_FILE_DRAG_WINDOWS_H
 #define HIDE_FILE_DRAG_WINDOWS_H
 #define COBJMACROS

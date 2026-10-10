@@ -1,4 +1,13 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings, UnboxedTuples #-}
+-- |
+-- Module      : UnicodeCheck
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings, UnboxedTuples
+
 module UnicodeCheck (checks) where
 import AllocationProfile (AllocationProfile, withinBudget)
 import Control.Monad (unless, forM_)

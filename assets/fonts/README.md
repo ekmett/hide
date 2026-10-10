@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2026 Edward Kmett
+SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
+
 # Bundled bitmap fonts
 
 The source framebuffer uses 8 × 16 pixel cells. Mode 3 displays them at

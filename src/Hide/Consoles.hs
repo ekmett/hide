@@ -1,5 +1,14 @@
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 {-# LANGUAGE OverloadedStrings #-}
--- | Own named terminals and their corresponding editor documents.
+-- |
+-- Module      : Hide.Consoles
+-- Copyright   : (c) 2026 Edward Kmett
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett <ekmett@gmail.com>
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Own named terminals and their corresponding editor documents.
 --
 -- Process preparation can run off the UI worker; adoption transfers an already
 -- started terminal into the console service. Screen polling updates documents,

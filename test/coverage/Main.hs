@@ -1,6 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
--- SPDX-License-Identifier: UPL-1.0 AND BSD-3-Clause
--- | Fast coverage paths. Reuse the inexpensive, bounded contract checks;
+-- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
+-- | Module      : Main
+-- Copyright   : (c) Edward Kmett 2026
+-- License     : BSD-2-Clause OR Apache-2.0
+-- Maintainer  : Edward Kmett
+-- Stability   : experimental
+-- Portability : OverloadedStrings
+--
+-- Fast coverage paths. Reuse the inexpensive, bounded contract checks;
 -- process-lifetime fixtures, allocation budgets and large histories stay in CI.
 module Main (main) where
 
