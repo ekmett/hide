@@ -30,7 +30,7 @@ import qualified Hide.Plugin.BufferDiff as D
 import qualified Hide.Plugin.WindowRead as W
 import Hide.Plugin.Request (RequestServices(..))
 import Hide.Plugin.Command (Codec(..),CommandDef(..),CommandError(..))
-import Hide.Plugin.Tool (Tool(..))
+import Hide.Plugin.Tool (Tool(..),ToolHints(..))
 
 -- | Explicit editor-visible requests. Every service call owns fresh host
 -- admission; read-only metadata grants no authority and must not add an outer
@@ -38,18 +38,18 @@ import Hide.Plugin.Tool (Tool(..))
 -- A prepared-window read similarly requires the captured immutable body service.
 tools :: [Tool RequestServices]
 tools=
-  [Tool "list_buffers" True (CommandDef "hide.buffer.list"
+  [Tool "list_buffers" (ToolHints True False False) (CommandDef "hide.buffer.list"
     "List open buffers with paths and unsaved-change state, including untitled buffers."
     listInput listOutput (\services ()->bufferList (requestBuffers services)))
-  ,Tool "read_buffer" True (CommandDef "hide.buffer.read"
+  ,Tool "read_buffer" (ToolHints True False False) (CommandDef "hide.buffer.read"
     "Read live buffer contents including unsaved edits; private conversation fields are redacted and approval buffers are unavailable. Text is paged by 1-based lines (200 default, 1000 maximum), capped at 131072 characters; binary buffers return up to 4096 hex bytes from byteOffset."
     readInput readOutput (\services->bufferRead (requestBuffers services)))
-  ,Tool "read_window" True (CommandDef "hide.window.read"
+  ,Tool "read_window" (ToolHints True False False) (CommandDef "hide.window.read"
     "Read an explicitly readable prepared text window by logical window-text lines; private regions are redacted. Defaults to the active window, 200 lines; maximum 1000 lines and 131072 characters. Source windows use read_buffer."
     W.readInput windowOutput (\services arguments->case requestWindows services of
       Nothing->pure (Left (CommandRejected "Window read requires an exact host-captured request."))
       Just reader->W.readWindow reader arguments))
-  ,Tool "buffer_apply_diff" False (CommandDef "hide.buffer.apply-diff"
+  ,Tool "buffer_apply_diff" (ToolHints False True True) (CommandDef "hide.buffer.apply-diff"
     "Apply strict unified diffs atomically to 1–16 distinct live text buffers at their given revisions, with at most 1048576 patch characters in total. Context and hunk positions must match exactly. One approval covers the whole batch; every patch is applied together or none, with ordinary Undo per changed buffer. No file is saved. Results follow input order and report the exact approved patches. File headers identify only the target buffer, never disk paths."
     D.applyInput applyOutput (\services arguments->case requestDiff services of
       Nothing->pure (Left (CommandRejected "Diff requires an exact host-captured request."))

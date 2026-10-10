@@ -20,7 +20,7 @@ import System.Mem.StableName (makeStableName)
 import GHC.Stack (HasCallStack,callStack,prettyCallStack)
 import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.ConversationInput as ConversationInput
-import EditorFixture (agentSettingsReply)
+import EditorFixture (questionReply,agentSettingsReply)
 import Hide.Conversation
 import Hide.TextPresentation (TextPresentation,withTextPresentation,textPresentationEffects,tickTextPresentation)
 import qualified Hide.Consoles as C
@@ -380,7 +380,7 @@ checks=bracket temporary removePathForcibly $ \root ->
       shownCanonical<-canonicalWindowText recoveredShown
       ensure "show after switching does not lose primary transcript" (shownCanonical==primaryCanonical)
       caller<-captureQuestionCaller conversation primary >>= right
-      (questionView,_)<-chatToolAs conversation (Just caller) recoveredShown "ask_user" (object ["question" .= ("Choose privately"::T.Text)])
+      (questionView,_)<-questionReply conversation (Just caller) recoveredShown (object ["question" .= ("Choose privately"::T.Text)])
       let privateAnswer=questionView {chatQuestion=fmap (\q->q {questionBuffer=newBuffer "unsent secret answer",questionSelection=Selection 20 20}) (chatQuestion questionView)}
       paintedAnswer<-testUntil "live recovered question prompt and input" (pure . (\d->
         "Choose privately" `T.isInfixOf` activeText d &&
@@ -447,8 +447,8 @@ checks=bracket temporary removePathForcibly $ \root ->
       ensure "rejected primary input never starts its provider" (field "connected" settings==Just False)
       let primary=AR.primaryAgent (conversationAgents conversation)
       caller<-captureQuestionCaller conversation primary >>= right
-      (questionView,questionReply)<-chatToolAs conversation (Just caller) shown "ask_user" (object ["question" .= ("Must not allocate a question"::T.Text)])
-      questionResult<-questionReply
+      (questionView,reply)<-questionReply conversation (Just caller) shown (object ["question" .= ("Must not allocate a question"::T.Text)])
+      questionResult<-reply
       ensure "missing presenter rejects a new question before creating its input"
         (case (questionResult,chatQuestion questionView) of (Left _,Nothing)->True; _->False)
       preserved "rejected question without a presenter" questionView

@@ -11,7 +11,7 @@
 -- exact invocation identity and retirement; this adapter adds wire metadata and
 -- bounded arguments/results. Permission decisions remain in the host.
 module Hide.Plugin.Tool
-  ( Tool(..), mapToolContext, Tools, withTools, toolDefinitions, hasTool, callTool ) where
+  ( Tool(..), ToolHints(..), mapToolContext, Tools, withTools, toolDefinitions, hasTool, callTool ) where
 
 import Control.DeepSeq (force)
 import Control.Exception (evaluate)
@@ -29,15 +29,23 @@ import qualified Data.Text as T
 import qualified Data.Vector as V
 import Hide.Plugin.Command
 
--- | MCP name, explicit read-only policy hint and the typed command to expose.
--- A hint configures the host's default policy; it never authorizes execution.
+-- | Independent MCP annotations. A local question can change state without
+-- being destructive or reaching outside the editor. Read-only configures the
+-- host's default policy; none of these hints authorizes execution.
+data ToolHints = ToolHints
+  { readOnlyHint :: !Bool
+  , destructiveHint :: !Bool
+  , openWorldHint :: !Bool
+  } deriving (Eq,Show)
+
+-- | MCP name, explicit policy hints and the typed command to expose.
 -- Input schemas are strict objects; output schemas describe objects. Codecs
 -- must enforce their stated fields and bounds.
 -- Wire arguments have a 1 MiB ceiling and results 4 MiB, matching the host
 -- transport. The host supplies an admitted context or a service that owns admission
 -- for every call (see 'Hide.Plugin.Session.PluginTool'); arguments cannot supply
 -- or replace it.
-data Tool c = forall a b. Tool Text Bool (CommandDef c a b)
+data Tool c = forall a b. Tool Text ToolHints (CommandDef c a b)
 
 -- | Project a host-granted context without changing tool names, schemas,
 -- exposure or registration lifetime. The projection runs only when the command
@@ -47,7 +55,7 @@ data Tool c = forall a b. Tool Text Bool (CommandDef c a b)
 --
 -- @mapToolContext f (mapToolContext g tool) = mapToolContext (g . f) tool@
 mapToolContext :: (d -> c) -> Tool c -> Tool d
-mapToolContext project (Tool name readonly definition)=Tool name readonly
+mapToolContext project (Tool name hints definition)=Tool name hints
   (CommandDef (commandName definition) (commandTitle definition)
     (commandInput definition) (commandOutput definition)
     (\context->commandRun definition (project context)))
@@ -67,13 +75,13 @@ withTools reserved declarations use=withRegistry $ \registry->do
   entries<-foldM (register registry) M.empty declarations
   use (Tools registry entries)
   where
-    register registry entries (Tool name readonly definition)=do
+    register registry entries (Tool name hints definition)=do
       let input=codecSchema (commandInput definition)
           output=codecSchema (commandOutput definition)
           description=commandTitle definition
           metadata=object ["name" .= name,"description" .= description,"inputSchema" .= input,
             "outputSchema" .= output,"annotations" .= object
-              ["readOnlyHint" .= readonly,"destructiveHint" .= not readonly,"openWorldHint" .= not readonly]]
+              ["readOnlyHint" .= readOnlyHint hints,"destructiveHint" .= destructiveHint hints,"openWorldHint" .= openWorldHint hints]]
       unless (validName name) (failTool "Invalid tool name.")
       unless (name `notElem` reserved && M.notMember name entries) (failTool ("Duplicate or reserved tool name: "<>name))
       unless (not (T.null description) && T.length description<=2048) (failTool "Tool description exceeds its bounds.")

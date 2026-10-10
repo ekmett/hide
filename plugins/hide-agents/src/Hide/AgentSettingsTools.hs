@@ -15,12 +15,12 @@ import Data.Aeson
 import Data.Text (Text)
 import Hide.Plugin.AgentSettings
 import Hide.Plugin.Command
-import Hide.Plugin.Tool (Tool(..))
+import Hide.Plugin.Tool (Tool(..),ToolHints(..))
 
 -- | Read the admitted primary snapshot. No argument can select another actor,
 -- directory, provider or authority; anonymous editor access remains host policy.
 tools :: [Tool AgentSettingsServices]
-tools=[Tool "agent_settings" True (CommandDef "hide.agents.settings"
+tools=[Tool "agent_settings" (ToolHints True False False) (CommandDef "hide.agents.settings"
   "Read provider executable, argument count, environment variable names, connection state, model/config choices and context usage. Secret-labelled values, argument values, environment values and session keys are omitted. Cannot change provider settings."
   (Codec (object ["type" .= ("object"::Text),"properties" .= object [],"required" .= ([]::[Text]),"additionalProperties" .= False])
     (\value->if value==object [] then Right () else Left "agent_settings accepts no arguments.") (const (object [])))

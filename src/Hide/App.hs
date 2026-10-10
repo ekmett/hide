@@ -18,6 +18,7 @@ import Control.Applicative ((<|>))
 import Data.Maybe (fromMaybe)
 import Hide.DocumentationHost
 import qualified Hide.Plugin.Services as PluginServices
+import qualified Hide.Plugin.Request as PluginRequest
 import Hide.GuestAccess (validateGuestEffects)
 import Hide.Autocomplete
 import qualified Hide.AutocompleteACP as CompletionACP
@@ -306,7 +307,7 @@ runEditor plugins args = do
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
-          let specs=builtinTools++debugTools++chatTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++[screenTool]
+          let specs=builtinTools++debugTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++[screenTool]
           let names definitions=[name | spec<-definitions,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]]
               declarations=concatMap Plugin.pluginTools plugins
           PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
@@ -349,7 +350,6 @@ runEditor plugins args = do
                           (PluginServices.EditorServices (docsServices docsCommands context)
                             (environmentServices environmentCommands directory) settings) name parameters)
                     | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
-                    | name `elem` chatToolNames = chatTool conversation d name parameters
                     | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
                     | name `elem` workspaceToolNames = workspaceTool guestCore d name parameters
                     | name `elem` fileToolNames = fileTool guestCore d name parameters
@@ -368,21 +368,22 @@ runEditor plugins args = do
                     let agents=conversationAgents conversation
                         hub=AR.agentHub agents
                         reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
-                    let permitted callback current name parameters
+                    let permitted questionBinding callback current name parameters
                           | PluginTool.hasTool requestToolset name = do
                               context<-bufferRequestServices (bufferReader permissions currentCaller)
                                 (bufferEditor permissions currentCaller) (windowReader permissions currentCaller) current name parameters
                               pure (current,either (pure . Left)
-                                (\services'->PluginTool.callTool requestToolset services' name parameters) context)
+                                (\services'->PluginTool.callTool requestToolset
+                                  services' {PluginRequest.requestQuestions=fmap (\bound->questionServices conversation bound permissions currentCaller) questionBinding}
+                                  name parameters) context)
                           | name=="editor_input" = permissionBuildInputAs currentCaller permissions
                               (\admission admittedDesktop admittedTool admittedArgs->withBuildAdmission services admission (controlTool guestCore admittedDesktop admittedTool admittedArgs)) current name parameters
-                          | name=="ask_user",Nothing<-token = pure (current,pure (Left "ask_user requires the authenticated requesting agent."))
                           | otherwise = permissionCallAs currentCaller permissions callback current name parameters
                         currentCaller=case token of
                           Nothing->pure (Right ())
                           Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
                     response<-case token of
-                      Nothing -> editorResponseWith editorSpecs (permitted inspectTool) d request
+                      Nothing -> editorResponseWith editorSpecs (permitted Nothing inspectTool) d request
                       Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly CompletionACP.completionTools (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
                       Just secret -> do
                         bound<-resolveAgentAccess (AR.agentAccess agents) secret
@@ -396,14 +397,11 @@ runEditor plugins args = do
                                 questionCaller<-captureQuestionCaller conversation ident
                                 let dispatch current name parameters
                                       | PluginTool.hasTool agentToolset name = pure (current,PluginTool.callTool agentToolset (agentServices hub (AH.Agent ident) root) name parameters)
-                                      | name `elem` chatToolNames = case questionCaller of
-                                          Left err->pure (current,pure (Left err))
-                                          Right caller->chatToolAs conversation (Just caller) current name parameters
                                       | otherwise = inspectTool current name parameters
                                     -- Worktree agents reach this endpoint only for
                                     -- coordination. Their editor tools use their own session.
                                     visible=if ident==AR.primaryAgent agents then editorSpecs++agentTools else agentTools
-                                editorResponseOnly visible (permitted dispatch) d request
+                                editorResponseOnly visible (permitted (either (const Nothing) Just questionCaller) dispatch) d request
                     let (updated,finish)=response
                     quit<-readIORef exiting
                     pure (quit,updated,finish)

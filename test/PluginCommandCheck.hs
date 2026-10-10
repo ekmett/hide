@@ -101,8 +101,8 @@ toolChecks=do
       output=Codec (object ["type" .= ("object"::T.Text)]) Right id
       definition name action=CommandDef name "Add the authenticated context" input output action
       run (context::Int) n=modifyIORef' calls (+1) >> pure (Right (object ["answer" .= (context+n)]))
-      increment=Tool.Tool "increment" True (definition "example.tool.increment" run)
-      second=Tool.Tool "second" True (definition "example.tool.second" run)
+      increment=Tool.Tool "increment" (Tool.ToolHints True False False) (definition "example.tool.increment" run)
+      second=Tool.Tool "second" (Tool.ToolHints True False False) (definition "example.tool.second" run)
       arguments=object ["n" .= (4::Int)]
   escaped<-Tool.withTools [] [increment,second] $ \tools->do
     check "tool discovery contains exactly the composed set" (length (Tool.toolDefinitions tools)==2 && Tool.hasTool tools "increment" && Tool.hasTool tools "second" && not (Tool.hasTool tools "missing"))
@@ -121,15 +121,15 @@ toolChecks=do
   closed<-Tool.callTool escaped 10 "increment" arguments
   afterClose<-readIORef calls
   check "leaving tool scope revokes retained calls" (isLeft closed && beforeClose==afterClose)
-  forM_ [(["increment"],[increment]),([],[increment,increment]),([],[increment,Tool.Tool "another" True (definition "example.tool.increment" run)])] $ \(reserved,declarations)->do
+  forM_ [(["increment"],[increment]),([],[increment,increment]),([],[increment,Tool.Tool "another" (Tool.ToolHints True False False) (definition "example.tool.increment" run)])] $ \(reserved,declarations)->do
     reached<-newIORef False
     rejected<-tryIOError (Tool.withTools reserved declarations (\_->writeIORef reached True))
     used<-readIORef reached
     check "reserved names, overlapping names and command IDs fail before exposure" (isLeft rejected && not used)
-  let malformed=Tool.Tool "malformed" True ((definition "example.tool.malformed" run)
+  let malformed=Tool.Tool "malformed" (Tool.ToolHints True False False) ((definition "example.tool.malformed" run)
         {commandInput=input {codecSchema=object ["type" .= ("object"::T.Text)]}})
   invalid<-tryIOError (Tool.withTools [] [malformed] (\_->error "invalid schema exposed"))
   check "an input schema must declare its strict fields" (isLeft invalid)
-  let huge=Tool.Tool "large" False (definition "example.tool.large" (\(_::Int) _->pure (Right (object ["text" .= T.replicate (4*1024*1024+1) "x"]))))
+  let huge=Tool.Tool "large" (Tool.ToolHints False True True) (definition "example.tool.large" (\(_::Int) _->pure (Right (object ["text" .= T.replicate (4*1024*1024+1) "x"]))))
   large<-Tool.withTools [] [huge] $ \tools->Tool.callTool tools 0 "large" arguments
   check "oversized result fails without a truncated success" (isLeft large)

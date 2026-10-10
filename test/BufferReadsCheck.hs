@@ -54,7 +54,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
   withPermissionsAt path specs $ \runtime -> do
     let reader=bufferReader runtime (pure (Right ()))
         begin reader' d=beginRequest d $ do
-          let context=RequestServices (bufferReadServices reader' (activeWindow d >>= bufferId) (nextId d)) Nothing Nothing
+          let context=RequestServices (bufferReadServices reader' (activeWindow d >>= bufferId) (nextId d)) Nothing Nothing Nothing
           context `seq` pure (d,Tool.callTool toolset context "read_buffer" args)
         beginWindow d=beginRequest d $ do
           captured<-bufferRequestServices reader (bufferEditor runtime (pure (Right ())))

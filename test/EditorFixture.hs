@@ -2,13 +2,15 @@
 -- SPDX-License-Identifier: BSD-3-Clause
 -- | Scoped real host editor ownership for model checks. The registry, body and
 -- draft live for the callback; joint preparation/admission uses production APIs.
-module EditorFixture (withEditorFixture, withEditorTextFixture, withEditorBodyFixture, withAutocompleteFixture, sameBufferVersions, agentSettingsReply) where
+module EditorFixture (withEditorFixture, withEditorTextFixture, withEditorBodyFixture, withAutocompleteFixture, sameBufferVersions, agentSettingsReply, questionReply) where
 
 import Control.Monad (unless)
 import Data.Aeson (Value(Null), object)
-import Hide.Conversation (ConversationState,captureAgentSettings)
+import Hide.Conversation (ConversationState,captureAgentSettings,QuestionCaller,applyQuestion)
 import qualified Hide.AgentSettingsTools as AgentSettingsTools
 import qualified Hide.Plugin.Tool as Tool
+import Hide.Plugin.Command (codecDecode)
+import Hide.Plugin.Questions (questionInput)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromJust)
 import Data.Text (Text)
@@ -84,3 +86,11 @@ agentSettingsReply runtime desktop=do
   services<-captureAgentSettings runtime desktop
   pure (Tool.withTools [] AgentSettingsTools.tools $ \tools->
     Tool.callTool tools services "agent_settings" (object []))
+
+-- Layout checks use the typed host transition; permission checks invoke the
+-- plugin tool through its worker capability and real permission owner.
+questionReply :: ConversationState -> Maybe QuestionCaller -> Desktop -> Value
+  -> IO (Desktop,IO (Either Text Value))
+questionReply runtime caller desktop arguments=case codecDecode questionInput arguments of
+  Left err->pure (desktop,pure (Left err))
+  Right request->applyQuestion runtime caller desktop request

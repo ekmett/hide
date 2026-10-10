@@ -22,12 +22,12 @@ import qualified Data.Text as T
 import Hide.Plugin.Agent
 import Hide.Plugin.AgentServices
 import Hide.Plugin.Command
-import Hide.Plugin.Tool (Tool(..))
+import Hide.Plugin.Tool (Tool(..),ToolHints(..))
 
 -- | Explicit schemas, policy metadata and codecs for the existing workflow.
 -- No human-only configuration, steering or permission operation is registered.
 tools :: [Tool AgentServices]
-tools=[Tool name readonly (CommandDef ("hide.agents."<>T.drop 6 name) description
+tools=[Tool name (ToolHints readonly (not readonly) (not readonly)) (CommandDef ("hide.agents."<>T.drop 6 name) description
   (Codec (schema required properties) (decodeRequest name (map fst properties)) requestArguments)
   (Codec (object ["type" .= ("object"::Text)]) Right id)
   (\services request->fmap (either (Left . CommandRejected) Right) (perform services request)))

@@ -770,7 +770,8 @@ metadata before exposing the set. Strict object codecs validate input on the
 worker; object results are published as structured content and JSON text. The
 wire limits match MCP: 1 MiB of arguments and 4 MiB of result. Scope closure
 refuses retained calls, and unknown names never reach a fallback interpreter.
-Read-only hints configure default policy; they do not authorize execution.
+`ToolHints` declares read-only, destructive and open-world behavior independently.
+Read-only configures default policy; none of these hints authorizes execution.
 
 `Hide.AgentTools` in the linked `hide-agents` package registers the existing nine
 orchestration tools. Its only execution context is `AgentServices`, supplied by
@@ -826,6 +827,18 @@ changing focus cannot retarget it. Each invocation rechecks caller, policy,
 privacy and that body identity. Projection and bounded paging run on the worker,
 including the logical conversation catalogue. The plugin owns the declaration
 and `window-text` reply codec; no host body or source tree crosses the API.
+
+`Hide.QuestionTools` declares `ask_user` through
+`RequestServices.requestQuestions`. `Hide.Plugin.Questions` supplies checked
+create/poll requests; the host binds the authenticated primary actor and exact
+provider incarnation before dispatch. Its worker capability enters the same
+bounded permission queue as other editor requests. Creation returns an identified
+pending result after admission. Polling does not ask for another approval, but
+still respects Disable and checks the requester. Human input alone submits an
+answer; neither polling nor elapsed time exposes the draft or selects a choice.
+Cancellation and session retirement resolve pending admission without creating a
+question, and a replacement provider cannot inherit the previous caller's result.
+The host retains question state, presentation and answer delivery.
 
 `buffer_apply_diff` consumes the public `Hide.Plugin.BufferDiff` service through
 `RequestServices`. The checked `ApplyDiffArguments` contains 1–16 distinct

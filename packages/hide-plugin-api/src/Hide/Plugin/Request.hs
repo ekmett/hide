@@ -13,6 +13,7 @@ module Hide.Plugin.Request
   ( RequestServices(..)
   ) where
 
+import Hide.Plugin.Questions (QuestionServices)
 import Hide.Plugin.BufferDiff (BufferDiffServices)
 import Hide.Plugin.BufferRead (BufferReadServices)
 import Hide.Plugin.WindowRead (WindowReadServices)
@@ -27,8 +28,11 @@ import Hide.Plugin.WindowRead (WindowReadServices)
 -- target from a numeric ID/revision or inherit authority from a read operation.
 -- Prepared-window reads likewise require the exact host-captured body service;
 -- another request cannot use a numeric window ID to acquire or replace that body.
+-- Questions require an authenticated requesting actor and its provider incarnation;
+-- neither tool arguments nor a retained service can substitute another requester.
 data RequestServices = RequestServices
   { requestBuffers :: !BufferReadServices
   , requestDiff :: !(Maybe BufferDiffServices)
   , requestWindows :: !(Maybe WindowReadServices)
+  , requestQuestions :: !(Maybe QuestionServices)
   }

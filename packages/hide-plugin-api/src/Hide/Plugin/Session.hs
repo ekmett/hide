@@ -45,6 +45,7 @@ data Session c r settings completion = Session
 -- Request tools share editor visibility but receive self-admitting services.
 -- Each operation requests fresh permission through its host owner; exact diff
 -- and window-read capabilities are present only for their host-captured request.
+-- Question services require a host-authenticated actor/provider binding.
 -- Do not wrap these tools
 -- in a second permission call or supply general editor services before admission.
 data PluginTool

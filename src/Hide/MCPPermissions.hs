@@ -15,7 +15,7 @@
 -- checked saving rather than reformatting unrelated tables and comments.
 -- Project agent limits may tighten global ceilings but cannot raise them.
 module Hide.MCPPermissions
-  ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, AdmittedBuild, permissionBuildInputAs, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild, policyEffects, tickPermissions, awaitPermissionWork
+  ( Permissions, withPermissions, withPermissionsAt, permissionCall, permissionCallAs, requestPermission, AdmittedBuild, permissionBuildInputAs, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild, policyEffects, tickPermissions, awaitPermissionWork
   , ReadAdmission, permissionReadCall, bufferEditor, readReference, resolveReadReference, bufferReader, windowReader
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
@@ -86,8 +86,9 @@ data CaptureSubmission = CaptureSubmission BufferRef (IO (Either Text ())) (MVar
   | ListingSubmission (IO (Either Text ())) (MVar (Either Text [ListedBuffer])) (IORef Bool) (MVar ())
   | WindowCaptureSubmission Reads.WindowReadTarget (IO (Either Text ())) (MVar (Either Text Reads.CapturedWindowRead)) (IORef Bool) (MVar ())
 data DiffSubmission = DiffSubmission [BufferDiff] [Buffer] (IO (Either Text ())) (MVar (Either Text [DiffResult])) (IORef Bool) (MVar ()) (IORef (Maybe DiffAttempt))
-data BufferSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
-data BufferIngress = BufferIngress (STM.TBQueue BufferSubmission) (STM.TVar Bool)
+data RequestSubmission = ReadSubmission CaptureSubmission | EditSubmission DiffSubmission
+  | WireSubmission !Text !Value Tool (IO (Either Text ())) (MVar (IO (Either Text Value))) (IORef Bool) (MVar ())
+data RequestIngress = RequestIngress (STM.TBQueue RequestSubmission) (STM.TVar Bool)
 -- A request retains its policy phase while worker IO is pending. The queue is
 -- transport only: Waiting remains the one request/cancellation owner.
 type Policies = Either Text (M.Map Text Mode)
@@ -103,7 +104,7 @@ data PolicyOwner = PolicyOwner
   , policyWorker :: Async (), policyWake :: STM.TMVar (), policyEpoch :: IORef Int
   , settingsGeneration :: IORef Int, settingsJob :: IORef (Maybe SettingsJob) }
 data PermissionState = PermissionState { waiting :: [Waiting], nextTicket :: Int, displayed :: Maybe Text }
-data Permissions = Permissions FilePath (M.Map Text Bool) (IORef PermissionState) BufferNamespace (IORef [MVar ()]) BufferIngress PolicyOwner
+data Permissions = Permissions FilePath (M.Map Text Bool) (IORef PermissionState) BufferNamespace (IORef [MVar ()]) RequestIngress PolicyOwner
 
 permissionConfigPath :: IO FilePath
 permissionConfigPath=do
@@ -122,16 +123,16 @@ withPermissionsAt path specs=bracket acquire release
   where
     acquire=do
       owner<-newPolicyOwner path registry
-      Permissions path registry <$> newIORef (PermissionState [] 1 Nothing) <*> newBufferNamespace <*> newIORef [] <*> (BufferIngress <$> STM.newTBQueueIO 32 <*> STM.newTVarIO False) <*> pure owner
+      Permissions path registry <$> newIORef (PermissionState [] 1 Nothing) <*> newBufferNamespace <*> newIORef [] <*> (RequestIngress <$> STM.newTBQueueIO 32 <*> STM.newTVarIO False) <*> pure owner
     registry=M.fromList [(name,fromMaybe False (field "annotations" spec >>= field "readOnlyHint")) | spec<-specs,Just name<-[field "name" spec]]
-    release runtime@(Permissions _ _ ref _ retired (BufferIngress inbox closed) policy)=do
+    release runtime@(Permissions _ _ ref _ retired (RequestIngress inbox closed) policy)=do
       incoming<-STM.atomically $ do
         STM.writeTVar closed True
         STM.writeTVar (policyClosed policy) True
         queued<-STM.flushTBQueue (policyInbox policy)
         mapM_ (resolvePolicy (Left "Editor session closed before policy decision")) queued
         STM.flushTBQueue inbox
-      mapM_ (\submission->finishBufferSubmission runtime submission "Editor session closed before admission") incoming
+      mapM_ (\submission->finishRequestSubmission runtime submission "Editor session closed before admission") incoming
       requests<-waiting <$> readIORef ref
       mapM_ (\request->finish runtime request (Left "Editor session closed before approval")) requests
       cancel (policyWorker policy)
@@ -177,6 +178,33 @@ queueWirePermission caller runtime@(Permissions _ registry ref _ _ _ _) operatio
         shown<-tickPermissions runtime desktop
         pure (shown,(readMVar promise >>= id) `onException` finish runtime request (Left "MCP permission request cancelled"))
   where denied reason=pure (desktop,pure (Left reason))
+
+-- | Worker entry to the same bounded permission ingress and Waiting owner.
+-- The callback is private host code, executed only after policy/caller admission
+-- under the owner; its returned continuation runs on this worker. No plugin
+-- callback, Desktop or reusable approval crosses the public capability boundary.
+requestPermission :: IO (Either Text ()) -> Permissions -> Tool -> Text -> Value -> IO (Either Text Value)
+requestPermission caller (Permissions _ _ _ _ _ (RequestIngress inbox closed) owner) callback name args=mask $ \restore->do
+  promise<-newEmptyMVar
+  enabled<-newIORef True
+  claim<-newMVar ()
+  let submission=WireSubmission name args callback caller promise enabled claim
+  accepted<-STM.atomically $ do
+    stopped<-STM.readTVar closed
+    full<-STM.isFullTBQueue inbox
+    if stopped then pure (Left "Editor session closed before admission")
+    else if full then pure (Left "Too many requests are awaiting admission")
+    else STM.writeTBQueue inbox submission >> STM.tryPutTMVar (policyWake owner) () >> pure (Right ())
+  case accepted of
+    Left err->pure (Left err)
+    Right ()->restore (readMVar promise >>= id) `onException`
+      withMVar claim (\()->finishWireSubmissionOwned promise enabled "MCP permission request cancelled")
+
+finishWireSubmissionOwned :: MVar (IO (Either Text Value)) -> IORef Bool -> Text -> IO ()
+finishWireSubmissionOwned promise enabled reason=mask_ $ do
+  writeIORef enabled False
+  _<-tryPutMVar promise (pure (Left reason))
+  pure ()
 
 -- | Reserve the admitted input once for a newly captured build intent.
 reserveAdmittedBuild :: AdmittedBuild -> IO Bool
@@ -293,7 +321,7 @@ permissionReadCall runtime@(Permissions _ _ _ namespace _ _ _) callback desktop 
           (\receipt->callback receipt d tool parameters)
 
 sessionClosed :: Permissions -> IO Bool
-sessionClosed (Permissions _ _ _ _ _ (BufferIngress _ closed) _)=STM.readTVarIO closed
+sessionClosed (Permissions _ _ _ _ _ (RequestIngress _ closed) _)=STM.readTVarIO closed
 
 -- | Host-bound session reader. It requests fresh policy for every capture and
 -- grants no Human provenance or reusable approval. Linked handlers only enqueue
@@ -311,10 +339,10 @@ windowReader (Permissions _ _ _ _ _ ingress owner) caller target=
 
 -- The existing fixed capture operation owns acceptance and reply cancellation;
 -- the factory only binds one host submission to its new promise and claim.
-queueCapture :: BufferIngress -> PolicyOwner
+queueCapture :: RequestIngress -> PolicyOwner
   -> (MVar (Either Text a) -> IORef Bool -> MVar () -> CaptureSubmission)
   -> IO (Either Text a)
-queueCapture (BufferIngress inbox closed) owner submissionFor=mask $ \restore->do
+queueCapture (RequestIngress inbox closed) owner submissionFor=mask $ \restore->do
   promise<-newEmptyMVar
   enabled<-newIORef True
   claim<-newMVar ()
@@ -350,7 +378,7 @@ rejectCaptureOwned (WindowCaptureSubmission _ _ promise enabled _) err=finishCap
 -- | Host-only fixed actor binding. Public callers submit exact read versions;
 -- this transport grants neither Human authority nor reusable approval.
 bufferEditor :: Permissions -> IO (Either Text ()) -> BufferEditor
-bufferEditor (Permissions _ _ _ namespace retired (BufferIngress inbox closed) owner) caller=newBufferEditor namespace $ \patches->mask $ \restore->do
+bufferEditor (Permissions _ _ _ namespace retired (RequestIngress inbox closed) owner) caller=newBufferEditor namespace $ \patches->mask $ \restore->do
   let bounded=take 17 patches
       targets=[reference | BufferDiff reference _ _<-bounded]
       size=sum [toInteger (T.length patch) | BufferDiff _ _ patch<-bounded]
@@ -410,28 +438,32 @@ diffTargetsCurrent namespace targets desktop=and <$> mapM current targets
   where current (BufferDiff reference expected _)=maybe (pure False) (versionCurrent expected . documentBuffer)
           (referenceId namespace reference >>= (`M.lookup` buffers desktop))
 
-finishBufferSubmission :: Permissions -> BufferSubmission -> Text -> IO ()
-finishBufferSubmission _ (ReadSubmission submission) err=let (_,claim,_)=captureLifetime submission
+finishRequestSubmission :: Permissions -> RequestSubmission -> Text -> IO ()
+finishRequestSubmission _ (ReadSubmission submission) err=let (_,claim,_)=captureLifetime submission
   in withMVar claim (\()->rejectCaptureOwned submission err)
-finishBufferSubmission (Permissions _ _ _ _ retired _ _) (EditSubmission submission) err=finishDiffSubmission retired submission (Left err)
+finishRequestSubmission (Permissions _ _ _ _ retired _ _) (EditSubmission submission) err=finishDiffSubmission retired submission (Left err)
+finishRequestSubmission _ (WireSubmission _ _ _ _ promise enabled claim) err=
+  withMVar claim (\()->finishWireSubmissionOwned promise enabled err)
 
 -- Fixed bounded transport only; PermissionState still has one serialized owner.
 -- An interrupted extracted batch resolves every accepted reply before unwinding.
-drainBufferRequests :: Permissions -> Desktop -> IO Desktop
-drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress inbox _) _) desktop=mask_ $ do
+drainRequests :: Permissions -> Desktop -> IO Desktop
+drainRequests runtime@(Permissions _ _ state namespace _ (RequestIngress inbox _) _) desktop=mask_ $ do
   incoming<-STM.atomically (STM.flushTBQueue inbox)
   foldM admitSafely desktop incoming `onException`
-    mapM_ (\submission->finishBufferSubmission runtime submission "Buffer request owner interrupted") incoming
+    mapM_ (\submission->finishRequestSubmission runtime submission "Request owner interrupted") incoming
   where
     admitSafely current submission=admit current submission `catch` \(err::SomeException)->
       case fromException err :: Maybe SomeAsyncException of
         Just _->throwIO err
-        Nothing->finishBufferSubmission runtime submission "Buffer request admission failed" >> pure current
+        Nothing->finishRequestSubmission runtime submission "Request admission failed" >> pure current
     admit current submission=do
       let (enabled,claim,caller)=case submission of
             ReadSubmission capture->captureLifetime capture
             EditSubmission (DiffSubmission _ _ c _ e k _)->(e,k,c)
+            WireSubmission _ _ _ c _ e k->(e,k,c)
           target=case submission of
+            WireSubmission name args callback _ promise _ _->Right (name,args,WireOperation callback promise)
             ReadSubmission capture@ListingSubmission{}->Right ("list_buffers",object [],CaptureOperation capture)
             ReadSubmission capture@(CaptureSubmission reference _ _ _ _)->bufferTarget reference $ \ident->
               ("read_buffer",object ["bufferId" .= ident],CaptureOperation capture)
@@ -445,15 +477,16 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
       withMVar claim $ \()->do
         live<-readIORef enabled
         when live $ case target of
-          Left err->finishBufferSubmissionOwned submission err
+          Left err->finishRequestSubmissionOwned submission err
           Right (name,args,op)->do
             original<-readIORef state
             liveRequests<-filterMActive (waiting original)
-            if length liveRequests>=32 then finishBufferSubmissionOwned submission "Too many MCP requests are awaiting permission" else do
-              attempt<-case submission of ReadSubmission _->newIORef Nothing; EditSubmission (DiffSubmission _ _ _ _ _ _ a)->pure a
+            if length liveRequests>=32 then finishRequestSubmissionOwned submission "Too many MCP requests are awaiting permission" else do
+              attempt<-case submission of EditSubmission (DiffSubmission _ _ _ _ _ _ a)->pure a; _->newIORef Nothing
               stage<-newIORef (PolicyPending AdmitPolicy Nothing)
               captured<-case submission of
                 ReadSubmission _->pure (Right Nothing)
+                WireSubmission{}->pure (Right Nothing)
                 EditSubmission (DiffSubmission targets _ _ _ _ _ _)->do
                   matches<-diffTargetsCurrent namespace targets current
                   if not matches then pure (Left "Buffer identity or revision changed; read the buffer again") else
@@ -461,13 +494,14 @@ drainBufferRequests runtime@(Permissions _ _ state namespace _ (BufferIngress in
                       Left err->pure (Left err)
                       Right sources->Right . Just <$> mapM evaluate sources
               case captured of
-                Left err->finishBufferSubmissionOwned submission err
+                Left err->finishRequestSubmissionOwned submission err
                 Right source->do
                   let request=Waiting (nextTicket original) name args op enabled False caller attempt source claim stage
                   writeIORef state original {waiting=liveRequests++[request],nextTicket=nextTicket original+1}
         pure current
-    finishBufferSubmissionOwned (ReadSubmission submission) err=rejectCaptureOwned submission err
-    finishBufferSubmissionOwned (EditSubmission submission) err=finishDiffSubmissionOwned submission (Left err)
+    finishRequestSubmissionOwned (ReadSubmission submission) err=rejectCaptureOwned submission err
+    finishRequestSubmissionOwned (EditSubmission submission) err=finishDiffSubmissionOwned submission (Left err)
+    finishRequestSubmissionOwned (WireSubmission _ _ _ _ promise enabled _) err=finishWireSubmissionOwned promise enabled err
 
 -- Caller holds the same short request claim used by cancellation. Only known
 -- host capture/actor operations run here; no extension handler or reply wait.
@@ -602,7 +636,7 @@ drainDiffAttempts runtime@(Permissions _ _ ref _ retired _ _) initial=do
 -- | Display the oldest live approval and withdraw stale or cancelled prompts.
 tickPermissions :: Permissions -> Desktop -> IO Desktop
 tickPermissions runtime@(Permissions _ _ ref _ _ _ _) original=do
-  desktop<-drainSettings runtime original >>= drainBufferRequests runtime >>= drainDiffAttempts runtime >>= drainPolicies runtime
+  desktop<-drainSettings runtime original >>= drainRequests runtime >>= drainDiffAttempts runtime >>= drainPolicies runtime
   s<-readIORef ref
   live<-filterMActive (waiting s)
   let staleApproval=case dialog desktop of

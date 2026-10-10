@@ -2,7 +2,7 @@
 module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks) where
 import AllocationProfile (AllocationProfile, withinBudget)
 
-import EditorFixture (agentSettingsReply,withEditorFixture,withEditorBodyFixture,sameBufferVersions)
+import EditorFixture (questionReply,agentSettingsReply,withEditorFixture,withEditorBodyFixture,sameBufferVersions)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as Vec
 import Hide.TextPresentation (withTextPresentation,textPresentationEffects,tickTextPresentation,TextPresentation)
@@ -10,11 +10,15 @@ import qualified Hide.Conversation as Conversation
 import qualified Hide.Plugin.Menu as HideMenu
 import qualified Hide.Plugin.Editor as Editor
 import Hide.AgentSidebarTypes (DirectoryRequest(..))
-import MCPPermissionsCheck (settledTool,settleDialog)
+import MCPPermissionsCheck (settleDialog)
+import qualified Hide.Plugin.Tool as Tool
+import qualified Hide.QuestionTools as QuestionTools
+import qualified Hide.Plugin.Questions as Questions
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 
-import Control.Concurrent.Async (withAsync,wait)
+import Control.Concurrent.Async (withAsync,wait,cancel,poll)
+import qualified Control.Concurrent.STM as STM
 import Control.Exception (bracket, evaluate)
 import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson hiding (Number)
@@ -37,7 +41,7 @@ import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 #ifndef mingw32_HOST_OS
-import Control.Concurrent.Async (Async,poll)
+import Control.Concurrent.Async (Async)
 import Data.IORef (newIORef,writeIORef,readIORef)
 import System.IO (hFlush)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, isEmptyMVar, tryPutMVar)
@@ -488,7 +492,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           case caller of
             Left err->pure (desktop,pure (Left err))
             Right context->do
-              (asked,reply)<-chatToolAs runtime (Just context) desktop "ask_user" args
+              (asked,reply)<-questionReply runtime (Just context) desktop args
               shown<-case chatQuestion asked of
                 Just q | chatQuestion desktop==Nothing->await runtime "prepared question body" (\d->maybe False ((==questionToken q).questionToken.fst) (activeWindow d >>= windowQuestion d)) asked
                 _->pure asked
@@ -812,7 +816,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
-      (_,anonymous)<-chatTool runtime savedDraft "ask_user" (object ["question" .= ("Anonymous question"::T.Text)])
+      (_,anonymous)<-questionReply runtime Nothing savedDraft (object ["question" .= ("Anonymous question"::T.Text)])
       refused<-timeout 100000 anonymous
       check "anonymous ask_user cannot acquire a private answer" (case refused of Just (Left _)->True; _->False)
     C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
@@ -828,7 +832,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       created<-timeout 100000 answer
       ident<-case created of Just (Right value)->maybe (error "Missing immediate questionId") pure (field "questionId" value :: Maybe Int); _->error "ask_user did not return pending immediately"
       check "question creation is immediately pending" (case created of Just (Right value)->field "status" value==Just ("pending"::T.Text); _->False)
-      (_,anonymousPoll)<-chatTool runtime asked "ask_user" (object ["questionId" .= ident])
+      (_,anonymousPoll)<-questionReply runtime Nothing asked (object ["questionId" .= ident])
       check "anonymous callers cannot retrieve authenticated questions" . isLeft =<< anonymousPoll
       foreignCaller<-captureQuestionCaller runtime (AH.AgentId "unrelated-agent")
       check "another actor cannot acquire a private question caller receipt" (case foreignCaller of Left _->True; _->False)
@@ -911,38 +915,75 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           _->False)
       smallCancelled<-clickAction runtime "question-cancel" typedInput
       check "small-window custom input leaves Cancel reachable" (chatQuestion smallCancelled==Nothing)
-    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->Permissions.withPermissionsAt (root </> "question-permissions.toml") chatTools $ \permissions->do
-      preparedDraft<-send runtime "show" [] draftBase
-      let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
-      bound<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
-      let primary=AR.primaryAgent (conversationAgents runtime)
-          actor=fmap (() <$) (AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent primary) primary)
-          operation=chatToolAs runtime (Just bound)
-          call=settledTool permissions (Permissions.permissionCallAs actor permissions operation)
-          approve desktop=case dialog desktop of
-            Just dg->let (next,effects)=submitDialog 0 dg desktop in snd <$> Permissions.policyEffects permissions fallback next effects >>= settleDialog permissions dg
-            Nothing->error "Missing question permission review"
-      (review,creation)<-call savedDraft "ask_user" (object ["question" .= ("One permission per question"::T.Text)])
-      check "question creation retains ordinary permission approval" (dialog review/=Nothing && chatQuestion review==Nothing)
-      withAsync creation $ \request->do
-        admitted<-approve review
-        ident<-questionId (wait request)
-        (unchanged,pending)<-call admitted "ask_user" (object ["questionId" .= ident])
-        result<-timeout 100000 pending
-        check "owned pending retrieval does not create another human approval"
-          (dialog unchanged==Nothing && chatQuestion unchanged==chatQuestion admitted && case result of Just (Right value)->field "status" value==Just ("pending"::T.Text); _->False)
-        writeFile (root </> "question-permissions.toml") "[editor.mcp.permissions]\nask_user = 'disable'\n"
-        (_,disabled)<-call admitted "ask_user" (object ["questionId" .= ident])
-        check "Disable still refuses owned question retrieval" . isLeft =<< disabled
-        _<-send runtime "cancel" [] admitted
-        pure ()
-      writeFile (root </> "question-permissions.toml") ""
-      (revokedReview,revokedCreation)<-call savedDraft "ask_user" (object ["question" .= ("Revoked caller"::T.Text)])
-      _<-AH.endAgent (AR.agentHub (conversationAgents runtime)) AH.Human primary
-      withAsync revokedCreation $ \request->do
-        refused<-approve revokedReview
-        result<-wait request
-        check "deferred approval cannot resurrect an ended question requester" (chatQuestion refused==Nothing && isLeft result)
+    C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->
+      Tool.withTools [] QuestionTools.tools $ \tools->do
+        check "question metadata describes a local nondestructive state change"
+          (case Tool.toolDefinitions tools of
+            [definition]->field "annotations" definition==Just (object ["readOnlyHint" .= False,"destructiveHint" .= False,"openWorldHint" .= False])
+            _->False)
+        let path=root </> "question-permissions.toml"
+        retired<-Permissions.withPermissionsAt path (Tool.toolDefinitions tools) $ \permissions->do
+          preparedDraft<-send runtime "show" [] draftBase
+          let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
+          bound<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
+          let primary=AR.primaryAgent (conversationAgents runtime)
+              actor=fmap (() <$) (AH.statusAgent (AR.agentHub (conversationAgents runtime)) (AH.Agent primary) primary)
+              questionService=questionServices runtime bound permissions actor
+              service=Just questionService
+              call desktop arguments use=withAsync (Tool.callTool tools service "ask_user" arguments) $ \worker->do
+                let loop current=do
+                      result<-poll worker
+                      case result of
+                        Just _->pure current
+                        Nothing | Just dg<-dialog current, PermissionDialog action<-purpose dg, "approve:" `T.isPrefixOf` action->pure current
+                                | otherwise->threadDelay 1000 >> Permissions.tickPermissions permissions current >>= loop
+                shown<-timeout 3000000 (loop desktop) >>= maybe (error "Question permission dispatch did not settle") pure
+                use shown worker
+              approve desktop=case dialog desktop of
+                Just dg->let (next,effects)=submitDialog 0 dg desktop in snd <$> Permissions.policyEffects permissions fallback next effects >>= settleDialog permissions dg
+                Nothing->error "Missing question permission review"
+          check "public question tool requires the authenticated service" . isLeft =<<
+            Tool.callTool tools Nothing "ask_user" (object ["question" .= ("Anonymous"::T.Text)])
+          forM_ [Questions.CreateQuestion "" [],Questions.CreateQuestion (T.replicate 4097 "x") [],
+                 Questions.CreateQuestion "Choose" (replicate 13 "option")] $ \invalid->do
+            result<-timeout 3000000 (Questions.requestQuestion questionService invalid)
+            check "direct question service rejects invalid arguments without owner admission"
+              (case result of Just (Left _)->True; _->False)
+          -- This owner has received no work: its first wake belongs to this
+          -- queued request. Cancellation precedes the owner's first admission.
+          withAsync (Tool.callTool tools service "ask_user" (object ["question" .= ("Cancelled before admission"::T.Text)])) $ \request->do
+            timeout 3000000 (STM.atomically (Permissions.awaitPermissionWork permissions)) >>= maybe (error "Question did not reach its owner") pure
+            cancel request
+            refused<-Permissions.tickPermissions permissions savedDraft
+            check "cancelled ingress creates neither review nor question" (dialog refused==Nothing && chatQuestion refused==Nothing)
+          call savedDraft (object ["question" .= ("Cancelled before approval"::T.Text)]) $ \review request->do
+            cancel request
+            refused<-approve review
+            check "cancelled public question cannot be resurrected by approval" (chatQuestion refused==Nothing)
+          call savedDraft (object ["question" .= ("One permission per question"::T.Text)]) $ \review request->do
+            check "question creation retains ordinary permission approval" (dialog review/=Nothing && chatQuestion review==Nothing)
+            admitted<-approve review
+            ident<-questionId (wait request)
+            call admitted (object ["questionId" .= ident]) $ \unchanged pending->do
+              result<-wait pending
+              check "owned pending retrieval does not create another human approval"
+                (dialog unchanged==Nothing && chatQuestion unchanged==chatQuestion admitted && case result of Right value->field "status" value==Just ("pending"::T.Text); _->False)
+            writeFile path "[editor.mcp.permissions]\nask_user = 'disable'\n"
+            call admitted (object ["questionId" .= ident]) $ \_ disabled->
+              check "Disable still refuses owned question retrieval" . isLeft =<< wait disabled
+            _<-send runtime "cancel" [] admitted
+            pure ()
+          writeFile path ""
+          call savedDraft (object ["question" .= ("Revoked caller"::T.Text)]) $ \review request->do
+            _<-AH.endAgent (AR.agentHub (conversationAgents runtime)) AH.Human primary
+            refused<-approve review
+            result<-wait request
+            check "deferred approval cannot resurrect an ended question requester" (chatQuestion refused==Nothing && isLeft result)
+          pure service
+        closedReply<-timeout 3000000 (Tool.callTool tools retired "ask_user" (object ["question" .= ("After close"::T.Text)]))
+        check "closed permission owner rejects retained question services" (case closedReply of
+          Just (Left reason)->"closed" `T.isInfixOf` reason
+          _->False)
     (closedRuntime,closedId)<-C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->do
       preparedDraft<-send runtime "show" [] draftBase
       let savedDraft=draftAt (newBuffer "existing draft") (Selection 4 4) preparedDraft
@@ -1071,7 +1112,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       originalCaller<-captureQuestionCaller runtime (AR.primaryAgent (conversationAgents runtime)) >>= either (error . T.unpack) pure
       queued<-clickActionBeforeTick runtime False "question-submit" =<< clickAction runtime "question-choice" held
       replacement<-send runtime "new" [] queued >>= await runtime "replacement provider" ((=="Session fixture-session").status)
-      (_,oldCreation)<-chatToolAs runtime (Just originalCaller) replacement "ask_user" (object ["question" .= ("Old queued request"::T.Text)])
+      (_,oldCreation)<-questionReply runtime (Just originalCaller) replacement (object ["question" .= ("Old queued request"::T.Text)])
       check "old queued admission cannot bind to a replacement provider" . isLeft =<< oldCreation
       stale<-questionPoll runtime replacement oldId
       check "same session label on a new connection cannot retrieve an old answer"

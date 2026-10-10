@@ -12,7 +12,7 @@
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, withConversationAt, chatTools, chatToolNames, chatTool, QuestionCaller, captureQuestionCaller, chatToolAs, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, withConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
 import Hide.ConversationBody
@@ -33,7 +33,7 @@ import qualified Hide.Plugin.Menu as Plugin
 import Control.Concurrent.MVar (MVar, tryPutMVar, isEmptyMVar, newMVar, withMVar, modifyMVar_)
 import Control.Monad (foldM, filterM, forM, forM_, void, when, unless)
 import Data.Aeson
-import Data.Aeson.Types (parseMaybe, parseEither)
+import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
@@ -73,6 +73,8 @@ import Hide.Model hiding (prompt)
 import qualified Hide.Plugin.EditorHost as Editor
 import qualified Hide.Plugin.Command as Command
 import Hide.Plugin.Input (InputDeclaration)
+import qualified Hide.Plugin.Questions as Questions
+import Hide.MCPPermissions (Permissions,requestPermission)
 import Hide.Plugin.ConversationInput (PrimaryInputServices(..), ChildInputServices(..))
 import Hide.PluginWindowHost (installEditorDraft,applyEditorUpdate,adoptWindowUpdate)
 import qualified Hide.Plugin.Window as W
@@ -1443,26 +1445,6 @@ captureAgentSettings (ConversationState _ ref _ _) desktop=do
        "current" .= (if secret then "[hidden]" else settingCurrent option),
        "choices" .= [object ["value" .= value,"name" .= title] | (value,title)<-settingChoices option,not secret],"redacted" .= secret]
 
-chatToolNames :: [Text]
-chatToolNames=["ask_user"]
-
-chatTools :: [Value]
-chatTools=[object ["name" .= ("ask_user"::Text),"description" .= ("Create one inline human question and return questionId/status pending immediately. Continue independent work, then retrieve its status using questionId only. Answers require explicit human submission; pending replies never reveal the draft or selected choice. Only the authenticated requesting agent can retrieve results. No timeout supplies an answer or approval."::Text),
-  "inputSchema" .= object ["oneOf" .=
-    [object ["type" .= ("object"::Text),"required" .= ["question"::Text],"additionalProperties" .= False,
-      "properties" .= object ["question" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (4096::Int)],
-        "choices" .= object ["type" .= ("array"::Text),"maxItems" .= (12::Int),"items" .= object ["type" .= ("string"::Text),"minLength" .= (1::Int),"maxLength" .= (256::Int)]],
-        "allowMultiple" .= object ["type" .= ("boolean"::Text),"enum" .= [False]]]],
-     object ["type" .= ("object"::Text),"required" .= ["questionId"::Text],"additionalProperties" .= False,
-       "properties" .= object ["questionId" .= object ["type" .= ("integer"::Text),"minimum" .= (1::Int)]]]]],
-  "annotations" .= object ["readOnlyHint" .= False,"destructiveHint" .= False,"openWorldHint" .= False]]]
-
--- | Initiate a conversation tool under desktop serialization. Run the returned
--- reply continuation outside the desktop lock. Anonymous callers cannot create
--- or retrieve human questions; the host must supply authenticated attribution.
-chatTool :: ConversationState -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
-chatTool runtime=chatToolAs runtime Nothing
-
 -- | Capture authenticated primary attribution before queuing policy approval.
 -- The transport resolves bearer credentials first; this operation checks the
 -- owning actor and captures only the original provider incarnation metadata.
@@ -1481,12 +1463,29 @@ captureQuestionCaller (ConversationState _ ref _ agents) actor
           scope<-makeStableName =<< evaluate ref
           pure (Right (QuestionCaller scope actor receipt))
 
--- | Host-only authenticated caller binding. A question/result belongs to that
--- actor and runtime scope; the exact optional provider receipt also qualifies
--- polling/admission and answer delivery. This function never waits for a human.
-chatToolAs :: ConversationState -> Maybe QuestionCaller -> Desktop -> Text -> Value -> IO (Desktop,IO (Either Text Value))
-chatToolAs (ConversationState _ ref _ agents) caller d name args
-  | name/="ask_user"=pure (d,pure (Left "Unknown chat tool."))
+-- | Actor-bound worker capability. Fresh policy and the request claim use the
+-- existing permission owner; host admission checks the original question caller
+-- again. Neither this closure nor its public service retains a Desktop.
+questionServices :: ConversationState -> QuestionCaller -> Permissions
+  -> IO (Either Text ()) -> Questions.QuestionServices
+questionServices runtime caller permissions live=Questions.QuestionServices $ \request->
+  case Command.codecDecode Questions.questionInput (Command.codecEncode Questions.questionInput request) of
+    Left err->pure (Left (Command.InvalidArguments err))
+    Right checked->do
+      arguments<-evaluate (force (Command.codecEncode Questions.questionInput checked))
+      result<-requestPermission live permissions admit "ask_user" arguments
+      pure (either (Left . Command.CommandRejected) Right result)
+  where
+    admit desktop _ args=case Command.codecDecode Questions.questionInput args of
+      Left err->pure (desktop,pure (Left err))
+      Right request->applyQuestion runtime (Just caller) desktop request
+
+-- | The short host transition after policy admission. An identified request
+-- belongs to this actor/runtime/provider incarnation. Only human input can
+-- submit an answer; this operation never waits for one.
+applyQuestion :: ConversationState -> Maybe QuestionCaller -> Desktop -> Questions.QuestionRequest
+  -> IO (Desktop,IO (Either Text Value))
+applyQuestion (ConversationState _ ref _ agents) caller d request
   | Just (QuestionCaller scope actor originalReceipt)<-caller,actor==AR.primaryAgent agents=do
       live<-AH.statusAgent (AR.agentHub agents) (AH.Agent actor) actor
       s<-readIORef ref
@@ -1496,13 +1495,12 @@ chatToolAs (ConversationState _ ref _ agents) caller d name args
         Left err->pure (d,pure (Left err))
         Right _ | not (owner && same)->pure (d,pure (Left "Question requester session expired."))
         Right _ | questionsClosed s->pure (d,pure (Left "Editor session closed."))
-        Right _->case parseEither parse args of
-          Left err->pure (d,pure (Left (T.pack err)))
-          Right (Left ident)->do
+        Right _->case request of
+          Questions.ReadQuestion ident->do
             result<-questionStatus actor ident s
             pure (d,pure result)
-          Right (Right _) | isNothing (conversationPresenter s)->pure (d,pure (Left unavailableConversation))
-          Right (Right (question,choices))->case waitingQuestion s of
+          Questions.CreateQuestion{} | isNothing (conversationPresenter s)->pure (d,pure (Left unavailableConversation))
+          Questions.CreateQuestion question choices->case waitingQuestion s of
             Just _->pure (d,pure (Left "A question is already waiting for the user."))
             Nothing->do
               let token=nextApproval s
@@ -1513,22 +1511,6 @@ chatToolAs (ConversationState _ ref _ agents) caller d name args
               shown<-clearReplySelection <$> paint True next (selectConversationView "" "Primary" d) {chatQuestion=Just q,status="A question is waiting in Conversation."}
               pure (shown,pure (Right pending))
   | otherwise=pure (d,pure (Left "ask_user requires the authenticated requesting agent."))
-  where
-    parse=withObject "ask_user" $ \o->case KM.lookup "questionId" o of
-      Just _->do
-        unless (KM.keys o==["questionId"]) (fail "Retrieve a question with questionId only.")
-        ident<-o .: "questionId"
-        unless (ident>0) (fail "questionId must be positive.")
-        pure (Left ident)
-      Nothing->do
-        unless (all (`elem` ["question","choices","allowMultiple"]) (KM.keys o)) (fail "Unknown question argument.")
-        question<-o .: "question"
-        choices<-o .:? "choices" .!= []
-        multiple<-o .:? "allowMultiple" .!= False
-        when multiple (fail "Only single-choice questions are supported; custom text is always available.")
-        unless (not (T.null (T.strip question)) && T.length question<=4096 && not (T.any (\c->c<' ' && c `notElem` ['\n','\t']) question)) (fail "Question must contain 1..4096 characters.")
-        unless (length choices<=12 && all (\text->not (T.null (T.strip text)) && T.length text<=256 && not (T.any (\c->c<' ' || c=='\DEL') text)) choices) (fail "Supply at most 12 nonempty single-line choices of at most 256 characters.")
-        pure (Right (question,choices))
 
 questionStatus :: AH.AgentId -> Int -> State -> IO (Either Text Value)
 questionStatus actor ident s=case waitingQuestion s of
