@@ -29,7 +29,9 @@ import Hide.Files (FileState(..))
 import System.Posix.Files (createNamedPipe)
 import qualified System.Posix.IO.ByteString as PosixBytes
 import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock,cloexec)
+import System.Posix.Process (getProcessID)
 import System.IO.Error (tryIOError,isFullError)
+import System.Process (getPid,readProcessWithExitCode)
 #endif
 import Hide.Buffer
 import Hide.GuestAccess
@@ -122,7 +124,7 @@ delayedLocalSourceCheck=pure ()
 #else
 delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened","modal","modal-continue"]
   where
-    scenario action=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(port,path,_)->do
+    scenario action=bracket (Fixture.fixture "local-source") Fixture.cleanup $ \(port,path,peer)->do
       let rawSource=path<>".hs"
       removeFile rawSource
       createNamedPipe rawSource 0o600
@@ -139,18 +141,40 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
               pure (parseMaybe (withObject "status" (\o->o .: "frame" >>= withObject "frame" (.:"id"))) value==Just (11::Int))
             awaitFrame d=do next<-tick d; ready<-frameReady next; if ready then pure next else threadDelay 1000 >> awaitFrame next
             awaitPreparation expected d=do
-              observed<-newIORef ("not polled"::T.Text,""::T.Text)
+              observed<-newIORef ("not polled"::T.Text,""::T.Text,Null)
               let loop current=do
                     next<-tick current
                     (_,reply)<-debuggerTool runtime next "debug_status" (object [])
                     value<-reply >>= either (fail . T.unpack) pure
                     phase<-maybe (fail "Missing source preparation phase") pure
                       (parseMaybe (withObject "status" (.:"sourcePreparation")) value :: Maybe T.Text)
-                    writeIORef observed (phase,status next)
+                    let detail=maybe Null id (parseMaybe (withObject "status" (.:"sourcePreparationDetail")) value)
+                    writeIORef observed (phase,status next,detail)
                     if phase==expected then pure next else threadDelay 1000 >> loop next
               timeout 5000000 (loop d) >>= maybe (do
                 actual<-readIORef observed
-                fail ("Source preparation did not reach "++T.unpack expected++": "++show actual)) pure
+                -- Inspect this invocation's FIFO before debugger/peer teardown
+                -- removes the worker and descriptors that could explain missing EOF.
+                ownerPid<-getProcessID
+                peerPid<-getPid peer
+                let owners=show ownerPid++maybe "" ((","++).show) peerPid
+                    matching ownerRows descriptorRows
+                      | ("n"++source) `elem` descriptorRows=ownerRows++descriptorRows
+                      | otherwise=[]
+                    fifoRecords ownerRows descriptorRows []=matching ownerRows descriptorRows
+                    fifoRecords ownerRows descriptorRows (row:rest)
+                      | take 1 row=="p"=matching ownerRows descriptorRows++fifoRecords [row] [] rest
+                      | take 1 row=="c"=fifoRecords (ownerRows++[row]) descriptorRows rest
+                      | take 1 row=="f"=matching ownerRows descriptorRows++fifoRecords ownerRows [row] rest
+                      | otherwise=fifoRecords ownerRows (descriptorRows++[row]) rest
+                -- macOS can omit a FIFO from file-path selection; inspect the
+                -- owned processes and retain only this FIFO's descriptor records.
+                descriptors<-timeout 1000000 (tryIOError (readProcessWithExitCode "lsof" ["-nP","-p",owners,"-Fpcfatn"] ""))
+                let attribution=case descriptors of
+                      Nothing->"lsof diagnostic timed out"
+                      Just (Left err)->show err
+                      Just (Right (code,out,err))->show code++" "++T.unpack (T.take 8192 (T.pack (unlines (fifoRecords [] [] (lines out))++err)))
+                fail ("Source preparation did not reach "++T.unpack expected++" in "++T.unpack action++": "++show actual++"; FIFO descriptors for owned PIDs "++owners++" (omitted/inaccessible descriptors are inconclusive): "++attribution)) pure
             base=addDocument (Just (FileState (takeDirectory source </> "Foreground.hs") (Just "foreground")))
               (newBuffer "foreground") (initialDesktop (80,25))
         (_,attached)<-debuggerEffects runtime core base [DebugAction "connect" ["0","127.0.0.1",T.pack port]]

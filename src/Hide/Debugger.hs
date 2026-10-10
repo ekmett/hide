@@ -22,7 +22,7 @@ import qualified Hide.Plugin.Tree as P
 import Hide.DebuggerSidebarTypes
 import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
 import Control.Exception (IOException, SomeException, SomeAsyncException, fromException, throwIO, catch, bracket, try, evaluate, mask, mask_, finally)
-import Control.Concurrent.Async (Async, async, asyncWithUnmask, cancel, poll, race, waitCatch)
+import Control.Concurrent.Async (Async, async, asyncWithUnmask, asyncThreadId, cancel, poll, race, waitCatch)
 import Control.Concurrent.STM
 import qualified Hide.Downloads as Downloads
 import Hide.DownloadsWindowTypes
@@ -45,6 +45,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Vector as V
 import GHC.Clock (getMonotonicTimeNSec)
+import GHC.Conc (threadStatus)
 import System.Directory (XdgDirectory(XdgConfig), canonicalizePath, doesFileExist, getXdgDirectory, removeFile)
 import System.IO (openTempFile, hClose)
 import System.IO.Error (tryIOError)
@@ -241,7 +242,8 @@ data PreparedWatch = PreparedWatch !Text !Int !Bool !(Maybe FilePath) !Bool !(Ma
 data WatchProvider = forall context reply. WatchProvider (P.TreeProvider context reply)
 data WatchPreparation = WatchPreparation !WatchOperation !(Async PreparedWatch)
 data ReferenceOwner = FrameReferences !Int !Int | WatchReferences !Int !Int !WatchFrame deriving (Eq,Ord)
-data SourcePreparation = SourcePreparation !Int !Int !(Maybe (Int,Int)) !Bool !Value !(Maybe Int) !(Async (Either Text PreparedSource))
+-- Scalar milestones belong to this exact worker; status never inspects its Buffer.
+data SourcePreparation = SourcePreparation !Int !Int !(Maybe (Int,Int)) !Bool !Value !(Maybe Int) !(Maybe (IORef Text)) !(Async (Either Text PreparedSource))
 data PreparedSource = AdapterSource !(Maybe FilePath) !Buffer !Int | LocalSource !Bool !FilePath !LocalSourceTarget !Int
 data LocalSourceTarget = ExistingSource !Int !Int !ContentVersion !Bool | NewSource !FileState !Buffer
 data CapturedLocalSource = CapturedLocalSource !FilePath !Int !Int !ContentVersion !BufferContent !DirtySnapshot
@@ -912,13 +914,17 @@ debuggerStatus :: State -> IO Value
 debuggerStatus s=do
   -- Observe completion without joining or forcing the prepared Buffer. A ready
   -- result stays owned by the next UI tick, which may defer it behind a modal.
-  preparation<-case sourcePreparing s of
-    Nothing->pure ("idle"::Text)
-    Just (SourcePreparation _ _ _ _ _ _ worker)->do
+  (preparation,detail)<-case sourcePreparing s of
+    Nothing->pure ("idle"::Text,Null)
+    Just (SourcePreparation _ _ _ _ _ _ stage worker)->do
       result<-poll worker
-      pure (if isJust result then "ready" else "preparing")
+      phase<-maybe (pure "adapter-source") readIORef stage
+      let ident=asyncThreadId worker
+      activity<-threadStatus ident
+      pure (if isJust result then "ready" else "preparing",object
+        ["stage" .= phase,"worker" .= show ident,"threadStatus" .= show activity])
   pure $ object
-   ["sourcePreparation" .= preparation,"generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
+   ["sourcePreparation" .= preparation,"sourcePreparationDetail" .= detail,"generation" .= generation s,"active" .= (isJust (client s) && endedAt s==Nothing),"terminated" .= isJust (endedAt s),
    "finishing" .= (isJust (client s) && isJust (endedAt s)),"exitCode" .= programExitCode s,"connected" .= connected s,
    "ready" .= ready s,"configured" .= configured s,"stopped" .= stopped s,"follow" .= followSource s,
    "threadId" .= thread s,"frame" .= frame s,"source" .= (frame s >>= (field "source" :: Value -> Maybe Value)),
@@ -1190,7 +1196,7 @@ stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) s = 
         cancel worker
         completed<-atomically (tryTakeTMVar result)
         forM_ completed (mapM_ C.closePreparedConsole)
-      forM_ (sourcePreparing s) $ \(SourcePreparation _ _ _ _ _ _ worker)->cancel worker
+      forM_ (sourcePreparing s) $ \(SourcePreparation _ _ _ _ _ _ _ worker)->cancel worker
       forM_ (watchPreparing s) $ \(WatchPreparation _ worker)->cancel worker
       mapM_ (either (const (pure ())) id) cleanups
     modifyIORef' retired (task:)
@@ -1603,7 +1609,7 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
                     _<-evaluate (prepareBuffer prepared)
                     _<-evaluate offset
                     pure (Right (AdapterSource canonical prepared offset))
-              modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) revision (Just (reference,stamp)) explicit selected Nothing worker)})
+              modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) revision (Just (reference,stamp)) explicit selected Nothing Nothing worker)})
               pure d
           _->pure d {status="DAP source response is unavailable or expired."}
       where reference=integer "sourceReference" (fromMaybe Null (field "source" selected))
@@ -1670,8 +1676,9 @@ openFrame runtime@(Debugger ref _ _ _ _) explicit private d selected = do
           Just (CapturedLocalSource _ wid _ _ _ _)->Just wid
           Nothing->windowId <$> activeWindow d
     mask_ $ do
-      worker<-asyncWithUnmask (\unmask->unmask (prepareLocalSource (root s) path selected private captured))
-      modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) (frameRevision s) Nothing explicit selected owner worker)})
+      stage<-newIORef "starting"
+      worker<-asyncWithUnmask (\unmask->unmask (prepareLocalSource stage (root s) path selected private captured))
+      modifyIORef' ref (\state->state {sourcePreparing=Just (SourcePreparation (generation s) (frameRevision s) Nothing explicit selected owner (Just stage) worker)})
       pure d
   where
     capture (window,doc,file)=do
@@ -1682,23 +1689,29 @@ openFrame runtime@(Debugger ref _ _ _ _) explicit private d selected = do
 
 -- The existing source worker owns canonical paths, disk decoding, dirty-state
 -- evaluation and measured UTF-16 positioning. An open source needs no disk read.
-prepareLocalSource :: FilePath -> Text -> Value -> Maybe [FilePath] -> [CapturedLocalSource] -> IO (Either Text PreparedSource)
-prepareLocalSource base path selected private captured
+prepareLocalSource :: IORef Text -> FilePath -> Text -> Value -> Maybe [FilePath] -> [CapturedLocalSource] -> IO (Either Text PreparedSource)
+prepareLocalSource stage base path selected private captured
   | T.compareLength path 4096==GT || T.any (=='\0') path=pure (Left "Invalid debugger source path.")
   | Just opened<-find (\(CapturedLocalSource file _ _ _ _ _)->file==local) captured=existing local opened
   | otherwise=do
+      writeIORef stage "resolving-path"
       resolved<-canonicalSourcePath base (Just (T.unpack path))
       case resolved of
         Right (Just canonical) | denied canonical->pure (Left "Debugger source is private.")
         Right (Just canonical) -> case find (\(CapturedLocalSource file _ _ _ _ _)->file==canonical) captured of
           Just opened->existing canonical opened
           Nothing->do
+            writeIORef stage "checking-file"
             exists<-doesFileExist canonical
             if not exists then pure (Left "Debugger source file is unavailable.") else do
+              writeIORef stage "reading-file"
               result<-loadFile canonical
+              writeIORef stage "file-loaded"
               case result of
                 Right (file,buffer) | isJust (diskBytes file)->do
+                  writeIORef stage "measuring-buffer"
                   _<-evaluate (prepareBuffer buffer)
+                  writeIORef stage "buffer-measured"
                   prepare (filePath file) (NewSource file buffer) (bufferContent buffer)
                 _->pure (Left "Debugger source file is unavailable.")
         _->pure (Left "Debugger source file is unavailable.")
@@ -1708,13 +1721,16 @@ prepareLocalSource base path selected private captured
     existing canonical (CapturedLocalSource _ wid bid version image modified)
       | denied canonical=pure (Left "Debugger source is private.")
       | otherwise=do
+          writeIORef stage "checking-dirty-buffer"
           changed<-evaluate (snapshotDirty modified)
           prepare canonical (ExistingSource wid bid version changed) image
     prepare canonical target image=do
+      writeIORef stage "measuring-position"
       let row=max 0 (min (contentLineCount image-1) (integer "line" selected-1))
           offset | integer "line" selected<=0 = -1
                  | otherwise=contentLineOffset image row+L.positionOffset (contentLineAt image row) (0,max 0 (integer "column" selected-1))
       _<-evaluate offset
+      writeIORef stage "prepared"
       pure (Right (LocalSource (isJust private) canonical target offset))
 
 -- Only this owner adopts a prepared source. Cancellation/join is retired outside
@@ -1723,7 +1739,7 @@ retireSourcePreparation :: Debugger -> IO ()
 retireSourcePreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _)=mask_ $ do
   current<-readIORef ref
   modifyIORef' ref (\state->state {sourcePreparing=Nothing})
-  forM_ (sourcePreparing current) $ \(SourcePreparation _ _ _ _ _ _ worker)->do
+  forM_ (sourcePreparing current) $ \(SourcePreparation _ _ _ _ _ _ _ worker)->do
     cleanup<-asyncWithUnmask (\unmask->unmask (cancel worker))
     modifyIORef' retired (cleanup:)
 
@@ -1732,7 +1748,7 @@ tickSourcePreparation runtime@(Debugger ref _ _ _ _) d=do
   s<-readIORef ref
   case sourcePreparing s of
     Nothing->pure d
-    Just (SourcePreparation epoch selectedRevision observation explicit selected owner worker)
+    Just (SourcePreparation epoch selectedRevision observation explicit selected owner _ worker)
       | epoch/=generation s || selectedRevision/=frameRevision s || not (stopped s && maybe True (uncurry (sourceStampCurrent s)) observation)
         || not (isJust (client s)) || endedAt s/=Nothing || disconnectAt s/=Nothing || not explicit && not (followSource s)->
           retireSourcePreparation runtime >> pure d
