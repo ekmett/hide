@@ -5,7 +5,7 @@ and capturing the image-viewer documentation. It contains no text, so the
 photograph's texture and sky gradients exercise a different path from the text
 grid around it.
 
-Generated with the built-in image tool. Prompt:
+Generated with the OpenAI built-in image tool. Prompt:
 
 > Create a landscape PNG sample for testing an image viewer. A vivid natural
 > photograph of a rocky alpine lake with turquoise water, pine trees, distant
