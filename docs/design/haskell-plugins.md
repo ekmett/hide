@@ -1145,8 +1145,13 @@ runs in the existing control worker; context preparation keeps its own worker
 slot. A command cannot occupy the preparation slot while waiting for that slot
 to finish the same request.
 
-Provider startup, context capture and redaction remain host operations. Their
-control receipt survives the original connection startup. Once connected, an
+Provider startup, context capture and redaction remain host operations. Startup
+runs in the existing preparation worker: it resolves the directory, acquires the
+ACP process and sends `initialize`; a tick then adopts the completed client.
+Cancel or replacement detaches that owner immediately. Its retirement worker
+disposes a client that finished before cancellation but was never adopted, so
+neither acquisition nor that cleanup blocks interaction. The control receipt
+survives the original connection startup. Once connected, an
 invocation also keeps the captured model/configuration receipt; cancellation or
 replacement invalidates it. The plugin returns its prepared draft update
 through ordinary control adoption; later typing and hidden drafts retain the

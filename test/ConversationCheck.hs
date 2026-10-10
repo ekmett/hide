@@ -956,6 +956,31 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     (secondFile,secondBuffer)<-loadFile secondSource >>= either error pure
     (file,b)<-loadFile source >>= either error pure
     let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (emptySidebar root 20 False)})
+    -- Provider acquisition completes independently of UI ticks. Holding adoption
+    -- gives Cancel a deterministic completed-but-unowned client to retire.
+    forM_ [False,True] $ \cancelled->C.withConsoles $ \consoles->withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime->do
+      configured<-configure runtime ("yes"::T.Text) desktop
+      before<-length <$> logged
+      started<-send runtime "new" [] configured
+      let waitInitialize=do
+            entries<-drop before <$> logged
+            if any ((==Just ("initialize"::T.Text)).field "method") entries then pure ()
+              else threadDelay 1000 >> waitInitialize
+      timeout 8000000 waitInitialize >>= maybe (error "ACP startup did not send initialize independently of the UI") pure
+      (_,pendingReply)<-chatTool runtime started "agent_settings" (object [])
+      pendingSettings<-pendingReply >>= either (error . T.unpack) pure
+      check "ACP client acquisition waits for UI adoption without running on the UI thread"
+        (field "connected" pendingSettings==Just False && field "replying" pendingSettings==Just True)
+      ready<-if cancelled then send runtime "cancel" [] started >>= done runtime else done runtime started
+      (_,readyReply)<-chatTool runtime ready "agent_settings" (object [])
+      readySettings<-readyReply >>= either (error . T.unpack) pure
+      check "Cancel prevents adoption of a completed startup client"
+        (field "connected" readySettings==Just (not cancelled))
+      _<-prompt runtime "stream" ready >>= done runtime
+      entries<-drop before <$> logged
+      let count method=length (filter ((==Just (method::T.Text)).field "method") entries)
+      check "replacement startup never reuses the cancelled provider"
+        (count "initialize"==(if cancelled then 2 else 1) && count "session/new"==1 && count "session/prompt"==1)
     -- Services belong to the editor session, not its mounted ACP provider.
     -- Use the same real peer/approval route as the terminal checks below.
     when (terminalAvailable && os/="mingw32") $ withSessionServices $ \services->do
@@ -1634,11 +1659,17 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     afterRecovery<-logged
     check "recovery never starts a provider or sends a prompt automatically" (afterRecovery==beforeRecovery)
     forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
-      unrelated<-send runtime "load" ["0","unrelated-session-id"] desktop
+      unrelated<-send runtime "load" ["0","unrelated-session-id"] desktop >>= done runtime
       check "an unrelated resume ID does not select another saved provider"
         (maybe False ((=="Cannot start agent").dialogTitle) (dialog unrelated))
-      loaded<-send runtime "load" ["0",providerId] desktop >>= await runtime "saved provider and project" ((==("Session "<>providerId)).status)
+      shown<-send runtime "show" [] desktop
+      before<-length <$> logged
+      loading<-send runtime "load" ["0",providerId] shown
+      submitted<-submit runtime QuerySubmit (draftAt (newBuffer "stream") (Selection 6 6) loading)
+      loaded<-done runtime submitted
       entries<-logged
+      check "a query submitted during saved-provider startup binds to the selected provider"
+        (bufferLength (composerBuffer loaded)==0 && any ((==Just ("session/prompt"::T.Text)).field "method") (drop before entries))
       let loads=[params | entry<-entries,field "method" entry==Just ("session/load"::T.Text),Just params<-[field "params" entry::Maybe Value]]
       check "explicit resume selects saved provider and working directory"
         (field "cwd" (last loads)==Just providerRoot)

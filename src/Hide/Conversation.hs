@@ -2,7 +2,7 @@
 -- | Primary ACP ownership and captured plugin transcript sources.
 --
 -- The session tick consumes protocol and hub mailbox events. Owned workers prepare
--- prompt context, file captures and consoles before adoption; capture itself does
+-- provider acquisition, prompt context, file captures and consoles before adoption; capture itself does
 -- not authorize an action. Prepared results must still match source identity and
 -- privacy policy. Child cancellation/configuration/steering completes through ticks.
 --
@@ -96,8 +96,18 @@ conversationEditorMount (PrimaryEditor editor)=Editor.editorMount editor
 conversationEditorMount (ChildEditor editor)=Editor.editorMount editor
 
 data AgentControlResult = AgentControlAccepted | ConversationInputAccepted !Editor.EditorUpdate
-data PromptPreparation = ContextPrompt !Bool !Text !(Maybe AR.PrimaryControl) !(Async (Either Text ([Value],Value)))
+data PromptPreparation
+  = StartingClient !(Maybe Text) !(Async (FilePath,A.Client,Int))
+  | ContextPrompt !Bool !Text !(Maybe AR.PrimaryControl) !(Async (Either Text ([Value],Value)))
 preparationCancel :: PromptPreparation -> IO ()
+preparationCancel (StartingClient _ worker)=do
+  cancel worker
+  -- Cancellation can lose to successful acquisition. Until a tick adopts the
+  -- result this owner must dispose it, including during session shutdown.
+  completed<-poll worker
+  case completed of
+    Just (Right (_,client,_))->A.stopClient client
+    _->pure ()
 preparationCancel (ContextPrompt _ _ _ worker)=cancel worker
 
 
@@ -500,27 +510,32 @@ primaryBusy :: State -> Bool
 primaryBusy s=busy s || M.member "" (agentControls s)
 
 start :: ConversationState -> Maybe Text -> Desktop -> IO Desktop
-start (ConversationState _ ref _ _) resume d = do
+start (ConversationState _ ref _ _) resume d = mask_ $ do
   s<-readIORef ref
   if isNothing (conversationPresenter s) || isNothing (primaryInput s) then pure d {status=unavailableConversation}
   else do
-    let (launch,directory)=case (resume,lastSession s) of
+    let (selectedLaunch,selectedDirectory)=case (resume,lastSession s) of
           (Just wanted,Just (savedProvider,savedDirectory,savedId)) | wanted==savedId -> (savedProvider,savedDirectory)
           _ -> (provider s,maybe (startingDirectory d) treeRoot (sideTree d))
-    result<-try $ do
-      root<-canonicalizePath directory
+    -- Project the captured fields before the worker escapes; it needs neither
+    -- the source Desktop nor the rest of the conversation state.
+    launch<-evaluate selectedLaunch
+    directory<-evaluate selectedDirectory
+    -- Inherit the mask through Async result publication: a successfully acquired
+    -- client belongs either to the result or to its exception cleanup. Only the
+    -- directory lookup is unmasked before a client exists. ACP owns cancellation
+    -- safety within process acquisition; request failure closes the acquired peer.
+    worker<-asyncWithUnmask $ \unmask->do
+      root<-unmask (canonicalizePath directory)
       client<-A.startClient launch root
-      ident<-A.request client "initialize" (object ["protocolVersion" .= (1::Int),"clientInfo" .= object ["name" .= ("hide"::Text),"version" .= ("0.1.0.0"::Text)],
-        "clientCapabilities" .= object ["fs" .= object ["readTextFile" .= True,"writeTextFile" .= True],"terminal" .= Terminal.terminalAvailable]]) `onException` A.stopClient client
-      pure (root,client,ident)
-    case result of
-      Left (err::IOException) -> do
-        mapM_ (AR.rejectPrimaryControl "Could not start the primary provider.") (snd =<< queuedPrompt s)
-        writeIORef ref s {queuedPrompt=Nothing}
-        pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
-      Right (root,client,ident) -> do
-        writeIORef ref s {provider=launch,connection=Just client,project=root,deliveredContext=Nothing,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,lastAgentSync=Nothing,pending=M.singleton ident (Initializing resume)}
-        pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
+      (do
+        ident<-A.request client "initialize" (object ["protocolVersion" .= (1::Int),"clientInfo" .= object ["name" .= ("hide"::Text),"version" .= ("0.1.0.0"::Text)],
+          "clientCapabilities" .= object ["fs" .= object ["readTextFile" .= True,"writeTextFile" .= True],"terminal" .= Terminal.terminalAvailable]])
+        pure (root,client,ident)) `onException` A.stopClient client
+    -- Input captured while a saved provider starts belongs to that selected
+    -- launch, not the previously configured provider.
+    writeIORef ref s {provider=launch,promptPreparation=Just (StartingClient resume worker)}
+    pure d {status="Connecting to ACP provider...",agentSteering=False,agentReplying=True,agentContextUsage=Nothing,agentSettings=[]}
 
 restorePrimaryDraft :: Text -> Desktop -> Desktop
 restorePrimaryDraft text d=case M.lookup "" (conversationViews d) of
@@ -559,6 +574,22 @@ pollPromptPreparation runtime@(ConversationState _ ref _ _) d = do
   s<-readIORef ref
   case promptPreparation s of
     Nothing -> if isNothing (queuedPrompt s) then pollQueuedPrimaryEditor runtime s d else sendQueued runtime d
+    Just (StartingClient resume worker)->do
+      result<-poll worker
+      case result of
+        Nothing->pure d
+        Just outcome->mask_ $ case outcome of
+          Left err->do
+            mapM_ (AR.rejectPrimaryControl "Could not start the primary provider.") (snd =<< queuedPrompt s)
+            writeIORef ref s {promptPreparation=Nothing,queuedPrompt=Nothing}
+            pure (message "Cannot start agent" (wrapMessage (T.pack (show err))) d)
+          Right (root,client,ident)->do
+            -- Transfer ownership in one state update. Retirement no longer owns
+            -- this completed result once the connection becomes current.
+            writeIORef ref s {connection=Just client,project=root,promptPreparation=Nothing,
+              deliveredContext=Nothing,agentInitialized=Null,agentConfig=Null,streamTails=M.empty,promptReply=Nothing,
+              lastAgentSync=Nothing,pending=M.singleton ident (Initializing resume)}
+            pure d
     Just (ContextPrompt steering text control worker) -> do
       result<-poll worker
       case result of
@@ -1713,7 +1744,12 @@ refreshChildConversation (ConversationState _ ref _ agents) d=do
       cancellation=[either (const "Child cancellation failed.") (either id (const "Child reply cancelled.")) result | (target,Just result)<-completed,target==conversationTarget d]
       original=case cancellation of text:_->controlled {status=text}; _->controlled
   modifyIORef' ref (\s->s {childCancels=foldr M.delete (childCancels s) finished})
-  if T.null (conversationTarget original) then pure original else do
+  if T.null (conversationTarget original) then do
+    -- Controls can complete after the tick's initial projection. Publish their
+    -- settled state together with draft adoption, not one UI tick afterward.
+    current<-readIORef ref
+    pure original {agentReplying=primaryBusy current,agentQueued=queryCount "" (queuedQueries current)}
+  else do
     let target=conversationTarget original
         hub=AR.agentHub agents
     selected<-AH.statusAgent hub AH.Human (AH.AgentId target)
@@ -1899,6 +1935,7 @@ showConversationFrame target desktop=case M.lookup target (conversationViews des
     in selectConversationView target (maybe target conversationName (M.lookup target (conversationViews opened))) opened
 
 preparingSteer :: PromptPreparation -> Bool
+preparingSteer StartingClient{}=False
 preparingSteer (ContextPrompt steering _ _ _)=steering
 
 captureEditorContext :: ConversationState -> Text -> IO (Either Text ChatEditorContext)
