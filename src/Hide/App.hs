@@ -40,6 +40,8 @@ import Hide.PluginWindowHost (tickPluginWindows,retireClosedWindow)
 import Hide.MenuCommands
 import Hide.Keybindings
 import Hide.Commands (configuredBindings, contributedBindingCommands)
+import Hide.SystemOne (withSystemOne,selectDecisionProvider,systemOneServices)
+import Hide.SystemOneConfig (loadSystemOneProvider)
 import Hide.MCPPermissions
 import Hide.ClipboardMCP
 import Hide.Links (followLink)
@@ -327,115 +329,118 @@ runEditor plugins args = do
           let specs=builtinTools++debugTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++[screenTool]
           let names definitions=[name | spec<-definitions,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]]
               declarations=concatMap Plugin.pluginTools plugins
-          PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
-            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.RequestTool tool<-declarations] $ \requestToolset ->
-            PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt agentProvider presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarConversationOperation PluginMenu.cancelConversationAction sidebarSelectedAgent) $ do
-            contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
-            let agentTools=PluginTool.toolDefinitions agentToolset
-                editorSpecs=specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset
-                liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
-            keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
-            let liveDesktop=liveBase {keyBindings=keymap}
-            withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> withTextPresentation $ \textPresentation -> do
-              exiting<-newIORef False
-              let runtimeEffects=textPresentationEffects textPresentation $ sidebarEffects sidebarHost (packageBuildEffects packageSidebar (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (sessionEffects services (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))))))
-                  core d pending=foldM step (False,d) pending
-                    where
-                      step result@(True,_) _=pure result
-                      step (_,current) (SetScreenMode mode)=pure (False,(resizeScreenMode (modeSize mode) current) {videoMode=Just mode})
-                      step (_,current) effect=do
-                        result@(quit,_)<-runtimeEffects current [effect]
-                        when quit (writeIORef exiting True)
-                        pure result
-                  guestCore d pending=validateGuestEffects d pending >> core d pending
-                  effects d pending=do
-                    writeIORef exiting False
-                    (quit,updated)<-policyEffects permissions core d pending
-                    approvedExit<-readIORef exiting
-                    pure (quit || approvedExit,updated)
-                  prepareBodies desktop=do
-                    requests<-conversationBodyRequests conversation desktop
-                    (prepared,completed)<-tickTextPresentation textPresentation requests desktop
-                    adoptConversationBodies conversation completed prepared
-                  tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
-                  inspectTool d name parameters
-                    | PluginTool.hasTool editorToolset name = do
-                        context<-captureDocsContext d
-                        directory<-evaluate (startingDirectory d)
-                        settings<-captureAgentSettings conversation d
-                        pure (d,PluginTool.callTool editorToolset
-                          (PluginServices.EditorServices (docsServices docsCommands context)
-                            (environmentServices environmentCommands directory) settings) name parameters)
-                    | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
-                    | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
-                    | name `elem` workspaceToolNames = workspaceTool guestCore d name parameters
-                    | name `elem` fileToolNames = fileTool guestCore d name parameters
-                    | name `elem` testsToolNames = testsTool services d name parameters
-                    | name `elem` historyToolNames = historyTool d name parameters
-                    | name `elem` runtimeToolNames = runtimeTool services d name parameters
-                    | name `elem` gitToolNames = gitTool gitOperations d name parameters
-                    | name=="clipboard_write" = clipboardTool d parameters
-                    | name `elem` controlToolNames = controlTool guestCore d name parameters
-                    | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
-                        Left err -> pure (Left (T.pack err))
-                        Right image -> capture font d image)
-                    | otherwise = debuggerTool debugger d name parameters
-                  inspect d token request=do
-                    writeIORef exiting False
-                    let agents=conversationAgents conversation
-                        hub=AR.agentHub agents
-                        reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
-                    let permitted questionBinding callback current name parameters
-                          | PluginTool.hasTool requestToolset name = do
-                              context<-bufferRequestServices (bufferReader permissions currentCaller)
-                                (bufferEditor permissions currentCaller) (windowReader permissions currentCaller) current name parameters
-                              terminals<-terminalServices permissions (sessionConsoles services) currentCaller (Build.buildStartDirectory current)
-                              pure (current,either (pure . Left)
-                                (\services'->PluginTool.callTool requestToolset
-                                  services' {PluginRequest.requestQuestions=fmap (\bound->questionServices conversation bound permissions currentCaller) questionBinding,
-                                    PluginRequest.requestTerminals=Just terminals}
-                                  name parameters) context)
-                          | name=="editor_input" = permissionBuildInputAs currentCaller permissions
-                              (\admission admittedDesktop admittedTool admittedArgs->withBuildAdmission services admission (controlTool guestCore admittedDesktop admittedTool admittedArgs)) current name parameters
-                          | otherwise = permissionCallAs currentCaller permissions callback current name parameters
-                        currentCaller=case token of
-                          Nothing->pure (Right ())
-                          Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
-                    response<-case token of
-                      Nothing -> editorResponseWith editorSpecs (permitted Nothing inspectTool) d request
-                      Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly (autocompleteTools autocomplete) (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
-                      Just secret -> do
-                        bound<-resolveAgentAccess (AR.agentAccess agents) secret
-                        case bound of
-                          Nothing -> reject
-                          Just ident -> do
-                            active<-AH.statusAgent hub (AH.Agent ident) ident
-                            case active >>= maybe (Left "Unknown workspace.") Right . parseMaybe (withObject "agent" (.: "cwd")) of
-                              Left _ -> reject
-                              Right root -> do
-                                questionCaller<-captureQuestionCaller conversation ident
-                                let dispatch current name parameters
-                                      | PluginTool.hasTool agentToolset name = pure (current,PluginTool.callTool agentToolset (agentServices hub (AH.Agent ident) root) name parameters)
-                                      | otherwise = inspectTool current name parameters
-                                    -- Worktree agents reach this endpoint only for
-                                    -- coordination. Their editor tools use their own session.
-                                    visible=if ident==AR.primaryAgent agents then editorSpecs++agentTools else agentTools
-                                editorResponseOnly visible (permitted (either (const Nothing) Just questionCaller) dispatch) d request
-                    let (updated,finish)=response
-                    quit<-readIORef exiting
-                    pure (quit,updated,finish)
-              case daemon of
-                Just sid -> do
-                  let startOwned=do
-                        -- Recovery eligibility can change after the relay spawns
-                        -- us. This callback runs under the daemon lifetime lock.
-                        when (RequireCheckpoint `elem` flags) $ do
-                          present<-checkpointPath sid >>= doesFileExist
-                          unless present (ioError (userError "Saved session was deleted before recovery started."))
-                        AR.activateAgentCheckpoint (conversationAgents conversation)
-                  runRemoteDaemonWithStartup startOwned (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
-                Nothing -> die "Missing session process identity."
-
+          systemOneJSON<-readSystemOne >>= either (die . T.unpack) pure
+          systemOneProvider<-loadSystemOneProvider systemOneJSON >>= either (die . T.unpack) pure
+          withSystemOne $ \systemOne -> do
+            _<-selectDecisionProvider systemOne systemOneProvider >>= either (die . show) pure
+            PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
+              PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.RequestTool tool<-declarations] $ \requestToolset ->
+              PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withConversationAt agentProvider presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarConversationOperation PluginMenu.cancelConversationAction sidebarSelectedAgent (systemOneServices systemOne)) $ do
+              contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
+              let agentTools=PluginTool.toolDefinitions agentToolset
+                  editorSpecs=specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset
+                  liveBase=protectedDesktop {contributedMenus=contributions,agentMenuRefs=menuAgentReferences menuHost,menusActive=True}
+              keymap<-either (die . T.unpack) pure (configuredBindings (contributedBindingCommands liveBase) keys)
+              let liveDesktop=liveBase {keyBindings=keymap}
+              withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> withTextPresentation $ \textPresentation -> do
+                exiting<-newIORef False
+                let runtimeEffects=textPresentationEffects textPresentation $ sidebarEffects sidebarHost (packageBuildEffects packageSidebar (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (sessionEffects services (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))))))
+                    core d pending=foldM step (False,d) pending
+                      where
+                        step result@(True,_) _=pure result
+                        step (_,current) (SetScreenMode mode)=pure (False,(resizeScreenMode (modeSize mode) current) {videoMode=Just mode})
+                        step (_,current) effect=do
+                          result@(quit,_)<-runtimeEffects current [effect]
+                          when quit (writeIORef exiting True)
+                          pure result
+                    guestCore d pending=validateGuestEffects d pending >> core d pending
+                    effects d pending=do
+                      writeIORef exiting False
+                      (quit,updated)<-policyEffects permissions core d pending
+                      approvedExit<-readIORef exiting
+                      pure (quit || approvedExit,updated)
+                    prepareBodies desktop=do
+                      requests<-conversationBodyRequests conversation desktop
+                      (prepared,completed)<-tickTextPresentation textPresentation requests desktop
+                      adoptConversationBodies conversation completed prepared
+                    tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
+                    inspectTool d name parameters
+                      | PluginTool.hasTool editorToolset name = do
+                          context<-captureDocsContext d
+                          directory<-evaluate (startingDirectory d)
+                          settings<-captureAgentSettings conversation d
+                          pure (d,PluginTool.callTool editorToolset
+                            (PluginServices.EditorServices (docsServices docsCommands context)
+                              (environmentServices environmentCommands directory) settings) name parameters)
+                      | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
+                      | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
+                      | name `elem` workspaceToolNames = workspaceTool guestCore d name parameters
+                      | name `elem` fileToolNames = fileTool guestCore d name parameters
+                      | name `elem` testsToolNames = testsTool services d name parameters
+                      | name `elem` historyToolNames = historyTool d name parameters
+                      | name `elem` runtimeToolNames = runtimeTool services d name parameters
+                      | name `elem` gitToolNames = gitTool gitOperations d name parameters
+                      | name=="clipboard_write" = clipboardTool d parameters
+                      | name `elem` controlToolNames = controlTool guestCore d name parameters
+                      | name=="editor_screen" = pure (d,case parseEither (withObject "screen" (\o -> o .:? "image" .!= False)) parameters of
+                          Left err -> pure (Left (T.pack err))
+                          Right image -> capture font d image)
+                      | otherwise = debuggerTool debugger d name parameters
+                    inspect d token request=do
+                      writeIORef exiting False
+                      let agents=conversationAgents conversation
+                          hub=AR.agentHub agents
+                          reject=pure (d,pure (Just (rpcError (fromMaybe Null (parseMaybe (withObject "request" (.: "id")) request)) (-32600) "Invalid or inactive agent connection.")))
+                      let permitted questionBinding callback current name parameters
+                            | PluginTool.hasTool requestToolset name = do
+                                context<-bufferRequestServices (bufferReader permissions currentCaller)
+                                  (bufferEditor permissions currentCaller) (windowReader permissions currentCaller) current name parameters
+                                terminals<-terminalServices permissions (sessionConsoles services) currentCaller (Build.buildStartDirectory current)
+                                pure (current,either (pure . Left)
+                                  (\services'->PluginTool.callTool requestToolset
+                                    services' {PluginRequest.requestQuestions=fmap (\bound->questionServices conversation bound permissions currentCaller) questionBinding,
+                                      PluginRequest.requestTerminals=Just terminals}
+                                    name parameters) context)
+                            | name=="editor_input" = permissionBuildInputAs currentCaller permissions
+                                (\admission admittedDesktop admittedTool admittedArgs->withBuildAdmission services admission (controlTool guestCore admittedDesktop admittedTool admittedArgs)) current name parameters
+                            | otherwise = permissionCallAs currentCaller permissions callback current name parameters
+                          currentCaller=case token of
+                            Nothing->pure (Right ())
+                            Just secret->fmap (() <$) (resolveActiveAgentAccess (AR.agentAccess agents) hub secret)
+                      response<-case token of
+                        Nothing -> editorResponseWith editorSpecs (permitted Nothing inspectTool) d request
+                        Just secret | secret==autocompleteToken autocomplete -> editorResponseOnly (autocompleteTools autocomplete) (\current name parameters -> pure (current,autocompleteTool autocomplete name parameters)) d request
+                        Just secret -> do
+                          bound<-resolveAgentAccess (AR.agentAccess agents) secret
+                          case bound of
+                            Nothing -> reject
+                            Just ident -> do
+                              active<-AH.statusAgent hub (AH.Agent ident) ident
+                              case active >>= maybe (Left "Unknown workspace.") Right . parseMaybe (withObject "agent" (.: "cwd")) of
+                                Left _ -> reject
+                                Right root -> do
+                                  questionCaller<-captureQuestionCaller conversation ident
+                                  let dispatch current name parameters
+                                        | PluginTool.hasTool agentToolset name = pure (current,PluginTool.callTool agentToolset (agentServices hub (AH.Agent ident) root) name parameters)
+                                        | otherwise = inspectTool current name parameters
+                                      -- Worktree agents reach this endpoint only for
+                                      -- coordination. Their editor tools use their own session.
+                                      visible=if ident==AR.primaryAgent agents then editorSpecs++agentTools else agentTools
+                                  editorResponseOnly visible (permitted (either (const Nothing) Just questionCaller) dispatch) d request
+                      let (updated,finish)=response
+                      quit<-readIORef exiting
+                      pure (quit,updated,finish)
+                case daemon of
+                  Just sid -> do
+                    let startOwned=do
+                          -- Recovery eligibility can change after the relay spawns
+                          -- us. This callback runs under the daemon lifetime lock.
+                          when (RequireCheckpoint `elem` flags) $ do
+                            present<-checkpointPath sid >>= doesFileExist
+                            unless present (ioError (userError "Saved session was deleted before recovery started."))
+                          AR.activateAgentCheckpoint (conversationAgents conversation)
+                    runRemoteDaemonWithStartup startOwned (awaitPermissionWork permissions) sid scale effects tick inspect liveDesktop
+                  Nothing -> die "Missing session process identity."
   where
     lastMaybe []=Nothing
     lastMaybe values=Just (last values)

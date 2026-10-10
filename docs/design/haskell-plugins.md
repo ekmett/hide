@@ -168,6 +168,34 @@ build; there is no compatibility layer for hypothetical older plugins. Runtime
 loading, package discovery and hot code unloading need a concrete installation
 workflow before adding their complexity.
 
+## Small model decisions
+
+`sessionSystemOne` supplies `SystemOneServices` from `Hide.Plugin.SystemOne`.
+Use it for classification or ranking over an immutable, already-authorized text
+snapshot. It returns typed probabilities; it cannot edit a buffer, run a command
+or approve an action. [Global configuration](../configuration.md#system-1-decisions)
+selects the supplier. The service does not expose that selection authority.
+
+Capture `currentDecisionSupplier`, then call `requestDecision` with its exact ID,
+a `DecisionInput` and a deadline in milliseconds. Input carries a consumer state
+ID, bounded text, named binary/choice/score questions and a locality requirement.
+A busy, unavailable or replaced supplier is an explicit result. A host-process-only
+request cannot use an HTTP endpoint, including localhost. Run preparation and
+admission on the consumer worker, outside the UI lock.
+
+An admitted `DecisionTicket` supports await, poll and cancel. The first terminal
+result wins; repeated observations return it unchanged. Canceling retires the
+receipt promptly, while the single execution slot remains occupied until its
+resources drain. The consumer rechecks its own state ID before using a result.
+No decision establishes permission or proves that the source is still current.
+
+Choice labels are part of the model's input. Results follow the submitted option
+order, even when an endpoint returns JSON keys in another order. Probabilities
+are not silently renormalized; rounding allowance belongs to the supplier.
+Confidence is provider-specific, and an endpoint's reported model name is not
+proof of which weights ran. A workflow must evaluate its own questions and
+thresholds before relying on them.
+
 ## Commands, menus and bindings
 
 A command has a namespaced ID, typed arguments/results and explicit wire codecs.

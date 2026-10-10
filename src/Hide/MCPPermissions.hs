@@ -30,7 +30,7 @@ module Hide.MCPPermissions
   , permissionConfigPath, readEditorDefaults, writeEditorDefaults, readEditorDefaultsAt, writeEditorDefaultsAt
   , projectConfigPath, readEditorDefaultsFor, readAgentContextAt, writeAgentContextAt, readAgentContexts
   , readEnvironmentAt, writeEnvironmentAt, readKeybindingsAt, readKeybindingsFor
-  , readAgentLimitsFor, updateConfigTable, readAutocompleteFor, writeAutocomplete, writeAutocompleteFor
+  , readSystemOne, readAgentLimitsFor, updateConfigTable, readAutocompleteFor, writeAutocomplete, writeAutocompleteFor
   ) where
 
 import Control.Concurrent (MVar, newEmptyMVar, newMVar, readMVar, tryReadMVar, tryPutMVar, withMVar)
@@ -1338,6 +1338,18 @@ readEnvironmentAt path=configIO $ do
 
 writeEnvironmentAt :: FilePath -> Value -> IO (Either Text ())
 writeEnvironmentAt path=writeTable path ["editor","environment"]
+
+-- | Read only the global human-owned inference destination. A project override
+-- must not silently move admitted context to an endpoint or attached browser.
+readSystemOne :: IO (Either Text Value)
+readSystemOne=configIO $ do
+  path<-permissionConfigPath
+  config<-readConfig path
+  pure $ do
+    (_,_,table)<-config
+    selected<-lookupTable ["editor","systemOne"] table
+    values<-traverse (primitive . snd) (maybe M.empty tableMap selected)
+    pure (object [K.fromText key .= value | (key,value)<-M.toList values])
 
 -- Autocomplete provider settings are human-owned, separate from display defaults.
 readAutocompleteFor :: FilePath -> IO (Either Text Value)

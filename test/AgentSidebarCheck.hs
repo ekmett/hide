@@ -58,11 +58,12 @@ import Hide.Model
 import Hide.Sidebar
 import Hide.SidebarCommands
 import Hide.Session
+import Hide.SystemOne (withSystemOne,systemOneServices)
 import qualified Hide.Plugin.Tree as P
 import qualified AgentIntegrationCheck
 
 checks :: IO ()
-checks=bracket temporary removePathForcibly $ \root->
+checks=withSystemOne $ \systemOne->bracket temporary removePathForcibly $ \root->
   environment "XDG_CONFIG_HOME" (Just (root </> "config")) $
   environment "XDG_DATA_HOME" (Just (root </> "data")) $ do
     let config=root </> "config" </> "thc-edit"
@@ -75,7 +76,7 @@ checks=bracket temporary removePathForcibly $ \root->
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Plugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Plugin.pluginPrimaryInput Hide.AgentUI.plugin) (Plugin.pluginChildInput Hide.AgentUI.plugin) consoles root $ \conversation->
       withDocsCommands $ \docs->withConversationMenuCommands docs conversation $ \menuHost->
-      withAutocomplete (Plugin.pluginCompletionProvider Hide.AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools Hide.AgentUI.plugin] (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost host) sidebarConversation SidebarConversation sidebarConversationOperation Menu.cancelConversationAction sidebarSelectedAgent) $ do
+      withAutocomplete (Plugin.pluginCompletionProvider Hide.AgentUI.plugin) [tool | Plugin.CompletionTool tool<-Plugin.pluginTools Hide.AgentUI.plugin] (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost host) sidebarConversation SidebarConversation sidebarConversationOperation Menu.cancelConversationAction sidebarSelectedAgent (systemOneServices systemOne)) $ do
         createRequests<-newIORef []
         agentRequests<-newIORef []
         sessionRequests<-newIORef []

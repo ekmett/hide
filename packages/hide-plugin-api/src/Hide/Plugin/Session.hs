@@ -31,6 +31,7 @@ import Hide.Plugin.Request (RequestServices)
 import Hide.Plugin.Tool (Tool)
 import Hide.Plugin.Services (EditorServices)
 import Hide.Plugin.Transcript (ConversationPresenter)
+import Hide.Plugin.SystemOne (SystemOneServices)
 
 -- | Capabilities for the concrete first-party directory workflow. Providers and
 -- resource owners outlive activation. Captured requests are admitted by the host;
@@ -50,6 +51,8 @@ data Session c r settings completion receipt = Session
   , sessionSelectedAgent :: c -> Either Text AgentId
     -- ^ Small selected-agent identity captured at menu admission. It grants no
     -- authority and must never be recomputed from later focus on a worker.
+  , sessionSystemOne :: SystemOneServices
+    -- ^ Bounded decisions on consumer-admitted text, without action or supplier-selection authority.
   }
 
 -- | Endpoint visibility carries its actual service context. Editor tools are

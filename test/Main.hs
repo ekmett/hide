@@ -55,6 +55,8 @@ import qualified WorkspaceMCPCheck
 import qualified WorkspaceFilesMCPCheck
 import qualified TestsMCPCheck
 #endif
+import qualified SystemOneCheck
+import qualified SystemOneEndpointCheck
 import qualified BindingsCheck
 import qualified HintComposerCheck
 import qualified AutocompleteCheck
@@ -157,7 +159,9 @@ tests :: TestTree
 tests = askOption $ \profile->withResource
   (when (profile==Instrumented) (putStrLn "Instrumented allocation profile: counters are measured; optimized limits are enforced by the separate normal run."))
   (const (pure ())) $ \_->inOrderTestGroup (if profile==Instrumented then "editor-instrumented" else "editor")
-  [ testCase "FileExport" FileExportCheck.checks
+  [ testCase "SystemOne" SystemOneCheck.checks
+  , testCase "SystemOneEndpoint" SystemOneEndpointCheck.checks
+  , testCase "FileExport" FileExportCheck.checks
   , testCase "FileDragHelper" FileDragHelperCheck.checks
   , testCase "Bindings" BindingsCheck.checks
   , testCase "HintComposer" HintComposerCheck.checks

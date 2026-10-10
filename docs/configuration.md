@@ -495,3 +495,40 @@ there. Completion stays off until a provider is selected. The Options dialog
 updates the project table if it already exists, otherwise global settings. A
 project value in `thc.toml` takes precedence. Agents
 cannot change these settings or complete their own authentication.
+
+
+## System-1 decisions
+
+Plugins can submit small classification and ranking questions to a selected
+System One endpoint. This is separate from the conversational agent: it returns
+probabilities, not edits or commands. The consumer decides what to do with them.
+
+Select the destination in the **global** configuration:
+
+```toml
+[editor.systemOne]
+provider = "endpoint" # off or endpoint
+endpoint = "http://127.0.0.1:8008/v1/systemone"
+model = "kev-latest"
+tokenEnv = "" # optional, e.g. SYSTEM_ONE_TOKEN
+```
+
+The default is `off`. Project configuration cannot override the destination.
+Selecting an endpoint does not connect until a plugin requests a decision.
+The URL must omit credentials, query and fragment; redirects are refused. A
+bearer variable must have a sensitive name such as `SYSTEM_ONE_TOKEN` or
+`SYSTEM_ONE_SECRET`, so the existing environment tools redact its value and
+refuse agent changes. A request marked host-process-only cannot use an endpoint,
+even on localhost.
+
+Each request has a deadline of at most 30 seconds. The service admits one request
+at a time, rejects additional work as busy, and retains the slot until canceled
+work has finished releasing its resources. Changing the supplier expires pending
+results; it never forwards their context to the replacement. State is limited to
+64 KiB of UTF-8, with 128 KiB across state, names and questions. Inputs that exceed
+a limit are refused rather than shortened.
+
+An endpoint's model name is reported provenance, not proof of its weights.
+Probabilities and confidence retain the provider's meaning. A consumer must apply
+its existing privacy and permission rules before submitting context, and judge
+whether the selected model is useful for its particular decision.
