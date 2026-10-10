@@ -115,5 +115,5 @@ test-suite coverage-smoke
   other-modules: BufferViewCheck, BrowserCheck, DefaultsCheck, FilesCheck, HexCheck, MarkdownCheck, WindowCheck, PluginCommandCheck, PluginFormCheck, PluginMenuCheck, PluginTreeCheck, GuestAccessCheck, LinksCheck, HelpCheck, CompletionCheck, BufferEditsCheck, AgentHubCheck, TextStyleCheck, MarkdownViewCheck, SourceWindowFixture, FormExtension, EditorFixture, SidebarFixture
   main-is: Main.hs
   ghc-options: -threaded -rtsopts
-  build-depends: hide, hide-agents ==0.1.0.0, hide-plugin-api ==0.1.0.0, aeson, async, stm, vector, JuicyPixels, base64-bytestring
+  build-depends: hide, hide-agent-api ==0.1.0.0, hide-agents ==0.1.0.0, hide-plugin-api ==0.1.0.0, aeson, async, stm, vector, JuicyPixels, base64-bytestring
     , tasty >=1.5.4 && <1.6, tasty-hunit >=0.10.2 && <0.11, tasty-ant-xml >=1.1.9 && <1.2
