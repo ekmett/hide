@@ -183,6 +183,15 @@ existing lines. Once stopped, use `debug_inspect` for threads → stack trace �
 scopes → variables.
 Use `debug_control` to continue, step, pause or disconnect, then refresh status.
 
+For a bounded search through execution, call `debug_assist` with `command: "start"`,
+the paused `generation`, a concrete `goal` and a small `maxSteps`/`budgetMs`.
+Poll `command: "status"`; inspect the retained source/runtime observations rather
+than treating a model choice as proof. Pause or stop when sufficient evidence
+is available. If it asks for a conversational hypothesis, use the evidence to
+form one and request any effectful expression evaluation explicitly. Reveal the
+shared stopped state for the person when ready. Ordinary controls take over and
+retiring your connection ends your assisted run.
+
 **Why these tools:** inspection and the person’s debugger UI use the same stopped
 process and generation. A separate debugger would not have that state.
 

@@ -86,6 +86,7 @@ import qualified DebuggerSourcePolicyCheck
 import qualified DebuggerWatchesCheck
 import qualified DebuggerSidebarCheck
 import qualified DebuggerCheck
+import qualified DebuggerAssistanceCheck
 import qualified CompletionCheck
 import qualified DownloadsCheck
 import qualified HdbAcquisitionCheck
@@ -235,6 +236,7 @@ tests = askOption $ \profile->withResource
   , testCase "Hex" HexCheck.checks
   , testCase "DAP" DAPCheck.checks
   , testCase "Debugger" DebuggerCheck.checks
+  , testCase "DebuggerAssistance" DebuggerAssistanceCheck.checks
   , testCase "DebuggerWatches" DebuggerWatchesCheck.checks
   , testCase "DebuggerSidebar" DebuggerSidebarCheck.checks
   , testCase "DebuggerSourcePolicy" DebuggerSourcePolicyCheck.checks
