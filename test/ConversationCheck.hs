@@ -37,6 +37,7 @@ import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,wait,cancel,poll)
 import qualified Control.Concurrent.STM as STM
 import Control.Exception (bracket, evaluate)
+import Control.DeepSeq (force)
 import Control.Monad (unless, when, forM_, foldM)
 import Data.Aeson hiding (Number)
 import Data.Aeson.Types (parseMaybe)
@@ -49,8 +50,9 @@ import qualified Data.Set as S
 import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (find,findIndex,mapAccumL)
-import Data.IORef (newIORef,writeIORef,readIORef)
+import Data.IORef (newIORef,writeIORef,readIORef,modifyIORef')
 import GHC.Conc (getAllocationCounter)
+import GHC.Stack (HasCallStack,callStack,prettyCallStack)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Graphics.Vty as V
@@ -472,7 +474,20 @@ draftReceiptChecks=withTextPresentation $ \presentation->
       untouched<-evaluate (newBuffer "stream")
       independent<-prompt runtime "stream" (draftBuffer untouched connected) >>= primaryDone runtime (scenario++" independent")
       check "independent prompt does not consume the composer" (contents (composerBuffer independent)=="stream")
-      active<-if steer then promptStarted runtime "wait" independent else pure independent
+      active<-if steer then do
+        -- Wire arrival can precede host adoption of the ProviderTurn. Consume
+        -- this Query's exact draft before testing Steer against its active turn.
+        waiting<-evaluate (newBuffer "wait")
+        waitingReceipt<-captureVersion waiting
+        submittedWait<-submit runtime QuerySubmit (draftAt waiting (Selection 4 4) independent)
+        admitted<-await runtime "wait input send admission" (\d->do
+          unchanged<-versionCurrent waitingReceipt (composerBuffer d)
+          pure (not unchanged && bufferLength (composerBuffer d)==0)) submittedWait
+        -- This callback belongs to the accepted Query; the next one must still
+        -- identify the Steer whose retained service is checked below.
+        _<-timeout 3000000 (takeMVar acknowledged) >>= maybe (error "Wait input command did not acknowledge") pure
+        pure admitted
+        else pure independent
       original<-evaluate (newBuffer (if steer then "direction" else "stream"))
       -- Preparation may finish off-thread, but only a later serialized tick adopts it.
       beforeSubmission<-readMessages (root </> "messages.jsonl")
@@ -638,15 +653,36 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
                   (if end then conversationAnchor view==FollowEnd && viewportAnchor viewport==FollowEnd else conversationAnchor view==viewportAnchor viewport)
                 _->False
           await runtime (if end then "logical body End" else "logical body Home") ready (fst (runCommand (if end then CursorDocumentEnd False else CursorDocumentStart False) browsing))
+        -- Retain only small observations, never the Desktop or its buffers.
+        -- The callsite identifies which request a completion timeout belongs to.
+        done :: HasCallStack => ConversationState -> Desktop -> IO Desktop
         done runtime desktop=do
+          observed<-newIORef ("starting"::T.Text,Null)
+          let stage name=modifyIORef' observed (\(_,facts)->(name,facts))
+              loop d=do
+                stage "ticking conversation"
+                next<-tickConversation runtime d
+                stage "reading owner settings"
+                reply<-agentSettingsReply runtime next
+                value<-reply >>= either (error . T.unpack) pure
+                let agents=conversationAgents runtime
+                stage "reading control state"
+                control<-AH.agentControlPending (AR.agentHub agents) (AR.primaryAgent agents)
+                delivery<-AR.primaryDeliveryActive agents
+                facts<-evaluate (force (object
+                  ["connected" .= (field "connected" value::Maybe Bool),"replying" .= (field "replying" value::Maybe Bool),
+                   "queued" .= agentQueued next,"controlPending" .= control,"deliveryActive" .= delivery,
+                   "dialog" .= (T.copy . T.take 80 . dialogTitle <$> dialog next),
+                   "status" .= T.copy (T.take 256 (status next))]))
+                writeIORef observed ("awaiting completion",facts)
+                if field "replying" value==Just False && agentQueued next==0 then pure next
+                  else threadDelay 10000 >> loop next
           result<-timeout 8000000 (loop desktop)
-          maybe (error "Conversation timeout: prompt completion") pure result
-          where loop d=do
-                  next<-tickConversation runtime d
-                  reply<-agentSettingsReply runtime next
-                  value<-reply >>= either (error . T.unpack) pure
-                  if field "replying" value==Just False && agentQueued next==0 then pure next
-                    else threadDelay 10000 >> loop next
+          case result of
+            Just completed->pure completed
+            Nothing->do
+              observation<-readIORef observed
+              error ("Conversation timeout: prompt completion; "++show observation++"\n"++prettyCallStack callStack)
         connectionState runtime connected label desktop=do
           observed<-newIORef Nothing
           result<-timeout 8000000 (loop observed desktop)

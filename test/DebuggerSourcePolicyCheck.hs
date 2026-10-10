@@ -33,11 +33,16 @@ import qualified Data.ByteString as BS
 import Hide.Files (loadFile)
 #ifndef mingw32_HOST_OS
 import Data.IORef
+import Control.Concurrent.MVar (newEmptyMVar,readMVar,putMVar)
+import qualified GHC.IO.Device as Device
+import qualified GHC.IO.FD as FD
+import Text.Read (readMaybe)
 import Control.Monad (void)
 import Hide.Files (FileState(..))
-import System.Posix.Files (createNamedPipe)
+import System.Posix.Files (createNamedPipe,getFileStatus,getFdStatus,fileID,deviceID,isNamedPipe)
 import qualified System.Posix.IO.ByteString as PosixBytes
-import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock,cloexec)
+import System.Posix.IO (openFd,closeFd,fdWrite,dup,queryFdOption,FdOption(NonBlockingRead),OpenMode(ReadWrite),defaultFileFlags,nonBlock,cloexec)
+import System.Posix.Types (Fd(..))
 import System.Posix.Process (getProcessID)
 import System.IO.Error (tryIOError,isFullError)
 import System.Process (getPid,readProcessWithExitCode)
@@ -183,11 +188,16 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                       Nothing->"lsof diagnostic timed out"
                       Just (Left err)->show err
                       Just (Right (code,out,err))->show code++" "++T.unpack (T.take 8192 (T.pack (unlines (fifoRecords [] [] (lines out))++err)))
-                fail ("Source preparation did not reach "++T.unpack expected++" in "++T.unpack action++": "++show actual++"; FIFO descriptors for owned PIDs "++owners++" (omitted/inaccessible descriptors are inconclusive): "++attribution)) pure
+                readiness<-case descriptors of
+                  Just (Right (_,out,_))->mapM (fifoReadiness source)
+                    (take 16 (ownedFifoReaders (show ownerPid) source (lines out)))
+                  _->pure []
+                fail ("Source preparation did not reach "++T.unpack expected++" in "++T.unpack action++": "++show actual++"; FIFO descriptors for owned PIDs "++owners++" (omitted/inaccessible descriptors are inconclusive): "++attribution++"; kernel read readiness (fd, (nonblocking, ready)): "++show readiness)) pure
             base=addDocument (Just (FileState (takeDirectory source </> "Foreground.hs") (Just "foreground")))
               (newBuffer "foreground") (initialDesktop (80,25))
         (_,attached)<-debuggerEffects runtime core base [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
-        withAsync (awaitFrame attached) $ \owner->do
+        writerReady<-newEmptyMVar
+        withAsync (readMVar writerReady >> awaitFrame attached) $ \owner->do
           -- Close the gate before waiting/cancelling the owner even when the
           -- baseline owner is blocked in its read. One-byte consumption proves
           -- a real filesystem reader entered, rather than an early load error.
@@ -196,6 +206,9 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
           returned<-bracket (openFd source ReadWrite defaultFileFlags {nonBlock=True,cloexec=True})
             (\gate->void (fdWrite gate "y") `finally` closeFd gate) $ \gate->do
             _<-fdWrite gate "x"
+            -- Do not let the reader observe a FIFO with no writer. Keep the
+            -- existing cleanup order: close the gate before joining the owner.
+            putMVar writerReady ()
             let readStarted=do
                   result<-tryIOError (PosixBytes.fdRead gate 1)
                   case result of
@@ -242,6 +255,34 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                   (action=="close" || activeText released=="foreground"))
                   (fail "Released stale local source read reopened or jumped")
         putStrLn ("delayed local source "++T.unpack action++" checks passed")
+
+-- Failure-only inspection of this process's exact FIFO readers. Own a duplicate
+-- before checking inode identity so the original can close without fd-reuse races.
+-- Never read bytes, close the reader's descriptor or borrow its Handle.
+-- The zero-time fdReady syscall bypasses the GHC I/O-manager/Handle wait, letting
+-- a captured failure distinguish kernel readiness from a missed runtime wakeup.
+ownedFifoReaders :: String -> FilePath -> [String] -> [Int]
+ownedFifoReaders owner source=go "" Nothing False
+  where
+    go _ _ _ []=[]
+    go pid fd readable (row:rest)=case row of
+      'p':value->go value Nothing False rest
+      'f':value->go pid (readMaybe value) False rest
+      'a':value->go pid fd (value=="r") rest
+      'n':path | pid==owner,readable,path==source,Just number<-fd->number:go pid fd readable rest
+      _->go pid fd readable rest
+
+fifoReadiness :: FilePath -> Int -> IO (Int,Either String (Bool,Bool))
+fifoReadiness source number=do
+  result<-tryIOError $ bracket (dup (Fd (fromIntegral number))) closeFd $ \owned@(Fd raw)->do
+    expected<-getFileStatus source
+    actual<-getFdStatus owned
+    unless (isNamedPipe actual && fileID actual==fileID expected && deviceID actual==deviceID expected)
+      (fail "FIFO descriptor changed before readiness observation")
+    nonblocking<-queryFdOption owned NonBlockingRead
+    ready<-Device.ready (FD.FD raw (if nonblocking then 1 else 0)) False 0
+    pure (nonblocking,ready)
+  pure (number,either (Left . show) Right result)
 #endif
 
 sourceHandleCheck :: IO ()
