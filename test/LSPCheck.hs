@@ -118,7 +118,7 @@ checks profile = do
       after<-waitResponse client barrier
       check "post-response applyEdit never acquires completed owner" (not (any (\event->case event of ApplyEdit{}->True; _->False) after))
     lifecycle <- readFile (root </> "lifecycle")
-    check "shutdown response then exit" (lifecycle == "shutdown\nexit\n")
+    check ("shutdown response then exit; observed lifecycle "++show (take 256 lifecycle)) (lifecycle == "shutdown\nexit\n")
     -- Initialization is deliberately held: document projection/equality must
     -- belong to the writer, never to the caller holding the desktop lock.
     writeUtf8 server "#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n"

@@ -14,7 +14,7 @@ import Control.Monad (unless, when, forM_, replicateM, foldM, void)
 import Control.Concurrent (threadDelay, newEmptyMVar, readMVar, putMVar, tryPutMVar, tryReadMVar)
 import Control.Concurrent.Async (withAsync, poll, wait, cancel)
 import Data.Aeson.Types (parseMaybe)
-import Control.Exception (bracket, evaluate, finally, uninterruptibleMask_)
+import Control.Exception (bracket, evaluate, finally, throwIO, uninterruptibleMask_)
 import System.Mem.StableName (makeStableName)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
 import Data.Aeson
@@ -446,42 +446,56 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
       field key=parseMaybe (withObject "result" (.:key))
       right=either (error . T.unpack) pure
       isLeft (Left _)=True; isLeft _=False
-      pump tooling d predicate=bounded "workspace edit did not progress" (loop d)
+      pump label tooling d predicate=bounded ("workspace edit timed out at "++label) (loop d)
         where loop state=do
                 next<-tickTooling tooling core state
                 ready<-predicate next
                 if ready then pure next else threadDelay 1000 >> loop next
-      finish tooling d answer=withAsync answer $ \waiting->do
-        updated<-pump tooling d (const (maybe False (const True) <$> poll waiting))
+      finish label tooling d answer=withAsync answer $ \waiting->do
+        updated<-pump (label++": matching operation reply") tooling d (const (maybe False (const True) <$> poll waiting))
         (updated,) <$> wait waiting
-      begin tooling current=do
+      awaitHeld label tooling d entered waiting=pump (label++": held Extra.hs read") tooling d $ \_->do
+        started<-tryReadMVar entered
+        case started of
+          Just ()->pure True
+          Nothing->do
+            completed<-poll waiting
+            case completed of
+              Nothing->pure False
+              Just result->do
+                reply<-either throwIO pure result
+                error ("workspace edit "++label++": operation completed before held Extra.hs read: "++show reply)
+      begin label tooling current=do
         (listing,listed)<-toolingTool tooling core current "lsp_code_actions" args
-        (_,offered)<-finish tooling listing listed
+        (_,offered)<-finish (label++": list code actions") tooling listing listed
         value<-right offered
         let identifiers=[key | item<-maybe [] id (field "actions" value),field "title" item==Just ("Fix source"::T.Text),Just key<-[field "actionId" item]]
-        key<-case identifiers of one:_->pure (one::T.Text); _->error "No prepared action"
+        key<-case identifiers of one:_->pure (one::T.Text); _->error ("workspace edit "++label++": no prepared action")
         toolingTool tooling core current "lsp_apply_code_action" (object ["bufferId" .= sourceId,"revision" .= (0::Int),"actionId" .= key])
-      withHeld action=do
+      withHeld label action=do
         entered<-newEmptyMVar; release<-newEmptyMVar
         let readHeld path=do
               loaded<-loadFile path
               when (path==extra) (void (tryPutMVar entered ()) >> uninterruptibleMask_ (readMVar release))
               pure loaded
         withToolingUsing (const (pure root)) (launchServer server) snapshot readHeld $ \tooling->flip finally (void (tryPutMVar release ())) $ do
-          (queued,answer)<-begin tooling base
-          held<-pump tooling queued (const (maybe False (const True) <$> tryReadMVar entered))
-          ticked<-bounded "closed-file preparation blocked tick" (tickTooling tooling core held)
-          check "input progresses while workspace read is held" (activeText (insertText "typed " ticked)=="typed scratch\n")
-          action tooling ticked answer release
+          (queued,answer)<-begin label tooling base
+          -- Keep the receipt observer alive through the scenario, so leaving
+          -- the held-read barrier cannot cancel the still-pending operation.
+          withAsync answer $ \waiting->do
+            held<-awaitHeld label tooling queued entered waiting
+            ticked<-bounded ("workspace edit "++label++": closed-file preparation blocked tick") (tickTooling tooling core held)
+            check "input progresses while workspace read is held" (activeText (insertText "typed " ticked)=="typed scratch\n")
+            action tooling ticked answer release
       editOther f d=d {buffers=M.adjust (\doc->restyle doc {documentBuffer=f (documentBuffer doc)}) otherId (buffers d)}
       textAt bid d=contents (documentBuffer (buffers d M.! bid))
   writeUtf8 source "😀 foo = 1\n"; writeUtf8 other "foo = 2\n"; writeUtf8 extra "third = 3\n"
   writeUtf8 server mcpServer
-  withHeld $ \tooling held answer release->do
+  withHeld "successful batch" $ \tooling held answer release->do
     let oldLength=bufferLength (documentBuffer (buffers held M.! sourceId))
         moved=(insertText "typed " held) {windows=map (\w->if sourceFixtureBuffer w==sourceId then w {selection=Selection oldLength oldLength,bounds=Rect 2 3 25 8} else w) (windows held)}
     putMVar release ()
-    (adopted,reply)<-finish tooling moved answer
+    (adopted,reply)<-finish "successful batch" tooling moved answer
     check "prepared batch succeeds" (not (isLeft reply) && textAt sourceId adopted=="😀 fixed = 1\n" && textAt otherId adopted=="fixed = 2\n")
     check "adoption preserves unrelated input" (textAt scratchId adopted=="typed scratch\n")
     let sourceWindows=[w | w<-windows adopted,sourceFixtureBuffer w==sourceId]
@@ -496,17 +510,17 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
         , ("close",\d->d {buffers=M.delete otherId (buffers d),windows=filter ((/=otherId) . sourceFixtureBuffer) (windows d)})
         , ("open closed target",addDocument (Just (FileState extra Nothing)) (newBuffer "new unsaved contents\n"))
         , ("private target",\d->d {guestPrivatePaths=[extra]})] $ \(label,change)->
-    withHeld $ \tooling held answer release->do
+    withHeld ("reject "++label) $ \tooling held answer release->do
       let changed=change held
       putMVar release ()
-      (rejected,reply)<-finish tooling changed answer
+      (rejected,reply)<-finish ("reject "++label) tooling changed answer
       check ("workspace adoption rejects "++label++" atomically") (isLeft reply && buffers rejected==buffers changed)
-  withHeld $ \tooling held answer release->do
+  withHeld "post-read disk change" $ \tooling held answer release->do
     -- The checked read already completed. A subsequent external write must
     -- remain protected by the FileState baseline when the user later saves.
     writeUtf8 extra "external update\n"
     putMVar release ()
-    (adopted,reply)<-finish tooling held answer
+    (adopted,reply)<-finish "post-read disk change" tooling held answer
     check "prepared closed-file edit retains its checked bytes" (not (isLeft reply))
     let targets=[(file,documentBuffer doc) | doc<-M.elems (buffers adopted),Just file<-[documentFile doc],filePath file==extra]
     target<-case targets of one:_->pure one; _->error "Missing prepared closed-file buffer"
@@ -514,15 +528,15 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
     check "save refuses a post-read external disk change" (isLeft result)
     check "failed save preserves external bytes" . (=="external update\n") =<< readUtf8 extra
     writeUtf8 extra "third = 3\n"
-  withHeld $ \tooling held answer release->do
+  withHeld "cancellation" $ \tooling held answer release->do
     withAsync answer $ \waiting->threadDelay 1000 >> cancel waiting
     putMVar release ()
-    (unchanged,reply)<-finish tooling held answer
+    (unchanged,reply)<-finish "cancellation" tooling held answer
     check "cancelled workspace adoption changes no buffers" (isLeft reply && buffers unchanged==buffers held)
-  withHeld $ \tooling held answer release->do
-    (_,restarted)<-bounded "restart blocked on workspace read" (toolingEffects tooling core held [LanguageRequest RestartLanguage])
+  withHeld "restart" $ \tooling held answer release->do
+    (_,restarted)<-bounded "workspace edit restart: blocked on workspace read" (toolingEffects tooling core held [LanguageRequest RestartLanguage])
     putMVar release ()
-    reply<-bounded "restart stranded workspace waiter" answer
+    reply<-bounded "workspace edit restart: matching operation reply stranded" answer
     check "restart cancels prepared workspace edit" (isLeft reply && buffers restarted==buffers held)
   entered<-newEmptyMVar; release<-newEmptyMVar; readCount<-newIORef (0::Int)
   let heldRead path=do
@@ -533,22 +547,24 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
           uninterruptibleMask_ (readMVar release)
         pure loaded
   withToolingUsing (const (pure root)) (launchServer server) snapshot heldRead $ \tooling->flip finally (void (tryPutMVar release ())) $ do
-    (queued,original)<-begin tooling base
-    _<-pump tooling queued (const (maybe False (const True) <$> tryReadMVar entered))
-    (_,restarted)<-bounded "restart waited for uninterruptible workspace read" (toolingEffects tooling core base [LanguageRequest RestartLanguage])
-    check "restart completes original workspace waiter" . isLeft =<< bounded "old workspace waiter stranded" original
-    forM_ [1..3::Int] $ \_->do
-      (pending,answer)<-begin tooling restarted
-      _<-tickTooling tooling core pending
-      threadDelay 1000
-      check "retiring workspace read reserves the sole worker" . (==1) =<< readIORef readCount
-      _<-bounded "repeated restart blocked workspace retirement" (toolingEffects tooling core pending [LanguageRequest RestartLanguage])
-      check "queued workspace cancellation is explicit" . isLeft =<< bounded "queued workspace waiter stranded" answer
-    putMVar release ()
-    (pending,answer)<-begin tooling base
-    (_,reply)<-finish tooling pending answer
-    check "workspace preparation resumes after retirement" (not (isLeft reply))
-    check "only one replacement workspace read starts" . (==2) =<< readIORef readCount
+    (queued,original)<-begin "worker retirement" tooling base
+    withAsync original $ \waiting->do
+      _<-awaitHeld "worker retirement" tooling queued entered waiting
+      (_,restarted)<-bounded "workspace edit worker retirement: restart waited for uninterruptible read" (toolingEffects tooling core base [LanguageRequest RestartLanguage])
+      check "restart completes original workspace waiter" . isLeft =<< bounded "workspace edit worker retirement: original operation reply stranded" original
+      forM_ [1..3::Int] $ \iteration->do
+        let label="queued restart "++show iteration
+        (pending,answer)<-begin label tooling restarted
+        _<-tickTooling tooling core pending
+        threadDelay 1000
+        check "retiring workspace read reserves the sole worker" . (==1) =<< readIORef readCount
+        _<-bounded ("workspace edit "++label++": restart blocked workspace retirement") (toolingEffects tooling core pending [LanguageRequest RestartLanguage])
+        check "queued workspace cancellation is explicit" . isLeft =<< bounded ("workspace edit "++label++": operation reply stranded") answer
+      putMVar release ()
+      (pending,answer)<-begin "resume after retirement" tooling base
+      (_,reply)<-finish "resume after retirement" tooling pending answer
+      check "workspace preparation resumes after retirement" (not (isLeft reply))
+      check "only one replacement workspace read starts" . (==2) =<< readIORef readCount
   putStrLn "workspace edit checks passed"
   where
     temporary=do
