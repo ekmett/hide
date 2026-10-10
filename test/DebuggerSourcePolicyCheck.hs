@@ -28,7 +28,7 @@ import Control.Monad (void)
 import Hide.Files (FileState(..))
 import System.Posix.Files (createNamedPipe)
 import qualified System.Posix.IO.ByteString as PosixBytes
-import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock)
+import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock,cloexec)
 import System.IO.Error (tryIOError,isFullError)
 #endif
 import Hide.Buffer
@@ -159,7 +159,8 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
           -- baseline owner is blocked in its read. One-byte consumption proves
           -- a real filesystem reader entered, rather than an early load error.
           -- Final data plus close wakes EOF readiness, also on exception cleanup.
-          returned<-bracket (openFd source ReadWrite defaultFileFlags {nonBlock=True})
+          -- Only this bracket owns the writer; child processes must not keep it alive.
+          returned<-bracket (openFd source ReadWrite defaultFileFlags {nonBlock=True,cloexec=True})
             (\gate->void (fdWrite gate "y") `finally` closeFd gate) $ \gate->do
             _<-fdWrite gate "x"
             let readStarted=do
