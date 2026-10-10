@@ -5,7 +5,7 @@ name: hide-agent-api
 version: 0.1.0.0
 synopsis: Provider-neutral agent driver contract for hide
 license: BSD-2-Clause OR Apache-2.0
-license-files: LICENSES/BSD-2-Clause.txt, LICENSES/Apache-2.0.txt
+license-files: LICENSE-BSD-2-Clause.md, LICENSE-APACHE.md
 build-type: Simple
 
 library

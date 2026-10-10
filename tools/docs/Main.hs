@@ -51,6 +51,7 @@ guides =
   , Guide "docs/architecture.md" "architecture" "Architecture"
   , Guide "README.md" "quick-reference" "F1 quick reference"
   , Guide "docs/site/build.md" "build-site" "Build this site"
+  , Guide "LICENSE.md" "license" "Licensing Terms"
   ]
 
 site :: FilePath
