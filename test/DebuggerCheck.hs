@@ -108,7 +108,9 @@ outputLifecycleCheck=bracket (fixture "output-owner") cleanup $ \(port,_,_)->do
     check "refresh retains source focus, selection and modal" (fmap windowId (activeWindow refreshed)==Just (windowId sourceWindow) && dialog refreshed==Just modal && sourceKept refreshed)
     let closing=closeActive (focusWindow (fromMaybe (error "missing output window") (windowId <$> (case [w | w<-windows refreshed,windowContent w==PluginContent first] of w:_->Just w; _->Nothing))) refreshed {dialog=Nothing})
     closed<-tick closing
-    afterClose<-emit "session=1 output=3" False closed
+    -- The command reply may arrive before the final copied report is adopted.
+    -- Earlier chunks already satisfy the size cap; wait for this burst's last one.
+    afterClose<-emit "session=1 output=3 part=7" False closed
     check "closed output stays closed while MCP retains capped current report" (opening afterClose==Nothing)
     copied<-await "closed output report detaches oversized backing" (\d->do
       value<-state d
