@@ -41,7 +41,7 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary
       bid=maybe (error "missing diff target") sourceFixtureBuffer (activeWindow base)
       patch="@@ -1 +1 @@\n-old\n+agent\n"::T.Text
       corrected="@@ -1 +1 @@\n-old\n+human λ\n"::T.Text
-      args text=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= text]
+      args text=object ["buffers" .= [object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= text]]]
       call runtime=startDiffCall toolset runtime (pure (Right ()))
       core d _=pure (False,d)
       submit runtime button d=case dialog d of
@@ -167,5 +167,8 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary
   where
     check label ok=unless ok (error label)
     isLeft (Left _)=True; isLeft _=False
-    field key result=either (const Nothing) (parseMaybe (withObject "diff response" (.:key))) result
+    field key result=do
+      value<-either (const Nothing) Just result
+      [entry]<-parseMaybe (withObject "diff response" (.: "buffers")) value :: Maybe [Value]
+      parseMaybe (withObject "diff entry" (.:key)) entry
     temporary=do root<-getTemporaryDirectory; (path,h)<-openTempFile root "hide-worker-diff"; hClose h; removeFile path; createDirectory path; pure path

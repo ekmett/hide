@@ -43,6 +43,7 @@ import Hide.Plugin.BufferHost (readerReference)
 import Hide.EditorMCP (builtinTools,editorResponseOnly)
 import qualified Hide.BufferTools as BufferTools
 import qualified Hide.Plugin.BufferRead as R
+import qualified Hide.Plugin.BufferDiff as D
 import Hide.Plugin.Request (RequestServices(..))
 import qualified Hide.Plugin.Tool as Tool
 import Hide.Plugin.Command (codecDecode,codecEncode)
@@ -228,8 +229,8 @@ checks profile=Tool.withTools [] BufferTools.tools $ \toolset->do
         check "actual typed list_buffers survives frontend detach with unchanged metadata"
           (succeeded listing && payload listing==Just (codecEncode BufferTools.listOutput [R.BufferMetadata ident "Untitled" Nothing True False 0]))
         let patch="@@ -1 +1 @@\n-original\n+daemon edit\n"::T.Text
-        edited<-callRemote "buffer_apply_diff" (object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch])
-        check "actual typed MCP diff applies after frontend detach" (succeeded edited && (payload edited >>= parseMaybe (withObject "diff" (.: "appliedDiff")))==Just patch)
+        edited<-callRemote "buffer_apply_diff" (object ["buffers" .= [object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch]]])
+        check "actual typed MCP diff applies after frontend detach" (succeeded edited && (payload edited >>= either (const Nothing) Just . codecDecode BufferTools.applyOutput)==Just [D.DiffReply ident 1 patch False])
         current<-readRemote
         check "daemon read observes exact typed diff result" ((payload current >>= parseMaybe (withObject "read" (.: "text")))==Just ("daemon edit\n"::T.Text))
     saved<-newIORef Nothing

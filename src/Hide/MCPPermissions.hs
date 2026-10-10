@@ -392,11 +392,10 @@ finishDiffSubmissionOwned (DiffSubmission _ _ _ promise enabled _ _) result=mask
 -- A batch has the same policy and correction ticket as one strict diff. Its
 -- target list is host-owned: human edits can replace patches, never references.
 packDiffArguments :: [Value] -> Value
-packDiffArguments [single]=single
 packDiffArguments batch=object ["buffers" .= batch]
 
 diffArguments :: Value -> [Value]
-diffArguments args=fromMaybe [args] (field "buffers" args)
+diffArguments args=fromMaybe [] (field "buffers" args)
 
 diffFields :: Waiting -> [(Text,Value)]
 diffFields request=case operation request of

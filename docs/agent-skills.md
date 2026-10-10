@@ -84,8 +84,11 @@ agent connection. Private windows and Rows/Details projections refuse this read.
 
 **Use:** make a source change, create a file, or undo a known edit.
 
-**Do:** `read_buffer` → `buffer_apply_diff` with that revision → `read_buffer`.
-Use one strict unified diff for the target buffer. Create an empty file with
+**Do:** `read_buffer` for each target → `buffer_apply_diff` → `read_buffer`.
+Pass `buffers: [{bufferId, revision, diff}, ...]`, with one strict unified diff
+per target and the revisions just read. One request applies all targets together
+or none (1–16 distinct buffers, at most 1 MiB patch characters total). Replies
+follow that order and report any human corrections. Create an empty file with
 `workspace_files`, then open and edit it. Preview history with `editor_history`;
 apply undo/redo with `editor_undo` and the current revision.
 

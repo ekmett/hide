@@ -265,7 +265,7 @@ main = PluginWindow.withWindowScope $ \downloadScope -> do
           (Just w,Just doc) | first:rest<-take 6 (T.lines (contents (documentBuffer doc))) -> do
             let patch=T.unlines (["--- a/src/Hide/Buffer.hs","+++ b/src/Hide/Buffer.hs","@@ -1,6 +1,7 @@"] ++
                   ["-"<>first,"+{-# LANGUAGE MultiParamTypeClasses #-}","+{-# LANGUAGE OverloadedStrings #-}"] ++ map (" "<>) rest)
-            let args=object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch]
+            let args=object ["buffers" .= [object ["bufferId" .= bufferId w,"revision" .= revision (documentBuffer doc),"diff" .= patch]]]
             context<-bufferRequestServices (bufferReader permissions (pure (Right ())))
               (bufferEditor permissions (pure (Right ()))) (windowReader permissions (pure (Right ()))) d "buffer_apply_diff" args >>= either (fail . T.unpack) pure
             withAsync (PluginTool.callTool bufferTools context "buffer_apply_diff" args) $ \_->

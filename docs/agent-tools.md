@@ -65,7 +65,7 @@ reads use a bounded declared corpus, not automatic classification of every word.
 | `workspace_project` | R | `{}` | Project root, Cabal package file, active source, unsaved buffers, existing Cabal component/dependency graph |
 | `workspace_search` | R | `query`, `trackedOnly?`, `offset?`, `limit?` | Literal line matches with live-buffer substitution; tracked-only or ignore-respecting workspace search |
 | `editor_file` | W | `action`, `bufferId?`, `windowId?`, `path?`, `revision?`, `dirtyAction?` | `open`, `save`, `close`; save/close require current revision. Dirty close requires `save` or `discard` |
-| `buffer_apply_diff` | W | `bufferId`, `revision`, `diff` | Strict unified diff, atomic and undoable, no save; returns new revision |
+| `buffer_apply_diff` | W | `buffers: [{bufferId, revision, diff}]` | 1–16 strict diffs applied together or none, Undo per changed buffer, no save; ordered results |
 | `workspace_files` | W | `operation`, `path`, `to?` | `mkdir`, `create_file` (empty), `delete`, `rename`; only rename takes `to` |
 
 Search: `query` is 1–256 characters on one line; `offset` 0–9999; `limit` 1–1000
@@ -488,10 +488,16 @@ nothing. A successful prompted patch returns `appliedDiff`, `userModified` and
 the resulting `revision`, so the requesting agent sees the human's actual edit.
 The buffer remains unsaved; approval never writes the file to disk.
 
-The same `buffer_apply_diff` permission covers linked plugins' atomic batches of
-up to 16 open buffers. Their approval shows one editable diff per file. Allow
-applies all of them together or none; the single-buffer MCP arguments above are
-unchanged.
+Use one `buffers` array for the whole edit, including a one-file edit. Each entry
+has its own `bufferId`, expected `revision` and strict unified `diff`. The batch
+accepts 1–16 distinct open text buffers and at most 1 MiB patch characters in
+total. Its approval shows one editable diff per file; Tab moves between them.
+Allow applies all changes together or none. One closed, private or stale target
+rejects the whole edit.
+
+The reply is `{ "buffers": [...] }` in request order. Each entry contains
+`bufferId`, the resulting `revision`, `saved: false`, `appliedDiff` and
+`userModified`. Each changed buffer has its own ordinary Undo entry.
 
 A pending approval can be cancelled; cancellation does not undo an operation
 already executed. Questions return pending without waiting for the human. HLS

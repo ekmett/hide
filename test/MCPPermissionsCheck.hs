@@ -354,7 +354,7 @@ reviewChecks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary r
         bid=fromMaybe (error "missing buffer") (sourceFixtureBuffer <$> activeWindow base)
         patch="@@ -1 +1 @@\n-old\n+agent\n"
         revised="@@ -1 +1 @@\n-old\n+human λ\n"
-        args=object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= (patch::T.Text)]
+        args=object ["buffers" .= [object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= (patch::T.Text)]]]
         request d=startDiffCall toolset runtime (pure (Right ())) d "buffer_apply_diff" args
         input event d=let (next,fx)=handleEvent event d in snd <$> policyEffects runtime core next fx
         key k mods=input (V.EvKey k mods)
@@ -368,6 +368,9 @@ reviewChecks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary r
         area d=case dialog d of Just dg -> [(b,sel,sr,sc) | TextArea _ True b sel sr sc<-fields dg]; _ -> []
         areaText d=case area d of (b,_,_,_):_->contents b; _->""
         isLeft (Left _)=True; isLeft _=False
+        diffField name value=do
+          [entry]<-field "buffers" value :: Maybe [Value]
+          field name entry
     (shown,pending)<-request base
     let image=snapshot shown
         colors=snapshotHtml shown
@@ -384,9 +387,9 @@ reviewChecks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary r
     applied<-allow restored
     result<-pending
     check "Allow applies human patch and reports exact applied diff" (activeText applied=="human λ\n" && dialog applied==Nothing &&
-      (either (const Nothing) (field "appliedDiff") result::Maybe T.Text)==Just revised &&
-      (either (const Nothing) (field "userModified") result::Maybe Bool)==Just True &&
-      (either (const Nothing) (field "revision") result::Maybe Int)==Just 1)
+      (either (const Nothing) (diffField "appliedDiff") result::Maybe T.Text)==Just revised &&
+      (either (const Nothing) (diffField "userModified") result::Maybe Bool)==Just True &&
+      (either (const Nothing) (diffField "revision") result::Maybe Int)==Just 1)
     (bad,badPending)<-request base
     invalid<-replace "not a diff" bad >>= allow
     check "invalid human diff retains review and does not edit target" (dialog invalid/=Nothing && areaText invalid=="not a diff" && activeText invalid=="old\n" && "Diff not applied:" `T.isInfixOf` snapshot invalid)
@@ -417,7 +420,7 @@ reviewChecks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary r
     check "cancelled dialog cannot approve its replacement ticket" (dialog stillWaiting==dialog replacement && activeText stillWaiting=="old\n")
     replacementApplied<-allow stillWaiting
     replacementResult<-replacementPending
-    check "replacement retains its own decision and original diff" (activeText replacementApplied=="agent\n" && (either (const Nothing) (field "userModified") replacementResult::Maybe Bool)==Just False)
+    check "replacement retains its own decision and original diff" (activeText replacementApplied=="agent\n" && (either (const Nothing) (diffField "userModified") replacementResult::Maybe Bool)==Just False)
     (cancelled,cancelPending)<-request base
     _<-key (V.KFun 3) [V.MAlt] cancelled
     check "close shortcut denies pending patch" . isLeft =<< cancelPending

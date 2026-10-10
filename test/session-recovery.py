@@ -83,8 +83,8 @@ with tempfile.TemporaryDirectory(prefix='thc-recovery-live-') as directory:
         config.write_text('[editor.mcp.permissions]\n'+''.join(json.dumps(n)+' = "enable"\n' for n in names))
         doc = next(b for b in bridge.call('list_buffers')['buffers'] if b.get('path') == str(source))
         bid = doc['bufferId']
-        bridge.call('buffer_apply_diff', {'bufferId':bid, 'revision':doc['revision'],
-            'diff':'@@ -1 +1 @@\n-original\n+unsaved work\n'})
+        bridge.call('buffer_apply_diff', {'buffers':[{'bufferId':bid, 'revision':doc['revision'],
+            'diff':'@@ -1 +1 @@\n-original\n+unsaved work\n'}]})
         bridge.call('editor_arrange', {'action':'split_vertical'})
         layout = bridge.call('editor_layout')
         def saved():

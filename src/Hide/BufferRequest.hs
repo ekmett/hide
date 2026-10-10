@@ -30,15 +30,15 @@ import Hide.Plugin.Request (RequestServices(..))
 import Hide.WorkspaceFilesMCP (capturePatchRequest)
 
 -- | Capture under the desktop owner, invoke the resulting tools on a worker.
--- Read selection is fixed at dispatch. A diff additionally fixes its exact
+-- Read selection is fixed at dispatch. A diff additionally fixes every exact
 -- immutable content identity before any permission wait; equal numeric revision
 -- never permits a replacement buffer to inherit the request.
 --
 -- The context contains session-bound services and immutable target captures;
 -- window captures retain only their prepared body or logical transcript.
 -- A diff capability is present only for a validated diff request. It refuses
--- target/revision substitution and asks the existing owner for fresh admission
--- on every invocation, including retries with a changed patch. A window read
+-- target count/order/revision substitution and asks the existing owner for fresh
+-- admission on every invocation, including retries with a changed patch. A window read
 -- pins the original active/explicit window and exact body before approval; later
 -- focus changes cannot retarget it and body replacement expires the capture.
 bufferRequestServices :: P.BufferReader -> P.BufferEditor
@@ -69,19 +69,24 @@ bufferRequestServices reader editor captureWindow desktop name args=do
   else case codecDecode D.applyInput args of
     Left err->pure (Left err)
     Right request->do
-      captured<-capturePatchRequest desktop request
-      expected<-evaluate (D.expectedRevision request)
-      pure $ case captured of
+      captures<-mapM (capturePatchRequest desktop) (D.diffEntries request)
+      -- Force these small keys now: retained callbacks must not keep selectors
+      -- into the request, original buffers or Desktop alive.
+      expected<-evaluate (force (map targetKey (D.diffEntries request)))
+      pure $ case sequence captures of
         Left err->Left err
-        Right (ident,version)->
-          let reference=editorReference editor ident
-              apply candidate
-                | D.targetBuffer candidate/=ident || D.expectedRevision candidate/=expected=
-                    pure (Left (CommandRejected "Diff request changed its original target or revision"))
+        Right captured->
+          let apply candidate
+                | map targetKey (D.diffEntries candidate)/=expected=
+                    pure (Left (CommandRejected "Diff request changed its original targets or revisions"))
                 | otherwise=do
-                    outcome<-P.applyBufferDiff editor reference version (D.diffText candidate)
+                    outcome<-P.applyBufferDiffs editor
+                      [P.BufferDiff (editorReference editor ident) version (D.diffText entry)
+                      | ((ident,version),entry)<-zip captured (D.diffEntries candidate)]
                     case outcome of
                       Left err->pure (Left (CommandRejected err))
-                      Right result->Right <$> evaluate (force (D.DiffReply ident (P.diffRevision result)
-                        (P.appliedDiff result) (P.userModified result)))
+                      Right results->Right <$> evaluate (force
+                        [D.DiffReply ident (P.diffRevision result) (P.appliedDiff result) (P.userModified result)
+                        | ((ident,_),result)<-zip captured results])
           in Right (RequestServices reading (Just (D.BufferDiffServices apply)) Nothing)
+  where targetKey entry=(D.targetBuffer entry,D.expectedRevision entry)

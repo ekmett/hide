@@ -327,7 +327,7 @@ buffers receive one ordinary Undo entry; saving stays explicit and a stale
 result never rebases the proposed edits.
 
 
-`buffer_apply_diff` captures the original editable buffer and optional file
+`buffer_apply_diff` captures each original editable buffer and optional file
 baseline when its request is admitted. Whole-text strict diff validation,
 replacement construction and comparison with the original approved diff run on
 an unmasked worker through WorkspaceFilesMCP and BufferEdits. A new content
@@ -340,7 +340,7 @@ approval attempts. Allow starts a worker without blocking the UI; invalid or
 stale results leave the same private review editable for correction. Current
 review identity guards completion, so an older attempt cannot overwrite newer
 review text, selection, Undo or body. The exact applied diff and userModified
-flag come from the worker result. Successful adoption is one ordinary Undo and
+flag come from the worker result. Successful adoption adds one ordinary Undo per changed buffer and
 never saves, including untitled targets.
 
 The existing permission tick rechecks policy, attributed token/actor and current
@@ -364,21 +364,27 @@ in the queue gap. Current policy, actor and privacy still apply to every request
 `Hide.Plugin.BufferDiff` in `hide-plugin-api` exposes checked diff arguments and
 an immutable result through a request-bound service. `hide-agents` owns the actual
 `buffer_apply_diff` declaration and JSON codec. `Hide.BufferRequest` checks its
-arguments and captures exact content identity before worker dispatch. Only that
-request receives a diff capability; it cannot substitute another buffer or
-revision. This capture does not grant approval: the existing permission owner
-still checks the actor, policy and current target on every invocation.
+arguments and captures every exact content identity from the same Desktop
+before worker dispatch. Only that request receives a diff capability; it cannot
+change the target count, order, IDs or revisions. This capture does not grant
+approval: the existing permission owner still checks the actor, policy and current
+target on every invocation.
 
-The reply worker retains only the editor, target and exact version. The same
+The reply worker retains only the editor, target keys and exact versions. The same
 Waiting request owns editable correction attempts, cancellation/adoption claim
 and terminal typed result. Cancellation retires the shared attempt; shutdown
 rejects new calls and resolves accepted replies before joining workers outside
-the session lock. The public `DiffReply` carries the exact `appliedDiff`,
-`userModified` and resulting revision. The plugin encodes that bounded reply on
-the worker; retiring its tool registry rejects later calls. Buffers, version
+the session lock. Each public `DiffReply` carries its buffer ID, exact `appliedDiff`,
+`userModified` and resulting revision; replies follow request order. The plugin
+encodes that bounded reply on the worker; retiring its tool registry rejects
+later calls. Buffers, version
 tokens and preparation objects stay host-internal.
 
-Host-internal edits across buffers use the same owner in one call:
+The public service accepts checked `ApplyDiffArguments`, built from a list of
+`DiffEntry` values with `applyDiffArguments`. The agent tool uses the same
+`buffers` array shape for every request, including one target, and returns
+ordered entries under `buffers`. Its captured callback submits the whole batch
+to the existing host owner in one call:
 
 ```haskell
 applyBufferDiffs editor
@@ -391,7 +397,7 @@ applyBufferDiffs editor
 accepts 1–16 distinct open text buffers with at most 1 MiB characters across all
 patches. Results follow input order. One invalid, stale, private or closed target
 rejects the entire batch; success adds one ordinary Undo per changed buffer and
-saves nothing. The singleton API follows this same path.
+saves nothing. The host-internal singleton convenience follows this same path.
 
 A batch uses one `buffer_apply_diff` permission ticket. In Prompt mode, each
 fixed target gets its own editable diff; the user can navigate between them
@@ -553,7 +559,7 @@ including its modal dialogs. On macOS, build the window backend and run:
 ```sh
 cabal build lib:hide
 mkdir -p build/docs-capture/objects
-cabal exec -- ghc -threaded -XGHC2021 -package hide -itools tools/docs-screenshots.hs -outputdir build/docs-capture/objects -o build/docs-capture/screenshots
+cabal exec -- ghc -threaded -XGHC2021 -package hide -package hide-agents -itools tools/docs-screenshots.hs -outputdir build/docs-capture/objects -o build/docs-capture/screenshots
 build/docs-capture/screenshots
 make docs
 make docs-check

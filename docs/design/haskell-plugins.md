@@ -793,12 +793,16 @@ including the logical conversation catalogue. The plugin owns the declaration
 and `window-text` reply codec; no host body or source tree crosses the API.
 
 `buffer_apply_diff` consumes the public `Hide.Plugin.BufferDiff` service through
-`RequestServices`. Its target and exact content identity are captured before
-worker dispatch, and only that request receives the diff capability. The callback
-rejects target/revision substitution and invokes the same host permission owner
-for admission, editable approval, cancellation and one ordinary Undo. It returns
-the human-approved patch and `userModified`; the plugin owns the concrete reply
-codec. Buffers, exact version grants and batch preparation remain host-internal.
+`RequestServices`. The checked `ApplyDiffArguments` contains 1–16 distinct
+`DiffEntry` targets with at most 1 MiB patch characters in total. All exact
+content identities are captured from the same Desktop before worker dispatch.
+Only that request receives the diff capability; its callback rejects changes
+to target count, order, IDs or revisions. It submits the batch once to the same
+host permission owner for admission, editable approval, cancellation and atomic
+adoption. Results follow input order and report the human-approved patches and
+`userModified`; each changed buffer gets ordinary Undo. The plugin owns the
+`buffers` array request/reply codecs. Buffers, exact version grants and batch
+preparation remain host-internal.
 
 The broader registration shape below remains proposed:
 

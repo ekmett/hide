@@ -21,6 +21,8 @@ import System.Info (os)
 import System.Process (callProcess)
 import qualified Hide.BufferTools as BufferTools
 import qualified Hide.Plugin.Tool as Tool
+import qualified Hide.Plugin.BufferDiff as D
+import Hide.Plugin.Command (codecDecode)
 import TypedBufferDiffsCheck (startDiffCall)
 import Hide.Buffer
 import Hide.BufferView
@@ -79,13 +81,13 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->do
           bid=maybe (error "missing buffer") sourceFixtureBuffer (activeWindow clean)
           patch::T.Text
           patch="--- a/source.hs\n+++ b/source.hs\n@@ -1 +1 @@\n-disk needle\n+live needle\n"
-      (dirtyDesktop,patched)<-success "buffer_apply_diff" ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= patch] clean
-      check "diff edit updates live buffer revision and remains unsaved" (field "revision" patched==Just (1::Int) && activeText dirtyDesktop=="live needle\n" && maybe False (dirty.documentBuffer) (activeDocument dirtyDesktop))
+      (dirtyDesktop,patched)<-success "buffer_apply_diff" ["buffers" .= [object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= patch]]] clean
+      check "diff edit updates live buffer revision and remains unsaved" (codecDecode BufferTools.applyOutput patched==Right [D.DiffReply bid 1 patch False] && activeText dirtyDesktop=="live needle\n" && maybe False (dirty.documentBuffer) (activeDocument dirtyDesktop))
       check "diff edit is undoable in one action" (activeText (fst (runCommand Undo dirtyDesktop))=="disk needle\n")
       disk<-TIO.readFile (root </> "source.hs")
       check "diff never saves the file" (disk=="disk needle\n")
-      rejected "buffer_apply_diff" ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= patch] dirtyDesktop
-      rejected "buffer_apply_diff" ["bufferId" .= bid,"revision" .= (1::Int),"diff" .= patch] dirtyDesktop
+      rejected "buffer_apply_diff" ["buffers" .= [object ["bufferId" .= bid,"revision" .= (0::Int),"diff" .= patch]]] dirtyDesktop
+      rejected "buffer_apply_diff" ["buffers" .= [object ["bufferId" .= bid,"revision" .= (1::Int),"diff" .= patch]]] dirtyDesktop
       rejected "workspace_files" (operation "delete" "source.hs") dirtyDesktop
       rejected "workspace_files" (operation "rename" "source.hs"++["to" .= ("renamed.hs"::T.Text)]) dirtyDesktop
       (renamedDesktop,renamedResult)<-success "workspace_files" (operation "rename" "source.hs"++["to" .= ("renamed.hs"::T.Text)]) clean
@@ -123,13 +125,13 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->do
         (defaultDirectory removedTree==Just root && fmap treeRoot (sideTree removedTree)==Just root)
       let binary=addDocument Nothing (newByteBuffer (BS.pack [0,255])) initial
           binaryId=maybe (error "missing binary buffer") sourceFixtureBuffer (activeWindow binary)
-      rejected "buffer_apply_diff" ["bufferId" .= binaryId,"revision" .= (0::Int),"diff" .= patch] binary
+      rejected "buffer_apply_diff" ["buffers" .= [object ["bufferId" .= binaryId,"revision" .= (0::Int),"diff" .= patch]]] binary
       let multiBase=fst (runCommand SplitVertical (addDocument Nothing (newBuffer "a\nb\ncc\nd\n") initial))
           multi=multiBase {windows=map (\w->w {selection=Selection 5 5}) (windows multiBase)}
           multiId=maybe (error "missing split buffer") sourceFixtureBuffer (activeWindow multi)
           multiPatch::T.Text
           multiPatch="@@ -1 +1 @@\n-a\n+AAAAA\n@@ -3 +3 @@\n-cc\n+Z\n"
-      (mapped,_)<-success "buffer_apply_diff" ["bufferId" .= multiId,"revision" .= (0::Int),"diff" .= multiPatch] multi
+      (mapped,_)<-success "buffer_apply_diff" ["buffers" .= [object ["bufferId" .= multiId,"revision" .= (0::Int),"diff" .= multiPatch]]] multi
       check "multi-hunk diff rebases every shared selection through preceding insertions"
         (all ((==Selection 10 10).selection) (windows mapped) && map windowId (windows mapped)==map windowId (windows multi))
       rejected "workspace_search" ["query" .= ("needle"::T.Text),"unexpected" .= True] initial
@@ -171,7 +173,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->do
       (_,privateSearch)<-success "workspace_search" ["query" .= ("private needle"::T.Text)] privateLive
       (_,privateTracked)<-success "workspace_search" ["query" .= ("private needle"::T.Text),"trackedOnly" .= True] privateLive
       check "workspace search excludes private disk and live contents" (null (texts privateSearch) && null (texts privateTracked))
-      rejected "buffer_apply_diff" ["bufferId" .= privateBid,"revision" .= (0::Int),"diff" .= ("@@ -1 +1 @@\n-unsaved private needle\n+changed\n"::T.Text)] privateLive
+      rejected "buffer_apply_diff" ["buffers" .= [object ["bufferId" .= privateBid,"revision" .= (0::Int),"diff" .= ("@@ -1 +1 @@\n-unsaved private needle\n+changed\n"::T.Text)]]] privateLive
       mapM_ (\path->rejected "workspace_files" (operation "delete" path) protected) ["authority/config.toml","authority"]
       rejected "workspace_files" (operation "rename" "authority"++["to" .= ("moved-authority"::T.Text)]) protected
       rejected "workspace_files" (operation "rename" "untracked.hs"++["to" .= ("future"::T.Text)]) protected

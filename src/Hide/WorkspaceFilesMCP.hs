@@ -178,9 +178,9 @@ data PatchSource = PatchSource !Int !Buffer !(Maybe FileState)
 -- | Capture only original target metadata. Whole-text validation belongs to
 -- preparePatch's worker; current editability/privacy is checked again at adoption.
 capturePatchSource :: Desktop -> Value -> Either Text PatchSource
-capturePatchSource desktop args=codecDecode D.applyInput args >>= captureDiffSource desktop
+capturePatchSource desktop args=codecDecode D.entryInput args >>= captureDiffSource desktop
 
-captureDiffSource :: Desktop -> D.ApplyDiffArguments -> Either Text PatchSource
+captureDiffSource :: Desktop -> D.DiffEntry -> Either Text PatchSource
 captureDiffSource desktop request=do
   let bid=D.targetBuffer request
       expected=D.expectedRevision request
@@ -193,7 +193,7 @@ captureDiffSource desktop request=do
 
 -- | Validate wire arguments and capture only the exact original content identity.
 -- The queued typed service refuses replacement before its source admission.
-capturePatchRequest :: Desktop -> D.ApplyDiffArguments -> IO (Either Text (Int,ContentVersion))
+capturePatchRequest :: Desktop -> D.DiffEntry -> IO (Either Text (Int,ContentVersion))
 capturePatchRequest desktop request=case captureDiffSource desktop request of
   Left err->pure (Left err)
   Right (PatchSource bid old _)->do
@@ -213,7 +213,7 @@ preparePatch (PatchSource target old file) original args=case patchArguments arg
 
 patchArguments :: Value -> Either Text (Int,Int,Text)
 patchArguments value=do
-  request<-codecDecode D.applyInput value
+  request<-codecDecode D.entryInput value
   pure (D.targetBuffer request,D.expectedRevision request,D.diffText request)
 
 -- | Recheck every target's current editability, then install the entire batch

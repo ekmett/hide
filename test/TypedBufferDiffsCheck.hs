@@ -6,7 +6,7 @@ import qualified Control.Concurrent.STM as STM
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async
 import Control.Exception (bracket,onException)
-import Control.Monad (unless,forM)
+import Control.Monad (unless,forM,forM_)
 import Data.Aeson
 import Data.IORef
 import Data.List (find)
@@ -42,12 +42,30 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
       base=addDocument Nothing (newBuffer "old\n") (initialDesktop (80,25))
       ident=maybe (error "missing typed diff target") sourceFixtureBuffer (activeWindow base)
       patch="@@ -1 +1 @@\n-old\n+agent\n"
-      arguments=object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch]
+      arguments=object ["buffers" .= [object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch]]]
       check label ok=unless ok (error label)
       rejected result=case result of Left _->True; _->False
   TIO.writeFile config "[editor.mcp.permissions]\nbuffer_apply_diff = 'enable'\n"
-  check "public diff codec rejects patches above its character bound"
-    (rejected (C.codecDecode D.applyInput (object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= T.replicate 1048577 "x"])))
+  let entry=D.DiffEntry ident 0 patch
+      half=T.replicate 524288 "λ"
+      boundary=[D.DiffEntry ident 0 half,D.DiffEntry (ident+1) 0 half]
+  checked<-either (error . T.unpack) pure (D.applyDiffArguments [entry])
+  check "public diff codec round-trips a checked batch"
+    (C.codecDecode D.applyInput (C.codecEncode D.applyInput checked)==Right checked)
+  check "public diff constructor accepts sixteen distinct targets and the aggregate boundary"
+    (not (rejected (D.applyDiffArguments [D.DiffEntry n 0 "" | n<-[0..15]]))
+      && not (rejected (D.applyDiffArguments boundary)))
+  let invalidBatches=[[],[D.DiffEntry n 0 "" | n<-[0..16]],[entry,entry],
+        [D.DiffEntry ident 0 (half<>"λ"),D.DiffEntry (ident+1) 0 half]]
+  check "public diff constructor and wire codec share count, uniqueness and aggregate bounds"
+    (all (\entries->rejected (D.applyDiffArguments entries)
+      && rejected (C.codecDecode D.applyInput (object ["buffers" .= map (C.codecEncode D.entryInput) entries]))) invalidBatches)
+  check "public diff codec rejects the retired singleton shape and unknown nested fields"
+    (all (rejected . C.codecDecode D.applyInput)
+      [object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch],
+       object ["buffers" .= [object ["bufferId" .= ident,"revision" .= (0::Int),"diff" .= patch,"extra" .= True]]],
+       object ["buffers" .= [C.codecEncode D.entryInput entry],"extra" .= True],
+       object ["buffers" .= [object ["bufferId" .= ident,"revision" .= (0.5::Double),"diff" .= patch]]]])
   withPermissionsAt config specs $ \owner->C.withRegistry $ \registry->do
     let linkedEditor=bufferEditor owner (pure (Right ()))
         linkedReference=editorReference linkedEditor ident
@@ -86,9 +104,9 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
     version<-captureVersion (documentBuffer (buffers base M.! ident))
     captured<-bufferRequestServices reader editor (windowReader owner (pure (Right ()))) base "buffer_apply_diff" arguments >>= either (error . T.unpack) pure
     substituted<-timeout 5000000 (Tool.callTool toolset captured "buffer_apply_diff"
-      (object ["bufferId" .= (ident+1),"revision" .= (0::Int),"diff" .= patch]))
+      (object ["buffers" .= [object ["bufferId" .= (ident+1),"revision" .= (0::Int),"diff" .= patch]]]))
     check "captured diff capability cannot be redirected to another target"
-      (substituted==Just (Left "Diff request changed its original target or revision"))
+      (substituted==Just (Left "Diff request changed its original targets or revisions"))
     withAsync (Tool.callTool toolset captured "buffer_apply_diff" arguments) $ \worker->do
       _<-timeout 5000000 (queued worker) >>= maybe (error "diff did not queue") pure
       TIO.writeFile (directory </> "replacement.txt") "old\n"
@@ -135,7 +153,7 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
     result<-timeout 5000000 (Tool.callTool retired captured "buffer_apply_diff" arguments)
     check "retired plugin tool cannot resurrect a diff request in live service"
       (case result of Just (Left "RegistryClosed")->True; _->False)
-  batchChecks specs directory config base ident patch
+  batchChecks toolset specs directory config base ident patch
   putStrLn "typed buffer diff checks passed"
   where
     waitQueued worker=do
@@ -147,25 +165,29 @@ checks=Tool.withTools [] BufferTools.tools $ \toolset->bracket temporary removeP
         _->threadDelay 1000 >> waitQueued worker
     temporary=do root<-getTemporaryDirectory; (path,h)<-openTempFile root "hide-typed-diff"; hClose h; removeFile path; createDirectory path; pure path
 
--- The same internal owner handles singleton and multi-target edits. These checks
--- observe target text/history and terminal replies, never permission internals.
-batchChecks :: [Value] -> FilePath -> FilePath -> Desktop -> Int -> T.Text -> IO ()
-batchChecks specs directory config single first firstPatch=do
+-- The public tool uses the same owner for singleton and multi-target edits.
+-- Observe text/history, exact target receipts and terminal replies at that seam.
+batchChecks :: Tool.Tools RequestServices -> [Value] -> FilePath -> FilePath -> Desktop -> Int -> T.Text -> IO ()
+batchChecks toolset specs directory config single first firstPatch=do
   let opened=addDocument (Just (FileState (directory </> "second.hs") Nothing)) (newBuffer "other\n") single
       second=maybe (error "missing second batch target") sourceFixtureBuffer (activeWindow opened)
       base=opened {windows=map (\w->w {windowHexLow=True}) (windows opened)}
       secondPatch="@@ -1 +1 @@\n-other\n+second\n"
       reviewed="@@ -1 +1 @@\n-old\n+human λ\n"
+      entries=[D.DiffEntry second 0 secondPatch,D.DiffEntry first 0 firstPatch]
+      wire diffs=object ["buffers" .= map (C.codecEncode D.entryInput) diffs]
+      arguments=wire entries
       buffer bid d=documentBuffer (buffers d M.! bid)
       original d=contents (buffer first d)=="old\n" && contents (buffer second d)=="other\n" &&
         all (\bid->revision (buffer bid d)==0 && null (undoStack (buffer bid d))) [first,second]
       check label ok=unless ok (error label)
       isLeft (Left _)=True
       isLeft _=False
-      inputs editor=do
-        a<-captureVersion (buffer first base)
-        b<-captureVersion (buffer second base)
-        pure [P.BufferDiff (editorReference editor second) b secondPatch,P.BufferDiff (editorReference editor first) a firstPatch]
+      contextFor owner caller=bufferRequestServices (bufferReader owner caller)
+        (bufferEditor owner caller) (windowReader owner caller) base "buffer_apply_diff" arguments
+        >>= either (error . T.unpack) pure
+      call context args=Tool.callTool toolset context "buffer_apply_diff" args
+      replies result=either (error . T.unpack) pure result >>= either (error . T.unpack) pure . C.codecDecode BufferTools.applyOutput
       await owner worker start=timeout 5000000 (go start) >>= maybe (error "batch reply timed out") pure
         where go current=do
                 done<-poll worker
@@ -178,6 +200,9 @@ batchChecks specs directory config single first firstPatch=do
                 next<-tickPermissions owner current
                 if predicate next then pure next else threadDelay 1000 >> go next
       shown owner=untilDesktop owner (maybe False (const True) . dialog) base
+      failedReview owner review=untilDesktop owner (\d->case (dialog review,dialog d) of
+        (Just originalDialog,Just current)->purpose current==purpose originalDialog && any (T.isPrefixOf "Diff not applied:") (body current)
+        _->False)
       submit owner button d=case dialog d of
         Just dg->let (next,effects)=submitDialog button dg d in snd <$> policyEffects owner (\current _->pure (False,current)) next effects
         Nothing->error "missing batch approval"
@@ -186,43 +211,45 @@ batchChecks specs directory config single first firstPatch=do
         Nothing->error "missing batch target window"
       enqueue worker=timeout 5000000 (waitQueued worker) >>= maybe (error "batch did not queue") pure
   withPermissionsAt config specs $ \owner->do
-    let editor=bufferEditor owner (pure (Right ()))
-    patches<-inputs editor
-    withAsync (P.applyBufferDiffs editor patches) $ \worker->do
+    captured<-contextFor owner (pure (Right ()))
+    forM_ [("count",take 1 entries),("order",reverse entries),
+      ("target",[D.DiffEntry second 0 secondPatch,D.DiffEntry (second+1) 0 firstPatch]),
+      ("revision",[D.DiffEntry second 0 secondPatch,D.DiffEntry first 1 firstPatch])] $ \(label,changed)->do
+      result<-timeout 5000000 (call captured (wire changed))
+      check ("captured public batch rejects "++label++" substitution") (case result of Just (Left _)->True; _->False)
+    withAsync (call captured arguments) $ \worker->do
       (updated,result)<-await owner worker base
-      results<-either (error . T.unpack) pure result
-      check "batch results preserve input order" (map P.appliedDiff results==[secondPatch,firstPatch] && map P.diffRevision results==[1,1] && all (not . P.userModified) results)
+      results<-replies result
+      check "public batch results preserve input order"
+        (map D.editedBuffer results==[second,first] && map D.appliedDiff results==[secondPatch,firstPatch]
+          && map D.editedRevision results==[1,1] && all (not . D.userModified) results)
       check "batch commits all targets and clears their hex nibble state" (contents (buffer first updated)=="agent\n" && contents (buffer second updated)=="second\n" && all (not . windowHexLow) (windows updated))
       let undoSecond=fst (runCommand Undo (target second updated))
           undoFirst=fst (runCommand Undo (target first undoSecond))
       check "batch gives each target one independent ordinary Undo" (all (\bid->length (undoStack (buffer bid updated))==1) [first,second] && contents (buffer first undoSecond)=="agent\n" && contents (buffer second undoSecond)=="other\n" && contents (buffer first undoFirst)=="old\n")
-    case patches of
-      a:_->do
-        duplicate<-P.applyBufferDiffs editor [a,a]
-        after<-tickPermissions owner base
-        check "duplicate batch targets reject without edits" (isLeft duplicate && original after)
-      _->error "empty batch fixture"
+    duplicate<-call captured (wire [D.DiffEntry second 0 secondPatch,D.DiffEntry second 0 secondPatch])
+    after<-tickPermissions owner base
+    check "duplicate public batch targets reject without edits" (isLeft duplicate && original after)
+    -- Only the internal API carries opaque references from another namespace.
+    let editor=bufferEditor owner (pure (Right ()))
     foreignReference<-withPermissionsAt config specs $ \other->pure (editorReference (bufferEditor other (pure (Right ()))) first)
-    version<-captureVersion (buffer first base)
-    case patches of
-      a:_->withAsync (P.applyBufferDiffs editor [a,P.BufferDiff foreignReference version firstPatch]) $ \worker->do
-        (unchanged,result)<-await owner worker base
-        check "one foreign-session target rejects the entire batch" (isLeft result && original unchanged)
-      _->error "empty batch fixture"
-    case patches of
-      [a,P.BufferDiff reference expected _]->withAsync (P.applyBufferDiffs editor [a,P.BufferDiff reference expected "not a diff"]) $ \worker->do
-        (unchanged,result)<-await owner worker base
-        check "one invalid strict patch cannot partially commit a batch" (isLeft result && original unchanged)
-      _->error "unexpected batch fixture"
+    firstVersion<-captureVersion (buffer first base)
+    secondVersion<-captureVersion (buffer second base)
+    withAsync (P.applyBufferDiffs editor [P.BufferDiff (editorReference editor second) secondVersion secondPatch,
+      P.BufferDiff foreignReference firstVersion firstPatch]) $ \worker->do
+      (unchanged,result)<-await owner worker base
+      check "one foreign-session target rejects the entire batch" (isLeft result && original unchanged)
+    withAsync (call captured (wire [D.DiffEntry second 0 secondPatch,D.DiffEntry first 0 "not a diff"])) $ \worker->do
+      (unchanged,result)<-await owner worker base
+      check "one invalid strict patch cannot partially commit a public batch" (isLeft result && original unchanged)
   TIO.writeFile config "[editor.mcp.permissions]\nbuffer_apply_diff = 'prompt'\n"
   withPermissionsAt config specs $ \owner->do
-    let editor=bufferEditor owner (pure (Right ()))
-    patches<-inputs editor
-    withAsync (P.applyBufferDiffs editor patches) $ \worker->do
+    captured<-contextFor owner (pure (Right ()))
+    withAsync (call captured arguments) $ \worker->do
       enqueue worker
       review<-shown owner
       let areas=[(i,contents b) | Just dg<-[dialog review],(i,TextArea _ True b _ _ _)<-zip [0..] (fields dg)]
-      check "one batch ticket has a human editable diff per target" (map snd areas==[secondPatch,firstPatch] && original review)
+      check "one public batch ticket has a human editable diff per target" (map snd areas==[secondPatch,firstPatch] && original review)
       focused<-case (dialog review,areas) of
         (Just dg,[_,(i,_)])->pure (fst (moveDialogFocus (i-focus dg) review))
         _->error "missing second editable batch diff"
@@ -232,48 +259,50 @@ batchChecks specs directory config single first firstPatch=do
       check "editing a batch approval retains both original target buffers" (original draft)
       started<-submit owner 0 draft
       (updated,result)<-await owner worker started
-      results<-either (error . T.unpack) pure result
-      check "one approval atomically applies exact edited diffs and ordered metadata" (contents (buffer first updated)=="human λ\n" && contents (buffer second updated)=="second\n" && map P.appliedDiff results==[secondPatch,reviewed] && map P.userModified results==[False,True] && dialog updated==Nothing)
-    withAsync (P.applyBufferDiffs editor patches) $ \worker->do
+      results<-replies result
+      check "one approval atomically applies exact edited diffs and ordered metadata"
+        (contents (buffer first updated)=="human λ\n" && contents (buffer second updated)=="second\n"
+          && map D.editedBuffer results==[second,first] && map D.appliedDiff results==[secondPatch,reviewed]
+          && map D.userModified results==[False,True] && dialog updated==Nothing)
+    withAsync (call captured arguments) $ \worker->do
       enqueue worker
       review<-shown owner
       let changed=review {buffers=M.adjust (\doc->doc {documentBuffer=replaceBuffer False "newer\n" (documentBuffer doc)}) second (buffers review)}
       started<-submit owner 0 changed
-      refused<-untilDesktop owner (T.isPrefixOf "Diff not applied:" . status) started
-      check "one stale target prevents every other batch edit" (contents (buffer first refused)=="old\n" && null (undoStack (buffer first refused)) && contents (buffer second refused)=="newer\n" && dialog refused/=Nothing)
+      refused<-failedReview owner review started
+      check "one stale target prevents every other public batch edit" (contents (buffer first refused)=="old\n" && null (undoStack (buffer first refused)) && contents (buffer second refused)=="newer\n" && dialog refused/=Nothing)
       _<-submit owner 1 refused
       check "denial after stale batch resolves the same request" . isLeft =<< wait worker
-    withAsync (P.applyBufferDiffs editor patches) $ \worker->do
+    withAsync (call captured arguments) $ \worker->do
       enqueue worker
       review<-shown owner
       started<-submit owner 0 review {guestPrivatePaths=[directory </> "second.hs"]}
-      refused<-untilDesktop owner (T.isPrefixOf "Diff not applied:" . status) started
-      check "one newly private target prevents every batch edit" (original refused && dialog refused/=Nothing)
+      refused<-failedReview owner review started
+      check "one newly private target prevents every public batch edit" (original refused && dialog refused/=Nothing)
       _<-submit owner 1 refused
       check "denial after private batch resolves the same request" . isLeft =<< wait worker
-    withAsync (P.applyBufferDiffs editor patches) $ \worker->do
+    withAsync (call captured arguments) $ \worker->do
       enqueue worker
       review<-shown owner
       cancel worker
       unchanged<-tickPermissions owner review
-      check "cancelled batch approval cannot commit on a later tick" (original unchanged)
+      check "cancelled public batch approval cannot commit on a later tick" (original unchanged)
     actor<-newIORef (Right ())
-    let attributed=bufferEditor owner (readIORef actor)
-    withAsync (P.applyBufferDiffs attributed patches) $ \worker->do
+    attributed<-contextFor owner (readIORef actor)
+    withAsync (call attributed arguments) $ \worker->do
       enqueue worker
       review<-shown owner
       writeIORef actor (Left "actor revoked")
       started<-submit owner 0 review
       (unchanged,result)<-await owner worker started
-      check "revocation after batch review rejects every target" (original unchanged && case result of Left "actor revoked"->True; _->False)
+      check "revocation after public batch review rejects every target" (original unchanged && result==Left "actor revoked")
   pending<-withPermissionsAt config specs $ \owner->do
-    let editor=bufferEditor owner (pure (Right ()))
-    patches<-inputs editor
-    worker<-async (P.applyBufferDiffs editor patches)
+    captured<-contextFor owner (pure (Right ()))
+    worker<-async (call captured arguments)
     enqueue worker `onException` cancel worker
     pure worker
   stopped<-timeout 5000000 (wait pending) >>= maybe (cancel pending >> error "batch shutdown reply timed out") pure
-  check "shutdown resolves an accepted multi-target request" (isLeft stopped)
+  check "shutdown resolves an accepted public multi-target request" (isLeft stopped)
   where
     waitQueued worker=do
       state<-threadStatus (asyncThreadId worker)

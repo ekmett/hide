@@ -50,34 +50,44 @@ tools=
       Nothing->pure (Left (CommandRejected "Window read requires an exact host-captured request."))
       Just reader->W.readWindow reader arguments))
   ,Tool "buffer_apply_diff" False (CommandDef "hide.buffer.apply-diff"
-    "Apply one strict unified diff to a live text buffer at the given revision. Context and hunk positions must match exactly. This permission also covers linked plugin batches for several buffers; every patch in a batch is applied atomically with ordinary Undo per buffer. No file is saved. File headers are optional and identify only the target buffer, never disk paths."
+    "Apply strict unified diffs atomically to 1–16 distinct live text buffers at their given revisions, with at most 1048576 patch characters in total. Context and hunk positions must match exactly. One approval covers the whole batch; every patch is applied together or none, with ordinary Undo per changed buffer. No file is saved. Results follow input order and report the exact approved patches. File headers identify only the target buffer, never disk paths."
     D.applyInput applyOutput (\services arguments->case requestDiff services of
       Nothing->pure (Left (CommandRejected "Diff requires an exact host-captured request."))
       Just editing->D.applyDiff editing arguments))]
 
--- | Concrete singleton diff outcome, preserving the exact edited approval and
--- existing wire fields. A diff never saves a file; a true saved marker fails.
+-- | Ordered outcomes for an atomic batch, preserving exact human corrections.
+-- A diff never saves a file; a true saved marker fails. Decode validates distinct
+-- targets, 1–16 replies and the aggregate one-MiB-character applied-diff bound.
 --
--- @codecDecode applyOutput (codecEncode applyOutput reply) = Right reply@.
--- for an outcome satisfying the one-MiB-character applied-diff bound.
-applyOutput :: Codec D.DiffReply
-applyOutput=Codec (objectSchema [("bufferId",number),("revision",number),
-  ("saved",object ["type" .= ("boolean"::Text),"const" .= False]),
-  ("appliedDiff",object ["type" .= ("string"::Text),"maxLength" .= (1048576::Int)]),
-  ("userModified",boolean)])
-  (decodeValue (withObject "buffer diff reply" $ \fields->do
-    only ["bufferId","revision","saved","appliedDiff","userModified"] fields
-    target<-fields .: "bufferId"
-    revision<-fields .: "revision"
-    saved<-fields .: "saved"
-    unless (not saved) (fail "Diff does not save files")
-    patch<-fields .: "appliedDiff"
-    unless (T.length patch<=1048576) (fail "Applied diff exceeds 1 MiB characters")
-    modified<-fields .: "userModified"
-    pure (D.DiffReply target revision patch modified)))
-  (\reply->object ["bufferId" .= D.editedBuffer reply,"revision" .= D.editedRevision reply,
-    "saved" .= False,"appliedDiff" .= D.appliedDiff reply,"userModified" .= D.userModified reply])
-  where number=object ["type" .= ("integer"::Text)]
+-- @codecDecode applyOutput (codecEncode applyOutput replies) = Right replies@
+-- for host outcomes satisfying those bounds.
+applyOutput :: Codec [D.DiffReply]
+applyOutput=Codec (objectSchema [("buffers",object ["type" .= ("array"::Text),
+    "minItems" .= (1::Int),"maxItems" .= (16::Int),"items" .= resultSchema])])
+  (decodeValue (withObject "buffer diff replies" $ \fields->do
+    only ["buffers"] fields
+    values<-fields .: "buffers"
+    unless (not (null values) && length values<=16) (fail "Diff batch requires 1..16 replies")
+    replies<-traverse parseReply values
+    _<-either (fail . T.unpack) pure (D.applyDiffArguments
+      [D.DiffEntry (D.editedBuffer reply) (D.editedRevision reply) (D.appliedDiff reply) | reply<-replies])
+    pure replies))
+  (\replies->object ["buffers" .= map encodeReply replies])
+  where
+    number=object ["type" .= ("integer"::Text)]
+    resultSchema=objectSchema [("bufferId",number),("revision",number),
+      ("saved",object ["type" .= ("boolean"::Text),"const" .= False]),
+      ("appliedDiff",object ["type" .= ("string"::Text),"maxLength" .= (1048576::Int)]),
+      ("userModified",boolean)]
+    parseReply=withObject "buffer diff reply" $ \fields->do
+      only ["bufferId","revision","saved","appliedDiff","userModified"] fields
+      target<-fields .: "bufferId"
+      revision<-fields .: "revision"
+      saved<-fields .: "saved"
+      unless (not saved) (fail "Diff does not save files")
+      D.DiffReply target revision <$> fields .: "appliedDiff" <*> fields .: "userModified"
+    encodeReply reply=object ["bufferId" .= D.editedBuffer reply,"revision" .= D.editedRevision reply,
+      "saved" .= False,"appliedDiff" .= D.appliedDiff reply,"userModified" .= D.userModified reply]
 
 -- | Concrete masked discovery reply. Encoding traverses metadata only, on the
 -- caller's worker; listing grants no subsequent content-read authority.
