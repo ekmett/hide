@@ -28,14 +28,17 @@ import Hide.AgentSidebarTypes
 import qualified Hide.AgentHub as AH
 import qualified Hide.AgentRuntime as AR
 import Hide.App (applyEffects)
+import Hide.MenuCommands
+import Hide.DocumentationHost (withDocsCommands)
 import Hide.Commands (configuredBindings)
-import Hide.Buffer (Selection(..),newBuffer)
+import Hide.Buffer (Selection(..),newBuffer,contents)
 import Hide.Plugin.Command (withRegistry,registerCommand,CommandDef(..),Codec(..))
 import qualified FormExtension
 import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import qualified Hide.Plugin.Form as Form
+import qualified Hide.Plugin.ConversationSession as ConversationSession
 import qualified Hide.Plugin.Menu as Menu
-import Hide.GuestAccess (readableAt,streamerReadableAt,guestKeyboardAllowed)
+import Hide.GuestAccess (readableAt,streamerReadableAt,guestKeyboardAllowed,guestEffectsAllowed)
 import qualified Hide.AgentTranscript as AgentTranscript
 import Hide.Conversation
 import qualified Hide.Consoles as C
@@ -43,7 +46,6 @@ import Hide.Model
 import Hide.Sidebar
 import Hide.SidebarCommands
 import Hide.Session
-import Hide.GuestAccess (guestEffectsAllowed)
 import qualified Hide.Plugin.Tree as P
 import qualified AgentIntegrationCheck
 
@@ -60,15 +62,20 @@ checks=bracket temporary removePathForcibly $ \root->
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) (Plugin.pluginPrimaryInput Hide.AgentUI.plugin) (Plugin.pluginChildInput Hide.AgentUI.plugin) consoles root $ \conversation->
-      withAutocomplete (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
+      withDocsCommands $ \docs->withConversationMenuCommands docs conversation $ \menuHost->
+      withAutocomplete (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost host) sidebarConversation SidebarConversation) $ do
         createRequests<-newIORef []
         agentRequests<-newIORef []
+        sessionRequests<-newIORef []
         let core desktop effects=do
               modifyIORef' agentRequests (++[request | AgentSidebarAction request<-effects])
               modifyIORef' createRequests (++[(workspace,name,task) | AgentSidebarAction (CreateAgent workspace name task)<-effects])
-              autocompleteEffects autocomplete (conversationEffects conversation applyEffects) desktop effects
-            tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= tickSidebar host core
-            act (d,effects)=snd <$> sidebarEffects host core d effects
+              changed<-autocompleteEffects autocomplete (conversationEffects conversation applyEffects) desktop effects
+              modifyIORef' sessionRequests (++[request | ConversationSessionAction request<-effects])
+              pure changed
+            runtime=sidebarEffects host (menuEffects menuHost core)
+            tick d=tickConversation conversation d >>= tickAutocomplete autocomplete >>= tickMenus menuHost runtime >>= tickSidebar host runtime
+            act (d,effects)=snd <$> runtime d effects
             -- Refusal is synchronous at the form owner. A later settings reply
             -- may update the HUD; it cannot change whether this action dispatched.
             refuseReplay d effects=do
@@ -82,6 +89,18 @@ checks=bracket temporary removePathForcibly $ \root->
             primary=AR.primaryAgent (conversationAgents conversation)
         initial<-initializeSidebar host (installSidebar (emptySidebar root 26 True) (modifyActive (\w->w {selection=Selection 2 4}) ((addDocument Nothing (newBuffer "source payload") (initialDesktop (100,35))) {defaultDirectory=Just root})))
         published<-await tick (has "Agents") initial
+        ensure "agent plugin publishes New and Resume through the public menu boundary"
+          (all (`elem` map (Menu.menuName . Menu.menuReference) (contributedMenus published))
+            ["hide.agents.new","hide.agents.resume"])
+        let sessionEntry name desktop=case [entry | i<-[0..length menus-1],entry@(MenuItem _ _ (RegisteredMenu reference _))<-menuItemsFor desktop i,Menu.menuName reference==name] of
+              [entry]->entry; _->error "Missing or duplicated conversation menu entry"
+            boundSessions=published {keyBindings=either (error . show) id (configuredBindings [] M.empty)}
+            newSessionEntry=sessionEntry "hide.agents.new" boundSessions
+            nativeSessions=published {nativeMac=True,videoMode=Just 3,keyBindings=M.empty}
+        ensure "registered New retains its configured command key identity"
+          (case newSessionEntry of MenuItem _ _ command->not (null (commandBindingKeys boundSessions AgentNew)) && commandBindingKeys boundSessions command==commandBindingKeys boundSessions AgentNew)
+        ensure "native session menu gives New its accelerator and leaves Resume unbound"
+          (menuShortcut nativeSessions (sessionEntry "hide.agents.new" nativeSessions)=="⇧⌘N" && menuShortcut nativeSessions (sessionEntry "hide.agents.resume" nativeSessions)=="")
         expanded<-act (activateTree True (index "Agents" published) published) >>= await tick (has "Primary")
         ensure "disconnected agents offer no unadvertised model actions"
           ("Model" `notElem` map fst (contextItemsFor (popupFor "Primary  idle" expanded)))
@@ -291,6 +310,37 @@ checks=bracket temporary removePathForcibly $ \root->
         ensure "rename Left collapses selection to its start" (inputValue (fst (handleEvent (V.EvKey V.KLeft []) renamed))==Just ("Primary",Selection 0 0))
         ensure "rename Shift Left extends existing selection" (inputValue (fst (handleEvent (V.EvKey V.KLeft [V.MShift]) typed))==Just ("N",Selection 1 0))
         _<-AH.endAgent hub AH.Human subagent
+        let sessionRequestAfter count _=((>count).length) <$> readIORef sessionRequests
+            resumeForm desktop=case dialog desktop of
+              Just dg | PluginInputForm{}<-purpose dg,dialogTitle dg=="Resume conversation"->True
+              _->False
+        capturedSession<-captureConversationSession conversation nested >>= right
+        ensure "session capture never inspects source payloads"
+          =<< fmap (either (const False) (const True)) (captureConversationSession conversation nested {buffers=error "session capture forced buffers"})
+        let menuContext=sidebarInvocationContext Menu.HumanMenu nested {buffers=error "menu context forced buffers"}
+        ensure "menu form context retains only shallow host input" (null (sidebarPrivatePaths menuContext) && null (sidebarRenameFiles menuContext))
+        childFocus<-act (nested,[AgentSidebarAction (ShowAgent peer)])
+        let childDraft=setComposerInput (newBuffer "unsent child draft") (Selection 3 8) True childFocus
+        beforeNew<-length <$> readIORef sessionRequests
+        restarting<-act (runCommand AgentNew childDraft) >>= awaitIO tick (sessionRequestAfter beforeNew)
+        let childAgain=selectConversationView (AH.agentIdText peer) "A peer" restarting
+        ensure "plugin New selects Primary and preserves the independent child draft"
+          (T.null (conversationTarget restarting) && contents (composerBuffer childAgain)=="unsent child draft" && composerSelection childAgain==Selection 3 8)
+        staleSession<-act (restarting,[ConversationSessionAction (ConversationSession.NewConversation (ConversationSession.conversationReceipt capturedSession))])
+        ensure "old session receipt cannot replace a newer provider acquisition"
+          ("changed or is busy" `T.isInfixOf` status staleSession && not (guestEffectsAllowed [ConversationSessionAction (ConversationSession.NewConversation (ConversationSession.conversationReceipt capturedSession))]))
+        readySession<-await tick (\desktop->not (null (agentSettings desktop)) && not (agentReplying desktop)) staleSession
+        offered<-act (runCommand AgentResume readySession) >>= await tick resumeForm
+        let resumeReference=case dialog offered of Just dg | PluginInputForm formOwner<-purpose dg->formOwner; _->error "Missing Resume form"
+        ensure "Resume uses the ordinary private form with the remembered ID"
+          (Form.formDisclosure resumeReference==Form.PrivateForm && inputValue offered==Just ("private-main-key",Selection 0 16) && not (guestKeyboardAllowed offered))
+        let pendingResume=snd (runCommand DialogAccept offered)
+        beforeCancel<-length <$> readIORef sessionRequests
+        cancelledResume<-act (runCommand DialogCancel offered)
+        replayedResume<-act (cancelledResume,pendingResume)
+        afterCancel<-length <$> readIORef sessionRequests
+        ensure "cancelled Resume cannot submit its retained form action"
+          (afterCancel==beforeCancel && dialog replayedResume==Nothing)
         putStrLn "agent sidebar checks passed"
   where
     ensure label ok=unless ok (error label)

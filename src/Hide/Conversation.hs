@@ -12,7 +12,7 @@
 -- Shared consoles are injected; retirement closes only ACP-owned terminal IDs.
 -- Tool initiation returns a desktop plus a continuation, so questions wait outside the
 -- desktop lock while the rest of the session continues.
-module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, withConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
+module Hide.Conversation (ConversationState, conversationAgents, captureAgentSettings, captureConversationSession, withConversationAt, QuestionCaller, captureQuestionCaller, questionServices, applyQuestion, withConversation, conversationEffects, tickConversation, conversationBodyRequests, adoptConversationBodies, parseLaunch, renderReply, pauseLabel, renderTimestamp) where
 
 import Hide.Sidebar
 import Hide.ConversationBody
@@ -40,6 +40,9 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Time (UTCTime, TimeZone, getCurrentTime, getCurrentTimeZone, diffUTCTime, utcToLocalTime, formatTime, defaultTimeLocale)
 import Data.IORef
+import Data.Unique (Unique,newUnique)
+import Hide.ConversationSessionTypes
+import qualified Hide.Plugin.ConversationSession as Session
 import Data.List (find, sortOn)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
@@ -145,7 +148,8 @@ data PromptReply = PromptReply !Int [Text]
 data SettingsCapture = SettingsCapture !Bool !FilePath !Settings.SettingsSnapshot
 
 data State = State
-  { provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
+  { sessionIdentity :: !Unique
+  , provider :: A.Launch, connection :: Maybe A.Client, session :: Maybe Text, project :: FilePath
   , pending :: M.Map Int Phase, queuedPrompt :: Maybe (Text,Maybe AR.PrimaryControl), transcript :: !Transcript.PrimaryTranscript, nextRecord :: !Int
   , reads :: M.Map FilePath Snapshot, approvals :: [(Int,Approval)], presented :: Maybe Int, deferredApproval :: Bool, nextApproval :: Int
   , queuedQueries :: [QueuedQuery]
@@ -209,8 +213,9 @@ withConversationAt presenter primary child consoles root action = W.withWindowSc
         (raw::Value)<-o .: "provider"; config<-either fail pure (decodeLaunch (BL.toStrict (encode raw)))
         (,,) config <$> o .: "cwd" <*> o .: "sessionId")) previous
   editors<-newIORef M.empty
+  identity<-newUnique
   ref<-newIORef State
-    { provider=launch,connection=Nothing,session=Nothing,project=root
+    { sessionIdentity=identity,provider=launch,connection=Nothing,session=Nothing,project=root
     , pending=M.empty,queuedPrompt=Nothing,transcript=Transcript.emptyPrimaryTranscript,nextRecord=0,reads=M.empty
     , approvals=[],presented=Nothing,deferredApproval=False,nextApproval=1,queuedQueries=[]
     , ownedTerminals=S.empty,terminalWaiters=M.empty,lastMessageAt=Nothing
@@ -281,6 +286,10 @@ conversationEffects runtime@(ConversationState _ ref _ _) fallback original effe
       let owned=any ((==mount).conversationEditorMount) (M.elems editors)
       if owned then (False,) <$> submitConversationEditor runtime mount slot origin d else fallback d [effect]
     apply (_,d) (AgentSidebarAction request) = (False,) <$> applyAgentSidebar runtime request d
+    apply (_,d) (ConversationSessionAction request)=do
+      updated<-applyConversationSession runtime request d
+      syncConversationAgent runtime
+      pure (False,updated)
     apply (_,d) (AgentAction "edit-context" ("0":scope:_)) = do
       state<-readIORef ref
       root<-if isNothing (connection state) then B.resolveBuildRoot d else pure (project state)
@@ -332,18 +341,18 @@ perform runtime@(ConversationState _ ref _ _) action values d=do
   state<-readIORef ref
   case () of
     _ | (isNothing (conversationPresenter state) || isNothing (primaryInput state)) &&
-        (action=="new" || T.null (conversationTarget d) && action `elem` ["send","load"])->
+        (T.null (conversationTarget d) && action=="send")->
           pure d {status=unavailableConversation}
-      | action `elem` ["show","new"]->do
+      | action=="show"->do
           prepared<-ensureConversationEditor runtime "" "Primary" d
           performPrimary runtime action values (selectConversationView "" "Primary" prepared)
-      | not (T.null (conversationTarget d)) && action `elem` ["send","cancel","copy","toggle-activity","new","resume","load","set-config"]->performChild runtime action values d
+      | not (T.null (conversationTarget d)) && action `elem` ["send","cancel","copy","toggle-activity","set-config"]->performChild runtime action values d
       | otherwise->performPrimary runtime action values d
 
 performPrimary :: ConversationState -> Text -> [Text] -> Desktop -> IO Desktop
 performPrimary runtime@(ConversationState directory ref consoles _) action values original = do
-  selected<-if action `elem` ["new","show"] then ensureConversationEditor runtime "" "Primary" original else pure original
-  d<-if action `elem` ["cancel","new","load","configure"] then cancelQuestion runtime "Question cancelled." selected else pure selected
+  selected<-if action=="show" then ensureConversationEditor runtime "" "Primary" original else pure original
+  d<-if action `elem` ["cancel","configure"] then cancelQuestion runtime "Question cancelled." selected else pure selected
   previous<-readIORef ref
   now<-getCurrentTime
   zone<-getCurrentTimeZone
@@ -472,28 +481,56 @@ performPrimary runtime@(ConversationState directory ref consoles _) action value
       unless (any isPrompt (M.elems (pending retired))) $
         completeConversationDelivery runtime (Left "Agent prompt cancelled.")
       pure (if keepDialog then d else dismissPermission d) {status="Cancellation requested."}
-    ("new",_) | primaryBusy s -> pure d {status="Cancel the current reply before starting a new session."}
-    ("new",_) -> do
-      AR.failPendingPrimary (conversationAgents runtime) "Agent session changed."
-      mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
-      retired<-retireRequests ref
-      mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=Transcript.emptyPrimaryTranscript,toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=M.empty,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
-      start runtime Nothing d
-    ("resume",_) | primaryBusy s -> pure d {status="Cancel the current reply before resuming a session."}
-    ("resume",_) -> pure d {dialog=Just (Dialog "Resume conversation" (AgentDialog "load")
-      [input "Session ID" (maybe "" (\(_,_,sid)->sid) (lastSession s))] 0 ["Resume","Cancel"]
-      ["The provider must support loading or resuming sessions."])}
-    ("load",_:sid:_) | not (T.null (T.strip sid)), not (primaryBusy s) -> do
-      AR.failPendingPrimary (conversationAgents runtime) "Agent session changed."
-      mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
-      retired<-retireRequests ref
-      mapM_ A.stopClient (connection s)
-      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=Transcript.emptyPrimaryTranscript,toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=sourceSnapshots d,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
-      start runtime (Just (T.strip sid)) d
     _ | Just suffix<-T.stripPrefix "approval:" action, Just token<-readMaybe (T.unpack suffix) -> decide runtime token values d
     _ -> pure d
   where input label text=Input label text (T.length text)
+
+-- | Capture only small session/provider/configuration identities at human menu
+-- dispatch. The returned private prefill is for a private form; capture starts
+-- no process and retains no Desktop, transcript, buffer or Undo.
+captureConversationSession :: ConversationState -> Desktop -> IO (Either Text (Session.ConversationTarget ConversationSessionReceipt))
+captureConversationSession (ConversationState _ ref _ agents) d=do
+  s<-readIORef ref
+  if questionsClosed s || isNothing (conversationPresenter s) || isNothing (primaryInput s)
+    then pure (Left unavailableConversation)
+    else if primaryBusy s then pure (Left "Cancel the current reply before changing sessions.") else do
+      launch<-makeStableName =<< evaluate (provider s)
+      client<-traverse (\value->makeStableName =<< evaluate value) (connection s)
+      config<-either (const Nothing) (Just . fst) <$> AH.agentConfiguration (AR.agentHub agents) (AR.primaryAgent agents) >>= traverse evaluate
+      sid<-traverse evaluate (session s)
+      receipt<-evaluate (ConversationSessionReceipt (sessionIdentity s) (AR.primaryAgent agents) launch client sid config)
+      target<-evaluate (Session.ConversationTarget receipt (T.null (conversationTarget d)) (maybe "" (\(_,_,value)->value) (lastSession s)))
+      pure (Right target)
+
+-- This is the owning lifecycle operation, not a text command adapter. Admission
+-- is serialized with provider ticks; a stale form never cancels a question,
+-- retires a request or starts a different provider incarnation.
+applyConversationSession :: ConversationState -> Session.ConversationRequest ConversationSessionReceipt -> Desktop -> IO Desktop
+applyConversationSession runtime@(ConversationState _ ref consoles agents) request original=do
+  s<-readIORef ref
+  let (receipt,resume)=case request of
+        Session.NewConversation target->(target,Nothing)
+        Session.ResumeConversation target sid->(target,Just sid)
+      ConversationSessionReceipt owner primary expectedLaunch expectedClient expectedSession expectedConfig=receipt
+  launch<-makeStableName =<< evaluate (provider s)
+  client<-traverse (\value->makeStableName =<< evaluate value) (connection s)
+  config<-either (const Nothing) (Just . fst) <$> AH.agentConfiguration (AR.agentHub agents) (AR.primaryAgent agents)
+  let current=not (questionsClosed s) && owner==sessionIdentity s && primary==AR.primaryAgent agents &&
+        launch==expectedLaunch && client==expectedClient && session s==expectedSession && config==expectedConfig &&
+        not (primaryBusy s) && dialog original==Nothing &&
+        maybe True (\sid->T.null (conversationTarget original) && not (T.null sid)) resume
+  if isNothing (conversationPresenter s) || isNothing (primaryInput s) then pure original {status=unavailableConversation}
+    else if not current then pure original {status="Conversation session changed or is busy; invoke it again."} else do
+      selected<-case resume of
+        Nothing->ensureConversationEditor runtime "" "Primary" original >>= pure . selectConversationView "" "Primary"
+        Just _->pure original
+      d<-cancelQuestion runtime "Question cancelled." selected
+      AR.failPendingPrimary agents "Agent session changed."
+      mapM_ (C.releaseConsole consoles) (S.toList (ownedTerminals s))
+      retired<-retireRequests ref
+      mapM_ A.stopClient (connection s)
+      writeIORef ref retired {connection=Nothing,session=Nothing,streamTails=M.empty,promptReply=Nothing,pending=M.empty,queuedPrompt=Nothing,queuedQueries=childQueries (queuedQueries retired),transcript=Transcript.emptyPrimaryTranscript,toolExpansions=S.filter ((/="").fst) (toolExpansions s),lastMessageAt=Nothing,reads=maybe M.empty (const (sourceSnapshots d)) resume,approvals=[],presented=Nothing,deferredApproval=False,ownedTerminals=S.empty,terminalWaiters=M.empty}
+      start runtime resume d
 
 -- Direct prompts and already-enqueued queries carry no draft consumption right.
 submitPrimaryPrompt :: ConversationState -> State -> Maybe AR.PrimaryControl -> Text -> (Bool,Bool,Bool) -> Desktop -> IO Desktop

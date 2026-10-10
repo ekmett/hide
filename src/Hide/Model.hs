@@ -34,6 +34,8 @@ import Hide.DownloadsWindowTypes
 import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Editor as Editor
 import Hide.AgentSidebarTypes
+import Hide.ConversationSessionTypes (ConversationSessionReceipt)
+import Hide.Plugin.ConversationSession (ConversationRequest)
 import Hide.SessionSidebarTypes
 import qualified Hide.Plugin.Tree as Tree
 import Hide.Plugin.Command (CommandRef)
@@ -271,7 +273,7 @@ data PackageBuildTarget = PackageBuildTarget
   , packageBuildName :: !Text } deriving (Eq,Show)
 
 -- | Ordered requests for the host interpreter, produced alongside a new desktop.
-data Effect = TerminalMouseInput !Text !Terminal.TerminalMouseEvent | CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ExportBufferDocument !Int !Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | OpenFile !Plugin.MenuOrigin !FilePath | OpenFileBytes !Text !ByteString | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice !Plugin.MenuOrigin FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
+data Effect = TerminalMouseInput !Text !Terminal.TerminalMouseEvent | CopyConversation !ConversationCopy | ExecuteShellBlockAction !ShellOrigin !(Int,Int,Text,Text) | SubmitEditor !Editor.EditorMount !Editor.EditorSlot !Plugin.MenuOrigin | RetireEditorMount !Editor.EditorMount | PackageDebugAction !PackageBuildTarget !(Either Text FilePath) | AdoptPreparedDebug !PackageBuildTarget | PackageBuildAction !BuildAction !PackageBuildTarget | AdoptPreparedBuild !(Maybe PackageBuildTarget) | DownloadCancelAction !DownloadCancelRequest | SubmitInputForm !Form.FormRef !Form.FormValue !Plugin.MenuOrigin | SubmitChoiceForm !Form.FormRef !Integer !Int !Plugin.MenuOrigin | RetireInputForm !Form.FormRef | SessionSidebarAction !SessionSidebarRequest | DebugSourceAction !DebugSourceRequest | RetirePluginWindow !PluginWindow.WindowRef | DebugSidebarAction !DebugSidebarRequest | AgentSidebarAction !AgentSidebarRequest | ConversationSessionAction !(ConversationRequest ConversationSessionReceipt) | ReloadKeyBindings FilePath | InspectKeyBindings (Maybe (Bindings.BindingPlatform,Bindings.BindingContext)) (Maybe (Bindings.Bindings Command)) | FollowLink !LinkOrigin Text | FollowTreeLink [Tree.TreeHit] FilePath Text | EnvironmentAction Text [Text] | AutocompleteAction Text [Text] | SaveWideSectionTitles Bool | SaveMacKeySymbols Bool | SaveChatSubmit ChatSubmit | SaveBufferViewDefault BufferView | ProjectRequest ProjectAction | DownloadDocument Int | ExportBufferDocument !Int !Int | ReadBrowserClipboard | WriteBrowserClipboard Text | LanguageRequest LanguageAction | RunGit GitAction | ReadMergeBranches | JumpTo FilePath Int Int | ReadPath FilePath | OpenFile !Plugin.MenuOrigin !FilePath | OpenFileBytes !Text !ByteString | BrowsePath FilePath Text | BrowseDirectories FilePath | ChangeDirectory FilePath | OpenChoice !Plugin.MenuOrigin FilePath Text Text | ReadTree FilePath | RefreshRenamedPath FilePath FilePath | RefreshTree FilePath [Entry] | LoadTree TreeRequest Plugin.MenuOrigin | InvokeTree [Tree.TreeHit] CommandRef Plugin.MenuOrigin | ReadHelp | InvokeMenu Plugin.MenuRef Plugin.MenuOrigin (Maybe ContextTarget) | RefreshGit FilePath | ReadGitDiff | AskGitCommit | WriteGitCommit Text | SaveDocument Int (Maybe FilePath) (Maybe Command) | ReviewExternal | ResolveConflict Conflict ConflictAction | ServiceAction Text [Text] | AgentAction Text [Text] | PermissionAction Text [Text] | DebugAction Text [Text] | SetScreenMode Int | Exit deriving (Eq,Show)
 data Field = Input Text Text Int | SelectedInput Text Text Selection | ComboBox Text [Text] Int (Maybe Int) | CheckBox Text Bool | Radio Text [Text] Int | ListBox Text [Text] Int | FileList [Entry] Int
   | ReadOnly Text Text
   | TextArea Text Bool Buffer Selection Int Int deriving (Eq,Show)
@@ -444,6 +446,7 @@ keyLabelWidth text = displayColumn text (T.length text)
 
 menuShortcut :: Desktop -> MenuItem -> Text
 menuShortcut d (MenuItem _ key cmd)
+  | nativeMac d,RegisteredMenu ref _<-cmd,Plugin.menuName ref=="hide.agents.new",Nothing<-effectiveBindings d=keyLabel d "Cmd+Shift+N"
   | Just _<-effectiveBindings d = keyLabel d (fromMaybe "" (listToMaybe (commandBindingKeys d cmd)))
   | nativeMac d = keyLabel d $ fromMaybe key (lookup cmd [(New,"Cmd+N"),(Open,"Cmd+O"),(Save,"Cmd+S"),(SaveAs,"Cmd+Shift+S"),(Close,"Cmd+W"),(Quit,"Cmd+Q"),(Undo,"Cmd+Z"),(Redo,"Cmd+Shift+Z"),(Copy,"Cmd+C"),(Cut,"Cmd+X"),(Paste,"Cmd+V"),(SelectAll,"Cmd+A"),(Find,"Cmd+F"),(Replace,"Cmd+Option+F"),(FindNext,"Cmd+G"),(FindPrevious,"Cmd+Shift+G"),(Conversation,"Cmd+Shift+C"),(AgentNew,"Cmd+Shift+N")])
   | otherwise = keyLabel d key
@@ -464,6 +467,8 @@ commandBindingKeys d cmd
           RegisteredMenu ref _ | Plugin.menuName ref=="hide.help.contents" -> Help
                                | Plugin.menuName ref=="hide.messages.go-to" -> GoToMessage
                                | Plugin.menuName ref=="hide.debug.toggle-breakpoint" -> DebugCommand "breakpoint"
+                               | Plugin.menuName ref=="hide.agents.new" -> AgentNew
+                               | Plugin.menuName ref=="hide.agents.resume" -> AgentResume
           _ -> cmd
 
 commandDescription :: Command -> Text
@@ -680,12 +685,15 @@ menuItemsFor d i
   where
     original=menuItems i
     slot=let (title,_,_)=menus !! (i `mod` length menus) in T.toLower title
-    additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot]
+    additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot,Plugin.menuName (Plugin.menuReference item) `notElem` ["hide.agents.new","hide.agents.resume"]]
     helpEntry=[item | item@(MenuItem _ _ (RegisteredMenu ref _))<-additions,Plugin.menuName ref=="hide.help.contents"]
     sourceEntry=find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
     replaceSource (MenuItem title key (DebugCommand "breakpoint"))=case sourceEntry of
       Just item->MenuItem title key (contributionCommand d item)
       Nothing->MenuItem title key (if menusActive d then Disabled "Breakpoint command is unavailable." else DebugCommand "breakpoint")
+    replaceSource (MenuItem title key cmd) | cmd `elem` [AgentNew,AgentResume]=case find ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
+      Just item->MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item)
+      Nothing->MenuItem title key (Disabled "Conversation session command is unavailable.")
     replaceSource item=item
     items=map replaceSource $ case helpEntry of
       first:_ -> [if cmd==Help then first else item | item@(MenuItem _ _ cmd)<-original]++[item | item<-additions,item/=first]
@@ -713,6 +721,7 @@ commandEnabled d ExportBuffer = dialog d==Nothing && not (questionActive d) && m
 commandEnabled d Download = browserFrontend d && maybe False ((==Nothing) . documentLabel) (activeDocument d)
 commandEnabled d GoToMessage | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.messages.go-to") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
 commandEnabled d (DebugCommand "breakpoint") | menusActive d = maybe False (commandEnabled d . contributionCommand d) (find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d))
+commandEnabled d cmd | cmd `elem` [AgentNew,AgentResume] = any ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) && dialog d==Nothing
 commandEnabled d Help | menusActive d = any ((=="hide.help.contents") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
 commandEnabled d (TreeCommand trace _) = dialog d==Nothing && maybe False (hitCurrent trace) (sideTree d)
 commandEnabled d (RegisteredMenu reference _) = dialog d==Nothing && case find ((==reference) . Plugin.menuReference) (contributedMenus d) of
@@ -754,6 +763,15 @@ commandEnabled d Copy | problemsVisible d && problemsFocused d = case messageInv
   _ -> False
 commandEnabled d cmd | problemsVisible d && problemsFocused d, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = False
 commandEnabled _ _ = True
+sessionCommandName :: Command -> Text
+sessionCommandName AgentNew="hide.agents.new"
+sessionCommandName _="hide.agents.resume"
+
+contributedSession :: Text -> Desktop -> (Desktop,[Effect])
+contributedSession name d=case find ((==name) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
+  Just item->runCommand (contributionCommand d item) d
+  Nothing->(d,[])
+
 -- | Actions requiring editable source identity never act on plugin text.
 markdownSourceCommand :: Command -> Bool
 markdownSourceCommand cmd=sourceOnlyCommand cmd && cmd `notElem` [Save,SaveAs,Download,ExportBuffer,SplitVertical,SplitHorizontal] || case cmd of
@@ -1491,8 +1509,8 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
       Just w -> let focused=focusWindow (windowId w) d in (setComposerInput (composerBuffer focused) (composerSelection focused) True focused,[AgentAction "focus" []])
       Nothing -> (d,[AgentAction "show" []])
     go AgentCancel d = (d,[AgentAction "cancel" []])
-    go AgentResume d = (d,[AgentAction "resume" []])
-    go AgentNew d = (d,[AgentAction "new" []])
+    go AgentResume d = contributedSession "hide.agents.resume" d
+    go AgentNew d = contributedSession "hide.agents.new" d
     go (AgentChoose category) d = (openAgentChoices category d,[])
     go (AgentSet ident value) d = (d,[AgentAction "set-config" [ident,value]])
     go AgentCopyRaw d = (d,[AgentAction "copy" []])

@@ -12,7 +12,7 @@ frontends:
 | `hide-plugin-api` | Scoped commands, tools, forms, input declarations, menus, trees and session composition |
 | `hide-agent-api` | Provider contracts, conversation input delivery, directory metadata and attributed orchestration services |
 | `hide-acp` | ACP transport and provider adapter |
-| `hide-agents` | Agents sidebar/forms, conversation input and transcripts, completion hints and editor tools |
+| `hide-agents` | Agents sidebar/forms, conversation menus/input and transcripts, completion hints and editor tools |
 
 Buffer/window ownership and the multiline-editor interpreter still live in the
 main `hide` library. ACP completion and primary/child conversations declare their
@@ -23,8 +23,9 @@ SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
 navigation model.
 
 **Agents > Rename** and **Files > Rename** use single-input forms. **New Agent**
-uses named Name and Task inputs. **Model** and **Effort** use choice forms for
-primary, child and ACP completion agents. A linked handler prepares an
+uses named Name and Task inputs. **Tools > Resume session** uses a private
+Session ID input. **Model** and **Effort** use choice forms for primary, child
+and ACP completion agents. A linked handler prepares an
 `InputFormSpec`, `InputsFormSpec` or `ChoiceFormSpec` with a typed registered
 action, then embeds the form in a host reply through the sidebar capability.
 The host owns drafts, selection, focus and modal geometry.
@@ -41,15 +42,18 @@ and its command registration remain current. Agent configuration rechecks the
 captured provider/session receipt. New-agent creation captures the workspace at
 opening and checks it before starting the existing spawn worker. Changing the
 workspace expires that request. Once creation commits, the new agent has its own
-lifetime.
+lifetime. Resume retains the original primary/provider/configuration receipt; a
+submitted form cannot switch a replacement provider or interrupt a newly started
+reply. Its remembered ID selects the saved provider and working directory only
+when explicitly resumed. Reading recovery metadata starts no provider.
 
-The checked host results support agent creation, rename, configuration and
-saved-file basename rename. Persistent multiline input is described below;
-arbitrary widget actions remain separate work. Agent input cannot operate these
+The checked host results support agent creation, rename, configuration, primary
+conversation New/Resume and saved-file basename rename. Persistent multiline
+input is described below; arbitrary widget actions remain separate work. Agent input cannot operate these
 forms. The linked owner declares capture disclosure when preparing a form;
-refresh cannot change
-it. Rename and new-agent forms are private. Model/effort forms expose filtered
-public capability labels, preserving readable agent settings without allowing
+refresh cannot change it. Rename, new-agent and resume forms are private.
+Model/effort forms expose filtered public capability labels, preserving readable
+agent settings without allowing
 agent input. A readable form is no authority to expose protected source or session
 keys; its owner must remove those before preparation.
 
@@ -61,7 +65,17 @@ The workspace is the editor's working directory, independent of the Files tree
 root. `Hide.AgentUI` in `hide-agents` uses this boundary without importing the
 desktop model or its sidebar interpreter. `Hide.Plugin.Session` scopes its
 registrations and metadata worker; provider services retain their own session
-lifetimes. Conversation registration remains in the host.
+lifetimes. Provider acquisition, retirement and final lifecycle admission remain
+in the host.
+
+The same session supplies `MenuPublisher c r` for scoped menu contributions.
+`mapMenu` projects immutable invocation context and adapts replies on the menu
+worker while retaining the original command registration. The host routes a
+prepared form to its existing form controller; there is no second modal queue.
+The New/Resume declarations, labels and input validation live in `hide-agents`.
+New selects Primary without consuming a child conversation's draft. New and
+Resume retain their command IDs, configured shortcuts and native labels, but
+require a live contribution.
 
 ## Direction
 
@@ -1062,10 +1076,12 @@ without stopping providers.
 The command, form, menu, tree and session contracts live in `hide-plugin-api`,
 without the editor's buffer or rendering dependencies. The real Agents tree is
 the linked `hide-agents` package. Its `Hide.AgentUI.plugin`
-uses `Hide.Plugin.Session` to scope registration and its metadata worker. The
-executable selects it with `Hide.App.main [Hide.AgentUI.plugin]`; the editor
-library does not import the plugin implementation. The metadata worker publishes
-invalidations to the same bounded, close-aware queue as trees and forms. No
+uses `Hide.Plugin.Session` to scope its tree, New/Resume menu commands and
+metadata worker. `Hide.ConversationMenus` prepares the private Resume form through
+that public API. The executable selects the plugin with
+`Hide.App.main [Hide.AgentUI.plugin]`; the editor library does not import its
+implementation. The metadata worker publishes invalidations to the same
+bounded, close-aware queue as trees and forms. No
 plugin callback runs on the UI tick. The host drains bounded deltas and owns
 input, geometry, forms and action admission. The same plugin declares its
 orchestration tools, which the host registers with existing per-tool policy.

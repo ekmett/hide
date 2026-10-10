@@ -435,9 +435,10 @@ checks=bracket temporary removePathForcibly $ \root ->
           rejected label desktop=do
             ensure (label++" reports the unavailable plugin") ("plugin" `T.isInfixOf` T.toLower (status desktop))
             preserved label desktop
-      forM_ [("send",["","must not send","false","false","false"]),("new",[]),("load",["","must-not-load"])] $ \(action,args)->do
-        denied<-apply shown [AgentAction action args]
-        rejected (T.unpack action++" without a presenter") denied
+      denied<-apply shown [AgentAction "send" ["","must not send","false","false","false"]]
+      rejected "send without a presenter" denied
+      ensure "missing session menu contribution leaves New and Resume inert"
+        (null (snd (runCommand AgentNew shown)) && null (snd (runCommand AgentResume shown)))
       let (submitted,effects)=runCommand (SubmitChat QuerySubmit) shown
       ensure "recovered primary draft has a real submit action" (not (null effects))
       deniedSubmit<-apply submitted effects

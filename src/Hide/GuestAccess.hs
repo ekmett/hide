@@ -193,6 +193,7 @@ guestEffectsAllowed=all allowed
     allowed SubmitChoiceForm{}=False
     allowed RetireInputForm{}=False
     allowed AgentSidebarAction{}=False
+    allowed ConversationSessionAction{}=False
     allowed ReloadKeyBindings{}=False
     allowed (InvokeMenu _ origin _)=origin==Plugin.AgentMenu
     allowed (InvokeTree _ _ origin)=origin==Plugin.AgentMenu

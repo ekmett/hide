@@ -6,6 +6,7 @@ module Hide.SidebarCommands
   ( SidebarHost, SidebarContext(..), SidebarReply(..), withSidebarCommands
   , sidebarRegistry, sidebarCapabilities, publishTreeFromHost, retireTreeFromHost, sidebarEffects
   , tickSidebar, refreshTreeFromHost, initializeSidebar, awaitFileOpening, prepareSidebarFile, publishFormRefreshFromHost
+  , sidebarInvocationContext, adoptForm
   ) where
 
 import Hide.FileIO (withFileRead)
@@ -45,6 +46,8 @@ import qualified Hide.AgentHub
 import qualified Hide.Plugin.Form as Form
 import qualified Hide.Plugin.Sidebar as PluginSidebar
 import Hide.AgentSidebarTypes
+import Hide.ConversationSessionTypes
+import qualified Hide.Plugin.ConversationSession as Conversation
 import Hide.SessionSidebarTypes
 import qualified Hide.Recovery as Recovery
 import Hide.Sidebar
@@ -56,8 +59,9 @@ import qualified Hide.Plugin.Menu as Menu
 -- | Captured host policy; extension labels and paths grant no authority.
 data SidebarContext = SidebarContext
   { sidebarOrigin :: !Menu.MenuOrigin, sidebarContextDirectory :: !FilePath, sidebarContextWorkspace :: !FilePath, sidebarProvider :: !(Maybe P.TreeRef), sidebarPrivatePaths :: ![FilePath]
-  , sidebarColumns :: !Int, sidebarOpenedImage :: !(Maybe (FilePath,Int,PluginWindow.WindowRef)), sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int, sidebarAttachment :: !Int }
-data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
+  , sidebarColumns :: !Int, sidebarOpenedImage :: !(Maybe (FilePath,Int,PluginWindow.WindowRef)), sidebarOpened :: !(Maybe (FilePath,Int,Int,ContentVersion)), sidebarRenameFiles :: ![Rename.RenameFile], sidebarExportEpoch :: !Int, sidebarAttachment :: !Int
+  , sidebarConversation :: !(Either Text (Conversation.ConversationTarget ConversationSessionReceipt)) }
+data SidebarReply = SidebarExportFile !Int !Text !BS.ByteString | SidebarPackageDebug !PackageBuildTarget !(Either Text FilePath) | SidebarBuild !BuildAction !PackageBuildTarget | SidebarRename !P.TreeRef !Rename.PreparedRename | SidebarForm !(Form.PreparedForm SidebarContext SidebarReply) | SidebarSession !SessionSidebarRequest | SidebarConversation !(Conversation.ConversationRequest ConversationSessionReceipt) | SidebarRecoveredSources !Int !FilePath !Recovery.RecoveredSources | SidebarExisting !FilePath !Int !Int !ContentVersion | SidebarDocument !FilePath !Document | SidebarPrepared !LinkResult | SidebarAgent !AgentSidebarRequest | SidebarDebug !DebugSidebarRequest | SidebarExistingImage !FilePath !Int !PluginWindow.WindowRef | SidebarImage !(Maybe FilePath) !PluginWindow.PreparedWindow | SidebarUpload !Document | SidebarWindow !PluginWindow.WindowUpdate | SidebarEditorWindow !(PluginWindow.EditorWindowUpdate SidebarContext SidebarReply) | SidebarEditorUpdate !Editor.EditorUpdate
 
 data ChildJob = ChildJob !TreeRequest !Menu.MenuOrigin !(Async (Either CommandError (P.PreparedPage SidebarContext SidebarReply))) !Bool
 data ActionJob = ActionJob ![P.TreeHit] !CommandRef !Menu.MenuOrigin !Int !(Async (Either CommandError SidebarReply)) !Bool
@@ -154,7 +158,15 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
-context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d)
+context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d) (Left "No captured conversation session.")
+
+-- | Shallow immutable menu input for this same form owner. It retains no desktop,
+-- source contents or Undo. The menu owner supplies its captured session receipt.
+sidebarInvocationContext :: Menu.MenuOrigin -> Desktop -> SidebarContext
+sidebarInvocationContext origin d=SidebarContext origin workspace workspace Nothing []
+  (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] 0 (sessionAttachment d)
+  (Left "No captured conversation session.")
+  where workspace=startingDirectory d
 metadata :: P.NodeDef c r -> (P.NodeInfo,Maybe CommandRef,[(Text,P.TreeMenuTarget)])
 metadata node=(P.nodeInfo node,fmap P.actionReference (P.nodeAction node),map P.menuTarget (P.nodeMenus node))
 addProvider :: P.TreeProvider SidebarContext SidebarReply -> Sidebar -> Sidebar
@@ -759,6 +771,7 @@ finishAction host@(SidebarHost _ ref _ cancellation _ _) core d=do
               Right (Right SidebarEditorUpdate{})->d {status="Editor result has no submitted job."}
               Right (Right SidebarForm{})->d {status="Sidebar form expired."}
               Right (Right SidebarAgent{})->d {status="Sidebar result expired."}
+              Right (Right SidebarConversation{})->d {status="Conversation session result requires its menu owner."}
               Right (Right SidebarRename{})->d {status="Sidebar result expired."}
               Right (Right (SidebarPrepared value))->fst (applyLink value d)
               Right (Right SidebarDocument{})->d {status="Sidebar result expired."}
@@ -1083,6 +1096,8 @@ forceFormReply reply@(SidebarSession (SessionDeleted ident))
   | T.length ident==48=evaluate (T.length ident) >> evaluate reply
   | otherwise=ioError (userError "Invalid deleted session result.")
 forceFormReply reply@SidebarRename{}=evaluate reply
+forceFormReply reply@(SidebarConversation Conversation.NewConversation{})=evaluate reply
+forceFormReply reply@(SidebarConversation (Conversation.ResumeConversation _ sid))=evaluate (T.length sid) >> evaluate reply
 forceFormReply _=ioError (userError "Unsupported single-line form reply.")
 acceptedFormRequest :: AgentSidebarRequest -> Bool
 acceptedFormRequest CreateAgent{}=True
@@ -1112,6 +1127,7 @@ finishFormJob host@(SidebarHost _ ref _ cancellation _ _) core d reference worke
       case result of
         Right (Right (SidebarAgent request)) | consumed,acceptedFormRequest request->snd <$> core d [AgentSidebarAction request]
         Right (Right (SidebarSession request@SessionDeleted{})) | consumed->snd <$> core d [SessionSidebarAction request]
+        Right (Right (SidebarConversation request)) | consumed->snd <$> core d [ConversationSessionAction request]
         Right (Right (SidebarRename owner prepared)) | consumed->do
           provider<-maybe (pure False) P.treeCurrent (M.lookup owner (providers state))
           if not provider then pure d {status="Files provider expired."} else do

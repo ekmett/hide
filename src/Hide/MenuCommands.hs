@@ -6,7 +6,7 @@
 -- contribution/command lifetime and host modal/layout state before installing a
 -- prepared document. No extension callback executes during admission or adoption.
 module Hide.MenuCommands
-  ( MenuHost, withMenuCommands, menuContributions, menuAgentReferences, publishMenuFromHost, requestMenuRetirement, retireMenuFromHost, MenuContext(..), MenuReply(..), menuEffects, tickMenus
+  ( MenuHost, withMenuCommands, withConversationMenuCommands, menuSidebarCapabilities, menuContributions, menuAgentReferences, publishMenuFromHost, requestMenuRetirement, retireMenuFromHost, MenuContext(..), MenuReply(..), menuEffects, tickMenus
   ) where
 
 import Control.Concurrent.STM (TBQueue, atomically, newTBQueueIO, writeTBQueue, tryReadTBQueue, TVar, newTVarIO, readTVar, readTVarIO, writeTVar, flushTBQueue)
@@ -35,6 +35,8 @@ import Hide.Plugin.Documentation
 import Hide.Links (LinkResult, applyLink, prepareMarkdown)
 import Hide.BufferView (BufferView(..))
 import qualified Hide.Plugin.EditorHost as Editor
+import Hide.SidebarCommands (SidebarHost,SidebarContext(..),SidebarReply(..),sidebarInvocationContext,adoptForm)
+import Hide.Conversation (ConversationState,captureConversationSession)
 import Hide.Model hiding (menus)
 import qualified Hide.Model as Model
 import qualified Hide.Plugin.Window as PluginWindow
@@ -48,12 +50,13 @@ data MenuContext = MenuContext
   { invocationColumns :: Int, invocationOrigin :: Plugin.MenuOrigin
   , invocationNavigation :: Maybe NavigationInput, invocationSource :: Maybe SourceInput
   , invocationRow :: Maybe (PluginWindow.WindowRef,Tree.NodeId)
+  , invocationSidebar :: !SidebarContext
   }
 data SourceInput = SourceInput ContextTarget ContentVersion DirtySnapshot
 data NavigationInput = NavigationInput (FilePath,Int,Int) (Maybe OpenSource) (Maybe [FilePath])
 data OpenSource = OpenSource Int Int ContentVersion BufferContent
 data Navigation = Navigation FilePath Int Int (Maybe Document)
-data MenuReply = PreparedDownloadCancel !DownloadCancelRequest | PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindow PluginWindow.WindowUpdate | PreparedEditorWindow !(PluginWindow.EditorWindowUpdate MenuContext MenuReply) | PreparedEditorUpdate !Editor.EditorUpdate
+data MenuReply = PreparedSidebar !SidebarHost !SidebarReply | PreparedDownloadCancel !DownloadCancelRequest | PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindow PluginWindow.WindowUpdate | PreparedEditorWindow !(PluginWindow.EditorWindowUpdate MenuContext MenuReply) | PreparedEditorUpdate !Editor.EditorUpdate
 
 data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
   | PendingEditor Editor.DraftSubmission (Async (Either CommandError MenuReply))
@@ -62,7 +65,7 @@ data MenuState = MenuState
   { menuPending :: Maybe Pending
   , menuEditors :: M.Map Editor.DraftRef (PluginWindow.WindowRef,Editor.PreparedEditor MenuContext MenuReply) }
 data Publication = Publish Plugin.MenuItem | Withdraw Plugin.MenuRef
-data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] [Plugin.MenuRef] (TBQueue Publication) (IORef MenuState) !(TVar Bool)
+data MenuHost = MenuHost (Plugin.Menus MenuContext MenuReply) [Plugin.MenuRef] [Plugin.MenuRef] (TBQueue Publication) (IORef MenuState) !(TVar Bool) !(Maybe ConversationState)
 
 -- | Keep the registry independent of frontend attachments. The host may add
 -- linked extension declarations to menuContributions before taking its snapshot.
@@ -85,8 +88,8 @@ withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus Model.menuC
       (Plugin.MenuDef name "context.source" "debug" 0 title "" False
         (Plugin.menuAction registry source (const (Right ())) (\_ ->pure . PreparedDebugSource)))
     pure item) [("hide.debug.toggle-breakpoint","Toggle breakpoint",ToggleSourceBreakpoint),("hide.debug.add-watch","Add watch…",AddSourceWatch)]
-  bracket (MenuHost menus [reference,navigationRef] sourceReferences <$> newTBQueueIO 256 <*> newIORef (MenuState Nothing M.empty) <*> newTVarIO False) close use
-  where close (MenuHost _ _ _ changes ref closed)=do
+  bracket (MenuHost menus [reference,navigationRef] sourceReferences <$> newTBQueueIO 256 <*> newIORef (MenuState Nothing M.empty) <*> newTVarIO False <*> pure Nothing) close use
+  where close (MenuHost _ _ _ changes ref closed _)=do
           atomically (writeTVar closed True >> flushTBQueue changes >> pure ())
           state<-readIORef ref
           mapM_ cancelPending (menuPending state)
@@ -95,20 +98,42 @@ withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus Model.menuC
         cancelPending (PendingEditor _ worker)=cancel worker
         cancelPending (RetiringEditor worker reaper)=cancel worker >> cancel reaper
 
+-- | Compose the existing menu worker with Conversation's captured session owner.
+-- The owner is fixed before activation and outlives all plugin registrations.
+withConversationMenuCommands :: DocsCommands -> ConversationState -> (MenuHost -> IO a) -> IO a
+withConversationMenuCommands docs conversation use=withMenuCommands docs $ \(MenuHost menus permitted sources queue state closed _)->
+  use (MenuHost menus permitted sources queue state closed (Just conversation))
+
+-- | Publish typed menus whose replies use this exact existing sidebar form owner.
+-- Context/reply maps execute only on the menu worker. Menu and form registrations
+-- retain their original lifetimes; no additional registry, queue or modal owner
+-- is created, and no Desktop crosses into a declaration.
+menuSidebarCapabilities :: MenuHost -> SidebarHost -> Plugin.MenuPublisher SidebarContext SidebarReply
+menuSidebarCapabilities host sidebar=Plugin.MenuPublisher publish (requestMenuRetirement host)
+  where
+    publish definition=do
+      registered<-Plugin.contributeMenu (menuContributions host)
+        (Plugin.mapMenu invocationSidebar (\_ reply->evaluate (PreparedSidebar sidebar reply)) definition)
+      case registered of
+        Left err->pure (Left err)
+        Right reference->do
+          published<-publishMenuFromHost host reference
+          pure (reference <$ published)
+
 menuContributions :: MenuHost -> Plugin.Menus MenuContext MenuReply
-menuContributions (MenuHost menus _ _ _ _ _)=menus
+menuContributions (MenuHost menus _ _ _ _ _ _)=menus
 
 -- | Exact first-party refs allowed by host policy. Contribution metadata can
 -- further restrict these; it cannot grant agent authority to new registrations.
 menuAgentReferences :: MenuHost -> [Plugin.MenuRef]
-menuAgentReferences (MenuHost _ permitted _ _ _ _)=permitted
+menuAgentReferences (MenuHost _ permitted _ _ _ _ _)=permitted
 
 -- | Prepare bounded metadata on the caller's registration worker, then queue an
 -- exact delta. Never call this while holding the desktop/session lock. Deltas
 -- cannot clobber newer publications, unlike delayed whole-catalogue snapshots.
 -- Shutdown wakes blocked callers with MenusClosed and rejects later publication.
 publishMenuFromHost :: MenuHost -> Plugin.MenuRef -> IO (Either Plugin.MenuError ())
-publishMenuFromHost host@(MenuHost menus _ _ _ _ _) reference=do
+publishMenuFromHost host@(MenuHost menus _ _ _ _ _ _) reference=do
   metadata<-Plugin.menuMetadata menus reference
   case metadata of
     Left err->pure (Left err)
@@ -122,17 +147,17 @@ requestMenuRetirement host reference=enqueuePublication host (Withdraw reference
 
 -- Ordered transport admission and scope close share one STM boundary.
 enqueuePublication :: MenuHost -> Publication -> IO (Either Plugin.MenuError ())
-enqueuePublication (MenuHost _ _ _ changes _ closed) publication=atomically $ do
+enqueuePublication (MenuHost _ _ _ changes _ closed _) publication=atomically $ do
   stopped<-readTVar closed
   if stopped then pure (Left Plugin.MenusClosed) else writeTBQueue changes publication >> pure (Right ())
 
 requireOpen :: MenuHost -> IO ()
-requireOpen (MenuHost _ _ _ _ _ closed)=readTVarIO closed >>= \stopped->when stopped (ioError (userError "Menu host closed."))
+requireOpen (MenuHost _ _ _ _ _ closed _)=readTVarIO closed >>= \stopped->when stopped (ioError (userError "Menu host closed."))
 
 -- | Withdraw directly at the session owner. UI callers do not enqueue or wait for
 -- capacity, even if registration workers have filled the publication queue.
 retireMenuFromHost :: MenuHost -> Plugin.MenuRef -> Desktop -> IO Desktop
-retireMenuFromHost host@(MenuHost menus _ _ _ _ _) reference d=do
+retireMenuFromHost host@(MenuHost menus _ _ _ _ _ _) reference d=do
   requireOpen host
   _<-Plugin.retireMenu menus reference
   pure d {contributedMenus=filter ((/=reference) . Plugin.menuReference) (contributedMenus d),
@@ -141,7 +166,7 @@ retireMenuFromHost host@(MenuHost menus _ _ _ _ _) reference d=do
 -- Input remains schedulable under producer load: at most 16 bounded deltas are
 -- admitted at one owner boundary. Metadata/handlers were prepared elsewhere.
 adoptPublications :: MenuHost -> Desktop -> IO Desktop
-adoptPublications host@(MenuHost menus _ _ changes _ _)=drain (16::Int)
+adoptPublications host@(MenuHost menus _ _ changes _ _ _)=drain (16::Int)
   where
     drain 0 d=pure d
     drain remaining d=do
@@ -258,7 +283,7 @@ captureNavigation _ _ _=pure Nothing
 -- | Admission checks only policy/lifetimes and captures immutable read handles.
 -- Busy calls refuse instead of replacing another prepared result.
 menuEffects :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
-menuEffects host@(MenuHost menus permitted _ _ ref _) _ original [InvokeMenu reference origin target]=mask $ \restore->do
+menuEffects host@(MenuHost menus permitted _ _ ref _ conversation) _ original [InvokeMenu reference origin target]=mask $ \restore->do
   requireOpen host
   published<-adoptPublications host original
   d<-tickEditorBindings host published
@@ -273,12 +298,15 @@ menuEffects host@(MenuHost menus permitted _ _ ref _) _ original [InvokeMenu ref
     Nothing->do
       navigation<-captureNavigation origin target d
       source<-captureSource target d
+      sessionTarget<-maybe (pure (Left "No conversation session owner.")) (\runtime->captureConversationSession runtime d) conversation
+      sidebar<-evaluate ((sidebarInvocationContext origin d) {sidebarConversation=sessionTarget})
+      _<-evaluate (length (sidebarContextWorkspace sidebar))
       let row=case target of Just (WindowRowTarget windowRef ident)->Just (windowRef,ident); _->Nothing
-          context=MenuContext (columns d) origin navigation source row
+          context=MenuContext (columns d) origin navigation source row sidebar
       worker<-async (restore (Plugin.invokeMenu menus reference context))
       modifyIORef' ref (\s->s {menuPending=Just (Pending reference target context worker)})
       pure (False,d {status="Running menu action…"})
-menuEffects host@(MenuHost _ _ _ _ ref _) core d [effect@(SubmitEditor mount slot origin)]=do
+menuEffects host@(MenuHost _ _ _ _ ref _ _) core d [effect@(SubmitEditor mount slot origin)]=do
   requireOpen host
   state<-readIORef ref
   if M.member (Editor.mountDraft mount) (menuEditors state)
@@ -313,7 +341,7 @@ adoptNavigation context (Navigation path row offset loaded) d
 -- | Drain ordered publication/retirement before late reply adoption. No handler
 -- or lazy extension metadata executes here, and no file work runs under the lock.
 tickMenus :: MenuHost -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> IO Desktop
-tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
+tickMenus host@(MenuHost menus _ sourceRefs _ ref closed _) core original=
   readTVarIO closed >>= \stopped->if stopped then pure original else do
   published<-adoptPublications host original
   d<-tickEditorBindings host published
@@ -340,6 +368,9 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
           if not live || not current then pure d {status="Menu result expired; invoke it again."} else case result of
             Left err->pure d {status="Menu action failed: "<>T.pack (displayException err)}
             Right (Left err)->pure d {status="Menu action failed: "<>T.pack (show err)}
+            Right (Right (PreparedSidebar sidebar (SidebarForm prepared))) | invocationOrigin context==Plugin.HumanMenu->adoptForm sidebar True prepared d
+            Right (Right (PreparedSidebar _ (SidebarConversation request))) | invocationOrigin context==Plugin.HumanMenu->snd <$> core d [ConversationSessionAction request]
+            Right (Right PreparedSidebar{})->pure d {status="Menu result requires its owning operation."}
             Right (Right (PreparedDownloadCancel request))->snd <$> core d [DownloadCancelAction request]
             Right (Right (PreparedWindow prepared))->adoptWindowUpdate (invocationOrigin context) prepared d
             Right (Right (PreparedEditorWindow prepared))->adoptMenuEditor host (invocationOrigin context) prepared d
@@ -357,7 +388,7 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed) core original=
 -- retires even a hidden draft. Unsent input moves to an ordinary private
 -- document; callable bindings and prepared seeds retain no duplicate Undo.
 tickEditorBindings :: MenuHost -> Desktop -> IO Desktop
-tickEditorBindings (MenuHost _ _ _ _ ref _) d=do
+tickEditorBindings (MenuHost _ _ _ _ ref _ _) d=do
   state<-readIORef ref
   expired<-filterM (\(_, (scope,editor))->do
     published<-PluginWindow.windowScopeCurrent scope
@@ -369,7 +400,7 @@ tickEditorBindings (MenuHost _ _ _ _ ref _) d=do
   pure (preserveEditorDrafts removed d)
 
 adoptMenuEditor :: MenuHost -> Plugin.MenuOrigin -> PluginWindow.EditorWindowUpdate MenuContext MenuReply -> Desktop -> IO Desktop
-adoptMenuEditor host@(MenuHost _ _ _ _ ref _) origin update original=do
+adoptMenuEditor host@(MenuHost _ _ _ _ ref _ _) origin update original=do
   d<-tickEditorBindings host original
   state<-readIORef ref
   let editor=PluginWindow.editorWindowEditor update
@@ -383,7 +414,7 @@ adoptMenuEditor host@(MenuHost _ _ _ _ ref _) origin update original=do
   pure next
 
 submitMenuEditor :: MenuHost -> Editor.EditorMount -> Editor.EditorSlot -> Plugin.MenuOrigin -> Desktop -> IO Desktop
-submitMenuEditor (MenuHost _ _ _ _ ref _) mount slot origin d=mask $ \_->do
+submitMenuEditor (MenuHost _ _ _ _ ref _ _) mount slot origin d=mask $ \_->do
   state<-readIORef ref
   case M.lookup (Editor.mountDraft mount) (menuEditors state) of
     Just (_,editor) | origin==Plugin.HumanMenu,activeEditorMount d==Just mount,composerActive d,Editor.editorMount editor==mount->case menuPending state of
@@ -393,7 +424,7 @@ submitMenuEditor (MenuHost _ _ _ _ ref _) mount slot origin d=mask $ \_->do
         case captured of
           Nothing->pure d {status="Editor input expired."}
           Just submitted->do
-            let context=MenuContext (columns d) origin Nothing Nothing Nothing
+            let context=MenuContext (columns d) origin Nothing Nothing Nothing (sidebarInvocationContext origin d)
             worker<-asyncWithUnmask (\unmask->unmask (Editor.invokeEditorAction editor context submitted >>= traverse evaluate))
             modifyIORef' ref (\s->s {menuPending=Just (PendingEditor submitted worker)})
             pure d {status="Submitting editor input..."}
@@ -403,7 +434,7 @@ submitMenuEditor (MenuHost _ _ _ _ ref _) mount slot origin d=mask $ \_->do
 -- Closing its frame refuses pre-admission work but cannot undo committed work.
 finishMenuEditor :: MenuHost -> Desktop -> Editor.DraftSubmission
   -> Async (Either CommandError MenuReply) -> IO Desktop
-finishMenuEditor host@(MenuHost _ _ _ _ ref _) d submitted worker=do
+finishMenuEditor host@(MenuHost _ _ _ _ ref _ _) d submitted worker=do
   state<-readIORef ref
   owning<-case M.lookup (Editor.submissionDraft submitted) (menuEditors state) of
     Just (scope,editor) | Editor.mountActions (Editor.editorMount editor)==Editor.mountActions (Editor.submissionMount submitted)->do

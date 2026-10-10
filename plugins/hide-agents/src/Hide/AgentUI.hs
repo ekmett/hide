@@ -42,6 +42,7 @@ import qualified Hide.EnvironmentTools as EnvironmentTools
 import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.CompletionInput as CompletionInput
 import qualified Hide.ConversationInput as ConversationInput
+import qualified Hide.ConversationMenus as ConversationMenus
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Sidebar as Sidebar
@@ -52,7 +53,9 @@ data Snapshot completion = Snapshot !(M.Map A.AgentId A.AgentSummary) !(Maybe (C
 -- registration never stops providers; the host retains their shared lifetime.
 plugin :: Plugin
 plugin=Plugin
-  { withPlugin= \session->withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
+  { withPlugin= \session->ConversationMenus.withConversationMenus (sessionSidebar session)
+      (sessionMenus session) (sessionConversation session) (sessionConversationReply session)
+      . withAgentSidebar (sessionSidebar session) (sessionAgentReply session) (sessionAgents session)
   , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (map (mapToolContext editorDocumentation) DocsTools.tools
       ++map (mapToolContext editorEnvironment) EnvironmentTools.tools
       ++map (mapToolContext editorAgentSettings) AgentSettingsTools.tools)

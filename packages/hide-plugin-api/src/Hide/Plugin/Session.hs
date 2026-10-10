@@ -22,6 +22,9 @@ import Hide.Plugin.Sidebar (Sidebar)
 import Hide.Plugin.AgentServices (AgentServices)
 import Hide.Plugin.Completion (HintServices)
 import Hide.Plugin.ConversationInput (PrimaryInputServices, ChildInputServices)
+import Hide.Plugin.ConversationSession (ConversationTarget,ConversationRequest)
+import Hide.Plugin.Menu (MenuPublisher)
+import Data.Text (Text)
 import Hide.Plugin.Input (InputDeclaration)
 import Hide.Plugin.Request (RequestServices)
 import Hide.Plugin.Tool (Tool)
@@ -31,10 +34,13 @@ import Hide.Plugin.Transcript (ConversationPresenter)
 -- | Capabilities for the concrete first-party directory workflow. Providers and
 -- resource owners outlive activation. Captured requests are admitted by the host;
 -- the reply constructor does not grant human or agent authority.
-data Session c r settings completion = Session
+data Session c r settings completion receipt = Session
   { sessionSidebar :: Sidebar c r
   , sessionAgents :: AgentDirectory settings completion
   , sessionAgentReply :: DirectoryRequest settings completion -> r
+  , sessionMenus :: MenuPublisher c r
+  , sessionConversation :: c -> Either Text (ConversationTarget receipt)
+  , sessionConversationReply :: ConversationRequest receipt -> r
   }
 
 -- | Endpoint visibility carries its actual service context. Editor tools are
@@ -62,8 +68,8 @@ data PluginTool
 -- supplies actor-bound services with their declared admission contract: editor
 -- services follow permission admission; request services own each admission.
 data Plugin = Plugin
-  { withPlugin :: forall c r settings completion a. Eq completion =>
-      Session c r settings completion -> IO a -> IO a
+  { withPlugin :: forall c r settings completion receipt a. Eq completion =>
+      Session c r settings completion receipt -> IO a -> IO a
   , pluginTools :: [PluginTool]
   , pluginConversation :: Maybe ConversationPresenter
     -- ^ Pure presentation selected at startup and evaluated only on the host
@@ -88,6 +94,6 @@ data Plugin = Plugin
 --
 -- @withPlugins (p:ps) session action =
 --   withPlugin p session (withPlugins ps session action)@
-withPlugins :: Eq completion => [Plugin] -> Session c r settings completion -> IO a -> IO a
+withPlugins :: Eq completion => [Plugin] -> Session c r settings completion receipt -> IO a -> IO a
 withPlugins [] _ action=action
 withPlugins (plugin:plugins) session action=withPlugin plugin session (withPlugins plugins session action)

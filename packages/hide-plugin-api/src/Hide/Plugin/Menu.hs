@@ -7,8 +7,8 @@
 -- check currentness again before adopting replies and supply their own context,
 -- policy and presentation adapter; this module has no mutable desktop capability.
 module Hide.Plugin.Menu
-  ( Menus, MenuRef, MenuItem(..), MenuDef(..), MenuAction, MenuError(..), MenuOrigin(..)
-  , withMenus, menuAction, contributeMenu, retireMenu, menuSnapshot, menuMetadata
+  ( Menus, MenuRef, MenuItem(..), MenuDef(..), MenuAction, MenuError(..), MenuOrigin(..), MenuPublisher(..)
+  , withMenus, menuAction, mapMenu, contributeMenu, retireMenu, menuSnapshot, menuMetadata
   , menuName, menuEpoch, menuGeneration, menuCurrent, invokeMenu
   ) where
 
@@ -46,16 +46,35 @@ data MenuItem = MenuItem
 
 -- | Host-chosen argument projection and reply adapter, evaluated with typed
 -- command work off the UI lock. Projection reads only captured immutable context.
-data MenuAction context reply = forall a b. MenuAction
-  (Registry context) (Command context a b) (context -> Either Text a) (context -> b -> IO reply)
+data MenuAction context reply = forall c a b. MenuAction
+  (Registry c) (Command c a b) (context -> c) (c -> Either Text a) (context -> b -> IO reply)
 menuAction :: Registry context -> Command context a b -> (context -> Either Text a) -> (context -> b -> IO reply) -> MenuAction context reply
-menuAction=MenuAction
+menuAction registry command=MenuAction registry command id
+
+-- | Ordered session publication supplied by the host. Calls may block their
+-- registration worker; never publish or withdraw beneath the UI lock. Scope
+-- owners withdraw exact refs before their registry closes. Closing the host
+-- rejects waiting and retained calls without redirecting a reused name.
+data MenuPublisher c r = MenuPublisher
+  { publishMenu :: MenuDef c r -> IO (Either MenuError MenuRef)
+  , withdrawMenu :: MenuRef -> IO ()
+  }
 
 data MenuDef context reply = MenuDef
   { menuId :: Text, contributionSlot :: Text, contributionGroup :: Text
   , contributionOrder :: Int, contributionTitle :: Text, contributionKey :: Text
   , contributionAgentAllowed :: Bool, contributionAction :: MenuAction context reply
   }
+
+-- | Select immutable invocation context and adapt a worker reply while retaining
+-- the exact command and registration lifetime. Both maps run on the invoking
+-- worker, never during painting/adoption. Identity and composition obey:
+-- @mapMenu id (\_ -> pure) d ≡ d@ (observationally), and successive context maps
+-- compose without registering or invoking another command.
+mapMenu :: (c -> d) -> (c -> s -> IO r) -> MenuDef d s -> MenuDef c r
+mapMenu project prepare definition=definition {contributionAction=case contributionAction definition of
+  MenuAction registry command capture arguments reply->MenuAction registry command (capture . project) arguments
+    (\context value->reply (project context) value >>= prepare context)}
 data MenuError = MenusClosed | InvalidMenu Text | DuplicateMenu Text | UnknownMenu Text
   | UnknownSlot Text | MenuLimit
   | StaleMenu Text | MenuCommandError CommandError deriving (Eq,Show)
@@ -113,7 +132,7 @@ retireMenu menus@(Menus _ _ _ state) reference=do
         _->pure (current,Left (StaleMenu (menuName reference)))
 
 actionCurrent :: MenuAction context reply -> IO Bool
-actionCurrent (MenuAction registry command _ _)=commandCurrent registry (commandRef command)
+actionCurrent (MenuAction registry command _ _ _)=commandCurrent registry (commandRef command)
 
 -- | Currentness checks never call extension code. Use immediately before host
 -- adoption as well as admission; already-running command IO may finish retired.
@@ -156,10 +175,11 @@ invokeMenu menus reference context=do
   found<-entry menus reference
   case found of
     Left err->pure (Left err)
-    Right (Entry _ (MenuAction registry command arguments prepare))->do
-      result<-case arguments context of
+    Right (Entry _ (MenuAction registry command capture arguments prepare))->do
+      let captured=capture context
+      result<-case arguments captured of
         Left err->pure (Left (CommandRejected err))
-        Right value->invoke registry command context value
+        Right value->invoke registry command captured value
       case result of
         Left err->pure (Left (MenuCommandError err))
         Right value->Right <$> prepare context value

@@ -90,7 +90,7 @@ checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \ru
   check "deleting a clean file prompts without erasing buffer" (contents (sourceBuffer deleted)==contents (sourceBuffer savedCopy))
   restored <- choose ReloadDisk deleted
   check "explicit reload of deletion preserves old content in undo" (contents (sourceBuffer restored)=="" && disk restored==Nothing && contents (undo (sourceBuffer restored))==contents (sourceBuffer savedCopy))
-  let commands = [(AgentOptions,"options"),(Conversation,"show"),(AgentCancel,"cancel"),(AgentResume,"resume"),(AgentNew,"new"),(AgentCopyRaw,"copy")]
+  let commands = [(AgentOptions,"options"),(Conversation,"show"),(AgentCancel,"cancel"),(AgentCopyRaw,"copy")]
   check "agent commands route generic effects" (all (\(command,action) -> snd (runCommand command restored)==[AgentAction action []]) commands)
   let agentDialog = Dialog "Agent" (AgentDialog "permission") [Input "Value" "x" 1,CheckBox "Allowed" True,ListBox "Choice" ["a","b"] 1] 3 ["Allow","Deny"] []
   check "agent dialog submits button and field values" (snd (handleEvent (V.EvKey V.KEnter []) restored {dialog=Just agentDialog})==[AgentAction "permission" ["0","x","true","1"]])

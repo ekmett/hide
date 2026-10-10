@@ -32,6 +32,7 @@ import qualified Data.Set as S
 import Data.Maybe (mapMaybe, fromMaybe, listToMaybe)
 import Data.Time (UTCTime(..), fromGregorian, secondsToDiffTime, minutesToTimeZone, addUTCTime)
 import Data.List (find,findIndex,mapAccumL)
+import Data.IORef (newIORef,writeIORef,readIORef)
 import GHC.Conc (getAllocationCounter)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -42,7 +43,6 @@ import System.FilePath ((</>))
 import System.IO (hClose,openTempFile)
 #ifndef mingw32_HOST_OS
 import Control.Concurrent.Async (Async)
-import Data.IORef (newIORef,writeIORef,readIORef)
 import System.IO (hFlush)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, putMVar, takeMVar, isEmptyMVar, tryPutMVar)
 import qualified Hide.Plugin.Command as Command
@@ -63,6 +63,10 @@ import qualified Hide.App as App
 import Hide.GuestAccess (guestCommandAllowed, protectedBuffer, readableAt)
 import qualified Hide.AgentTranscript as AgentTranscript
 import qualified Hide.ConversationInput as ConversationInput
+import qualified Hide.ConversationMenus as ConversationMenus
+import Hide.DocumentationHost (withDocsCommands)
+import qualified Hide.MenuCommands as MenuHost
+import qualified Hide.SidebarCommands as SidebarHost
 import Hide.Conversation hiding (tickConversation)
 import Hide.SessionServices
 import qualified Hide.BuildJobs as Jobs
@@ -88,6 +92,47 @@ draftBuffer b d=setComposerInput b (composerSelection d) (composerFocused d) d
 
 draftAt :: Buffer -> Selection -> Desktop -> Desktop
 draftAt b selected d=setComposerInput b selected True d
+
+-- Exercise the real plugin declarations through the existing menu/form owners.
+-- A lifecycle call completes on its own typed host request, independently of
+-- provider startup, HUD text and another check's resources. Resume inspection
+-- alone starts no provider; its returned form is private even after scope end.
+sessionMenuAction :: ConversationState -> Command -> Maybe T.Text -> Desktop -> IO Desktop
+sessionMenuAction runtime command value original=SidebarHost.withSidebarCommands $ \forms->withDocsCommands $ \docs->
+  MenuHost.withConversationMenuCommands docs runtime $ \menuOwner->
+  ConversationMenus.withConversationMenus (SidebarHost.sidebarCapabilities forms)
+    (MenuHost.menuSidebarCapabilities menuOwner forms) SidebarHost.sidebarConversation SidebarHost.SidebarConversation $ do
+      result<-newIORef Nothing
+      let core d requests=do
+            changed<-conversationEffects runtime (\desktop _->pure (False,desktop)) d requests
+            when (any lifecycle requests) (writeIORef result (Just (snd changed)))
+            pure changed
+          lifecycle ConversationSessionAction{}=True
+          lifecycle _=False
+          effects=SidebarHost.sidebarEffects forms (MenuHost.menuEffects menuOwner core)
+          tick d=MenuHost.tickMenus menuOwner effects d >>= SidebarHost.tickSidebar forms effects
+          submitted d=do
+            next<-tick d
+            completed<-readIORef result
+            maybe (threadDelay 1000 >> submitted next) pure completed
+          opened d=do
+            next<-tick d
+            case dialog next of
+              Just dg | PluginInputForm{}<-purpose dg->pure next
+              _->threadDelay 1000 >> opened next
+          bounded label action=timeout 5000000 action >>= maybe (error ("Session menu did not complete: "++label)) pure
+          act (d,requests)=snd <$> effects d requests
+      metadata<-HideMenu.menuSnapshot (MenuHost.menuContributions menuOwner)
+      let initial=original {contributedMenus=metadata,menusActive=True,agentMenuRefs=MenuHost.menuAgentReferences menuOwner}
+      queued<-act (runCommand command initial)
+      if command==AgentNew then bounded "New" (submitted queued) else do
+        form<-bounded "Resume form" (opened queued)
+        case value of
+          Nothing->pure form
+          Just sid->do
+            let typed=form {dialog=fmap (\dg->dg {fields=[SelectedInput "Session ID" sid (Selection (T.length sid) (T.length sid))]}) (dialog form)}
+            accepted<-act (runCommand DialogAccept typed)
+            bounded "Resume submission" (submitted accepted)
 
 sameDraftRoot :: Desktop -> Desktop -> IO Bool
 sameDraftRoot before after=captureVersion (composerBuffer before) >>= \version->versionCurrent version (composerBuffer after)
@@ -449,8 +494,7 @@ draftReceiptChecks=withTextPresentation $ \presentation->
             check "child input service rejects after its acknowledged command completes"
               (case expired of Just (Left _)->True; _->False)
             when replaced $ do
-              let (requested,effects)=runCommand AgentNew restored
-              restarted<-snd <$> conversationEffects runtime (\value _->pure (False,value)) requested effects
+              restarted<-sessionMenuAction runtime AgentNew Nothing restored
               let childAgain=selectConversationView target "Receipt child" restarted
               retained<-sameDraftRoot restored childAgain
               check "New conversation selects the real primary editor and retains the child draft"
@@ -485,6 +529,9 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
         secondSource=root </> "Second.hs"
         settings=root </> "config" </> "thc-edit"
         environment support=object ["THC_LOG" .= logPath,"THC_SOURCE" .= source,"THC_SECOND" .= secondSource,"THC_RESUME" .= support]
+        send runtime "new" _ desktop=sessionMenuAction runtime AgentNew Nothing desktop
+        send runtime "resume" _ desktop=sessionMenuAction runtime AgentResume Nothing desktop
+        send runtime "load" (_:sid:_) desktop=sessionMenuAction runtime AgentResume (Just sid) desktop
         send runtime action values desktop=snd <$> textPresentationEffects presentation (conversationEffects runtime fallback) desktop [AgentAction action values]
         prompt runtime text=send runtime "send" ["0",text,"false","false","false"]
         questionTool runtime desktop args=do
@@ -1531,7 +1578,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       restarted<-prompt runtime "stream" legacy >>= done runtime
       disconnected<-prompt runtime "disconnect" restarted >>= await runtime "provider EOF" ((=="Agent disconnected.").status)
       reconnected<-prompt runtime "stream" disconnected >>= done runtime
-      resumed<-send runtime "load" ["0","saved-id"] reconnected >>= await runtime "resume session" (\d->status d=="Session saved-id" && "Session: saved-id" `T.isInfixOf` conversationText d)
+      resumed<-send runtime "load" ["0","  saved-id  "] reconnected >>= await runtime "resume session" (\d->status d=="Session saved-id" && "Session: saved-id" `T.isInfixOf` conversationText d)
       check "new session clears stale context usage" (agentContextUsage resumed==Nothing && " -- " `T.isInfixOf` snapshot resumed)
       check "conversation header follows resumed session" ("Session: saved-id" `T.isInfixOf` conversationText resumed)
       check "capability selects session/load" . any ((==Just ("session/load"::T.Text)).field "method") =<< logged
@@ -1676,7 +1723,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       pure ()
     let editorSessions=[(replicate 48 'a',"resume-a"::T.Text,root),(replicate 48 'b',"resume-b",root </> "other-project")]
         withEditor ident action=bracket (lookupEnv "THC_EDIT_SESSION" <* setEnv "THC_EDIT_SESSION" ident) (restoreEnvironment "THC_EDIT_SESSION") (const action)
-        resumeId d=case [value | Just dg<-[dialog d],Input "Session ID" value _<-fields dg] of value:_->Just value; _->Nothing
+        resumeId d=case [value | Just dg<-[dialog d],field'<-fields dg,value<-case field' of Input "Session ID" text _->[text]; SelectedInput "Session ID" text _->[text]; _->[]] of value:_->Just value; _->Nothing
     forM_ editorSessions $ \(ident,providerId,providerRoot) -> withEditor ident $ C.withConsoles $ \consoles -> withConversation (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
       offered<-send runtime "resume" [] desktop
       check "new editor session does not inherit another session resume ID" (resumeId offered==Just "")
