@@ -266,6 +266,7 @@ tests = askOption $ \profile->withResource
   , testCase "ACP" ACPCheck.checks
   , testCase "Links" LinksCheck.checks
   , testCase "Markdown" MarkdownCheck.checks
+  , testCase "Markdown.performance" MarkdownCheck.performanceChecks
   ]
 
 modelChecks :: IO ()

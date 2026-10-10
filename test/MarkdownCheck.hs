@@ -1,5 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
-module MarkdownCheck (checks) where
+module MarkdownCheck (checks, performanceChecks) where
 
 import Control.Monad (forM_, unless)
 import Control.Exception (evaluate)
@@ -77,6 +77,12 @@ checks = do
   check "table logical copy and link offsets share the parser's canonical cells"
     (T.concat (map markdownBlockText linkedTable)=="H\tV\nalpha\t42" &&
       concatMap markdownBlockLinks linkedTable==[(4,9,"target.md")])
+  putStrLn "Markdown checks passed"
+  where contains character style=any (\(text,actual)->actual==style && T.any (==character) text)
+
+-- | The parser's scaling regression runs in optimized CI, without HPC costs.
+performanceChecks :: IO ()
+performanceChecks = do
   let paragraph=T.replicate 2000 "Ordinary message with some **bold** and code `abc`.\n"
       long=renderMarkdown 73 paragraph
   rendered<-timeout 2000000 (evaluate (styledLength long))
@@ -84,6 +90,5 @@ checks = do
   check "large paragraph retains text order and inline styles"
     (T.take 8 (styledContents long)=="Ordinary" && sum [T.count "b" run | (run,BoldStyle Keyword)<-long]==2000 && sum [T.count "a" run | (run,Literal)<-long]==2000)
 
-  putStrLn "Markdown checks passed"
-  where check label ok = unless ok (error label)
-        contains character style=any (\(text,actual)->actual==style && T.any (==character) text)
+check :: String -> Bool -> IO ()
+check label ok = unless ok (error label)
