@@ -20,7 +20,7 @@ module Hide.Plugin.EditorHost
   ( DraftRef, newDraftRef, draftRefCurrent, retireDraftRef
   , EditorMount, mountDraft, mountSpec, mountActions, mountCurrent, retireEditorMount
   , EditorSpec(..), EditorSlot(..), EditorAction, editorAction
-  , PreparedEditor, prepareEditorBuffer, remountEditor, editorMount, editorInitialBuffer
+  , PreparedEditor, prepareEditorBuffer, prepareDeclaredEditor, remountEditor, editorMount, editorInitialBuffer
   , installedEditor, editorCurrent, editorBindingCurrent, claimEditorMount
   , DraftSubmission, captureDraftSubmission, submissionDraft, submissionMount
   , submissionVersion, submissionContent, submissionAction, submissionSlot, sameDraftSubmission, submissionAccepted, abortEditorSubmission
@@ -33,9 +33,10 @@ import Control.Exception (evaluate)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Unique
-import Hide.Buffer (Buffer,BufferContent,newBuffer,bufferContent)
+import Hide.Buffer (Buffer,BufferContent,newBuffer,bufferContent,contentLength,contentSlice)
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion)
 import Hide.Plugin.Command
+import Hide.Plugin.Input (EditorSpec(..),EditorSlot(..),InputDeclaration(..),InputUpdate(..))
 
 -- | A draft's owning target/session lifetime. The host stores its sole editable
 -- Buffer/selection separately, keyed by this reference. Closing a frame does not
@@ -55,17 +56,6 @@ draftRefCurrent (DraftRef _ live)=readTVarIO live
 retireDraftRef :: DraftRef -> IO ()
 retireDraftRef (DraftRef _ live)=atomically (writeTVar live False)
 
--- | Fixed input behavior and labels. The host owns all caret/selection geometry;
--- Code input enables its existing indentation/fenced-input grammar. Enter uses
--- the first action and Ctrl+Enter the second, except the host's newline grammar.
-data EditorSpec = EditorSpec
-  { editorCodeInput :: !Bool
-  , editorDefaultLabel :: !Text
-  , editorAlternateLabel :: !Text
-  } deriving (Eq,Show)
--- | Fixed action position, independent of registration identity. Both slots may
--- use the same typed Command with different captured argument adapters.
-data EditorSlot = DefaultEditor | AlternateEditor deriving (Eq,Show)
 data MountPhase = MountPending | MountOpen | MountRetired deriving Eq
 -- | Exact frame attachment. Reopening always obtains a fresh identity. Its
 -- immutable actions cannot be changed by an ordinary body publication.
@@ -97,11 +87,11 @@ retireEditorMount (EditorMount _ _ _ _ _ state)=atomically (writeTVar state Moun
 -- | Typed registered argument/reply adapters. Both execute only on the owning
 -- action worker. No closure is placed in prepared readonly window content.
 data EditorAction c r = forall a b. EditorAction !(Registry c) !(Command c a b)
-  (DraftSubmission -> Either CommandError a) (c -> b -> IO r)
+  (DraftSubmission -> Either CommandError a) (DraftSubmission -> c -> b -> IO (Either CommandError r))
 -- | Bind a typed command to immutable submitted input. Registration is not an
 -- MCP exposure or a human grant; the host still validates input ownership.
 editorAction :: Registry c -> Command c a b -> (DraftSubmission -> Either CommandError a) -> (c -> b -> IO r) -> EditorAction c r
-editorAction=EditorAction
+editorAction registry command arguments prepare=EditorAction registry command arguments (\_ context value->Right <$> prepare context value)
 actionReference :: EditorAction c r -> CommandRef
 actionReference (EditorAction _ command _ _)=commandRef command
 actionCurrent :: EditorAction c r -> IO Bool
@@ -121,6 +111,39 @@ prepareEditorBuffer draft spec initial normal alternate
       mount<-EditorMount <$> newUnique <*> pure draft <*> pure metadata <*> pure (actionReference normal) <*> pure (actionReference alternate) <*> newTVarIO MountPending
       pure (Right (PreparedEditor mount (Just initial) normal alternate))
   where invalid value=T.null value || T.length value>256 || T.any (\c->c<' ' || c=='\DEL') value
+-- | Compile a public declaration once, before the event loop. Its command uses
+-- the existing registry and submission claim; no plugin code runs at capture or
+-- adoption. The worker checks cached length before materializing bounded input,
+-- then binds the public result to this exact private submission, never a token
+-- lookup or a plugin-selected version. Recovery seeds remain host-owned. The
+-- injection embeds that exact update in the owner's ordinary reply type and is
+-- evaluated on this worker, like every other editor reply adapter.
+prepareDeclaredEditor :: Registry c -> DraftRef -> InputDeclaration c -> (EditorUpdate -> r)
+  -> IO (Either CommandError (PreparedEditor c r))
+prepareDeclaredEditor registry draft (InputDeclaration spec limit definition arguments prepare) inject
+  | limit<=0=pure (Left (InvalidArguments "Input character limit must be positive."))
+  | otherwise=do
+      registered<-registerCommand registry definition
+      case registered of
+        Left err->pure (Left err)
+        Right command->do
+          let capture slot submitted
+                | contentLength source>limit=Left (InvalidArguments ("Input exceeds "<>T.pack (show limit)<>" characters."))
+                | otherwise=let text=contentSlice source 0 (contentLength source)
+                            in T.length text `seq` arguments slot text
+                where source=submissionContent submitted
+              result submitted _ value=case prepare value of
+                KeepInput->pure (Right (EditorUpdate submitted Nothing))
+                ClearInput->pure (Right (clearEditorDraft submitted))
+                ReplaceInput text | T.length text>limit->pure (Left (InvalidArguments "Input replacement exceeds its character limit."))
+                                  | otherwise->Right <$> replacementEditorDraft submitted text
+              action slot=EditorAction registry command (capture slot) (\submitted context value->
+                fmap (fmap inject) (result submitted context value))
+          prepared<-prepareEditorBuffer draft spec (newBuffer "") (action DefaultEditor) (action AlternateEditor)
+          case prepared of
+            Left err->retireCommand registry (commandRef command) >> pure (Left err)
+            Right editor->pure (Right editor)
+
 -- | Mint a fresh pending frame for the same draft/actions, without copying or
 -- reseeding its editable state. A retired registration is refused at admission.
 remountEditor :: PreparedEditor c r -> IO (PreparedEditor c r)
@@ -240,24 +263,27 @@ invokeEditorAction (PreparedEditor mount@(EditorMount _ (DraftRef _ draftLive) _
                 then pure False else writeTVar state Invoked >> pure True
             if not accepted then pure (Left (CommandRejected "Editor submission expired.")) else do
               result<-invoke registry command context captured
-              case result of Left err->pure (Left err); Right resultValue->Right <$> (reply context resultValue >>= evaluate)
+              case result of Left err->pure (Left err); Right resultValue->reply submitted context resultValue >>= traverse evaluate
   where selected=case submissionSlot submitted of DefaultEditor->normal; AlternateEditor->alternate
 
 -- | A result for one exact submitted draft. This cannot select another target,
 -- reopen a frame or authorize an arbitrary edit of the current composer.
-data EditorUpdate = EditorUpdate !DraftSubmission !Buffer
+data EditorUpdate = EditorUpdate !DraftSubmission !(Maybe Buffer)
 -- | Clear only the submitted immutable version after the real owning operation
 -- accepts it. The host performs the final version check at serialized adoption.
 clearEditorDraft :: DraftSubmission -> EditorUpdate
-clearEditorDraft submitted=EditorUpdate submitted (newBuffer "")
+clearEditorDraft submitted=let replacement=newBuffer "" in replacement `seq` EditorUpdate submitted (Just replacement)
 -- | Prepare an exact-version replacement on the owning result worker.
 replacementEditorDraft :: DraftSubmission -> Text -> IO EditorUpdate
-replacementEditorDraft submitted text=evaluate (EditorUpdate submitted (newBuffer text))
+replacementEditorDraft submitted text=do
+  replacement<-evaluate (newBuffer text)
+  evaluate (EditorUpdate submitted (Just replacement))
 -- | /O(1)/. Receipt checked against the host's sole draft state.
 updateSubmission :: EditorUpdate -> DraftSubmission
 updateSubmission (EditorUpdate submitted _)=submitted
--- | /O(1)/. Prepared replacement; transfer it only after exact version validation.
-updateReplacement :: EditorUpdate -> Buffer
+-- | /O(1)/. Prepared replacement, or an acknowledged Keep. Transfer a replacement
+-- only after exact version validation; Keep leaves selection and Undo unchanged.
+updateReplacement :: EditorUpdate -> Maybe Buffer
 updateReplacement (EditorUpdate _ replacement)=replacement
 -- | Consume once, after final draft/version/current-owner checks. A hidden mount
 -- is allowed; target retirement refuses. No input or process authority is granted.

@@ -16,7 +16,7 @@ module Hide.Plugin.Editor
   ( DraftRef, withDraftRef, newDraftRef, draftRefCurrent, retireDraftRef
   , EditorMount, mountDraft, mountSpec, mountActions
   , EditorSpec(..), EditorSlot(..), EditorAction, editorAction
-  , PreparedEditor, prepareEditor, remountEditor, editorMount
+  , PreparedEditor, prepareEditor, prepareDeclaredEditor, remountEditor, editorMount
   , DraftSubmission, submissionDraft, submissionMount, submissionVersion
   , submissionContent, submissionAction, submissionSlot
   , EditorUpdate, clearEditorDraft, replacementEditorDraft

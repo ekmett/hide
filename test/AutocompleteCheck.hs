@@ -3,8 +3,9 @@ module AutocompleteCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (unless,void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.ByteString.Char8 as BS
@@ -19,6 +20,11 @@ import System.IO (hClose, openTempFile)
 import System.Timeout (timeout)
 import AutocompleteACPCheck (fixture)
 import Hide.Autocomplete
+import qualified Hide.AgentUI as AgentUI
+import qualified Hide.Plugin.Session as Plugin
+import qualified Hide.Plugin.Command as Command
+import Hide.Plugin.Completion (HintServices(..))
+import Hide.Plugin.Input (InputDeclaration(..))
 import qualified Graphics.Vty as V
 import Hide.AgentSidebarTypes
 import Hide.Buffer
@@ -31,6 +37,7 @@ import Hide.GuestAccess (readableAt,pointerAllowedAt)
 
 checks :: IO ()
 checks=bracket temporary removePathForcibly $ \root->do
+  acknowledged<-newEmptyMVar
   let script=root </> "provider.py"
       logPath=root </> "requests.jsonl"
       project=root </> "thc.toml"
@@ -67,7 +74,7 @@ checks=bracket temporary removePathForcibly $ \root->do
     withEnv "THC_EDIT_SESSION" Nothing $
     withEnv "LOG" (Just logPath) $
     withEnv "SECRET" (Just "runtime-autocomplete-secret") $
-    withAutocomplete root $ \runtime->do
+    withAutocomplete (observeHint acknowledged <$> Plugin.pluginCompletionInput AgentUI.plugin) root $ \runtime->do
       configured<-awaitDesktop runtime "project ACP configuration" autocompleteACPEnabled desktop
       check "completion chat is hidden by default" (not (hasTranscript configured))
       check "provider is lazy before any request" . null =<< logs
@@ -176,88 +183,129 @@ checks=bracket temporary removePathForcibly $ \root->do
       firstPreview<-awaitDesktop runtime "preview before settings change" (isJust.inlinePreview) sixthRequest
       oldTarget<-awaitIO "connected completion target" $ fmap (\(CompletionSummary current _)->current) <$> completionSummary runtime
       changedSetting<-configure oldTarget "model-id" "model-b" firstPreview
-      configuredPreview<-awaitDesktop runtime "accepted setting invalidates preview" (\d->status d=="Completion setting updated." && inlinePreview d==Nothing) changedSetting
+      configuredPreview<-awaitDesktop runtime "accepted setting invalidates preview" ((==Nothing).inlinePreview) changedSetting
       seventhRequest<-send runtime "propose" [] configuredPreview
       seventh<-awaitPrompt 7
       seventhId<-submit runtime seventh "newer proposal\n"
       waitRetired runtime seventhId
       newerPreview<-awaitDesktop runtime "new preview after settings change" (isJust.inlinePreview) seventhRequest
+      currentTarget<-awaitIO "completion target after settings change" $ fmap (\(CompletionSummary current _)->current) <$> completionSummary runtime
       rejectedSetting<-configure oldTarget "effort-id" "high" newerPreview
-      preserved<-awaitDesktop runtime "expired completion setting" (\d->status d=="Completion setting expired.") rejectedSetting
+      -- The reply to this queued request proves the owner handled the preceding
+      -- rejected setting; a shared notice cannot identify that completion. The
+      -- shared provider advertises one effort option and two model-category
+      -- options (one used by the credential-redaction check).
+      choicesBarrier<-timeout 5000000 (completionChoices runtime currentTarget "thought_level")
+      check ("current completion choices follow rejected setting: " ++ show choicesBarrier ++ "; captured " ++ show currentTarget) (case choicesBarrier of
+        Just (Right (replyTarget,_,_,_))->replyTarget==currentTarget
+        _->False)
+      preserved<-tickAutocomplete runtime rejectedSetting
       check "expired setting leaves a newer inline proposal intact"
         (inlinePreview preserved==inlinePreview newerPreview && activeText preserved=="x\n")
       entries<-logs
       check "autocomplete configuration is independent of the main agent" (length [() | entry<-entries,field "method" entry==Just ("initialize"::T.Text)]==1)
-      -- Hints use the mounted editor's checked submission; provider IO does not
-      -- borrow the live composer. The same real ACP fixture controls delivery.
+      -- The real plugin's command and this provider turn own acknowledgement.
+      -- Each gate is named by its ACP request; no later case clears an old gate.
       visibleHints<-save runtime True preserved >>= awaitDesktop runtime "hint pane visible" hasTranscript
       let hintWindow state=case [w | Just ref<-[autocompleteWindow state],w<-windows state,windowContent w==PluginContent ref] of
             w:_->w
             _->error "Missing hint window"
           focusHint state=focusWindow (windowId (hintWindow state)) state
           draft text state=setComposerInput (newBuffer text) (Selection (T.length text) (T.length text)) True (focusHint state)
-          sendHint state=let (nextState,effects)=handleEvent (V.EvKey V.KEnter []) state
+          sendInput state=let (nextState,effects)=handleEvent (V.EvKey V.KEnter []) state
             in snd <$> autocompleteEffects runtime (\d _->pure (False,d)) nextState effects
-          waitStatus prefix=awaitDesktop runtime "hint delivery" (T.isPrefixOf prefix.status)
-          hintReady=awaitIO "hint provider arrival" $ do
-            ready<-doesFileExist (root </> "hint.ready")
-            pure (if ready then Just () else Nothing)
-          releaseHint=writeFile (root </> "hint") "complete"
-          resetHint=mapM_ removeFile [root </> "hint",root </> "hint.ready"]
-      pendingHint<-sendHint (draft "keep allocations local" visibleHints)
-      hintReady
-      check "submitted hint stays editable during provider delivery" (contents (composerBuffer pendingHint)=="keep allocations local")
-      duplicateHint<-sendHint pendingHint
+          hintReady :: T.Text -> IO FilePath
+          hintReady hintText=do
+            gateId<-awaitIO "hint request" $ do
+              requestEntries<-logs
+              pure $ case [rpcId | entry<-requestEntries,field "method" entry==Just ("session/prompt"::T.Text),
+                    Just params<-[field "params" entry],Just blocks<-[field "prompt" params::Maybe [Value]],
+                    block<-blocks,Just text<-[field "text" block],Just hintContext<-[decodeStrict' (TE.encodeUtf8 text)],
+                    field "intent" hintContext==Just ("hint"::T.Text),field "message" hintContext==Just hintText,
+                    Just rpcId<-[field "id" entry::Maybe Int]] of
+                rpcId:_->Just ("hint-"++show rpcId)
+                []->Nothing
+            awaitIO "hint provider arrival" $ do
+              ready<-doesFileExist (root </> (gateId++".ready"))
+              pure (if ready then Just () else Nothing)
+            pure gateId
+          releaseHint gateId=writeFile (root </> gateId) "complete"
+      pendingHint<-sendInput (draft "send this exact version" visibleHints)
+      hintId<-hintReady "send this exact version"
+      check "submitted hint stays editable during provider delivery" (contents (composerBuffer pendingHint)=="send this exact version")
+      duplicateHint<-sendInput pendingHint
       check "repeated Enter does not enqueue the same immutable hint" (status duplicateHint=="Completion hint is already pending.")
-      let newerHint=fst (handleEvent (V.EvPaste (TE.encodeUtf8 " and keep names")) pendingHint)
-      releaseHint
-      completedHint<-waitStatus "Completion hint sent." newerHint
-      check "late hint completion preserves newer typing" (contents (composerBuffer completedHint)=="keep allocations local and keep names")
-      resetHint
-      exactHint<-sendHint (draft "send this exact version" completedHint)
-      hintReady
-      releaseHint
-      clearedHint<-awaitDesktop runtime "accepted hint clear" (\d->status d=="Completion hint sent." && bufferLength (composerBuffer d)==0) exactHint
+      releaseHint hintId
+      -- Clearing this exact draft is the owning adoption result, independent of
+      -- mutable HUD messages or later transcript refreshes.
+      clearedHint<-awaitDesktop runtime "accepted hint clear" ((==0).bufferLength.composerBuffer) duplicateHint
+      services<-timeout 5000000 (takeMVar acknowledged) >>= maybe (error "Plugin hint command did not acknowledge") pure
+      expired<-timeout 5000000 (sendHint services "must not reach the retired invocation")
+      check "retained hint service rejects after its command completes" (case expired of Just (Left _)->True; _->False)
       check "success clears only the submitted hint" (activeText preserved=="x\n" && bufferLength (composerBuffer clearedHint)==0)
-      resetHint
-      holdingTarget<-sendHint (draft "hold original target" clearedHint)
-      hintReady
-      capturedTarget<-awaitIO "hint target before configuration" $ fmap (\(CompletionSummary current _)->current) <$> completionSummary runtime
-      configuringHint<-configure capturedTarget "model-id" "model-b" holdingTarget
-      queuedOldTarget<-sendHint (draft "only for original target" configuringHint)
-      releaseHint
-      expiredTarget<-waitStatus "Completion hint expired" queuedOldTarget
-      check "queued hint refuses a changed model without clearing its draft" (contents (composerBuffer expiredTarget)=="only for original target")
-      resetHint
-      writeFile (root </> "hint.fail") "refuse"
-      failingHint<-sendHint (draft "retry this hint" expiredTarget)
-      failedHint<-waitStatus "Completion agent hint failed" failingHint
-      check "provider failure retains the entire hint" (contents (composerBuffer failedHint)=="retry this hint")
-      removeFile (root </> "hint.fail")
-      -- Closing a queued frame retires its input before the next provider call.
-      -- While one hint is in flight, later edits can queue; overflow is a refusal,
-      -- never an eager clear or truncation of the current draft.
-      blockedHint<-sendHint (draft "hold provider" failedHint)
-      hintReady
+      -- Input bounds are enforced before the real plugin can call its service.
+      let oversizedText=T.replicate 16385 "x"
+      oversizedHint<-sendInput (draft oversizedText clearedHint)
+      boundTarget<-awaitIO "completion target for input bound" $ fmap (\(CompletionSummary current _)->current) <$> completionSummary runtime
+      boundBarrier<-timeout 5000000 (completionChoices runtime boundTarget "thought_level")
+      check "input bound rejection completes before the owner barrier" (case boundBarrier of
+        Just (Right (replyTarget,_,_,_))->replyTarget==boundTarget
+        _->False)
+      boundedHint<-tickAutocomplete runtime oversizedHint
+      boundedPrompts<-prompts
+      check "oversized input stays in its draft and never reaches the provider"
+        (bufferLength (composerBuffer boundedHint)==16385 && all ((/=Just oversizedText) . field "message") boundedPrompts)
+      -- Retire one queued request while the owner stays live. Its FIFO reply
+      -- proves the skipped request was handled before inspecting provider input.
+      heldHint<-sendInput (draft "hold before close" boundedHint)
+      heldId<-hintReady "hold before close"
+      queuedHint<-sendInput (draft "retired queued hint" heldHint)
+      check "later hint is queued before its mount closes"
+        (status queuedHint=="Sending completion hint; draft kept until delivered.")
+      let (closingHint,retireEffects)=runCommand Close queuedHint
+      retiredHint<-snd <$> autocompleteEffects runtime (\d _->pure (False,d)) closingHint retireEffects
+      liveTarget<-awaitIO "completion target before retired hint barrier" $ fmap (\(CompletionSummary current _)->current) <$> completionSummary runtime
+      releaseHint heldId
+      retiredBarrier<-timeout 5000000 (completionChoices runtime liveTarget "thought_level")
+      check "live owner handles queued hint retirement before replying" (case retiredBarrier of
+        Just (Right (replyTarget,_,_,_))->replyTarget==liveTarget
+        _->False)
+      receivedPrompts<-prompts
+      check "retired queued hint never reaches the provider"
+        (all ((/=Just ("retired queued hint"::T.Text)) . field "message") receivedPrompts)
+      retiredSettled<-tickAutocomplete runtime retiredHint
+      reopeningHint<-snd <$> autocompleteEffects runtime (\d _->pure (False,d)) retiredSettled
+        [AgentSidebarAction (ShowCompletion liveTarget)]
+      reopenedHint<-awaitDesktop runtime "hint pane after queued retirement" hasTranscript reopeningHint
+      -- While an identified provider turn is held, queue pressure is a direct
+      -- synchronous refusal. No status polling or provider timing establishes it.
+      blockedHint<-sendInput (draft "hold provider" reopenedHint)
+      blockedId<-hintReady "hold provider"
       let fill n state
             | n>80=error "Hint queue did not remain bounded"
             | otherwise=do
                 let text="queued hint "<>T.pack (show n)
-                nextState<-sendHint (draft text state)
+                nextState<-sendInput (draft text state)
                 if status nextState=="Autocomplete is busy; draft kept."
                   then check "queue pressure keeps the unsubmitted hint" (contents (composerBuffer nextState)==text) >> pure nextState
                   else fill (n+1) nextState
       fullHints<-fill (1::Int) blockedHint
       let (closedHints,closeEffects)=runCommand Close fullHints
-      stoppedHints<-snd <$> autocompleteEffects runtime (\d _->pure (False,d)) closedHints closeEffects
-      releaseHint
-      drainedHints<-awaitDesktop runtime "closed hint queue drains" (T.isPrefixOf "Completion hint expired".status) stoppedHints
-      hintPrompts<-prompts
-      check "closed mounts do not deliver queued hints" (length [() | value<-hintPrompts,field "intent" value==Just ("hint"::T.Text)]==5 && not (hasTranscript drainedHints))
-  closed<-withAutocomplete root pure
+      _<-snd <$> autocompleteEffects runtime (\d _->pure (False,d)) closedHints closeEffects
+      releaseHint blockedId
+  closed<-withAutocomplete (Plugin.pluginCompletionInput AgentUI.plugin) root pure
   closedChoices<-timeout 5000000 (completionChoices closed (CompletionTarget 0 Nothing) "model")
   check "choice requests refuse after owner shutdown" (case closedChoices of Just (Left _)->True; _->False)
   putStrLn "Autocomplete runtime checks passed"
+
+-- Observe the real command's result without changing its validation, provider
+-- call or reply adapter. The runtime adoption above proves that it has returned.
+observeHint :: MVar HintServices -> InputDeclaration HintServices -> InputDeclaration HintServices
+observeHint acknowledged (InputDeclaration spec limit definition arguments result)=
+  InputDeclaration spec limit (definition {Command.commandRun= \services input->do
+    reply<-Command.commandRun definition services input
+    case reply of Right _->void (tryPutMVar acknowledged services); Left _->pure ()
+    pure reply}) arguments result
 
 field :: FromJSON a => Key -> Value -> Maybe a
 field key=parseMaybe (withObject "fixture" (.:key))

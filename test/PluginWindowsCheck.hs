@@ -31,12 +31,16 @@ import Hide.GuestAccess (guestKeyboardAllowed,pointerAllowedAt,readableAt,protec
 import Hide.Debugger (withDebugger,withDownloadsCommands)
 import Hide.MenuCommands
 import qualified Hide.Plugin.Editor as E
+import Hide.Plugin.Input (InputDeclaration(..),InputUpdate(..))
+import Hide.Plugin.Completion (HintServices(..))
+import qualified Hide.CompletionInput as CompletionInput
+import Hide.Plugin.BufferHost (captureVersion,versionCurrent)
 import qualified Hide.Plugin.Window as W
 import Hide.PluginWindowHost (adoptWindowUpdate,replaceWindowUpdate,tickPluginWindows)
 import Hide.Sidebar
 import Hide.SidebarCommands
 import Hide.Model
-import Hide.Plugin.Command (withRegistry,CommandError,CommandDef(..),Codec(..),registerCommand,retireCommand,commandRef)
+import Hide.Plugin.Command (withRegistry,CommandError(..),CommandDef(..),Codec(..),registerCommand,retireCommand,commandRef,invoke)
 import qualified Hide.Plugin.Menu as P
 import qualified Hide.Plugin.Tree as PTree
 import Hide.Render (snapshot,renderKey,renderCellRows,renderCellRowsAndCanvas,renderCursor)
@@ -273,9 +277,99 @@ checks=W.withWindowScope $ \scope->withDocsCommands $ \docs->withRegistry $ \reg
     refused<-timeout 5000000 (awaitExpired expired) >>= maybe (fail "late retired menu result timeout") pure
     check "retired originating command cannot adopt late plugin window" (activePluginWindow refused==Nothing && length (windows refused)==1)
   editorChecks
+  declaredInputChecks
   sidebarEditorRetirementChecks
   emptyEditorRetirementChecks
   putStrLn "plugin window checks passed"
+
+-- Public declarations use the real published window and menu worker. Closing
+-- then reopening supplies an owner barrier even when the result preserves input.
+declaredInputChecks :: IO ()
+declaredInputChecks=W.withWindowScope $ \scope->E.withDraftRef $ \draft->withDocsCommands $ \docs->
+  withRegistry $ \registry->withMenuCommands docs $ \host->do
+  entered<-newEmptyMVar
+  finish<-newEmptyMVar
+  let check label condition=unless condition (fail label)
+      wait label action=timeout 5000000 action >>= maybe (fail label) pure
+      right=either (fail . show) pure
+      hidden=Codec Null (const (Left "host input")) (const Null)
+      unit=Codec Null (const (Right ())) (const Null)
+      definition=CommandDef "example.input" "Input" hidden hidden $ \_ value->
+        putMVar entered value >> takeMVar finish
+      declaration metadata limit=InputDeclaration metadata limit definition (\slot text->Right (slot,text)) id
+      spec=E.EditorSpec False "Apply" "Alternate"
+      refused value=case value of Left _->True; Right _->False
+      core _ _=error "declared input escaped its menu owner"
+      current desktop=editorDraftBuffer (editorDrafts desktop M.! draft)
+      close desktop=let (closed,effects)=runCommand Close desktop in snd <$> applyEffects closed effects
+      submit modifiers desktop=let (chosen,effects)=handleEvent (V.EvKey V.KEnter modifiers) desktop
+        in snd <$> menuEffects host core chosen effects
+  badBound<-E.prepareDeclaredEditor registry draft (declaration spec 0) PreparedEditorUpdate
+  badLabel<-E.prepareDeclaredEditor registry draft (declaration (spec {E.editorDefaultLabel=""}) 16) PreparedEditorUpdate
+  check "invalid input declarations reject at activation" (refused badBound && refused badLabel)
+  editor<-E.prepareDeclaredEditor registry draft (declaration spec 16) PreparedEditorUpdate >>= right
+  nextEditor<-newIORef editor
+  opening<-registerCommand registry (CommandDef "example.input.open" "Input" unit hidden (\_ ()->do
+    next<-readIORef nextEditor
+    E.remountEditor next >>= writeIORef nextEditor
+    pure (Right next))) >>= right
+  reference<-P.contributeMenu (menuContributions host)
+    (P.MenuDef "example.input.open" "help" "extensions" 11 "Input" "" False
+      (P.menuAction registry opening (const (Right ())) (\_ prepared->do
+        body<-W.prepareTextWindow "Declared input" "Bounded command input"
+        W.openEditorWindow scope body prepared >>= maybe (fail "Input scope retired") (pure . PreparedEditorWindow))))
+      >>= either (fail . show) pure
+  catalogue<-P.menuSnapshot (menuContributions host)
+  let base=(addDocument Nothing (newBuffer "background") (initialDesktop (80,25))) {contributedMenus=catalogue}
+      open desktop=do
+        next<-tickMenus host core desktop
+        if activeEditorMount next/=Nothing then pure next else do
+          let (chosen,effects)=runCommand (RegisteredMenu reference False) next
+          (_,queued)<-menuEffects host core chosen effects
+          yield
+          open queued
+      run reply modifiers change desktop=do
+        busy<-submit modifiers desktop
+        receipt<-wait "declared input command did not receive its exact input" (takeMVar entered)
+        closed<-close (change busy)
+        putMVar finish reply
+        reopened<-wait "declared input result did not drain before reopening" (open closed)
+        pure (receipt,reopened)
+  opened<-wait "declared input did not open through menu worker" (open base)
+  let original=newBuffer "original input"
+      ready=setComposerInput original (Selection 2 5) True opened
+  version<-captureVersion original
+  (kept,unchanged)<-run (Right KeepInput) [] id ready
+  check "KeepInput consumes its result without changing input or selection" =<<
+    ((&& (composerSelection unchanged==Selection 2 5)) <$> versionCurrent version (current unchanged))
+  (replaced,changed)<-run (Right (ReplaceInput "changed λ")) [V.MCtrl] id
+    (setComposerInput (current unchanged) (Selection 2 5) True unchanged)
+  check "ReplaceInput applies its exact worker-prepared text" (contents (current changed)=="changed λ")
+  let newer=newBuffer "new typing"
+  newerVersion<-captureVersion newer
+  (cleared,preserved)<-run (Right ClearInput) [] (setComposerInput newer (Selection 2 5) True)
+    (setComposerInput original (Selection 0 0) True changed)
+  check "older public clear cannot consume newer typing" =<< versionCurrent newerVersion (current preserved)
+  check "declared action slots use exact bounded text"
+    ([kept,replaced,cleared]==[(E.DefaultEditor,"original input"),(E.AlternateEditor,"original input"),(E.DefaultEditor,"original input")])
+  (_,bounded)<-run (Right (ReplaceInput "replacement exceeding sixteen")) [] id
+    (setComposerInput newer (Selection 2 5) True preserved)
+  check "oversized replacement preserves the exact input" =<< versionCurrent newerVersion (current bounded)
+  (_,failed)<-run (Left (CommandRejected "delivery failed")) [] id
+    (setComposerInput newer (Selection 2 5) True bounded)
+  check "failed command preserves the exact input and selection" =<<
+    ((&& (composerSelection failed==Selection 2 5)) <$> versionCurrent newerVersion (current failed))
+  -- Exercise the real first-party command with its acknowledged service error.
+  -- The runtime check separately supplies ACP and proves successful adoption.
+  case CompletionInput.completionInput of
+    InputDeclaration _ _ command arguments _->withRegistry $ \hintRegistry->do
+      registered<-registerCommand hintRegistry command >>= right
+      input<-right (arguments E.DefaultEditor "keep failed hint")
+      calls<-newIORef []
+      failure<-invoke hintRegistry registered
+        (HintServices (\value->modifyIORef' calls (++[value]) >> pure (Left "provider refused"))) input
+      check "actual plugin refuses a failed acknowledged hint" (refused failure)
+      check "actual plugin calls the supplied service with the submitted text" . (==["keep failed hint"]) =<< readIORef calls
 
 -- Block the actual pure worker adapter before input admission. This is test-only
 -- scheduling control; no receipt or input authority is manufactured here.

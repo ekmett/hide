@@ -876,9 +876,18 @@ inert unavailable view with a fresh revoked reference. Parsing never runs plugin
 code and a restored type does not automatically reattach to a registration.
 Prepared content identities make redraw/checkpoint invalidation shallow.
 
-Persistent multiline input uses `Hide.Plugin.Editor`: the host retains the draft,
-Undo and selection independently of body refreshes. `openEditorWindow` publishes
-an input attachment and prepared body together through the same command owner.
+A linked plugin declares multiline input with `Hide.Plugin.Input`: labels,
+code-input behavior, a character bound, a typed command and its argument/reply
+adapters. The host checks cached length before reading submitted text on the
+worker and binds `KeepInput`, `ClearInput` or `ReplaceInput` to the original
+submission. Plugins receive no Buffer, Undo or content-version identity.
+`hide-agents` uses this for ACP completion's acknowledged **Send hint** action;
+provider selection, the bounded queue and exact-version adoption remain with the
+existing completion owner.
+
+The `Hide.Plugin.Editor` interpreter retains drafts, Undo and selection
+independently of body refreshes. `openEditorWindow` publishes an input attachment
+and prepared body together through the same command owner.
 See [embedded editor ownership](design/haskell-plugins.md#embedded-editor-ownership)
 for submission and lifetime rules. Conversation uses that input attachment and
 prepared semantic bodies, with history rendering on the existing presentation

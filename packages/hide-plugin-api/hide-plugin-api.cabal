@@ -9,7 +9,7 @@ library
   default-language: Haskell2010
   ghc-options: -Wall
   hs-source-dirs: src
-  exposed-modules: Hide.Plugin.Command, Hide.Plugin.Form, Hide.Plugin.Menu
+  exposed-modules: Hide.Plugin.Command, Hide.Plugin.Form, Hide.Plugin.Menu, Hide.Plugin.Input
     , Hide.Plugin.Tree, Hide.Plugin.Sidebar, Hide.Plugin.Session, Hide.Plugin.Tool
     , Hide.Plugin.Transcript, Hide.Plugin.Documentation, Hide.Plugin.Environment, Hide.Plugin.Services
     , Hide.Plugin.BufferRead, Hide.Plugin.BufferDiff, Hide.Plugin.WindowRead, Hide.Plugin.Request

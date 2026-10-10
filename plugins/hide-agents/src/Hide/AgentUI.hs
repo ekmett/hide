@@ -35,6 +35,7 @@ import qualified Hide.BufferTools as BufferTools
 import qualified Hide.DocsTools as DocsTools
 import qualified Hide.EnvironmentTools as EnvironmentTools
 import qualified Hide.AgentTranscript as AgentTranscript
+import qualified Hide.CompletionInput as CompletionInput
 import qualified Hide.Plugin.Menu as Menu
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Sidebar as Sidebar
@@ -49,6 +50,7 @@ plugin=Plugin
   , pluginTools=map CoordinationTool AgentTools.tools++map EditorTool (DocsTools.tools++EnvironmentTools.tools)
       ++map RequestTool BufferTools.tools
   , pluginConversation=Just AgentTranscript.presentConversation
+  , pluginCompletionInput=Just CompletionInput.completionInput
   }
 
 rootId :: P.NodeId

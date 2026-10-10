@@ -99,11 +99,18 @@ checks=bracket temporary removePathForcibly $ \root -> do
     check "fresh private session and only supplied MCP servers are used" (length [() | entry<-entries,field "method" entry==Just ("session/new"::T.Text)]==1 && any (\entry -> (field "params" entry >>= field "mcpServers")==Just servers) entries)
     check "model and effort use advertised configuration IDs" (all (\setting -> any (\entry -> field "method" entry==Just ("session/set_config_option"::T.Text) && (field "params" entry >>= field "configId")==Just setting) entries) ["model-id"::T.Text,"effort-id"])
     withAsync (hintACP completion "Prefer small total functions.") $ \running -> do
-      await (doesFileExist (root </> "hint.ready"))
+      let findHint=do
+            requestEntries<-logs
+            case [ident | entry<-requestEntries,field "method" entry==Just ("session/prompt"::T.Text),
+                  "Prefer small total functions." `T.isInfixOf` T.pack (show entry),Just ident<-[field "id" entry::Maybe Int]] of
+              ident:_->pure ("hint-"<>T.pack (show ident))
+              []->threadDelay 1000 >> findHint
+      hintId<-timeout 5000000 findHint >>= maybe (error "ACP hint request did not arrive") pure
+      await (doesFileExist (root </> T.unpack (hintId<>".ready")))
       hidden<-callCompletionTool completion "read_completion_file" (object ["requestId" .= ("second"::T.Text),"startOffset" .= (0::Int),"maxCharacters" .= (9::Int)])
       hintSubmission<-submitted completion "second" []
       check "hint conversation has no current source or completion slot" (isLeft hidden && isLeft hintSubmission)
-      release "hint"
+      release hintId
       wait running
     hinted<-logs
     check "human hints use the existing session without a completion request" (length [() | entry<-hinted,field "method" entry==Just ("session/new"::T.Text)]==1 && any (\entry -> "Prefer small total functions." `T.isInfixOf` T.pack (show entry)) hinted)
@@ -179,10 +186,8 @@ fixture=unlines
   , "   if option['id']==params['configId']: option['currentValue']=params['value']"
   , "  send(id=request['id'],result=dict(configOptions=options))"
   , " elif method=='session/prompt':"
-  , "  context=json.loads(params['prompt'][-1]['text']); ident=context.get('requestId','hint')"
+  , "  context=json.loads(params['prompt'][-1]['text']); ident=context.get('requestId','hint-'+str(request['id']))"
   , "  if context['intent']=='hint':"
-  , "   if os.path.exists('hint.fail'):"
-  , "    send(id=request['id'],error=dict(code=-32000,message='fixture refused hint')); continue"
   , "   assert 'requestId' not in context and 'lines' not in context"
   , "   send(method='session/update',params=dict(sessionId='private-completion',update=dict(sessionUpdate='agent_message_chunk',content=dict(type='text',text='I will prefer small total functions.'))))"
   , "  for denied in ['fs/read_text_file','fs/write_text_file','terminal/create','session/request_permission']:"

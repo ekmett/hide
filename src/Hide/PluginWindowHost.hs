@@ -171,5 +171,7 @@ applyEditorUpdate submitted update d
       Just draft->do
         current<-versionCurrent (E.submissionVersion submitted) (editorDraftBuffer draft)
         consumed<-E.consumeEditorUpdate update
-        pure $ if not current || not consumed then d else d {editorDrafts=M.insert (E.submissionDraft submitted)
-          draft {editorDraftBuffer=E.updateReplacement update,editorDraftSelection=Selection 0 0} (editorDrafts d)}
+        pure $ case E.updateReplacement update of
+          Just replacement | current && consumed->d {editorDrafts=M.insert (E.submissionDraft submitted)
+            draft {editorDraftBuffer=replacement,editorDraftSelection=Selection 0 0} (editorDrafts d)}
+          _->d

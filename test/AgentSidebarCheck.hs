@@ -60,7 +60,7 @@ checks=bracket temporary removePathForcibly $ \root->
     record<-newSessionRecord Nothing ["--",root]
     rememberSession record
     environment "THC_EDIT_SESSION" (Just (sessionId record)) $ withSidebarCommands $ \host->C.withConsoles $ \consoles -> withConversationAt (Just AgentTranscript.presentConversation) consoles root $ \conversation->
-      withAutocomplete root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
+      withAutocomplete (Plugin.pluginCompletionInput Hide.AgentUI.plugin) root $ \autocomplete->Plugin.withPlugins [Hide.AgentUI.plugin] (Plugin.Session (sidebarCapabilities host) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent) $ do
         createRequests<-newIORef []
         agentRequests<-newIORef []
         let core desktop effects=do

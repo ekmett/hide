@@ -9,14 +9,15 @@ frontends:
 
 | Package | Contents |
 | --- | --- |
-| `hide-plugin-api` | Scoped commands, tools, forms, menus, trees and session composition |
-| `hide-agent-api` | Provider contracts, directory metadata and attributed orchestration services |
+| `hide-plugin-api` | Scoped commands, tools, forms, input declarations, menus, trees and session composition |
+| `hide-agent-api` | Provider contracts, completion hint delivery, directory metadata and attributed orchestration services |
 | `hide-acp` | ACP transport and provider adapter |
-| `hide-agents` | Agents sidebar/forms, conversation transcripts, coordination, documentation and environment tools |
+| `hide-agents` | Agents sidebar/forms, conversation transcripts, completion hints and editor tools |
 
-Buffer, window and multiline-editor APIs still live in the main `hide` library.
-Conversation input bindings and the remaining editor tools are the next package
-boundaries. The sections below distinguish implemented APIs
+Buffer/window ownership and the multiline-editor interpreter still live in the
+main `hide` library. ACP completion declares its input and acknowledged command
+through the public API. Main and child conversation input bindings and the
+remaining editor tools are the next package boundaries. The sections below distinguish implemented APIs
 from proposed contracts; proposed signatures are design sketches, not compilable
 SDK examples. The [sidebar design](../plans/sidebar-navigation.md) supplies the
 navigation model.
@@ -335,10 +336,29 @@ label summary; recovery does not reconnect jobs or restore actions/Details.
 
 ### Embedded editor ownership
 
-`Hide.Plugin.Editor` attaches persistent multiline input to a window. The host
-owns its draft, Undo history, caret, selection and focus separately from the
-prepared body. Both prepared plugin windows and conversation windows use this
-input path. Body refreshes preserve the draft.
+`Hide.Plugin.Input` lets an independently linked plugin declare multiline input:
+its default/alternate labels, code-input behavior, character limit, typed command,
+argument adapter and `KeepInput`, `ClearInput` or `ReplaceInput` reply. The host
+compiles that declaration into its existing scoped command registry and editor
+binding. Both adapters run on the command worker. The limit is checked against
+cached text length before materializing the submitted text.
+
+The plugin receives bounded text and the selected slot, never the draft's Buffer,
+Undo history or content-version token. The host binds each result to the original
+submission. `KeepInput` consumes the acknowledgement without changing text,
+selection or Undo. Clear/replace can affect only that exact version; refusal or
+newer typing preserves the draft. Labels never resolve commands or grant input
+authority.
+
+The host's `Hide.Plugin.Editor` interpreter attaches persistent multiline input
+to a window. It owns the draft, Undo history, caret, selection and focus separately
+from the prepared body. Prepared plugin windows and conversations use this same
+input path. Body refreshes preserve the draft. The following lower-level binding
+API remains in the host library; plugins use the public declaration above.
+An owner compiles a declaration with
+`prepareDeclaredEditor registry draft declaration reply`, where `reply` injects
+the exact `EditorUpdate` into its existing result type. It publishes the resulting
+attachment through the same window owner; there is no separate input dispatcher.
 
 Prepare a draft under `withDraftRef` and bind its default and alternate slots to
 ordinary typed commands with `editorAction`. `prepareEditor` supplies initial
@@ -927,9 +947,10 @@ requests, attributed messages, public capabilities/events and a driver lifetime.
 The adapter does not import the hub, Model, Render or Conversation. Capability
 decoding belongs to ACP; the hub decodes its own checkpoint representation.
 The linked `hide-agents` package supplies the Agents sidebar, primary and child
-transcripts, coordination, documentation and environment tools through
-`hide-plugin-api`. Conversation input and the remaining editor tools still use
-host types; those consumers define the remaining public boundaries.
+transcripts, completion hint input, coordination, documentation and environment
+tools through `hide-plugin-api`. Main and child conversation input and the
+remaining editor tools still use host types; those consumers define the remaining
+public boundaries.
 
 The hub remains the owner of agent IDs, ancestry, limits, workspaces, task tickets
 and message attribution. A provider plugin supplies a driver; a conversation
@@ -1065,15 +1086,24 @@ owner ticks refresh only the exact installed `WindowRef`. Closing the frame
 preserves its warm provider and independent hint draft, and later trace output
 cannot reopen it. The hint pane is bound to that reference rather than the title.
 Readable output grants no input authority. Recovery retains the transcript as an
-inert private text view and clears the hint binding and draft.
+inert private text view. Unsent hints recover through the ordinary private
+**Recovered input.txt** handoff; neither recovery nor a missing plugin restores a
+callable binding or sends the draft.
 
-The hint uses the same `PreparedEditor`, `DraftRef` and frame mount as conversation
-input. Its typed action runs on the existing completion worker. Enter captures
-an immutable version without clearing it; provider failure, a full queue or an
-expired mount leaves the draft intact. Successful delivery clears only that
-submitted version, including a hidden draft. Later typing survives. Configuration
-changes invalidate queued submissions rather than sending them to a replacement
-provider. The hint is ephemeral and grants no agent input authority.
+`Hide.CompletionInput` in `hide-agents` owns the Send hint declaration and its
+acknowledged command. It accepts at most 16,384 characters, rejects blank/NUL
+input, calls `Hide.Plugin.Completion`'s checked delivery service and requests
+`ClearInput` only on success. The executable selects at most one completion-input
+contribution. With none, the trace stays read-only.
+
+The host compiles it into the same `PreparedEditor`, `DraftRef` and frame mount as
+conversation input. Enter captures an immutable version without clearing it.
+The existing completion worker checks the original provider/configuration receipt
+and mount before supplying the delivery service; the plugin cannot choose another
+provider. Failure, a full queue or an expired mount leaves the draft intact.
+Successful delivery clears only the submitted version, including a hidden draft.
+Later typing survives. Configuration changes invalidate queued submissions rather
+than sending them to a replacement provider. Hints grant no agent input authority.
 
 ## Cabal navigation as a second example
 
