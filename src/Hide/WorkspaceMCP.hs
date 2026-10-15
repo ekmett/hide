@@ -65,6 +65,7 @@ definitions =
   ,("editor_panels","Show/hide the files tree or messages panel and resize their docks in character cells.",[("files",boolean),("messages",boolean),("filesWidth",integer),("messagesHeight",integer)],[],False)
   ,("editor_mode","Select text or hex mode for a buffer. Conversion preserves bytes and refuses invalid UTF-8 or NUL-containing text.",targets++[("mode",choice ["text","hex"])],["mode"],False)
   ,("editor_file","Open an existing file, save a buffer, or close one window. Save/close require the current buffer revision. Dirty close requires dirtyAction save or discard; discard only removes this view, retaining a buffer shared by other windows. Save uses the editor's disk-conflict checks; no implicit overwrite.",targets++[("action",choice ["open","save","close"]),("path",field "string" "Existing path to open, or destination for an untitled save."),("revision",integer),("dirtyAction",choice ["save","discard"])],["action"],False)
+  ,("editor_show_diff","Show the person a read-only, colored diff between two commits. It uses the same privacy filtering as workspace_git and never includes the working tree. Repeated calls replace the same window. Windows over 1 Mi characters are truncated.",[("from",field "string" "Base commit revision."),("to",field "string" "Target commit revision; defaults to HEAD."),("path",field "string" "Optional file filter, relative to the workspace directory.")],["from"],False)
   ,("workspace_project","Read project metadata, unsaved buffers and the existing canonical Cabal plan component/dependency graph. No build is started. Paths and plan fields are filtered; bounded graphs report omissions. Freshness is unknown unless known manifests changed.",[],[],True)
   ,("workspace_diagnostics","Read the live HLS/build/messages snapshot. Entries include reported versions and current buffer revisions, so stale diagnostics are distinguishable. Messages are truncated to 8192 characters.",[("offset",integer),("limit",integer)],[],True)
   ,("workspace_git","Read Git status or disk/worktree diff. Unsaved editor changes are listed separately and are not included in the Git diff. Diff response is capped at 128 Ki characters.",[("view",choice ["status","diff"]),("path",field "string" "Optional file filter for diff, relative to the workspace directory.")],["view"],True)]
@@ -77,8 +78,8 @@ type Apply = Desktop -> [Effect] -> IO (Bool,Desktop)
 type Reply = (Desktop,IO (Either Text Value))
 
 -- | Handle a workspace tool under desktop serialization, then return its reply action.
--- Run deferred project/Git reads outside the lock; file/navigation effects can
--- perform synchronous IO during the initial phase.
+-- Run deferred project/Git reads outside the lock; file/navigation effects and
+-- the diff window can perform synchronous IO during the initial phase.
 workspaceTool :: Apply -> Desktop -> Text -> Value -> IO Reply
 workspaceTool apply desktop name args = case parseEither parse args of
   Left err -> failure desktop (T.pack err)
@@ -126,6 +127,14 @@ workspaceTool apply desktop name args = case parseEither parse args of
             else success next {drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing}
       "editor_file" -> parsed desktop ((,,,,,) <$> o .: "action" <*> o .:? "windowId" <*> o .:? "bufferId" <*> o .:? "path" <*> o .:? "revision" <*> o .:? "dirtyAction") $ \(action,wid,bid,path,rev,decision) ->
         fileAction apply desktop action wid bid path rev decision
+      "editor_show_diff" -> parsed desktop ((,,) <$> o .: "from" <*> o .:? "to" <*> o .:? "path") $ \(from,to,path) ->
+        if maybe False invalidPath path then failure desktop "Invalid path."
+        else if any invalidRevision (from:maybe [] pure to) then failure desktop "Invalid revision."
+        else do
+          shown<-tryIOError (repositoryRangeDiffFiltered (startingDirectory desktop) from (fromMaybe "HEAD" to) path (protectedPath desktop))
+          case either (Left . T.pack . show) id shown of
+            Left err -> failure desktop err
+            Right range -> success (addReadOnly "Git range diff" (rangeDiffView range) desktop)
       "workspace_project" -> pure (desktop,ioResult $ do
         root<-resolveBuildRoot desktop
         package<-packageFile root >>= maybe (pure Nothing) (publicProjectPath desktop root)
@@ -184,6 +193,21 @@ selectTarget d wid bid = do
 
 invalidPath :: FilePath -> Bool
 invalidPath path=null path || length path>32768 || '\0' `elem` path
+
+-- Name the resolved commits so the person sees exactly what was compared.
+rangeDiffView :: (Text,Text,Text,Int) -> Text
+rangeDiffView (base,target,text,omitted)=T.concat
+  ["Commits ",base,"..",target,"\n"
+  ,case omitted of
+     0 -> ""
+     1 -> "1 protected file omitted.\n"
+     _ -> T.pack (show omitted)<>" protected files omitted.\n"
+  ,"\n",T.take 1048576 text
+  ,if T.length text>1048576 then "\n[Diff truncated.]\n" else ""]
+
+-- Revisions are never Git options; resolution then requires a commit.
+invalidRevision :: Text -> Bool
+invalidRevision revision=T.null revision || T.length revision>256 || T.isPrefixOf "-" revision || T.any (<' ') revision
 
 openPath :: Apply -> Desktop -> FilePath -> IO (Either Text Desktop)
 openPath apply d path

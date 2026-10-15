@@ -233,6 +233,7 @@ Breakpoints use 1-based lines, at most 1000. See the
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
 | `workspace_git` | R | `view`, `path?` | `status` or `diff`; disk changes and unsaved buffers reported separately |
+| `editor_show_diff` | W | `from`, `to?`, `path?` | Open or replace a read-only colored window with the filtered commit-range diff; returns the layout |
 | `git_fetch` | W | — | Fetch the selected repository’s configured default remote; returns `accepted` and `jobId` |
 | `git_pull` | W | — | Fetch configured upstream, check incoming changes, then fast-forward only |
 | `git_merge` | W | `ref` | Merge a named local or remote-tracking branch with checked incoming paths |
@@ -242,7 +243,11 @@ Breakpoints use 1-based lines, at most 1000. See the
 
 Diff text is capped at 128 Ki characters. A path filter is a literal file path,
 not a Git glob/magic pathspec. Whole-repository diffs apply the [protected content policy](#protected-content-policy), including Git-detected rename/copy
-destinations derived from them; `omittedFiles` reports a count without their names. Agent mouse/key input cannot
+destinations derived from them; `omittedFiles` reports a count without their names.
+`editor_show_diff` applies the same policy to the diff between two commits,
+excluding the working tree. Its window names the resolved commits and any
+omitted-file count, is capped at 1 Mi characters, and cannot be approved as a
+commit review. Ranges too wide for complete rename/copy tracing are refused. Agent mouse/key input cannot
 open the unrestricted human Git review or commit dialog; use `workspace_git`
 for filtered review. `workspace_search` with
 `trackedOnly: true` searches tracked source. Commit-history search is not exposed as an agent tool.

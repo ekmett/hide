@@ -216,6 +216,21 @@ checks=do
       _->False)
     (_,missingDiff)<-call privateProject "workspace_git" ["view" .= ("diff"::T.Text),"path" .= ("absent/subdir"::T.Text)]
     ok "selected missing path is a safe empty diff" (case missingDiff of Right value->parseMaybe (withObject "diff" (.: "diff")) value==Just ("No changes.\n"::T.Text); _->False)
+    fixtureGit ["add","--all"]
+    fixtureGit ["commit","--quiet","-m","range fixture"]
+    BS.writeFile (root </> "nested/public.hs") "uncommitted nested source"
+    (_,headOutput,_)<-readProcessWithExitCode "git" ["-C",root,"rev-parse","HEAD"] ""
+    (shownDesktop,shownResult)<-call privateProject "editor_show_diff" ["from" .= ("HEAD~1"::T.Text)]
+    let shownText=[contents (documentBuffer doc) | doc<-M.elems (buffers shownDesktop),documentLabel doc==Just "Git range diff"]
+    ok "diff window shows the filtered range to HEAD without the working tree or a commit review" (succeeded shownResult && gitReview shownDesktop==Nothing && case shownText of
+      [text]->"ordinary nested source" `T.isInfixOf` text && T.isPrefixOf "Commits " text && (".."<>T.strip (T.pack headOutput)) `T.isInfixOf` text && "protected files omitted" `T.isInfixOf` text &&
+        not (any (`T.isInfixOf` text) ["uncommitted nested source","authority.toml","private-git-secret","thc.toml","ordinary-name.txt","private nested context"])
+      _->False)
+    (replaced,_)<-call shownDesktop "editor_show_diff" ["from" .= ("HEAD"::T.Text)]
+    ok "repeated diff windows replace the same view" (length [() | doc<-M.elems (buffers replaced),documentLabel doc==Just "Git range diff"]==1)
+    (_,optionShow)<-call privateProject "editor_show_diff" ["from" .= ("--output=leak"::T.Text)]
+    (_,targetShow)<-call privateProject "editor_show_diff" ["to" .= ("HEAD"::T.Text)]
+    ok "diff window requires from and rejects option syntax" (rejected optionShow && rejected targetShow)
     planChecks root project
   putStrLn "workspace MCP checks passed"
 
