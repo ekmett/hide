@@ -284,6 +284,11 @@ composerCodeChecks profile=do
         check "code status clicks keep query and steer ownership with compiled bindings"
           (clickHint QuerySubmit desktop==[editorEffect QuerySubmit extended] && clickHint SteerSubmit desktop==[editorEffect SteerSubmit extended] &&
            snd (handleEvent (V.EvKey V.KEnter [V.MCtrl]) desktop)==[editorEffect (if chosen==QuerySubmit then SteerSubmit else QuerySubmit) desktop])
+      forM_ [chat,extended] $ \desktop->do
+        let quiet=desktop {keyBindings=maps,status=""}
+            noted=quiet {status="Warden review limit reached for this task."}
+        check "conversation status follows both submission hints"
+          (activeConversation noted && statusHints noted==statusHints quiet++[(" | Warden review limit reached for this task.",Nothing)])
       let copied=fst (runCommand Copy (fst (runCommand SelectAll extended)))
           unwrapped=press V.KBS [] (press V.KHome [] code)
           backIn=press V.KBS [] (press V.KDown [] code)
