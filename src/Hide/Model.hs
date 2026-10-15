@@ -665,14 +665,14 @@ statusHintsRaw d
   | composerActive d, activeConversation d, composerInCode d =
       [key " Enter Newline" V.KEnter []] ++
       [("  "<>submitHint action,Just (Left (SubmitChat action))) | action<-[QuerySubmit,SteerSubmit]] ++
-      [key "  Esc Cancel" V.KEsc [] | agentReplying d]
+      [key "  Esc Cancel" V.KEsc [] | agentReplying d] ++ statusNote
   | composerActive d,not (activeConversation d),Just mount<-activeEditorMount d =
       [key (" Enter "<>Editor.editorDefaultLabel (Editor.mountSpec mount)) V.KEnter [],
        key ("  Ctrl+Enter "<>Editor.editorAlternateLabel (Editor.mountSpec mount)) V.KEnter [V.MCtrl],
        key "  Shift+Enter Newline" V.KEnter [V.MShift]]
   | activeConversation d =
       [key (" Enter "<>submitLabel False) V.KEnter [],key ("  Ctrl+Enter "<>submitLabel True) V.KEnter [V.MCtrl],
-       key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d]
+       key "  Shift+Enter Newline" V.KEnter [V.MShift]] ++ [key "  Esc Cancel" V.KEsc [] | agentReplying d] ++ statusNote
   | not (T.null (typeHint d)) = [(" "<>typeHint d,Nothing)]
   | not (T.null (status d)) = [command " F1" "Help" Help,(" | "<>status d,Nothing)]
   | Just _<-activePluginWindow d = [command " Ctrl+C" "Copy" Copy,command "  Alt+F3" "Close" Close,(" | Read-only plugin text",Nothing)]
@@ -686,6 +686,8 @@ statusHintsRaw d
           " "<>maybe "" (<>" ") (listToMaybe (commandBindingKeys d cmd))<>caption
         effective shortcut caption _=shortcut<>" "<>caption
         key label k mods=(label,Just (Right (V.EvKey k mods)))
+        -- Conversation hints stay visible; the latest status follows them.
+        statusNote=[(" | "<>status d,Nothing) | not (T.null (status d))]
         submitHint action=(if action/=chatSubmit d then "Ctrl+Enter " else "")<>(if action==SteerSubmit then "Steer" else if agentReplying d then "Queue query" else "Query")
         submitLabel opposite=if composerQuery opposite d then if agentReplying d then "Queue query" else "Query" else "Steer"
 
