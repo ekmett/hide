@@ -786,7 +786,7 @@ windowLayers _ d active original =
 
     lineColor _ | terminalPaint, null (documentHighlight doc) = Just base
     lineColor n = case documentLabel doc of
-      Just "Git diff" -> Just (diffLineAttr (bufferLineAt b n))
+      Just label | label `elem` ["Git diff","Git range diff"] -> Just (diffLineAttr (bufferLineAt b n))
       Just _ | useStyles -> Nothing
       Just _ -> Just (attr yellow blue)
       Nothing -> Nothing

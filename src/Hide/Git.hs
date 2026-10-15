@@ -16,7 +16,7 @@
 -- so a commit can reject changed evidence. Normal hooks still run and their tree
 -- changes are reported separately from the reviewed staged tree.
 module Hide.Git
-  ( RepoStatus(..), repositoryStatus, repositoryDiff, repositoryDiffFiltered, repositoryDiffFilteredAt
+  ( RepoStatus(..), repositoryStatus, repositoryDiff, repositoryDiffFiltered, repositoryDiffFilteredAt, repositoryRangeDiffFiltered
   , GitReview(..), reviewRepository, commitReview
   , GitCommit(..), reviewRepositoryChecked, commitReviewChecked
   , checkIntegrationState, checkIncomingChanges
@@ -108,25 +108,86 @@ repositoryDiffFiltered path=repositoryDiffFilteredAt path Nothing
 repositoryDiffFilteredAt :: FilePath -> Maybe FilePath -> (FilePath -> Bool) -> IO (Either Text (Text,Int))
 repositoryDiffFilteredAt path selected excluded=do
   prepared<-result $ do
-    directory<-pathDirectory path
-    root<-repositoryRoot directory
-    selection<-traverse (\file->do
-      let absolute=normalise (if isAbsolute file then file else directory </> file)
-      canonical<-canonicalizePath absolute
-      unless (within root canonical && not (excluded absolute || excluded canonical)) (failGit "Selected diff path is private or outside this repository.")
-      pure canonical) selected
+    (root,selection)<-selectedRoot path selected excluded
     (checked,before,_)<-classifyChanges root excluded
-    let selectedRows=[row | row@(file,_,_)<-checked,maybe True (\base->within base (normalise (root </> file))) selection]
-        allowed=[file | (file,_,False)<-selectedRows]
-    text<-if null allowed then pure "No changes.\n" else diffTextWith ["--no-renames","--submodule=short"] root allowed
+    let selectedRows=selectRows root selection checked
+    text<-filteredText selectedRows (diffTextWith ["--no-renames","--submodule=short"] root)
     after<-renameChanges root
     unless (before==after) (failGit "Repository changed while preparing the filtered diff; retry.")
-    forM_ [row | row@(_,_,False)<-selectedRows] $ \(file,canonical,_)->do
-      current<-canonicalizePath (root </> file)
-      unless (current==canonical && not (excluded current)) (failGit "A filtered diff path changed; retry.")
-    pure (text,length [() | (_,_,True)<-selectedRows])
-  -- Git failures may mention filenames; a private path must not escape in errors.
-  pure (either (const (Left "Could not prepare a stable filtered Git diff; retry or select a safe file.")) Right prepared)
+    recheckRows root excluded selectedRows
+    pure (text,omittedRows selectedRows)
+  pure (either (const (Left filteredFailure)) Right prepared)
+
+-- | Filter rename/copy lineage between two commits before selecting paths.
+-- Revisions resolve once to the reported commit IDs; the working tree is never
+-- included. Privacy is judged by the current paths, as for the worktree diff.
+repositoryRangeDiffFiltered :: FilePath -> Text -> Text -> Maybe FilePath -> (FilePath -> Bool) -> IO (Either Text (Text,Text,Text,Int))
+repositoryRangeDiffFiltered path from to selected excluded=do
+  located<-result (selectedRoot path selected excluded)
+  case located of
+    Left _->pure (Left filteredFailure)
+    Right (root,selection)->do
+      resolved<-(,) <$> commitId root from <*> commitId root to
+      case resolved of
+        (Nothing,_)->pure (Left "Could not resolve from as a commit.")
+        (_,Nothing)->pure (Left "Could not resolve to as a commit.")
+        (Just base,Just target)->do
+          let range=[T.unpack base,T.unpack target,"--"]
+          prepared<-result $ do
+            -- Wide ranges can exceed -l256; Git then only warns and stops
+            -- tracing edited private copies, so refuse rather than leak them.
+            (code,names,warnings)<-runGit root (diffArgs++["--name-status","-z","-M","-C","--find-copies-harder","-l256"]++range)
+            unless (code==ExitSuccess && T.null warnings) (failGit incompleteLineage)
+            (changed,renames)<-either failGit pure (parseChanges names)
+            let files=Set.toAscList (Set.fromList changed)
+            when (length files>10000) (failGit "Git range diff exceeds 10000 files.")
+            selectedRows<-selectRows root selection <$> classifyPaths root excluded files renames
+            text<-filteredText selectedRows (\allowed->git root (diffArgs++["--no-renames","--submodule=short"]++range++allowed))
+            recheckRows root excluded selectedRows
+            pure (base,target,text,omittedRows selectedRows)
+          pure (either (\err->Left (if err==incompleteLineage then err else filteredFailure)) Right prepared)
+  where
+    -- Retrying or selecting a path cannot help: lineage covers the whole range.
+    incompleteLineage :: Text
+    incompleteLineage="Git could not trace every rename and copy in this range; choose a narrower range."
+    -- Git's resolution errors are not returned; they are not needed to retry.
+    -- Check the type too: "rev:name^{commit}" names a blob path, not a peel.
+    commitId root revision=do
+      (code,out,_)<-runGit root ["rev-parse","--verify","--quiet","--end-of-options",T.unpack revision++"^{commit}"]
+      let object=T.strip out
+      (typeCode,kind,_)<-if code==ExitSuccess then runGit root ["cat-file","-t",T.unpack object] else pure (code,"","")
+      pure (if typeCode==ExitSuccess && T.strip kind=="commit" then Just object else Nothing)
+
+-- Git failures may mention filenames; a private path must not escape in errors.
+filteredFailure :: Text
+filteredFailure="Could not prepare a stable filtered Git diff; retry or select a safe file."
+
+selectedRoot :: FilePath -> Maybe FilePath -> (FilePath -> Bool) -> IO (FilePath,Maybe FilePath)
+selectedRoot path selected excluded=do
+  directory<-pathDirectory path
+  root<-repositoryRoot directory
+  selection<-traverse (\file->do
+    let absolute=normalise (if isAbsolute file then file else directory </> file)
+    canonical<-canonicalizePath absolute
+    unless (within root canonical && not (excluded absolute || excluded canonical)) (failGit "Selected diff path is private or outside this repository.")
+    pure canonical) selected
+  pure (root,selection)
+
+selectRows :: FilePath -> Maybe FilePath -> [(FilePath,FilePath,Bool)] -> [(FilePath,FilePath,Bool)]
+selectRows root selection checked=[row | row@(file,_,_)<-checked,maybe True (\base->within base (normalise (root </> file))) selection]
+
+filteredText :: [(FilePath,FilePath,Bool)] -> ([FilePath] -> IO Text) -> IO Text
+filteredText rows render=case [file | (file,_,False)<-rows] of
+  [] -> pure "No changes.\n"
+  allowed -> (\text->if T.null text then "No changes.\n" else text) <$> render allowed
+
+recheckRows :: FilePath -> (FilePath -> Bool) -> [(FilePath,FilePath,Bool)] -> IO ()
+recheckRows root excluded rows=forM_ [row | row@(_,_,False)<-rows] $ \(file,canonical,_)->do
+  current<-canonicalizePath (root </> file)
+  unless (current==canonical && not (excluded current)) (failGit "A filtered diff path changed; retry.")
+
+omittedRows :: [(FilePath,FilePath,Bool)] -> Int
+omittedRows rows=length [() | (_,_,True)<-rows]
 
 within :: FilePath -> FilePath -> Bool
 within root file=let relative=makeRelative root file in not (isAbsolute relative) && ".." `notElem` splitDirectories relative
@@ -141,6 +202,12 @@ classifyChanges root excluded=do
   (changed,renames)<-either failGit pure (parseChanges (fst before<>snd before))
   let files=Set.toAscList (Set.fromList (listed++changed))
   when (length files>10000) (failGit "Git review exceeds 10000 files.")
+  checked<-classifyPaths root excluded files renames
+  pure (checked,before,Set.fromList (changed++untracked))
+
+-- Mark private paths and every rename/copy destination derived from them.
+classifyPaths :: FilePath -> (FilePath -> Bool) -> [FilePath] -> [(FilePath,FilePath)] -> IO [(FilePath,FilePath,Bool)]
+classifyPaths root excluded files renames=do
   checked<-forM files $ \file->do
     let absolute=normalise (root </> file)
     canonical<-canonicalizePath absolute
@@ -148,7 +215,7 @@ classifyChanges root excluded=do
   let links=Map.fromListWith (++) [(source,[destination]) | (source,destination)<-renames]
       initial=Set.fromList [file | (file,_,True)<-checked]
       omitted=closeRenames links initial (Set.toList initial)
-  pure ([(file,canonical,Set.member file omitted) | (file,canonical,_)<-checked],before,Set.fromList (changed++untracked))
+  pure [(file,canonical,Set.member file omitted) | (file,canonical,_)<-checked]
   where
     closeRenames _ omitted []=omitted
     closeRenames links omitted (source:rest)=
