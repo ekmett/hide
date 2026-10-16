@@ -433,6 +433,7 @@ test-suite editor-tests
     , PluginTreeCheck
     , AccessibilityCheck
     , SidebarCheck
+    , SidebarScrollCheck
     , SidebarFixture
     , TreeExtension
     , PluginMenuCheck

@@ -179,7 +179,7 @@ retireTreeFromHost (SidebarHost _ ref _ _ _ _) owner d=do
   state<-readIORef ref
   mapM_ P.retireTree (M.lookup owner (providers state))
   writeIORef ref state {providers=M.delete owner (providers state)}
-  pure d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing}
+  pure (fitTreeScroll d {sideTree=fmap (removeRoot owner) (sideTree d),contextMenu=Nothing,contextTarget=Nothing})
 
 context :: Menu.MenuOrigin -> Desktop -> SidebarContext
 context origin d=SidebarContext origin (maybe (startingDirectory d) treeRoot (sideTree d)) (startingDirectory d) Nothing (privateFilePaths d) (max 20 (min 76 (fst (screenSize d)-treeWidthOf d-4))) Nothing Nothing [] (fst (pendingFileExport d)) (sessionAttachment d) (Left "No captured conversation session.") (Left "No captured conversation operation.") (Left "No captured conversation agent.") (Left "Select an empty conversation draft to review Warden advice.")
@@ -660,7 +660,7 @@ finishProjection host@(SidebarHost _ ref _ _ _ _) d=do
           case (result,sideTree d) of
             (Right (prepared@(Projection revision _ _ _ _),defs,recovery),Just tree) | revision==treeRevision tree->do
               modifyIORef' ref (\s->s {definitions=defs})
-              adoptRecovery host recovery d {sideTree=Just (adoptProjection prepared tree)}
+              adoptRecovery host recovery (fitTreeScroll d {sideTree=Just (adoptProjection prepared tree)})
             (Left err,_)->pure d {status="Sidebar projection failed: "<>T.pack (displayException err)}
             _->pure d
 startProjection :: SidebarHost -> Desktop -> IO ()

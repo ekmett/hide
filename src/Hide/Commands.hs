@@ -179,6 +179,10 @@ builtinCommands =
   ,BuiltinCommand "hide.sidebar.down" (SidebarMove 1)
   ,BuiltinCommand "hide.sidebar.page-up" (SidebarMove (-10))
   ,BuiltinCommand "hide.sidebar.page-down" (SidebarMove 10)
+  ,BuiltinCommand "hide.sidebar.previous-section" (SidebarSection (-1))
+  ,BuiltinCommand "hide.sidebar.next-section" (SidebarSection 1)
+  ,BuiltinCommand "hide.sidebar.first" (SidebarEdge False)
+  ,BuiltinCommand "hide.sidebar.last" (SidebarEdge True)
   ,BuiltinCommand "hide.sidebar.activate" SidebarActivate
   ,BuiltinCommand "hide.sidebar.expand" SidebarExpand
   ,BuiltinCommand "hide.sidebar.collapse" SidebarCollapse
@@ -286,6 +290,7 @@ platformBindings catalogue platform configuration=do
     defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,PreviousWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget] || case action of DebugCommand _->True; _->False]
     defaultsFor SidebarKeys=withoutWindowF6 defaults ++
       [(SidebarMove (-1),["Up"]),(SidebarMove 1,["Down"]),(SidebarMove (-10),["PageUp"]),(SidebarMove 10,["PageDown"]),
+       (SidebarSection (-1),["Ctrl+Up"]),(SidebarSection 1,["Ctrl+Down"]),(SidebarEdge False,["Home"]),(SidebarEdge True,["End"]),
        (SidebarActivate,["Enter"]),(SidebarExpand,["Right"]),(SidebarCollapse,["Left"]),(FocusSource,["F6"])]
     defaultsFor MessagesKeys=withoutWindowF6 (filter (\(action,_)->case action of DebugCommand _->False; _->True) defaults) ++
       [(MessagesMove (-1),["Up"]),(MessagesMove 1,["Down"]),(MessagesPage (-1),["PageUp"]),(MessagesPage 1,["PageDown"]),(GoToMessage,["Enter"]),(FocusSource,["F6"])]

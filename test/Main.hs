@@ -39,6 +39,7 @@ import qualified MenuCommandsCheck
 import qualified MenuContextCheck
 import qualified PluginMenuCheck
 import qualified AccessibilityCheck
+import qualified SidebarScrollCheck
 import qualified SidebarCheck
 import qualified PluginTreeCheck
 import qualified PluginCommandCheck
@@ -209,6 +210,7 @@ tests = askOption $ \profile->withResource
   , testCase "Accessibility" AccessibilityCheck.checks
   , testCase "PluginTree" PluginTreeCheck.checks
   , testCase "Sidebar" SidebarCheck.checks
+  , testCase "SidebarScroll" SidebarScrollCheck.checks
   , testCase "PluginCommand" PluginCommandCheck.checks
   , testCase "PluginMenu" PluginMenuCheck.checks
   , testCase "MenuCommands" MenuCommandsCheck.checks

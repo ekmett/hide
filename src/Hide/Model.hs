@@ -241,7 +241,7 @@ data Command = New | Open | Download | ExportBuffer | ChangeDir | Save | SaveAs 
   | DialogFocusNext | DialogFocusPrevious | DialogAccept | DialogCancel
   | DeleteBackward | DeleteForward | DeleteLine | DeleteSelection
   | WordStarBlockPrefix | WordStarQuickPrefix | MarkBlockStart | MarkBlockEnd
-  | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
+  | SidebarMove Int | SidebarSection Int | SidebarEdge Bool | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text | AutocompleteCommand Text
   | TreeCommand [Tree.TreeHit] CommandRef
@@ -538,6 +538,8 @@ commandDescription cmd = case cmd of
   InspectBindings -> "Show every effective command binding for the focused profile and context."
   TreeCommand _ _ -> "Run the captured sidebar action."
   SidebarMove _ -> "Move the selected sidebar row."
+  SidebarSection _ -> "Select the next or previous sidebar section header."
+  SidebarEdge _ -> "Select the first or last sidebar row."
   SidebarActivate -> "Open the selected file or toggle its directory."
   SidebarExpand -> "Expand the selected directory or open its file."
   SidebarCollapse -> "Collapse the selected directory or select its parent."
@@ -771,6 +773,8 @@ commandEnabled d cmd | sourceKeyCommand cmd = sourceNavigationOwner d &&
   (cmd `notElem` [DeleteLine,DeleteSelection] || not (activeHex d))
 commandEnabled _ Disabled{} = False
 commandEnabled d SidebarMove{} = maybe False treeFocused (sideTree d)
+commandEnabled d SidebarSection{} = maybe False treeFocused (sideTree d)
+commandEnabled d SidebarEdge{} = maybe False treeFocused (sideTree d)
 commandEnabled d cmd | cmd `elem` [SidebarActivate,SidebarExpand,SidebarCollapse] = maybe False treeFocused (sideTree d)
 commandEnabled d MessagesMove{} = problemsFocused d
 commandEnabled d MessagesPage{} = problemsFocused d
@@ -1503,6 +1507,12 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go (SidebarMove delta) d = case sideTree d of
       Just tree | treeFocused tree -> moveTree delta tree d
       _ -> (d,[])
+    go (SidebarSection direction) d = case sideTree d of
+      Just tree | treeFocused tree -> sectionTree direction tree d
+      _ -> (d,[])
+    go (SidebarEdge end) d = case sideTree d of
+      Just tree | treeFocused tree -> selectTreeRow (if end then M.size (treeRows tree)-1 else 0) tree d
+      _ -> (d,[])
     go SidebarActivate d = maybe (d,[]) (\tree->activateTree False (treeSelected tree) d) (sideTree d)
     go SidebarExpand d = maybe (d,[]) (\tree->activateTree True (treeSelected tree) d) (sideTree d)
     go SidebarCollapse d = maybe (d,[]) (\tree->collapseTree tree d) (sideTree d)
@@ -2119,7 +2129,7 @@ handleEventCore event d = Bifunctor.first (layoutComposer d . clampReviewWindows
 
 dispatchEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 dispatchEvent (V.EvResize sw sh) d =
-  (layoutBottomWindows resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,
+  (fitTreeScroll $ layoutBottomWindows resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,
     menu=Nothing,contextMenu=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
   where
     resized=d {screenSize=(max 1 sw,max 3 sh),
@@ -4797,7 +4807,7 @@ activateTree forceOpen index d=case sideTree d of
       RetryLoad->expand Nothing
       LoadNext cursor->expand (Just cursor)
       ActivateNode | Tree.infoBranch (rowInfo row)->case M.lookup (keyOf (rowHit row)) (treeNodes chosen) of
-        Just node | stateExpanded node && not forceOpen->(selected {sideTree=Just (collapseAt index (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
+        Just node | stateExpanded node && not forceOpen->(fitTreeScroll selected {sideTree=Just (collapseAt index (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
                   | stateExpanded node->(selected,[])
                   | Loaded{}<-stateLoad node->(selected {sideTree=Just chosen {treeNodes=M.adjust (\value->value {stateExpanded=True}) (keyOf (rowHit row)) (treeNodes chosen),treeRevision=treeRevision chosen+1}},[])
         _->expand Nothing
@@ -4811,6 +4821,8 @@ activateTree forceOpen index d=case sideTree d of
 
 treeKey :: V.Key -> [V.Modifier] -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeKey key mods tree d = case key of
+  V.KUp | V.MCtrl `elem` mods -> sectionTree (-1) tree d
+  V.KDown | V.MCtrl `elem` mods -> sectionTree 1 tree d
   V.KUp -> move (-1)
   V.KDown -> move 1
   V.KPageUp -> move (-10)
@@ -4831,6 +4843,10 @@ treeKey key mods tree d = case key of
     move delta=moveTree delta tree d
     leave=(d {sideTree=Just tree {treeFocused=False}},[])
 
+-- | Select the nearest section header in a direction; the viewport follows the selection.
+sectionTree :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
+sectionTree direction tree d=maybe (d,[]) (\i->selectTreeRow i tree d) (adjacentSection direction (treeSelected tree) tree)
+
 moveTree :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
 moveTree delta tree d = selectTreeRow (treeSelected tree+delta) tree d
 
@@ -4846,7 +4862,7 @@ selectTreeRow i tree d = (d {sideTree=Just intent {treeSelected=chosen,treeScrol
 collapseTree :: Sidebar -> Desktop -> (Desktop,[Effect])
 collapseTree tree d=case rowAt (treeSelected tree) tree of
   Just row | rowExpanded row->let chosen=dismissRecoveryAnchors tree
-    in (d {sideTree=Just (collapseAt (treeSelected tree) (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
+    in (fitTreeScroll d {sideTree=Just (collapseAt (treeSelected tree) (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
   Just row | Just node<-M.lookup (keyOf (rowHit row)) (treeNodes tree), Just parent<-stateParent node->
     let ancestor=M.lookup parent (treeNodes tree) >>= (\value->M.lookupIndex (stateAddress value) (treeRows tree))
     in maybe (d,[]) (\index->selectTreeRow index tree d) ancestor
@@ -4854,6 +4870,10 @@ collapseTree tree d=case rowAt (treeSelected tree) tree of
 
 treeContentRows :: Desktop -> Int
 treeContentRows d = max 0 (snd (screenSize d)-4-problemsHeight d)
+
+-- | Rows removed by a collapse, reload or resize must not leave the viewport past the end.
+fitTreeScroll :: Desktop -> Desktop
+fitTreeScroll d=d {sideTree=fmap (\t->t {treeScroll=min (treeScroll t) (treeScrollLimit d t)}) (sideTree d)}
 
 treeScrollLimit :: Desktop -> Sidebar -> Int
 treeScrollLimit d tree = max 0 (M.size (treeRows tree)-treeContentRows d)
@@ -4868,7 +4888,8 @@ treeMouse x y button tree d = case button of
         actions=[(title,case target of Tree.RegisteredAction action->TreeCommand trace action; Tree.ResourceLink path targetText->OpenLink (SourceLink (Just path)) targetText) | (title,target)<-rowActions row]
     in (openContext (TreeContext trace actions) x (y+1) d {sideTree=Just tree {treeFocused=True},problemsFocused=False},[])
   V.BLeft | y==1 && x>=treeWidth tree-5 && x<treeWidth tree-1 -> (setTree Nothing d,[])
-          | x==treeWidth tree-2 && y>=2 && y<sh-2 && treeFocused tree && treeContentRows d>=3 ->
+          | y==1 && x>=1 && x<treeWidth tree-5, target:_<-hiddenSections (treeScroll tree) (treeContentRows d) tree -> (scrollTreeTo target tree d,[])
+          | x==treeWidth tree-2 && y>=2 && y<sh-2 && (treeFocused tree || treeScrollLimit d tree>0) && treeContentRows d>=3 ->
               let offset=y-2; len=treeContentRows d; thumb=scrollbarThumb len (treeScrollLimit d tree) (treeScroll tree)
                   step | offset==0 = -1 | offset==len-1 = 1 | offset<thumb = negate len | otherwise = len
               in if offset==thumb then (d {drag=Just TreeScrolling},[]) else (scrollTreeTo (treeScroll tree+step) tree d,[])
