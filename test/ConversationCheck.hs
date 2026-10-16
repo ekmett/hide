@@ -886,6 +886,22 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
           pageTwice=fst (runCommand (CursorPageDown True) pageOnce)
       check "pending page movement retains repeated input"
         (conversationRowShift (retained pageOnce)>0 && conversationRowShift (retained pageTwice)==2*conversationRowShift (retained pageOnce))
+      let shownPoint k d=do
+            viewport<-bodyViewportFor d ""
+            row<-viewportRows viewport Vec.!? (viewportScroll viewport+k)
+            bodyRowPoint row
+          bodyRows d=maybe 0 (pluginBodyRows d) (activeWindow d)
+      pagedDown<-await runtime "wide heading Page Down" caretReady (fst (runCommand (CursorPageDown False) reflowed))
+      pagedUp<-await runtime "wide heading Page Up" caretReady (fst (runCommand (CursorPageUp False) pagedDown))
+      check "page movement from below the top keeps one overlap row of the body above the composer"
+        (maybe False (\w->pluginBodyRows reflowed w<height (bounds w)-2 && fst (windowTextPosition reflowed w (W.preparedWindowText (targetBody "" reflowed)) (caret (selection w)))>scrollRow w) (activeWindow reflowed) &&
+         shownPoint 0 pagedDown/=Nothing && shownPoint 0 pagedDown==shownPoint (bodyRows reflowed-1) reflowed && shownPoint 0 pagedUp==shownPoint 0 reflowed)
+      following<-await runtime "wide heading End before paging" caretReady (fst (runCommand (CursorDocumentEnd False) reflowed))
+      endDown<-await runtime "wide heading Page Down at End" caretReady (fst (runCommand (CursorPageDown False) following))
+      endUp<-await runtime "wide heading Page Up from End" caretReady (fst (runCommand (CursorPageUp False) following))
+      check "page movement at the followed end keeps the end caret and pages back with one overlap row"
+        (conversationAnchor (retained following)==FollowEnd && conversationReplySelection (retained endDown)==conversationReplySelection (retained following) &&
+         shownPoint 0 following/=Nothing && shownPoint (bodyRows following-1) endUp==shownPoint 0 following)
       paged<-await runtime "wide heading Shift Page Down" caretReady pageTwice
       check "page movement preserves an offscreen logical extension anchor"
         (case (logicalSelection,conversationReplySelection (retained paged)) of

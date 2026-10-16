@@ -4104,8 +4104,20 @@ documentEdge end extend d
   where edge size=if end then size else 0
 
 -- | Source/hex pages reserve three chrome rows; prepared read-only text reserves two.
+-- Conversations page from the viewport top by their visible body, keeping one row of overlap.
 pageMove :: Bool -> Bool -> Desktop -> Desktop
-pageMove forward extend d=verticalMove (if forward then page else negate page) extend d
+pageMove forward extend d
+  | forward,Just w<-activeWindow d,Just target<-conversationTargetFor d w,
+    maybe False (\view->conversationAnchor view==FollowEnd && conversationRowShift view>=0) (M.lookup target (conversationViews d))=conversationEdge True extend d
+  | Just view<-activePluginWindow d,Just w<-activeWindow d,Just target<-conversationTargetFor d w,
+    Just captured<-bodyViewportFor d target,Just retained<-M.lookup target (conversationViews d)=
+      let rows=max 1 (pluginBodyRows d w-1)
+          column=snd (windowTextPosition d w (PluginWindow.preparedWindowText view) (caret (selection w)))
+          previousAnchor=case conversationCaretIntent retained of Just (RowCaret _ original)->original; _->Nothing
+          extended=if extend then previousAnchor <|> (case conversationReplySelection retained of Just (BodySelection first _)->Just first; _->viewportPoint captured (caret (selection w))) else Nothing
+          requested=retained {conversationRowShift=conversationRowShift retained+(if forward then rows else negate rows),conversationCaretIntent=Just (RowCaret column extended)}
+      in d {conversationViews=M.insert target requested (conversationViews d)}
+  | otherwise=verticalMove (if forward then page else negate page) extend d
   where page=maybe 10 (\w->case windowRows d w of Just (_,_,_,details)->max 1 (height (if details then snd (rowsWindowRects d w) else fst (rowsWindowRects d w))); _->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
 
 -- | Use measured scalar word boundaries in source; preserve byte/grapheme steps in other views.
