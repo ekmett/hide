@@ -226,7 +226,7 @@ markdownDocument doc=documentLabel doc==Nothing && textBuffer (documentBuffer do
 data Command = New | Open | Download | ExportBuffer | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | PreviousWindow | Cascade | Tile
   | OpenLink LinkOrigin Text | SplitVertical | SplitHorizontal | ToggleTerminalPin | About | Help | EditorOptions | ChatInputOptions | Gallery
-  | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
+  | InspectType | InspectSymbol | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
   | ProjectBrowser | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose | FormChoice !Form.FormRef !Integer !Int
@@ -276,7 +276,7 @@ data ContextTarget = WindowRowTarget !PluginWindow.WindowRef !Tree.NodeId | Side
   , sourceTargetSelection :: !Selection, sourceTargetRow :: !Int
   , sourceTargetExpression :: !(Maybe Text), sourceTargetFile :: !(Maybe FilePath) } | ChoicePopupContextTarget !ChoicePopupTarget | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
 
-data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
+data LanguageAction = TypeInfo | FindDefinition | ExamineSymbol | GoToSite !FilePath !Int !Int !Text | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Existing build operation selected by the admitted host command.
@@ -426,7 +426,7 @@ menus =
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Assisted debugging…" "" (DebugCommand "assist"),mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" AgentChoose,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Inspect symbol" "Shift+F12" InspectSymbol,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" AgentChoose,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload keybindings" "" ReloadBindings,mi "Inspect keybindings" "" InspectBindings])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView),mi "Markdown" "" (SetBufferView MarkdownView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About hide..." "" About])]
@@ -616,6 +616,7 @@ commandDescription cmd = case cmd of
   About -> "Show information about hide, the Haskell IDE."; Help -> "Open the read-only help document."
   EditorOptions -> "Change key bindings, cursor appearance, and graphical screen mode."; Gallery -> "Try the available dialog controls."
   InspectType -> "Ask HLS for type information at the cursor."
+  InspectSymbol -> "Inspect the symbol at the cursor: its type, definitions and references."
   Definition -> "Go to the symbol's definition using HLS."
   Complete -> "Choose an identifier completion from HLS."
   Problems -> "Show or hide Messages; select a diagnostic to visit it."
@@ -821,7 +822,7 @@ markdownSourceCommand cmd=sourceOnlyCommand cmd && cmd `notElem` [Save,SaveAs,Do
 
 sourceOnlyCommand :: Command -> Bool
 sourceOnlyCommand cmd=horizontalMutation cmd || cmd `elem` [Save,SaveAs,Download,ExportBuffer,Undo,Redo,Cut,Paste,Find,FindNext,FindPrevious,Replace,GoTo,
-  InspectType,Definition,Complete,RenameSymbol,CodeActions,ToggleHex,SplitVertical,SplitHorizontal]
+  InspectType,InspectSymbol,Definition,Complete,RenameSymbol,CodeActions,ToggleHex,SplitVertical,SplitHorizontal]
 
 -- | Shared current-state gate for menu invocations and frontend hints. Queued
 -- events must check this again when consumed; a painted enabled state is a hint.
@@ -1648,6 +1649,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go SplitHorizontal d = splitWindow False d
     go About d = (message "About hide" ["hide  0.1", "Haskell IDE", "", "Copyright (c) 2026 Edward Kmett"] d,[])
     go InspectType d = (d,[LanguageRequest TypeInfo])
+    go InspectSymbol d = (d,[LanguageRequest ExamineSymbol])
     go CodeActions d = (d,[LanguageRequest RequestCodeActions])
     go RenameSymbol d = (prompt "Rename symbol" Renaming [Input "New name" "" 0] d,[])
     go Definition d = (d,[LanguageRequest FindDefinition])
@@ -2924,7 +2926,7 @@ contextItems (LinkContext command) = [("Open",command)]
 contextItems (ShellContext command) = [("Execute in terminal",command)]
 contextItems (ChangeContext command) = ("Revert this change",command):contextItems SourceContext
 contextItems WindowRowsContext = []
-contextItems SourceContext = [("Copy Location",CopyLocation),("Export buffer copy…",ExportBuffer),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
+contextItems SourceContext = [("Copy Location",CopyLocation),("Export buffer copy…",ExportBuffer),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Inspect symbol",InspectSymbol),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
 contextItems (FormChoicesContext _ _ items) = items
 contextItems SubmittedChoicesContext{} = []
@@ -3961,6 +3963,7 @@ keyEvent key mods d
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, key==V.KChar 'x' = runCommand Quit d
   | V.MAlt `elem` mods, key==V.KFun 3 = runCommand Close d
   | key==V.KFun 1, V.MShift `elem` mods = runCommand InspectType d
+  | key==V.KFun 12, V.MShift `elem` mods = runCommand InspectSymbol d
   | key==V.KFun 12 = runCommand Definition d
   | ctrl, key==V.KChar ' ' = runCommand Complete d
   | key==V.KFun 1 = runCommand Help d

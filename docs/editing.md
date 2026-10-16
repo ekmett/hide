@@ -96,6 +96,11 @@ Right-click the package name to open its package description. For component
 actions, including Debug and GHC Test/Benchmark, see
 [running from the sidebar](running.md#compile-make-run).
 
+Right-click a package or component and choose **Inspect** to browse its
+components, source declarations and warnings. Select a row and use **Open** to
+follow it. View links and **Back** stay in the same window; **More…** advances
+through long lists. A changed package invalidates its continuation pages.
+
 Source entries follow Cabal declarations, including common stanzas and conditional
 source directories. A `?` marks conditional entries; multiple existing candidates
 expand into their paths. Generated, virtual and missing sources remain visible,

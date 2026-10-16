@@ -46,6 +46,21 @@ disk file changed while the request was pending, the editor rejects the stale
 edit. Text edits are supported; HLS file creation/deletion operations and
 executable completion commands are not applied. Completion snippets are disabled.
 
+## Inspect a symbol
+
+Choose **Tools > Inspect symbol** at a name or operator. The inspector combines
+the type, definitions and references reported by HLS. Open a row to inspect its
+source location, switch views, or return with **Back**. **Open in editor** checks
+the exact source line before moving the caret; an indentation change requires a
+fresh inspection too.
+
+Inspections use unsaved source. Editing, closing or making the source private
+expires its report. Making a referenced file private also revokes cached excerpts.
+Locations outside the workspace are omitted. Excerpts are limited to complete
+lines of 4096 characters, read within the first 1 MiB of each closed file, with
+at most 24 files and 200 sites per relation. Omitted locations are reported.
+These limits keep inspection independent of the size of a source file.
+
 ## Code actions
 
 Select source or place the cursor at a diagnostic, then choose **Code actions**.

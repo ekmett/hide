@@ -19,6 +19,10 @@ module Hide.App (main, demoDesktop, applyEffects) where
 
 import Hide.Sidebar
 import Hide.PackageSidebar
+import Hide.PackageInspect (publishPackageViews)
+import Hide.InspectorWindow (withInspector,inspectorPublisher')
+import Hide.InspectorMenu (withInspectorMenu)
+import Hide.SymbolInspector (withSymbolInspector,symbolEffects,tickSymbolInspector,symbolTool,symbolToolName,symbolTools)
 import qualified Hide.Plugin.Session as Plugin
 import qualified Hide.AgentDirectoryHost as AgentDirectory
 import Hide.SessionSidebar
@@ -330,7 +334,7 @@ runEditor plugins args = do
         else do
           mapM_ (setEnv "THC_EDIT_SESSION") daemon
           font<-Font.loadFont
-          let specs=builtinTools++debugTools++toolingTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++[screenTool]
+          let specs=builtinTools++debugTools++toolingTools++symbolTools++workspaceTools++fileTools++testsTools++historyTools++runtimeTools++gitTools++controlTools++clipboardTools++[screenTool]
           let names definitions=[name | spec<-definitions,Just name<-[parseMaybe (withObject "tool" (.: "name")) spec]]
               declarations=concatMap Plugin.pluginTools plugins
           systemOneJSON<-readSystemOne >>= either (die . T.unpack) pure
@@ -350,7 +354,7 @@ runEditor plugins args = do
             withWarden (systemOneServices systemOne) wardenSettings wardenRules $ \warden ->
               PluginTool.withTools (names specs) [tool | Plugin.EditorTool tool<-declarations] $ \editorToolset ->
               PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset)) [tool | Plugin.RequestTool tool<-declarations] $ \requestToolset ->
-              PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withGuardedConversationAt (Just warden) (fmap (wardenProviderFactory warden) agentProvider) presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withSystemOneMenu menuHost sidebarHost systemOne systemOneProvider systemOneBrowser $ withWardenMenu menuHost sidebarHost warden $ withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDebuggerSystemOne (systemOneServices systemOne) debugger $ withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (Just (systemOneServices systemOne)) completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withPackageSidebar sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarConversationOperation PluginMenu.cancelConversationAction sidebarSelectedAgent (systemOneServices systemOne)) $ do
+              PluginTool.withTools (names (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset)) [tool | Plugin.CoordinationTool tool<-declarations] $ \agentToolset -> withPermissions (specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset++PluginTool.toolDefinitions agentToolset) $ \permissions -> withDocsCommands $ \docsCommands -> withEnvironmentCommands $ \environmentCommands -> withSessionSidebar sidebarHost daemon protectedDesktop $ \sessionSidebar -> withSessionServices $ \services -> withGuardedConversationAt (Just warden) (fmap (wardenProviderFactory warden) agentProvider) presenter primaryInput childInput (sessionConsoles services) (startingDirectory protectedDesktop) $ \conversation -> withConversationMenuCommands docsCommands conversation $ \menuHost -> withSystemOneMenu menuHost sidebarHost systemOne systemOneProvider systemOneBrowser $ withWardenMenu menuHost sidebarHost warden $ withDebuggerConsoles (sessionConsoles services) $ \debugger -> withDebuggerSystemOne (systemOneServices systemOne) debugger $ withDownloadsCommands menuHost debugger $ withDebuggerSidebar sidebarHost debugger $ \debugSidebar -> withTooling L.startClient $ \tooling -> withGitOperations (buildTerminalLaunchPending services) $ \gitOperations -> withReconciliation $ \reconciliation -> withProjectBrowser $ \projectBrowser -> withHighlighting $ \highlighting -> withAutocomplete (Just (systemOneServices systemOne)) completionProvider [tool | Plugin.CompletionTool tool<-declarations] completionInput (startingDirectory protectedDesktop) $ \autocomplete -> withInspector $ \inspector -> withSymbolInspector tooling inspector $ \symbols -> publishPackageViews (inspectorPublisher' inspector) >>= \_ -> withInspectorMenu menuHost inspector $ withPackageSidebar inspector sidebarHost protectedDesktop $ \packageSidebar -> Plugin.withPlugins plugins (Plugin.Session (sidebarCapabilities sidebarHost) (AgentDirectory.agentDirectory (AR.agentHub (conversationAgents conversation)) autocomplete) SidebarAgent (menuSidebarCapabilities menuHost sidebarHost) sidebarConversation SidebarConversation sidebarConversationOperation PluginMenu.cancelConversationAction sidebarSelectedAgent (systemOneServices systemOne) (inspectorPublisher' inspector)) $ do
               contributions<-PluginMenu.menuSnapshot (menuContributions menuHost)
               let agentTools=PluginTool.toolDefinitions agentToolset
                   editorSpecs=specs++PluginTool.toolDefinitions editorToolset++PluginTool.toolDefinitions requestToolset
@@ -359,7 +363,7 @@ runEditor plugins args = do
               let liveDesktop=liveBase {keyBindings=keymap}
               withKeybindings keys (contributedBindingCommands liveBase) $ \keybindings -> withTextPresentation $ \textPresentation -> do
                 exiting<-newIORef False
-                let runtimeEffects=textPresentationEffects textPresentation $ sidebarEffects sidebarHost (packageBuildEffects packageSidebar (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (sessionEffects services (reconciliationEffects reconciliation (toolingEffects tooling applyEffects))))))))))))
+                let runtimeEffects=textPresentationEffects textPresentation $ sidebarEffects sidebarHost (packageBuildEffects packageSidebar (sessionSidebarEffects sessionSidebar (menuEffects menuHost (keybindingEffects keybindings (autocompleteEffects autocomplete (projectBrowserEffects projectBrowser (gitOperationEffects gitOperations (debuggerEffects debugger (conversationEffects conversation (sessionEffects services (reconciliationEffects reconciliation (symbolEffects symbols (toolingEffects tooling applyEffects)))))))))))))
                     core d pending=foldM step (False,d) pending
                       where
                         step result@(True,_) _=pure result
@@ -378,7 +382,7 @@ runEditor plugins args = do
                       requests<-conversationBodyRequests conversation desktop
                       (prepared,completed)<-tickTextPresentation textPresentation requests desktop
                       adoptConversationBodies conversation completed prepared
-                    tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
+                    tick d=tickProjectBrowser projectBrowser d >>= tickGitOperations gitOperations applyEffects >>= tickTooling tooling applyEffects >>= tickSymbolInspector symbols >>= tickReconciliation reconciliation (sidebarEffects sidebarHost applyEffects) >>= tickSessionServices services >>= tickConversation conversation >>= tickBuildPreparation services runtimeEffects >>= tickDebugger debugger >>= tickPreparedDebug debugger runtimeEffects >>= tickPermissions permissions >>= tickHighlighting highlighting >>= tickAutocomplete autocomplete >>= tickKeybindings keybindings >>= tickMenus menuHost runtimeEffects >>= tickDebuggerSidebar debugSidebar sidebarHost debugger >>= tickPackageSidebar packageSidebar sidebarHost >>= tickSessionSidebar sessionSidebar sidebarHost >>= tickSidebar sidebarHost runtimeEffects >>= tickPluginWindows >>= prepareBodies
                     inspectTool d name parameters
                       | PluginTool.hasTool editorToolset name = do
                           context<-captureDocsContext d
@@ -389,6 +393,7 @@ runEditor plugins args = do
                               (environmentServices environmentCommands directory) settings) name parameters)
                       | name `elem` ["list_windows","read_selection"] = pure (d,pure (builtinTool d name parameters))
                       | name `elem` toolingToolNames = toolingTool tooling guestCore d name parameters
+                      | name==symbolToolName = symbolTool symbols Nothing d name parameters
                       | name `elem` workspaceToolNames = workspaceTool guestCore d name parameters
                       | name `elem` fileToolNames = fileTool guestCore d name parameters
                       | name `elem` testsToolNames = testsTool services d name parameters
@@ -440,6 +445,7 @@ runEditor plugins args = do
                                   questionCaller<-captureQuestionCaller conversation ident
                                   let dispatch current name parameters
                                         | PluginTool.hasTool agentToolset name = pure (current,PluginTool.callTool agentToolset (agentServices hub (AH.Agent ident) root) name parameters)
+                                        | name==symbolToolName = symbolTool symbols (Just (AH.agentIdText ident)) current name parameters
                                         | otherwise = inspectTool current name parameters
                                       -- Worktree agents reach this endpoint only for
                                       -- coordination. Their editor tools use their own session.

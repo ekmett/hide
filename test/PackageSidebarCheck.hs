@@ -12,7 +12,7 @@ module PackageSidebarCheck (checks) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket)
-import Control.Monad (unless,when,foldM)
+import Control.Monad (unless,when,foldM,forM)
 import Data.IORef
 import qualified Data.Aeson as A
 import Data.Aeson.Types (parseMaybe)
@@ -34,6 +34,9 @@ import System.Info (os)
 import qualified Hide.Files
 import Hide.Files (filePath)
 import Hide.Model
+import Hide.InspectorWindow
+import Hide.PackageInspect (publishPackageViews)
+import Hide.Plugin.Inspect (RootDef(..),Revision(..),publishRoot,withdrawRoot)
 import Hide.PackageSidebar
 import qualified Hide.Plugin.Tree as P
 import qualified Hide.Plugin.Window as W
@@ -46,9 +49,10 @@ checks=bracket temporary removePathForcibly $ \root->do
       mainFile=root </> "Main.hs"
   writeFile file (manifest "sample")
   writeFile mainFile "main = pure ()\n"
-  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withEnv "THC_EDIT_SESSION" Nothing $ withSidebarCommands $ \host->withSessionServices $ \runtime->do
+  withEnv "XDG_CONFIG_HOME" (Just (root </> "config")) $ withEnv "THC_EDIT_SESSION" Nothing $ withInspector $ \inspector->withSidebarCommands $ \host->withSessionServices $ \runtime->do
     let initial=(initialDesktop (100,35)) {sideTree=Just (emptySidebar root 28 False)}
-    withPackageSidebar host initial $ \provider->do
+    _<-publishPackageViews (inspectorPublisher' inspector)
+    withPackageSidebar inspector host initial $ \provider->do
       captured<-newIORef Nothing
       capturedDebug<-newIORef Nothing
       attempted<-newIORef False
@@ -73,7 +77,7 @@ checks=bracket temporary removePathForcibly $ \root->do
       started<-initializeSidebar host initial
       mounted<-wait "package root" (has "sample") started
       targets<-activate "sample" mounted >>= wait "Cabal target" (has "exe:demo")
-      let componentActions label=[title | row<-rows targets,P.infoLabel (rowInfo row)==label,(title,_)<-rowActions row]
+      let componentActions label=[title | row<-rows targets,P.infoLabel (rowInfo row)==label,(title,_)<-rowActions row,title/="Inspect"]
       unless ("Build" `elem` componentActions "exe:demo" && "Run" `elem` componentActions "exe:demo" && "Build" `elem` componentActions "lib:sample" && "Run" `notElem` componentActions "lib:sample" && componentActions "test:check"==["Build","Run","Test","Debug"] && componentActions "test:driver"==["Build","Test"] && componentActions "bench:measure"==["Build","Run","Benchmark","Debug"] && null (componentActions "exe:disabled"))
         (fail "Cabal components expose only their supported captured actions")
       sources<-activate "exe:demo" targets >>= wait "Cabal source" (\d->any (\row->P.infoLabel (rowInfo row)=="Main.hs" && rowDepth row==2) (rows d) && ready d)
@@ -269,6 +273,12 @@ checks=bracket temporary removePathForcibly $ \root->do
       let moved=renamed {sideTree=fmap (\tree->tree {treeRoot=root </> "empty"}) (sideTree renamed)}
       _<-wait "old package retires after changing directory" (not . has "renamed") moved
       pure ()
+    -- Retired package slots must leave the full root budget available.
+    let publisher=inspectorPublisher' inspector
+    roots<-forM [1..256::Int] $ \n->do
+      result<-publishRoot publisher (RootDef ("test.retired.r"<>T.pack (show n)) (pure (Just (Revision 0,()))))
+      either (fail . show) pure result
+    mapM_ (withdrawRoot publisher) roots
   putStrLn "package sidebar checks passed"
   where
     manifest name=unlines ["cabal-version: 3.0","name: "<>name,"version: 0.1","library","  exposed-modules: Main","executable disabled","  main-is: Main.hs","  buildable: False","  if os(linux)","    buildable: True","executable second","  main-is: Other.hs","test-suite check","  type: exitcode-stdio-1.0","  main-is: Main.hs","test-suite driver","  type: detailed-0.9","  test-module: Main","benchmark measure","  type: exitcode-stdio-1.0","  main-is: Main.hs","executable demo","  main-is: Main.hs","  other-modules: Missing","  autogen-modules: Paths_sample"]

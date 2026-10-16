@@ -39,6 +39,9 @@ import qualified MenuCommandsCheck
 import qualified MenuContextCheck
 import qualified PluginMenuCheck
 import qualified AccessibilityCheck
+import qualified PluginInspectCheck
+import qualified InspectorWindowCheck
+import qualified SymbolInspectorCheck
 import qualified SidebarScrollCheck
 import qualified SidebarCheck
 import qualified PluginTreeCheck
@@ -211,6 +214,9 @@ tests = askOption $ \profile->withResource
   , testCase "PluginTree" PluginTreeCheck.checks
   , testCase "Sidebar" SidebarCheck.checks
   , testCase "SidebarScroll" SidebarScrollCheck.checks
+  , testCase "PluginInspect" PluginInspectCheck.checks
+  , testCase "InspectorWindow" InspectorWindowCheck.checks
+  , testCase "SymbolInspector" SymbolInspectorCheck.checks
   , testCase "PluginCommand" PluginCommandCheck.checks
   , testCase "PluginMenu" PluginMenuCheck.checks
   , testCase "MenuCommands" MenuCommandsCheck.checks

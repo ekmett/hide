@@ -118,6 +118,7 @@ fails without edits. Binary previews describe byte changes.
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
 | `workspace_diagnostics` | R | `offset?`, `limit?` | HLS/build/Messages snapshot with positions and reported/current revisions |
+| `inspect_symbol` | R | `action`, plus position or page arguments below | Browse type, definitions and references through caller-owned pages |
 | `lsp_hover` | R | `bufferId`, `line`, `column`, `revision?` | Hover text and type information |
 | `lsp_definition` | R | `bufferId`, `line`, `column`, `revision?` | Definition locations |
 | `lsp_type_definition` | R | `bufferId`, `line`, `column`, `revision?` | Type definition locations |
@@ -126,6 +127,21 @@ fails without edits. Binary previews describe byte changes.
 | `lsp_rename` | W | `bufferId`, `revision`, `line`, `column`, `newName` | Apply HLS rename to live buffers; reject stale source; no save |
 | `lsp_code_actions` | R | `bufferId`, `revision`, `line`, `column`, `endLine?`, `endColumn?` | List up to 128 action IDs with title/kind/preference and disabled reason; includes current intersecting diagnostics |
 | `lsp_apply_code_action` | W | `bufferId`, `revision`, `actionId` | Consume a listed action once; apply checked edits and advertised HLS commands; report partial command results |
+
+`inspect_symbol` shares the [symbol inspector](haskell.md#inspect-a-symbol) with
+the user. Start with `{"action":"inspect","bufferId":1,"line":5,"column":15}`
+(optionally include `revision`). The result contains a page token, available
+views and rows. Use `view` with `page` and `view`, `follow` with `page` and a
+zero-based `row`, or `back` with `page`. `discover` lists this caller's pages and
+can check a `bufferId`, `line`, `column` position without contacting HLS.
+
+Rows and continuation actions belong to the returned page. `hasMore` indicates
+another page; follow its **More…** row. `report.omittedAtLeast` is a lower bound
+on excluded locations, including those beyond the scan limit. Tokens expire after 15 minutes or when
+the source changes, closes, or becomes private. Referenced-file privacy is
+checked again before returning results. Following a source row returns a checked
+location; it does not move the user's caret.
+
 
 Calls synchronize unsaved Haskell text. Editor input positions use 1-based
 Unicode code points; raw LSP results use 0-based UTF-16. Responses identify the
