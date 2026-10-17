@@ -241,3 +241,34 @@ filteredChecks base=do
   writeFile (root </> "literal1.txt") "different unselected file\n"
   (literal,_)<-repositoryDiffFilteredAt root (Just "literal[1].txt") private >>= either (error . T.unpack) pure
   check "filtered selection treats pathspec metacharacters literally" ("literal bracket path" `T.isInfixOf` literal && not ("different unselected file" `T.isInfixOf` literal))
+  git ["add","--all"]
+  git ["commit","--quiet","-m","private range fixture"]
+  writeFile (root </> "visible.txt") "uncommitted working change\n"
+  let readRange from to selected=repositoryRangeDiffFiltered root from to selected private
+      commitOf revision=do
+        (code,out,err)<-readCreateProcessWithExitCode ((proc "git" ["rev-parse","--verify",revision]) {cwd=Just root}) ""
+        unless (code==ExitSuccess) (error err)
+        pure (T.strip (T.pack out))
+  parent<-commitOf "HEAD~1"
+  target<-commitOf "HEAD"
+  (rangeFrom,rangeTo,ranged,rangeOmitted)<-readRange "HEAD~1" "HEAD" Nothing >>= either (error . T.unpack) pure
+  check "range diff reports resolved commits" (rangeFrom==parent && rangeTo==target)
+  check "range diff retains ordinary committed changes without the working tree"
+    (all (`T.isInfixOf` ranged) ["-ordinary deleted content","+visible addition","literal bracket path"] && not ("uncommitted working change" `T.isInfixOf` ranged))
+  check "range diff omits private files and rename/copy destinations derived from them"
+    (rangeOmitted>=10 && not (any (`T.isInfixOf` ranged) ["private-tracked","private-deleted","private-renamed","private-copied","private-untracked","private-working-move","working-public","apparently-public","thc.toml","rename from","copy from"]))
+  forM_ ["apparently-public.txt","apparently-public-copy.txt","working-public.txt","working-public-copy.txt"] $ \selected->do
+    (_,_,hidden,count)<-readRange parent target (Just selected) >>= either (error . T.unpack) pure
+    check "selected private-origin range destinations stay filtered" (hidden=="No changes.\n" && count==1)
+  (_,_,rangeMissing,rangeMissingCount)<-readRange parent target (Just "not-present") >>= either (error . T.unpack) pure
+  check "selected absent range path yields no changes" (rangeMissing=="No changes.\n" && rangeMissingCount==0)
+  (_,_,same,_)<-readRange "HEAD" target Nothing >>= either (error . T.unpack) pure
+  check "identical range commits yield no changes" (same=="No changes.\n")
+  unknown<-readRange "no-such-revision" "HEAD" Nothing
+  tree<-readRange "HEAD~1" "HEAD^{tree}" Nothing
+  writeFile (root </> "visible.txt^{commit}") "blob named like a peel\n"
+  git ["add","--","visible.txt^{commit}"]
+  git ["commit","--quiet","-m","peel-like path"]
+  blob<-readRange "HEAD~1" "HEAD:visible.txt" Nothing
+  check "range revisions must resolve to commits"
+    (unknown==Left "Could not resolve from as a commit." && tree==Left "Could not resolve to as a commit." && blob==Left "Could not resolve to as a commit.")

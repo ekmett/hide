@@ -21,7 +21,7 @@ category. Both are also available through `docs_read` in the `editor` corpus.
 
 `list_windows`, `list_buffers`, `read_buffer` and `read_selection` expose live contents, paths, dirty flags and revisions. In a Markdown view, `read_selection` returns rendered text and labels its offsets
 `rendered-markdown`; `read_buffer` still returns the source. Use source offsets
-for edits. `workspace_project` identifies the project root and package file. `workspace_search` searches disk files and substitutes unsaved buffer contents; `trackedOnly` limits it to Git-tracked files. `workspace_git` reports disk changes separately from unsaved buffers.
+for edits. `workspace_project` identifies the project root and package file. `workspace_search` searches disk files and substitutes unsaved buffer contents; `trackedOnly` limits it to Git-tracked files. `workspace_git` reports disk changes separately from unsaved buffers. `editor_show_diff` shows the person the diff between two commits.
 
 `editor_file` opens, saves or closes files. Save and close require the current revision. Closing a dirty buffer requires an explicit save or discard choice. `buffer_apply_diff` accepts a `buffers` array of strict patches and expected revisions, applies them together or none, and adds ordinary Undo per changed buffer without saving. `workspace_files` creates files/directories, renames paths, or deletes files and empty directories inside the project.
 
