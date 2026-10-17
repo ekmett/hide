@@ -51,7 +51,7 @@ import qualified Hide.AgentRuntime as AgentRuntime
 import Hide.Model hiding (menus)
 import qualified Hide.Model as Model
 import qualified Hide.Plugin.Window as PluginWindow
-import Hide.PluginWindowHost (adoptWindowUpdate,adoptEditorWindowUpdate,applyEditorUpdate)
+import Hide.PluginWindowHost (replaceWindowUpdate,adoptWindowUpdate,adoptEditorWindowUpdate,applyEditorUpdate)
 import Hide.Plugin.Command
 import qualified Hide.Plugin.Menu as Plugin
 
@@ -68,7 +68,7 @@ data SourceInput = SourceInput ContextTarget ContentVersion DirtySnapshot
 data NavigationInput = NavigationInput (FilePath,Int,Int) (Maybe OpenSource) (Maybe [FilePath])
 data OpenSource = OpenSource Int Int ContentVersion BufferContent
 data Navigation = Navigation FilePath Int Int (Maybe Document)
-data MenuReply = PreparedSidebar !SidebarHost !SidebarReply | PreparedDownloadCancel !DownloadCancelRequest | PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindow PluginWindow.WindowUpdate | PreparedEditorWindow !(PluginWindow.EditorWindowUpdate MenuContext MenuReply) | PreparedEditorUpdate !Editor.EditorUpdate
+data MenuReply = PreparedSidebar !SidebarHost !SidebarReply | PreparedDownloadCancel !DownloadCancelRequest | PreparedDocument LinkResult | PreparedNavigation Navigation | PreparedDebugSource DebugSourceRequest | PreparedWindowReplacement !PluginWindow.WindowRef !PluginWindow.WindowUpdate | PreparedWindow PluginWindow.WindowUpdate | PreparedJump !FilePath !Int !Int !T.Text | PreparedEditorWindow !(PluginWindow.EditorWindowUpdate MenuContext MenuReply) | PreparedEditorUpdate !Editor.EditorUpdate
 
 data Pending = Pending Plugin.MenuRef (Maybe ContextTarget) MenuContext (Async (Either Plugin.MenuError MenuReply))
   | PendingEditor Editor.DraftSubmission (Async (Either CommandError MenuReply))
@@ -386,7 +386,8 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed conversation) core orig
         Just result->do
           modifyIORef' ref (\s->s {menuPending=Nothing})
           live<-Plugin.menuCurrent menus reference
-          let exactRow=case result of Right (Right PreparedDownloadCancel{})->invocationOrigin context==Plugin.HumanMenu && invocationRow context/=Nothing; _->False
+          let exactRow=case result of Right (Right PreparedDownloadCancel{})->humanRow; Right (Right PreparedWindow{})->humanRow; Right (Right PreparedJump{})->humanRow; _->False
+              humanRow=invocationOrigin context==Plugin.HumanMenu && invocationRow context/=Nothing
               current=dialog d==Nothing && (not exactRow || reference `elem` windowRowMenuRefsFor target d) && (exactRow || columns d==invocationColumns context) &&
                 any ((==reference) . Plugin.menuReference) (contributedMenus d) &&
                 maybe True (\captured->contextTargetCurrent d {contextTarget=Just captured}) target
@@ -401,7 +402,10 @@ tickMenus host@(MenuHost menus _ sourceRefs _ ref closed conversation) core orig
               adoptConversationAdvice runtime captured advice prepared d
             Right (Right PreparedSidebar{})->pure d {status="Menu result requires its owning operation."}
             Right (Right (PreparedDownloadCancel request))->snd <$> core d [DownloadCancelAction request]
+            Right (Right (PreparedWindowReplacement old prepared))->replaceWindowUpdate (invocationOrigin context) old prepared d
             Right (Right (PreparedWindow prepared))->adoptWindowUpdate (invocationOrigin context) prepared d
+            Right (Right (PreparedJump path row col expected)) | invocationOrigin context==Plugin.HumanMenu->snd <$> core d [LanguageRequest (GoToSite path row col expected)]
+            Right (Right PreparedJump{})->pure d {status="Source jumps require the human."}
             Right (Right (PreparedEditorWindow prepared))->adoptMenuEditor host (invocationOrigin context) prepared d
             Right (Right PreparedEditorUpdate{})->pure d {status="Editor result has no submitted job."}
             Right (Right (PreparedDocument prepared))->pure (fst (applyLink prepared d))
@@ -485,6 +489,7 @@ finishMenuEditor host@(MenuHost _ _ _ _ ref _ _) d submitted worker=do
       if not owning then pure d {status="Editor owner expired."} else case result of
         Right (Right (PreparedEditorUpdate update))->applyEditorUpdate submitted update d
         Right (Right (PreparedEditorWindow update))->adoptMenuEditor host Plugin.HumanMenu update d
+        Right (Right (PreparedWindowReplacement old update))->replaceWindowUpdate Plugin.HumanMenu old update d
         Right (Right (PreparedWindow update))->adoptWindowUpdate Plugin.HumanMenu update d
         Right (Right (PreparedDocument prepared))->pure (fst (applyLink prepared d))
         Right (Left err)->pure d {status="Editor submission failed: "<>T.pack (show err)}

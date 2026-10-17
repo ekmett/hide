@@ -21,7 +21,8 @@ data-files:
   , assets/fonts/*.txt
   , assets/fonts/README.md
 extra-source-files:
-    assets/examples/*.png
+    test/inspector-lsp.mjs
+  , assets/examples/*.png
   , assets/examples/*.md
   , cbits/shaders/*.h
   , cbits/shaders/*.hlsl
@@ -222,6 +223,11 @@ library
     , Hide.PackageSources
     , Hide.PackagePaths
     , Hide.PackageSidebar
+    , Hide.PackageInspect
+    , Hide.SymbolInspect
+    , Hide.SymbolInspector
+    , Hide.InspectorWindow
+    , Hide.InspectorMenu
     , Hide.ProjectBrowser
     , Hide.BuildJobs
     , Hide.TextPresentation
@@ -433,6 +439,10 @@ test-suite editor-tests
     , PluginTreeCheck
     , AccessibilityCheck
     , SidebarCheck
+    , SidebarScrollCheck
+    , PluginInspectCheck
+    , InspectorWindowCheck
+    , SymbolInspectorCheck
     , SidebarFixture
     , TreeExtension
     , PluginMenuCheck

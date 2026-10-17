@@ -135,6 +135,7 @@ builtinCommands =
   ,BuiltinCommand "hide.git.pull" (GitPull)
   ,BuiltinCommand "hide.git.merge" (GitMerge)
   ,BuiltinCommand "hide.language.inspect-type" (InspectType)
+  ,BuiltinCommand "hide.language.inspect-symbol" (InspectSymbol)
   ,BuiltinCommand "hide.language.code-actions" (CodeActions)
   ,BuiltinCommand "hide.language.rename" (RenameSymbol)
   ,BuiltinCommand "hide.view.messages" (Problems)
@@ -179,6 +180,10 @@ builtinCommands =
   ,BuiltinCommand "hide.sidebar.down" (SidebarMove 1)
   ,BuiltinCommand "hide.sidebar.page-up" (SidebarMove (-10))
   ,BuiltinCommand "hide.sidebar.page-down" (SidebarMove 10)
+  ,BuiltinCommand "hide.sidebar.previous-section" (SidebarSection (-1))
+  ,BuiltinCommand "hide.sidebar.next-section" (SidebarSection 1)
+  ,BuiltinCommand "hide.sidebar.first" (SidebarEdge False)
+  ,BuiltinCommand "hide.sidebar.last" (SidebarEdge True)
   ,BuiltinCommand "hide.sidebar.activate" SidebarActivate
   ,BuiltinCommand "hide.sidebar.expand" SidebarExpand
   ,BuiltinCommand "hide.sidebar.collapse" SidebarCollapse
@@ -286,6 +291,7 @@ platformBindings catalogue platform configuration=do
     defaultsFor TerminalKeys=[(action,filter (/="Ctrl+Q") chords) | (action,chords)<-defaults,action `elem` [Close,Quit,Zoom,NextWindow,PreviousWindow,NextMessage,PreviousMessage,MakeTarget,CompileTarget,RunTarget] || case action of DebugCommand _->True; _->False]
     defaultsFor SidebarKeys=withoutWindowF6 defaults ++
       [(SidebarMove (-1),["Up"]),(SidebarMove 1,["Down"]),(SidebarMove (-10),["PageUp"]),(SidebarMove 10,["PageDown"]),
+       (SidebarSection (-1),["Ctrl+Up"]),(SidebarSection 1,["Ctrl+Down"]),(SidebarEdge False,["Home"]),(SidebarEdge True,["End"]),
        (SidebarActivate,["Enter"]),(SidebarExpand,["Right"]),(SidebarCollapse,["Left"]),(FocusSource,["F6"])]
     defaultsFor MessagesKeys=withoutWindowF6 (filter (\(action,_)->case action of DebugCommand _->False; _->True) defaults) ++
       [(MessagesMove (-1),["Up"]),(MessagesMove 1,["Down"]),(MessagesPage (-1),["PageUp"]),(MessagesPage 1,["PageDown"]),(GoToMessage,["Enter"]),(FocusSource,["F6"])]
@@ -334,7 +340,7 @@ platformBindings catalogue platform configuration=do
       ,(Paste,["Ctrl+V","Shift+Insert"]),(SelectAll,["Ctrl+A"])
       ,(Find,["Ctrl+F"]),(Replace,["Ctrl+H","Ctrl+R"])
       ,(FindNext,["Ctrl+L"]),(FindPrevious,["Ctrl+Shift+L"]),(GoTo,["Ctrl+G"])
-      ,(Help,["F1"]),(InspectType,["Shift+F1"]),(Definition,["F12"])
+      ,(Help,["F1"]),(InspectType,["Shift+F1"]),(InspectSymbol,["Shift+F12"]),(Definition,["F12"])
       ,(Complete,["Ctrl+Space"]),(Zoom,["F5"]),(NextWindow,["F6","Ctrl+Tab"]),(PreviousWindow,["Ctrl+Shift+Tab"])
       ,(ToggleTree,["Ctrl+B"]),(Conversation,["Ctrl+Shift+C"]),(AgentNew,["Ctrl+Shift+N"])
       ,(NextMessage,["Alt+F8"]),(PreviousMessage,["Alt+F7"])

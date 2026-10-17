@@ -19,7 +19,7 @@
 -- client after their terminal response. Cancellation rejects further edits while
 -- awaiting that response; only an unresponsive transport is retired. Accepted
 -- batches survive later failure and are reported as partial.
-module Hide.Tooling (Tooling, toolingTool, toolingTools, toolingToolNames, withTooling, withToolingClock, withToolingUsing, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
+module Hide.Tooling (Tooling, toolingTool, humanToolingTool, locations, projectRoot, toolingTools, toolingToolNames, withTooling, withToolingClock, withToolingUsing, tickTooling, toolingEffects, completionItems, workspaceEdits, hoverText, diagnosticsCurrent) where
 
 import Hide.Sidebar (treeFocused)
 import Control.Exception (bracket, try, IOException, onException, mask_, evaluate, finally, displayException)
@@ -217,6 +217,11 @@ toolingTools = map descriptor toolingToolNames
 -- continuation outside the lock while tickTooling continues to make progress.
 toolingTool :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
 toolingTool = startTool False
+
+-- | As 'toolingTool' for a request the human started: progress and refusals are
+-- also reported in the status line. Cancelling the returned wait cancels the request.
+humanToolingTool :: Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
+humanToolingTool = startTool True
 
 startTool :: Bool -> Tooling -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> T.Text -> Value -> IO (Desktop, IO (Either T.Text Value))
 startTool = startToolWith Nothing
@@ -1293,6 +1298,8 @@ toolingEffects t core d effects = foldM apply (False,d) effects
     apply (_,desktop) (LanguageRequest (ApplyCodeAction bid version ident)) = do
       (updated,_)<-startTool True t core desktop "lsp_apply_code_action" (object ["bufferId" .= bid,"revision" .= version,"actionId" .= ident])
       pure (False,updated)
+    apply (_,desktop) (LanguageRequest ExamineSymbol) = pure (False,desktop {status="Symbol inspection is unavailable."})
+    apply (_,desktop) (LanguageRequest GoToSite{}) = pure (False,desktop {status="Symbol inspection is unavailable."})
     apply (_,desktop) (LanguageRequest ShowProblems) = (False,) <$> refreshProblems t desktop
     apply (_,desktop) (LanguageRequest action) = do
       sync t desktop

@@ -104,6 +104,25 @@ rowAt index tree
 -- | A viewport costs logarithmic splits plus its visible row count.
 visibleRows :: Int -> Int -> Sidebar -> [(Int,TreeRow)]
 visibleRows start count tree=zip [start..] (M.elems (fst (M.splitAt count (snd (M.splitAt start (treeRows tree))))))
+-- | Row indices of the top-level section rows. One ordered-map split skips each
+-- section's subtree, so the cost is one logarithmic lookup per section (at most
+-- 32), never a walk over the rows.
+sectionIndices :: Sidebar -> [Int]
+sectionIndices tree=go (32::Int) (M.lookupMin rows)
+  where
+    rows=treeRows tree
+    go budget (Just (address,_)) | budget>0=maybe id (:) (M.lookupIndex address rows) (go (budget-1) (M.lookupGT (address++[maxBound]) rows))
+    go _ _=[]
+-- | Sections whose header starts below a viewport of @count@ rows from @start@.
+hiddenSections :: Int -> Int -> Sidebar -> [Int]
+hiddenSections start count tree=dropWhile (<start+count) (sectionIndices tree)
+-- | The nearest section header after (positive) or before (negative) a row. Moving
+-- up from inside a section reaches its own header before the previous section.
+adjacentSection :: Int -> Int -> Sidebar -> Maybe Int
+adjacentSection direction index tree
+  | direction>0=case dropWhile (<=index) sections of i:_->Just i; []->Nothing
+  | otherwise=case reverse (takeWhile (<index) sections) of i:_->Just i; []->Nothing
+  where sections=sectionIndices tree
 nodeAt :: TreeHit -> Sidebar -> Maybe NodeState
 nodeAt hit@(TreeHit _ _ generation) tree=do
   node<-M.lookup (keyOf hit) (treeNodes tree)

@@ -74,6 +74,19 @@ copies until the frontend closes, allowing the receiving application to finish
 reading them. Right-clicking a file in Files and choosing **Export saved copy…**
 continues to export its saved disk contents.
 
+## Sidebar sections
+
+An overflowing sidebar shows a scrollbar even when it does not have focus.
+Click **↓ N more sections** above the list to reach the next section below the
+viewport. The mouse wheel scrolls without moving focus.
+
+With the sidebar focused, **Ctrl+Up/Down** selects the previous or next section
+header; **Home/End** selects the first or last row. These are the
+`hide.sidebar.previous-section`, `hide.sidebar.next-section`,
+`hide.sidebar.first` and `hide.sidebar.last` commands in the `sidebar` binding
+context. Resizing or collapsing a section keeps the scroll position inside the
+remaining list.
+
 ## Cabal packages
 
 The sidebar shows each `.cabal` package in the selected directory as a separate
@@ -82,6 +95,11 @@ test and benchmark targets, then expand a target to open its source files.
 Right-click the package name to open its package description. For component
 actions, including Debug and GHC Test/Benchmark, see
 [running from the sidebar](running.md#compile-make-run).
+
+Right-click a package or component and choose **Inspect** to browse its
+components, source declarations and warnings. Select a row and use **Open** to
+follow it. View links and **Back** stay in the same window; **More…** advances
+through long lists. A changed package invalidates its continuation pages.
 
 Source entries follow Cabal declarations, including common stanzas and conditional
 source directories. A `?` marks conditional entries; multiple existing candidates

@@ -987,12 +987,18 @@ treeLayers d tree =
   [place (w-5) 1 (label frame "[" V.<|> label (attr cyan blue) "←" V.<|> label frame "]")]
   ++ [place (w-1) y (V.char frame '│')
      | y<-[1..h], not (any (\win -> inside (bounds win) (w-1) y) (windows d))]
-  ++ [place (w-2) 2 (V.vertCat [scrollCell n | n<-[0..visible-1]]) | treeFocused tree, visible>=3]
+  ++ [place (w-2) 2 (V.vertCat [scrollCell n | n<-[0..visible-1]]) | treeFocused tree || treeScrollLimit d tree>0, visible>=3]
+  ++ [place 1 1 (label (attr cyan blue) cue) | not (T.null cue)]
   ++ [place 1 2 (V.vertCat (map line listing)),place 0 1 (V.charFill frame ' ' (max 0 (w-1)) h)]
   where
     w=treeWidth tree; h=max 0 (snd (screenSize d)-2-problemsHeight d); visible=treeContentRows d
     frame=attr white blue
     listing=visibleRows (treeScroll tree) visible tree
+    -- Row 1 holds no tree row, so the cue never covers a row or changes hit testing.
+    cue=case length (hiddenSections (treeScroll tree) visible tree) of
+      0->""
+      n->let full="↓ "<>T.pack (show n)<>(if n==1 then " more section" else " more sections")
+         in T.take (max 0 (w-6)) (if T.length full<=w-6 then full else "↓ "<>T.pack (show n)<>" more")
     line (i,node)=V.cropRight listWidth (leading
       V.<|> label a (" "<>shownName) V.<|> counts V.<|> V.charFill a ' ' listWidth 1)
       where

@@ -226,7 +226,7 @@ markdownDocument doc=documentLabel doc==Nothing && textBuffer (documentBuffer do
 data Command = New | Open | Download | ExportBuffer | ChangeDir | Save | SaveAs | Close | Quit | Undo | Redo | Cut | Copy | Paste
   | Find | FindNext | FindPrevious | Replace | GoTo | SelectAll | Zoom | NextWindow | PreviousWindow | Cascade | Tile
   | OpenLink LinkOrigin Text | SplitVertical | SplitHorizontal | ToggleTerminalPin | About | Help | EditorOptions | ChatInputOptions | Gallery
-  | InspectType | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
+  | InspectType | InspectSymbol | Definition | Complete | Problems | NextMessage | PreviousMessage | RestartHLS | RenameSymbol | CodeActions
   | ProjectBrowser | ToggleTree | GitDiff | GitCommit | GitFetch | GitPull | GitMerge | ReviewDisk
   | CompileTarget | MakeTarget | StopBuild | RunTarget | RunOptions | OpenTerminal | StopTerminal
   | AgentChoose | FormChoice !Form.FormRef !Integer !Int
@@ -241,7 +241,7 @@ data Command = New | Open | Download | ExportBuffer | ChangeDir | Save | SaveAs 
   | DialogFocusNext | DialogFocusPrevious | DialogAccept | DialogCancel
   | DeleteBackward | DeleteForward | DeleteLine | DeleteSelection
   | WordStarBlockPrefix | WordStarQuickPrefix | MarkBlockStart | MarkBlockEnd
-  | SidebarMove Int | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
+  | SidebarMove Int | SidebarSection Int | SidebarEdge Bool | SidebarActivate | SidebarExpand | SidebarCollapse | FocusSource | MessagesMove Int | MessagesPage Int
   | ToolchainOptions | SelectToolchain Toolchain | SelectCompiler Text
   | DebugCommand Text | AutocompleteCommand Text
   | TreeCommand [Tree.TreeHit] CommandRef
@@ -276,7 +276,7 @@ data ContextTarget = WindowRowTarget !PluginWindow.WindowRef !Tree.NodeId | Side
   , sourceTargetSelection :: !Selection, sourceTargetRow :: !Int
   , sourceTargetExpression :: !(Maybe Text), sourceTargetFile :: !(Maybe FilePath) } | ChoicePopupContextTarget !ChoicePopupTarget | MessagesTarget !Integer !Int !(Maybe (FilePath,Int,Int)) | UnavailableMessagesTarget | UnavailableSourceTarget deriving (Eq,Show)
 
-data LanguageAction = TypeInfo | FindDefinition | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
+data LanguageAction = TypeInfo | FindDefinition | ExamineSymbol | GoToSite !FilePath !Int !Int !Text | Completions | ShowProblems | RestartLanguage | RenameAt Text | RequestCodeActions | ApplyCodeAction Int Int Text deriving (Eq,Show)
 data Completion = Completion Text [(Int,Int,Text)] deriving (Eq,Show)
 data ProjectAction = LoadProject | ProjectPage Int Int | ProjectDetails Int Int deriving (Eq,Show)
 -- | Existing build operation selected by the admitted host command.
@@ -426,7 +426,7 @@ menus =
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
       mi "Assisted debugging…" "" (DebugCommand "assist"),mi "Exceptions..." "" (DebugCommand "exceptions"),mi "Exception details" "" (DebugCommand "exception-info"),mi "Output" "" (DebugCommand "output"),mi "Disconnect" "" (DebugCommand "disconnect")])
-  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" AgentChoose,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
+  ,("Tools",'t',[mi "File tree" "Ctrl+B" ToggleTree,mi "Git diff..." "" GitDiff,mi "Approve changes..." "" GitCommit,mi "Inspect type" "Shift+F1" InspectType,mi "Inspect symbol" "Shift+F12" InspectSymbol,mi "Code actions..." "" CodeActions,mi "Messages" "" Problems,mi "Go to next" "Alt+F8" NextMessage,mi "Go to previous" "Alt+F7" PreviousMessage,mi "Restart language server" "" RestartHLS,mi "Conversation" "Ctrl+Shift+C" Conversation,mi "Agents..." "" AgentDirectory,mi "Conversation model..." "" AgentChoose,mi "Cancel reply" "" AgentCancel,mi "Resume session..." "" AgentResume,mi "New conversation" "Ctrl+Shift+N" AgentNew,mi "Copy raw conversation" "" AgentCopyRaw,mi "Widget gallery..." "" Gallery,mi "Project browser..." "" ProjectBrowser,mi "Downloads..." "" (DebugCommand "downloads")])
   ,("Options",'o',[mi "Preferences..." "" EditorOptions,mi "Environment..." "" EnvironmentOptions,mi "Chat input..." "" ChatInputOptions,mi "Autocomplete..." "" (AutocompleteCommand "settings"),mi "Agents..." "" AgentOptions,mi "Agent Permissions" "" AgentPermissions,mi "Agent Context..." "" AgentGuidance,mi "Reload keybindings" "" ReloadBindings,mi "Inspect keybindings" "" InspectBindings])
   ,("Window",'w',[mi "Agents..." "" AgentDirectory,mi "Tile" "" Tile,mi "Cascade" "" Cascade,mi "Split vertically" "" SplitVertical,mi "Split horizontally" "" SplitHorizontal,mi "Zoom" "F5" Zoom,mi "Pin / unpin terminal" "" ToggleTerminalPin,mi "Next" "F6" NextWindow,mi "Close" "Alt+F3" Close,mi "" "" (Disabled ""),mi "Current" "" (SetBufferView CurrentView),mi "Changes" "" (SetBufferView ChangesView),mi "Only Changes" "" (SetBufferView OnlyChangesView),mi "Side by Side" "" (SetBufferView SideBySideView),mi "Markdown" "" (SetBufferView MarkdownView)])
   ,("Help",'h',[mi "Contents" "F1" Help,mi "About hide..." "" About])]
@@ -538,6 +538,8 @@ commandDescription cmd = case cmd of
   InspectBindings -> "Show every effective command binding for the focused profile and context."
   TreeCommand _ _ -> "Run the captured sidebar action."
   SidebarMove _ -> "Move the selected sidebar row."
+  SidebarSection _ -> "Select the next or previous sidebar section header."
+  SidebarEdge _ -> "Select the first or last sidebar row."
   SidebarActivate -> "Open the selected file or toggle its directory."
   SidebarExpand -> "Expand the selected directory or open its file."
   SidebarCollapse -> "Collapse the selected directory or select its parent."
@@ -614,6 +616,7 @@ commandDescription cmd = case cmd of
   About -> "Show information about hide, the Haskell IDE."; Help -> "Open the read-only help document."
   EditorOptions -> "Change key bindings, cursor appearance, and graphical screen mode."; Gallery -> "Try the available dialog controls."
   InspectType -> "Ask HLS for type information at the cursor."
+  InspectSymbol -> "Inspect the symbol at the cursor: its type, definitions and references."
   Definition -> "Go to the symbol's definition using HLS."
   Complete -> "Choose an identifier completion from HLS."
   Problems -> "Show or hide Messages; select a diagnostic to visit it."
@@ -771,6 +774,8 @@ commandEnabled d cmd | sourceKeyCommand cmd = sourceNavigationOwner d &&
   (cmd `notElem` [DeleteLine,DeleteSelection] || not (activeHex d))
 commandEnabled _ Disabled{} = False
 commandEnabled d SidebarMove{} = maybe False treeFocused (sideTree d)
+commandEnabled d SidebarSection{} = maybe False treeFocused (sideTree d)
+commandEnabled d SidebarEdge{} = maybe False treeFocused (sideTree d)
 commandEnabled d cmd | cmd `elem` [SidebarActivate,SidebarExpand,SidebarCollapse] = maybe False treeFocused (sideTree d)
 commandEnabled d MessagesMove{} = problemsFocused d
 commandEnabled d MessagesPage{} = problemsFocused d
@@ -817,7 +822,7 @@ markdownSourceCommand cmd=sourceOnlyCommand cmd && cmd `notElem` [Save,SaveAs,Do
 
 sourceOnlyCommand :: Command -> Bool
 sourceOnlyCommand cmd=horizontalMutation cmd || cmd `elem` [Save,SaveAs,Download,ExportBuffer,Undo,Redo,Cut,Paste,Find,FindNext,FindPrevious,Replace,GoTo,
-  InspectType,Definition,Complete,RenameSymbol,CodeActions,ToggleHex,SplitVertical,SplitHorizontal]
+  InspectType,InspectSymbol,Definition,Complete,RenameSymbol,CodeActions,ToggleHex,SplitVertical,SplitHorizontal]
 
 -- | Shared current-state gate for menu invocations and frontend hints. Queued
 -- events must check this again when consumed; a painted enabled state is a hint.
@@ -1503,6 +1508,12 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go (SidebarMove delta) d = case sideTree d of
       Just tree | treeFocused tree -> moveTree delta tree d
       _ -> (d,[])
+    go (SidebarSection direction) d = case sideTree d of
+      Just tree | treeFocused tree -> sectionTree direction tree d
+      _ -> (d,[])
+    go (SidebarEdge end) d = case sideTree d of
+      Just tree | treeFocused tree -> selectTreeRow (if end then M.size (treeRows tree)-1 else 0) tree d
+      _ -> (d,[])
     go SidebarActivate d = maybe (d,[]) (\tree->activateTree False (treeSelected tree) d) (sideTree d)
     go SidebarExpand d = maybe (d,[]) (\tree->activateTree True (treeSelected tree) d) (sideTree d)
     go SidebarCollapse d = maybe (d,[]) (\tree->collapseTree tree d) (sideTree d)
@@ -1638,6 +1649,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go SplitHorizontal d = splitWindow False d
     go About d = (message "About hide" ["hide  0.1", "Haskell IDE", "", "Copyright (c) 2026 Edward Kmett"] d,[])
     go InspectType d = (d,[LanguageRequest TypeInfo])
+    go InspectSymbol d = (d,[LanguageRequest ExamineSymbol])
     go CodeActions d = (d,[LanguageRequest RequestCodeActions])
     go RenameSymbol d = (prompt "Rename symbol" Renaming [Input "New name" "" 0] d,[])
     go Definition d = (d,[LanguageRequest FindDefinition])
@@ -2119,7 +2131,7 @@ handleEventCore event d = Bifunctor.first (layoutComposer d . clampReviewWindows
 
 dispatchEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 dispatchEvent (V.EvResize sw sh) d =
-  (layoutBottomWindows resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,
+  (fitTreeScroll $ layoutBottomWindows resized {windows=map resize (windows d),drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,
     menu=Nothing,contextMenu=Nothing,buttonHover=Nothing,buttonPressed=Nothing},[])
   where
     resized=d {screenSize=(max 1 sw,max 3 sh),
@@ -2914,7 +2926,7 @@ contextItems (LinkContext command) = [("Open",command)]
 contextItems (ShellContext command) = [("Execute in terminal",command)]
 contextItems (ChangeContext command) = ("Revert this change",command):contextItems SourceContext
 contextItems WindowRowsContext = []
-contextItems SourceContext = [("Copy Location",CopyLocation),("Export buffer copy…",ExportBuffer),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Complete identifier",Complete)]
+contextItems SourceContext = [("Copy Location",CopyLocation),("Export buffer copy…",ExportBuffer),("Rename symbol...",RenameSymbol),("Code actions...",CodeActions),("Go to definition",Definition),("Inspect type",InspectType),("Inspect symbol",InspectSymbol),("Complete identifier",Complete)]
 contextItems MessagesContext = [("Go to source",GoToMessage),("Copy message",Copy),("Copy all messages",CopyAllMessages),("Hide Messages",Problems)]
 contextItems (FormChoicesContext _ _ items) = items
 contextItems SubmittedChoicesContext{} = []
@@ -3951,6 +3963,7 @@ keyEvent key mods d
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, key==V.KChar 'x' = runCommand Quit d
   | V.MAlt `elem` mods, key==V.KFun 3 = runCommand Close d
   | key==V.KFun 1, V.MShift `elem` mods = runCommand InspectType d
+  | key==V.KFun 12, V.MShift `elem` mods = runCommand InspectSymbol d
   | key==V.KFun 12 = runCommand Definition d
   | ctrl, key==V.KChar ' ' = runCommand Complete d
   | key==V.KFun 1 = runCommand Help d
@@ -4797,7 +4810,7 @@ activateTree forceOpen index d=case sideTree d of
       RetryLoad->expand Nothing
       LoadNext cursor->expand (Just cursor)
       ActivateNode | Tree.infoBranch (rowInfo row)->case M.lookup (keyOf (rowHit row)) (treeNodes chosen) of
-        Just node | stateExpanded node && not forceOpen->(selected {sideTree=Just (collapseAt index (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
+        Just node | stateExpanded node && not forceOpen->(fitTreeScroll selected {sideTree=Just (collapseAt index (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
                   | stateExpanded node->(selected,[])
                   | Loaded{}<-stateLoad node->(selected {sideTree=Just chosen {treeNodes=M.adjust (\value->value {stateExpanded=True}) (keyOf (rowHit row)) (treeNodes chosen),treeRevision=treeRevision chosen+1}},[])
         _->expand Nothing
@@ -4811,6 +4824,8 @@ activateTree forceOpen index d=case sideTree d of
 
 treeKey :: V.Key -> [V.Modifier] -> Sidebar -> Desktop -> (Desktop,[Effect])
 treeKey key mods tree d = case key of
+  V.KUp | V.MCtrl `elem` mods -> sectionTree (-1) tree d
+  V.KDown | V.MCtrl `elem` mods -> sectionTree 1 tree d
   V.KUp -> move (-1)
   V.KDown -> move 1
   V.KPageUp -> move (-10)
@@ -4831,6 +4846,10 @@ treeKey key mods tree d = case key of
     move delta=moveTree delta tree d
     leave=(d {sideTree=Just tree {treeFocused=False}},[])
 
+-- | Select the nearest section header in a direction; the viewport follows the selection.
+sectionTree :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
+sectionTree direction tree d=maybe (d,[]) (\i->selectTreeRow i tree d) (adjacentSection direction (treeSelected tree) tree)
+
 moveTree :: Int -> Sidebar -> Desktop -> (Desktop,[Effect])
 moveTree delta tree d = selectTreeRow (treeSelected tree+delta) tree d
 
@@ -4846,7 +4865,7 @@ selectTreeRow i tree d = (d {sideTree=Just intent {treeSelected=chosen,treeScrol
 collapseTree :: Sidebar -> Desktop -> (Desktop,[Effect])
 collapseTree tree d=case rowAt (treeSelected tree) tree of
   Just row | rowExpanded row->let chosen=dismissRecoveryAnchors tree
-    in (d {sideTree=Just (collapseAt (treeSelected tree) (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
+    in (fitTreeScroll d {sideTree=Just (collapseAt (treeSelected tree) (maybe chosen (`dismissRecoveryBranch` chosen) (Tree.infoResource (rowInfo row))))},[])
   Just row | Just node<-M.lookup (keyOf (rowHit row)) (treeNodes tree), Just parent<-stateParent node->
     let ancestor=M.lookup parent (treeNodes tree) >>= (\value->M.lookupIndex (stateAddress value) (treeRows tree))
     in maybe (d,[]) (\index->selectTreeRow index tree d) ancestor
@@ -4854,6 +4873,10 @@ collapseTree tree d=case rowAt (treeSelected tree) tree of
 
 treeContentRows :: Desktop -> Int
 treeContentRows d = max 0 (snd (screenSize d)-4-problemsHeight d)
+
+-- | Rows removed by a collapse, reload or resize must not leave the viewport past the end.
+fitTreeScroll :: Desktop -> Desktop
+fitTreeScroll d=d {sideTree=fmap (\t->t {treeScroll=min (treeScroll t) (treeScrollLimit d t)}) (sideTree d)}
 
 treeScrollLimit :: Desktop -> Sidebar -> Int
 treeScrollLimit d tree = max 0 (M.size (treeRows tree)-treeContentRows d)
@@ -4868,7 +4891,8 @@ treeMouse x y button tree d = case button of
         actions=[(title,case target of Tree.RegisteredAction action->TreeCommand trace action; Tree.ResourceLink path targetText->OpenLink (SourceLink (Just path)) targetText) | (title,target)<-rowActions row]
     in (openContext (TreeContext trace actions) x (y+1) d {sideTree=Just tree {treeFocused=True},problemsFocused=False},[])
   V.BLeft | y==1 && x>=treeWidth tree-5 && x<treeWidth tree-1 -> (setTree Nothing d,[])
-          | x==treeWidth tree-2 && y>=2 && y<sh-2 && treeFocused tree && treeContentRows d>=3 ->
+          | y==1 && x>=1 && x<treeWidth tree-5, target:_<-hiddenSections (treeScroll tree) (treeContentRows d) tree -> (scrollTreeTo target tree d,[])
+          | x==treeWidth tree-2 && y>=2 && y<sh-2 && (treeFocused tree || treeScrollLimit d tree>0) && treeContentRows d>=3 ->
               let offset=y-2; len=treeContentRows d; thumb=scrollbarThumb len (treeScrollLimit d tree) (treeScroll tree)
                   step | offset==0 = -1 | offset==len-1 = 1 | offset<thumb = negate len | otherwise = len
               in if offset==thumb then (d {drag=Just TreeScrolling},[]) else (scrollTreeTo (treeScroll tree+step) tree d,[])
