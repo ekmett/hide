@@ -8,7 +8,7 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 
-module HighlightingCheck (checks) where
+module HighlightingCheck (checks, collectionChecks) where
 import AllocationProfile (AllocationProfile, withinBudget)
 
 import EditorFixture (withEditorFixture,withEditorTextFixture,withAutocompleteFixture)
@@ -19,7 +19,10 @@ import Data.IORef
 import Data.Foldable (toList)
 import GHC.Conc (getAllocationCounter)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromJust,isJust)
+import Data.Maybe (fromJust,isJust,isNothing)
+import Data.Unique (newUnique,hashUnique)
+import System.Mem (performGC)
+import System.Mem.Weak (mkWeakPtr,deRefWeak)
 import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import qualified Data.Sequence as Seq
@@ -34,6 +37,23 @@ import Hide.Model
 import Hide.Render (snapshot,snapshotHtml,renderCellRows)
 import Hide.Unicode (CellSpan(..))
 import Hide.Syntax
+
+-- Dropping an unseen buffer must release it even when there is no highlighting
+-- work to consume a deferred cache update. The service stays live through GC.
+collectionChecks :: IO ()
+collectionChecks=withHighlightingUsing (pure ()) (\_ _->error "unexpected highlighting request") $ \runtime->do
+  weak<-do
+    ident<-hashUnique <$> newUnique
+    buffer<-evaluate (newBuffer (T.pack (show ident)))
+    weak<-mkWeakPtr buffer Nothing
+    let hidden=(addDocument Nothing buffer (initialDesktop (80,25))) {windows=[]}
+    _<-tickHighlighting runtime hidden >>= evaluate . M.size . buffers
+    pure weak
+  forM_ [1..4::Int] $ \_->tickHighlighting runtime (initialDesktop (80,25)) >>= evaluate . M.size . buffers
+  performGC
+  gone<-isNothing <$> deRefWeak weak
+  check "highlighting releases closed buffers without another source request" gone
+  tickHighlighting runtime (initialDesktop (80,25)) >>= evaluate . M.size . buffers >> pure ()
 
 checks :: AllocationProfile -> IO ()
 checks profile = withEditorTextFixture "" "reply" (initialDesktop (100,35)) $ \chatBase->do
