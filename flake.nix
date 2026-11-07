@@ -87,7 +87,7 @@
       all = forAllSystems perSystem;
     in {
       packages = forAllSystems (system: (all.${system}).packages);
-      checks = forAllSystems (system: (all.${system}).apps);
+      checks = forAllSystems (system: (all.${system}).checks);
       apps = forAllSystems (system: (all.${system}).apps);
       devShells = forAllSystems (system: (all.${system}).devShells);
     };
