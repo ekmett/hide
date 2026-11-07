@@ -872,6 +872,7 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       check "conversation wide headings budget physical rows and retain the next logical row"
         (geometry first && geometry scrolled && case conversationAnchor (retained scrolled) of
           At (QuestionPoint _ 0 scalar)->scalar>0
+          AtRow (QuestionPoint _ 0 scalar) _->scalar>0
           _->False)
       let selected=fst (runCommand (CursorDown True) (fst (runCommand (CursorRowStart False) scrolled)))
           logicalSelection=conversationReplySelection (retained selected)
@@ -903,9 +904,12 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
          shownPoint 0 pagedDown/=Nothing && shownPoint 0 pagedDown==shownPoint (bodyRows reflowed-1) reflowed && shownPoint 0 pagedUp==shownPoint 0 reflowed)
       following<-await runtime "wide heading End before paging" caretReady (fst (runCommand (CursorDocumentEnd False) reflowed))
       endDown<-await runtime "wide heading Page Down at End" caretReady (fst (runCommand (CursorPageDown False) following))
-      endUp<-await runtime "wide heading Page Up from End" caretReady (fst (runCommand (CursorPageUp False) following))
+      let pendingUp=fst (runCommand (CursorPageUp False) following)
+      endUp<-await runtime "wide heading Page Up from End" caretReady pendingUp
+      endAgain<-await runtime "wide heading opposite pages at End" caretReady (fst (runCommand (CursorPageDown False) pendingUp))
       check "page movement at the followed end keeps the end caret and pages back with one overlap row"
         (conversationAnchor (retained following)==FollowEnd && conversationReplySelection (retained endDown)==conversationReplySelection (retained following) &&
+         conversationReplySelection (retained endAgain)==conversationReplySelection (retained following) &&
          shownPoint 0 following/=Nothing && shownPoint (bodyRows following-1) endUp==shownPoint 0 following)
       paged<-await runtime "wide heading Shift Page Down" caretReady pageTwice
       check "page movement preserves an offscreen logical extension anchor"
@@ -1203,6 +1207,50 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
     (secondFile,secondBuffer)<-loadFile secondSource >>= either error pure
     (file,b)<-loadFile source >>= either error pure
     let desktop=insertText "unsaved " (addDocument (Just file) b (addDocument (Just secondFile) secondBuffer (initialDesktop (90,28))) {sideTree=Just (emptySidebar root 20 False)})
+    forM_ [24,48] $ \columns -> forM_
+      ["```sh\necho first\n\n\necho second\n```",
+       "| Long heading | Other |\n|---|---|\n| A long wrapped value with 界 | Another wrapped value |"] $ \sourceText ->
+      C.withConsoles $ \consoles -> withConversation (ProviderPlugin.pluginAgentProvider Hide.AgentUI.plugin) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) (Just ConversationInput.childInput) consoles $ \runtime -> do
+        configured<-configure runtime ("yes"::T.Text) (initialDesktop (columns,1005))
+        completed<-prompt runtime ("paging\n"<>TE.decodeUtf8 (BL.toStrict (encode (sourceText::T.Text)))) configured >>= done runtime
+        -- Each fresh session receives exactly one incoming response to its only
+        -- prompt. Its adopted incoming span identifies this fixture operation.
+        shown<-await runtime "paging response adopted" (\d->any (\(_,_,_,outgoing)->not outgoing)
+          (Vec.toList (W.preparedWindowMessages (targetBody "" d)))) completed
+        let large=modifyActive (\w->w {bounds=Rect 0 1 columns 1000}) shown
+        complete<-bodyEdge runtime "" False large
+        let text=W.preparedWindowText (targetBody "" complete)
+            expected=case bodyViewportFor complete "" of
+              Just viewport->[contentLineAt text row | row<-[0..Vec.length (viewportRows viewport)-1]]
+              Nothing->error "Missing complete paging body"
+            small=modifyActive (\w->w {bounds=Rect 0 1 columns 5}) complete {screenSize=(columns,18)}
+            previous=conversationBodySnapshot "" complete
+            retained d=conversationViews d M.! ""
+            ready d=conversationRowShift (retained d)==0 && conversationCaretIntent (retained d)==Nothing
+            topLines d=case (bodyViewportFor d "",activeWindow d >>= windowPluginText d) of
+              (Just viewport,Just body)->[contentLineAt (W.preparedWindowText body) row |
+                row<-[viewportScroll viewport..min (Vec.length (viewportRows viewport)-1) (viewportScroll viewport+1)]]
+              _->[]
+            page forward extend d=await runtime "decorated transcript page" ready
+              (fst (runCommand (if forward then CursorPageDown extend else CursorPageUp extend) d))
+            assertPage index d=check "paging retains every physical code/table row in both directions"
+              (topLines d==take 2 (drop index expected))
+        first<-await runtime "two-row paging body" (\d->ready d && conversationBodySnapshot "" d/=previous) small
+        assertPage 0 first
+        lastPage<-foldM (\d index->do next<-page True False d; assertPage index next; pure next) first [1..length expected-1]
+        original<-foldM (\d index->do next<-page False False d; assertPage index next; pure next) lastPage [length expected-2,length expected-3..0]
+        let cancelled=fst (runCommand (CursorPageUp False) (fst (runCommand (CursorPageDown False) original)))
+        settled<-await runtime "cancelled decorated page" ready cancelled
+        assertPage 0 settled
+        selected<-foldM (\d _->page True True d) original [1..3::Int]
+        let selectedRange=conversationReplySelection (retained selected)
+            resized=modifyActive (\w->w {bounds=(bounds w) {width=72}}) selected {screenSize=(72,18)}
+        reflowed<-await runtime "decorated page reflow" (bodyAtWidth "") resized
+        stable<-tickConversation runtime reflowed
+        check "reflow retains logical selection and a stable physical viewport"
+            (conversationReplySelection (retained reflowed)==selectedRange &&
+             conversationAnchor (retained stable)==conversationAnchor (retained reflowed) &&
+             maybe False (\viewport->viewportScroll viewport<Vec.length (viewportRows viewport)) (bodyViewportFor stable ""))
     -- Each guarded peer owns its request log and source. Its protocol responses
     -- identify admission; HUD text and another scenario's replies are irrelevant.
     forM_ [Warden.WardenObserve,Warden.WardenEnforce] $ \mode->do
@@ -1605,6 +1653,36 @@ checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \prese
       check "conversation preserves Markdown styling" (any ((==BubbleText 1 False (BoldStyle Keyword)).snd) (conversationHighlight streamed))
       check "tool update merges pending record" (T.count "[completed] Local tool" (conversationText streamed)==1 && not ("[pending] Local tool" `T.isInfixOf` conversationText streamed))
       check "tool activity starts collapsed without raw arguments" (not ("rawInput" `T.isInfixOf` conversationText streamed) && "▸" `T.isInfixOf` conversationText streamed)
+      firstPage<-bodyEdge runtime "" False streamed
+      let twoRows=modifyActive (\w->w {bounds=(bounds w) {height=5}}) firstPage
+          page forward d=await runtime "page across transcript separator" pageReady
+            (fst (runCommand (if forward then CursorPageDown False else CursorPageUp False) d))
+          pageReady d=case M.lookup "" (conversationViews d) of
+            Just view->conversationRowShift view==0 && conversationCaretIntent view==Nothing
+            _->False
+          topRow d=do
+            viewport<-bodyViewportFor d ""
+            bodyRowPoint <$> (viewportRows viewport Vec.!? viewportScroll viewport)
+      check "two-row transcript paging fixture"
+        (maybe False ((==2).pluginBodyRows twoRows) (activeWindow twoRows))
+      separatorPage<-page True twoRows
+      let anchor d=conversationAnchor <$> M.lookup "" (conversationViews d)
+          pagingCheckpoint=root </> "paging-checkpoint.json"
+      writeCheckpoint pagingCheckpoint separatorPage >>= either (error.T.unpack) pure
+      restoredPage<-readCheckpoint pagingCheckpoint desktop >>= either (error.T.unpack) pure
+      check "checkpoint retains a transcript separator anchor" (anchor restoredPage==anchor separatorPage)
+      nextPage<-page True separatorPage
+      previousPage<-page False nextPage
+      originalPage<-page False previousPage
+      check "paging traverses the same transcript separator in both directions"
+        (topRow separatorPage==Just Nothing && topRow previousPage==Just Nothing &&
+          case (topRow twoRows,topRow nextPage,topRow originalPage) of
+            (Just (Just first),Just (Just next),Just (Just original))->first/=next && first==original
+            _->False)
+      let roundTrip=fst (runCommand (CursorPageUp False) (fst (runCommand (CursorPageDown False) originalPage)))
+      unchangedPage<-await runtime "opposite page requests before presentation" pageReady roundTrip
+      check "opposite pending page requests settle on the original viewport"
+        (topRow unchangedPage==topRow originalPage)
       let selectedChat=draftAt (newBuffer "retained draft") (Selection 2 2) streamed
           selectedWindow=fromMaybe (error "missing live copy frame") (activeWindow selectedChat)
           selectedBody=targetBody "" selectedChat
@@ -2296,6 +2374,9 @@ providerScript=unlines
   , "      finish()"
   , "    elif scenario.startswith('Human answer to ask_user question '): finish()"
   , "    elif scenario=='```': finish()"
+  , "    elif scenario=='paging':"
+  , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':json.loads(params['prompt'][0]['text'].splitlines()[1])}})"
+  , "      finish()"
   , "    elif scenario=='wide':"
   , "      update({'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':('reply-width '*90)+'\\n\\n```sh\\nprintf \\\'live λ\\\'\\n```'}})"
   , "      finish()"

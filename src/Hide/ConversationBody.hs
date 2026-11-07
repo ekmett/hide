@@ -1,4 +1,4 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BangPatterns,OverloadedStrings #-}
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 -- | Module      : Hide.ConversationBody
 -- Copyright   : (c) Edward Kmett 2026
@@ -35,7 +35,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import qualified Data.Set as S
 import System.FilePath ((</>))
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe,isNothing)
 import Control.Applicative ((<|>))
 import Data.List (mapAccumL,find)
 import qualified Data.List as List
@@ -90,7 +90,9 @@ instance Ord BodyPoint where
         | block<=(-3)=(1,token,1,(-3)-block,scalar)
         | block==(-1)=(1,token,2,0,scalar)
         | otherwise=(1,token,3,0,scalar)
-data BodyAnchor = At !BodyPoint | FollowEnd | WithinItem !BodyItemId !Int deriving (Eq,Show)
+-- A physical row retains its occurrence at a logical scalar boundary. Negative
+-- offsets name adjacent furniture before that boundary, independently of carets.
+data BodyAnchor = At !BodyPoint | AtRow !BodyPoint !Int | FollowEnd | WithinItem !BodyItemId !Int deriving (Eq,Show)
 data BodySelection = BodySelection !BodyPoint !BodyPoint deriving (Eq,Show)
 
 -- A signed row request is relative to the containing logical row, never an
@@ -567,8 +569,9 @@ prepareConversationBody (BodyRequest key input)=do
 prepareRenderedBody :: Bool -> BodyDisplay -> BodyInput -> LogicalBody -> IO (Either Text (W.PreparedWindow,Maybe TextLayout,HostBodyControls))
 prepareRenderedBody inert key input logical=case demandedRows key input logical of
     Left message->pure (Left message)
-    Right (pending,scroll,atEnd,demandRow)->do
-      let rows=[StyledRow sigils (if null rest then Nothing else Just Plain) messages
+    Right (located,scroll,atEnd,demandRow)->do
+      let pending=map snd located
+          rows=[StyledRow sigils (if null rest then Nothing else Just Plain) messages
             | (PendingRow _ mapped _ _ _,rest)<-withTail pending,let StyledRow sigils _ messages=mappedStyledRow mapped]
           (_,receipts)=mapAccumL receipt 0 (zip pending rows)
           actions=[(bodyRowPaintStart row+a,bodyRowPaintStart row+z,name,values)
@@ -594,8 +597,10 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
           semantics=W.TextSemantics (W.CopyMessages (if T.null (displayTarget key) then W.UserBotAttribution else W.NoAttribution))
             (if inert then Nothing else Just (bodyProject input </> "conversation.md")) (if inert then V.empty else V.fromList links) (if inert then V.empty else V.fromList shells) W.ReadableWindow
             (V.fromList (sessionHidden++guestHidden)) (V.fromList sessionHidden) (V.fromList (sessionHidden++questionHidden))
-          BodyDemand requested _ _=displayDemand key
-          anchor=case requested of FollowEnd | let BodyDemand _ delta _=displayDemand key,delta>=0->FollowEnd; _->maybe requested At (bodyRowPoint =<< listAt scroll receipts)
+          BodyDemand requested delta _=displayDemand key
+          anchor=case requested of
+            FollowEnd | delta>=0->FollowEnd
+            _->case drop scroll located of (actual,_):_->actual; _->requested
           progress@(position,limit)=logicalProgress logical anchor
           viewport=BodyViewport (V.fromList receipts) anchor scroll demandRow atEnd progress
           controls=if inert then HostBodyControls Nothing (Just viewport) Nothing [] else HostBodyControls questionToken (Just viewport) projected actions
@@ -626,11 +631,10 @@ prepareRenderedBody inert key input logical=case demandedRows key input logical 
     -- block share one visible action span without comparing source text.
     sameShellBlock (_,PendingRow (Just a) _ _ _ (Just _)) (_,PendingRow (Just z) _ _ _ (Just _))=sameBlock a z
     sameShellBlock _ _=False
-    listAt index rows=case drop index rows of first:_->Just first; _->Nothing
 
 -- Locate by item/block metadata, not accumulated prior row heights. A missing
 -- anchor is refused rather than redirected to a different surviving item.
-demandedRows :: BodyDisplay -> BodyInput -> LogicalBody -> Either Text ([PendingRow],Int,Bool,Int)
+demandedRows :: BodyDisplay -> BodyInput -> LogicalBody -> Either Text ([(BodyAnchor,PendingRow)],Int,Bool,Int)
 demandedRows key input logical=case anchor of
   WithinItem ident fraction->do
     point<-withinItemPoint logical ident fraction
@@ -638,34 +642,61 @@ demandedRows key input logical=case anchor of
   FollowEnd->let rows=ending (budget+max 0 (-delta))
                  scroll=max 0 (min (max 0 (length rows-height)) (length rows-height+delta))
              in Right (take (scroll+budget) rows,scroll,scroll+height>=length rows,scroll)
-  At point->do
-    (index,block,rows)<-locate point
-    let (prior,selectedPairs)=break (\(row,rest)->contains (anchorPoint index block point) row || null rest && endsAt (anchorPoint index block point) row) (withTail rows)
-        -- Source replacement may shorten a surviving item's selected block.
-        -- Clamp within that item, never redirect an evicted ID to its neighbor.
-        selected=if null selectedPairs then lastRows 1 rows else map fst selectedPairs
-        before=if null selectedPairs then take (max 0 (length prior-1)) (map fst prior) else map fst prior
-        needed=max 0 (-delta)
-        nearby=lastRows needed before
-        prefix=preceding (needed-length nearby) index block++nearby
-        combined=prefix++selected++following index block
-        start=max 0 (length prefix+delta)
-        remaining=drop start combined
-        shown=take (height+2) remaining
-        ended=length (take (height+1) remaining)<=height
-    if null selected then Left "The anchored conversation position is no longer present."
-      -- Ordinary anchors retain the requested top row even near EOF. Only
-      -- explicit FollowEnd fills backwards from history. A forward movement
-      -- past EOF clamps to the final row already demanded from this anchor.
-      else if null shown then Right (lastRows 1 (take start combined),0,True,0)
-      else Right (shown,0,ended,0)
+  At point->anchored point Nothing
+  AtRow point offset->anchored point (Just offset)
   where
+    anchored point physical=do
+      (index,block,rows)<-locate point
+      let wanted=anchorPoint index block point
+          reached (_,PendingRow candidate _ _ _ _)=maybe False (>=wanted) candidate
+          matches row=case physical of
+            Just _->reached row
+            Nothing->contains wanted (snd row)
+          (prior,selectedPairs)=break (\(row,rest)->matches row || null rest && endsAt wanted (snd row)) (withTail rows)
+          exact=case selectedPairs of ((_,PendingRow candidate _ _ _ _),_):_->candidate==Just wanted; _->False
+          -- Reflow may put the old scalar inside the preceding physical row.
+          overshot=case (physical,selectedPairs) of
+            (Just _,((_,PendingRow (Just actual) _ _ _ _),_):_)->actual>wanted && not (null prior)
+            _->False
+          selected | overshot=lastRows 1 (map fst prior)++map fst selectedPairs
+                   | null selectedPairs=lastRows 1 rows
+                   | otherwise=map fst selectedPairs
+          before | overshot || null selectedPairs=take (max 0 (length prior-1)) (map fst prior)
+                 | otherwise=map fst prior
+          offset=fromMaybe 0 physical
+          occurrence=if exact then min (max 0 offset) (length (take (max 0 offset+1) (takeWhile (samePoint wanted) selected))-1) else 0
+          distance=max 0 (-offset)
+          needed=distance+max 0 (-delta)
+          nearby=lastRows needed before
+          prefix=preceding (needed-length nearby) index block++nearby
+          unselectable (_,PendingRow candidate _ _ _ _)=isNothing candidate
+          retained=length (takeWhile unselectable (take distance (reverse prefix)))
+          combined=prefix++selected++following index block
+          start=max 0 (length prefix+occurrence+delta-retained)
+          remaining=drop start combined
+          shown=take (height+2) remaining
+          ended=length (take (height+1) remaining)<=height
+      if null selected then Left "The anchored conversation position is no longer present."
+        else if null shown then Right (lastRows 1 (take start combined),0,True,0)
+        else Right (shown,0,ended,0)
+    samePoint point (_,PendingRow candidate _ _ _ _)=candidate==Just point
+    -- Attach only local source coordinates while streaming this demanded block.
+    -- Consecutive equal scalar starts include code/table furniture and blank rows.
+    locatedRows=annotate Nothing 0
+      where
+        annotate _ _ []=[]
+        annotate previous !occurrence (row@(PendingRow point _ _ _ _):rest)=case point of
+          Just actual->let next=if point==previous then occurrence+1 else 0
+                       in (AtRow actual next,row):annotate point next rest
+          Nothing->case annotate previous occurrence rest of
+            annotated@((AtRow actual offset,_):_)->(AtRow actual (offset-1),row):annotated
+            annotated->(FollowEnd,row):annotated
     BodyDemand anchor delta requested=displayDemand key
     height=max 1 requested
     budget=height+2
     items=logicalBodyItems logical
     count=V.length items
-    questionRows=case bodyQuestion input of Nothing->[]; Just schema->questionPendingRows key schema
+    questionRows=case bodyQuestion input of Nothing->[]; Just schema->locatedRows (questionPendingRows key schema)
     locate (BodyPoint ident block _)=do
       index<-maybe (Left "The anchored conversation item is no longer present.") Right (logicalBodyItemIndex ident logical)
       let item=items V.! index; selectedBlock=min (blockCount item-1) block
@@ -676,7 +707,7 @@ demandedRows key input logical=case anchor of
       _->Left "The anchored question is no longer present."
     anchorPoint _ block (BodyPoint ident actual scalar)=BodyPoint ident block (if block==actual then scalar else maxBound)
     anchorPoint _ _ point=point
-    sameQuestionBlock block (PendingRow (Just (QuestionPoint _ actual _)) _ _ _ _)=actual==block
+    sameQuestionBlock block (_,PendingRow (Just (QuestionPoint _ actual _)) _ _ _ _)=actual==block
     sameQuestionBlock _ _=False
     following index block
       | index>=count=dropWhile (sameQuestionBlock block) (dropWhile (not . sameQuestionBlock block) questionRows)
@@ -685,14 +716,17 @@ demandedRows key input logical=case anchor of
                     itemSeparator index++itemsFrom (nextItem index)++questionRows
     ending needed
       | not (null questionRows)=let tailRows=lastRows needed questionRows in takeEnd (needed-length tailRows) (count-1)++tailRows
-      | count==0=[PendingRow Nothing (plainMapped Comment (if T.null (displayTarget key) then "Session: "<>fromMaybe "not connected" (bodySession input) else "No messages yet.")) [] [] Nothing]
+      | count==0=[(FollowEnd,PendingRow Nothing (plainMapped Comment (if T.null (displayTarget key) then "Session: "<>fromMaybe "not connected" (bodySession input) else "No messages yet.")) [] [] Nothing)]
       | otherwise=takeEnd needed (count-1)
     takeEnd needed index
       | needed<=0 || index<0=[]
       | otherwise=let item=items V.! index; rows=lastBlocks needed index (blockCount item-1)
                       previous=case collapsedGroup index of Just (first,_,_)->first-1; Nothing->index-1
-                      separator=if needed>length rows && previous>=0 then itemSeparator previous else []
-                  in takeEnd (needed-length rows-length separator) previous++separator++rows
+                  in beforeItem (needed-length rows) previous++rows
+    beforeItem needed previous
+      | needed<=0 || previous<0=[]
+      | otherwise=let separator=itemSeparator previous
+                  in takeEnd (needed-length separator) previous++separator
     lastBlocks needed index block
       | needed<=0 || block<0=[]
       | otherwise=let rows=lastRows needed (rowsAt index block)
@@ -703,7 +737,7 @@ demandedRows key input logical=case anchor of
                     in takeEnd (needed-length earlier) (count-1)++earlier
       | otherwise=let prior=lastBlocks needed index (block-1)
                       previous=case collapsedGroup index of Just (first,_,_)->first-1; Nothing->index-1
-                  in takeEnd (needed-length prior) previous++prior
+                  in beforeItem (needed-length prior) previous++prior
     blankRow=PendingRow Nothing (MappedStyledRow (StyledRow Nil Nothing V.empty) 0 0 V.empty) [] [] Nothing
     itemsFrom index
       | index>=count=[]
@@ -713,7 +747,9 @@ demandedRows key input logical=case anchor of
       | nextItem index>=count=[]
       | Just (_,lastIndex,_)<-group index,nextItem index<=lastIndex=[]
       | sameSpeaker (recordContent (logicalItemRecord (items V.! index))) (recordContent (logicalItemRecord (items V.! nextItem index)))=[]
-      | otherwise=[blankRow]
+      | otherwise=case rowsAt (nextItem index) 0 of
+          (AtRow point offset,_):_->[(AtRow point (offset-1),blankRow)]
+          _->[]
     sameSpeaker (Reply a _) (Reply b _)=a==b
     sameSpeaker _ _=False
     nextItem index=case collapsedGroup index of Just (_,lastIndex,_)->lastIndex+1; Nothing->index+1
@@ -729,7 +765,8 @@ demandedRows key input logical=case anchor of
     collapsedGroup index=do
       found@(_,_,ident)<-group index
       if S.member (displayTarget key,RunExpansion ident) (bodyExpandedTools input) then Nothing else Just found
-    rowsAt index block=case collapsedGroup index of
+    rowsAt index block=locatedRows (rawRowsAt index block)
+    rawRowsAt index block=case collapsedGroup index of
       Just (first,lastIndex,ident)->[groupHeading (Just (BodyPoint (recordId (logicalItemRecord (items V.! index))) 0 0)) False first lastIndex ident]
       Nothing->case group index of
         Just (first,lastIndex,ident)->
@@ -793,13 +830,15 @@ logicalProgress logical anchor=(position,limit)
     position=case anchor of
       FollowEnd->limit
       WithinItem ident fraction->maybe 0 (\index->index*1000+max 0 (min 1000 fraction)) (logicalBodyItemIndex ident logical)
-      At QuestionPoint{}->V.length items*1000
-      At (BodyPoint ident block scalar)->case logicalBodyItemIndex ident logical of
-        Nothing->0
-        Just index->let sizes=V.map T.length (itemBlockTexts (items V.! index))
-                        total=V.sum sizes
-                        offset=V.sum (V.take (max 0 block) sizes)+max 0 scalar
-                    in index*1000+fromInteger (min 1000 (toInteger offset*1000 `div` toInteger (max 1 total)))
+      AtRow point _->pointProgress point
+      At point->pointProgress point
+    pointProgress QuestionPoint{}=V.length items*1000
+    pointProgress (BodyPoint ident block scalar)=case logicalBodyItemIndex ident logical of
+      Nothing->0
+      Just index->let sizes=V.map T.length (itemBlockTexts (items V.! index))
+                      total=V.sum sizes
+                      offset=V.sum (V.take (max 0 block) sizes)+max 0 scalar
+                  in index*1000+fromInteger (min 1000 (toInteger offset*1000 `div` toInteger (max 1 total)))
 
 blockCount :: LogicalItem -> Int
 blockCount item=max 1 (V.length (logicalItemBlocks item))

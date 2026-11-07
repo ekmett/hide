@@ -4123,17 +4123,25 @@ documentEdge end extend d
 pageMove :: Bool -> Bool -> Desktop -> Desktop
 pageMove forward extend d
   | forward,Just w<-activeWindow d,Just target<-conversationTargetFor d w,
-    maybe False (\view->conversationAnchor view==FollowEnd && conversationRowShift view>=0) (M.lookup target (conversationViews d))=conversationEdge True extend d
+    Just retained<-M.lookup target (conversationViews d),conversationAnchor retained==FollowEnd,
+    conversationRowShift retained>=negate (bodyPage w)=conversationEdge True extend d
   | Just view<-activePluginWindow d,Just w<-activeWindow d,Just target<-conversationTargetFor d w,
     Just captured<-bodyViewportFor d target,Just retained<-M.lookup target (conversationViews d)=
-      let rows=max 1 (pluginBodyRows d w-1)
+      let rows=bodyPage w
           column=snd (windowTextPosition d w (PluginWindow.preparedWindowText view) (caret (selection w)))
           previousAnchor=case conversationCaretIntent retained of Just (RowCaret _ original)->original; _->Nothing
           extended=if extend then previousAnchor <|> (case conversationReplySelection retained of Just (BodySelection first _)->Just first; _->viewportPoint captured (caret (selection w))) else Nothing
-          requested=retained {conversationRowShift=conversationRowShift retained+(if forward then rows else negate rows),conversationCaretIntent=Just (RowCaret column extended)}
-      in d {conversationViews=M.insert target requested (conversationViews d)}
+          shift=conversationRowShift retained+(if forward then rows else negate rows)
+          requested=retained {conversationRowShift=shift,conversationCaretIntent=Just (RowCaret column extended)}
+          -- Opposite requests can return to the already prepared worker key.
+          ready=shift==0 && conversationAnchor requested==viewportAnchor captured
+          next=if ready then settleConversationCaret (windowPresentation d w) (Just captured) requested else requested
+          shown=if ready then modifyActive (\window->window {selection=projectConversationSelection next (Just captured)}) d else d
+      in shown {conversationViews=M.insert target next (conversationViews d)}
   | otherwise=verticalMove (if forward then page else negate page) extend d
-  where page=maybe 10 (\w->case windowRows d w of Just (_,_,_,details)->max 1 (height (if details then snd (rowsWindowRects d w) else fst (rowsWindowRects d w))); _->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
+  where
+    bodyPage w=max 1 (pluginBodyRows d w-1)
+    page=maybe 10 (\w->case windowRows d w of Just (_,_,_,details)->max 1 (height (if details then snd (rowsWindowRects d w) else fst (rowsWindowRects d w))); _->max 1 (height (bounds w)-if activeMarkdown d || isJust (activePluginWindow d) then 2 else 3)) (activeWindow d)
 
 -- | Use measured scalar word boundaries in source; preserve byte/grapheme steps in other views.
 wordMove :: Bool -> Bool -> Desktop -> Desktop

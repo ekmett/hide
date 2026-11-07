@@ -1120,10 +1120,13 @@ conversationBodyRequests (ConversationState _ ref _ agents) desktop=do
           Just owner | live && owns->
             let same=maybe True ((==owner).logicalBodyProvider) (conversationLogical view)
                 retained=case conversationAnchor view of
-                  At (QuestionPoint token _ _)->case schema of
-                    Just (QuestionSchema current _ _) -> token==current
-                    Nothing -> False
+                  At point->survives point
+                  AtRow point _->survives point
                   _->True
+                survives (QuestionPoint token _ _)=case schema of
+                  Just (QuestionSchema current _ _) -> token==current
+                  Nothing -> False
+                survives _=True
                 keepAnchor=same && retained
             in [BodyRequest (BodyKey reference target owner identity (case schema of Just (QuestionSchema token _ _)->Just token; Nothing->Nothing)
               (conversationWidthFor target desktop) (videoMode desktop/=Nothing) (wideSectionTitles desktop)

@@ -104,6 +104,7 @@ prepareRecoverySources desktop=do
         let same=maybe True ((==logicalBodyProvider latest).logicalBodyProvider) (conversationLogical view)
             anchored=case conversationAnchor view of
               At point->maybe FollowEnd At (clampPoint latest point)
+              AtRow point distance->maybe FollowEnd (\p->AtRow p distance) (clampPoint latest point)
               WithinItem ident fraction | logicalBodyItemIndex ident latest/=Nothing->WithinItem ident fraction
               _->FollowEnd
             selected=case conversationReplySelection view of
@@ -127,7 +128,10 @@ validateConversationPoints desktop=mapM_ validate (M.elems (conversationViews de
           _->Right ()
         mapM_ (validateLogicalPoint logical) (anchored++selected)
         where
-          anchored=case conversationAnchor view of At point@BodyPoint{}->[point]; _->[]
+          anchored=case conversationAnchor view of
+            At point@BodyPoint{}->[point]
+            AtRow point@BodyPoint{} _->[point]
+            _->[]
           selected=case conversationReplySelection view of
             Just (BodySelection a@BodyPoint{} z@BodyPoint{})->[a,z]
             _->[]
@@ -171,7 +175,10 @@ readCheckpoint path baseline=do
       pure (ident,reference,view)
     restoreConversation scope desktop frames (target,ConversationSeed name records buffer selected focused anchored column reply)=do
       logical<-restoreLogicalBody target records
-      let points=case anchored of At point->[point]; _->[]
+      let points=case anchored of
+            At point->[point]
+            AtRow point _->[point]
+            _->[]
           endpoints=case reply of Just (BodySelection a z)->[a,z]; Nothing->[]
       mapM_ (either (ioError . userError . T.unpack) pure . validateLogicalPoint logical) (points++endpoints)
       let rectangles=[rectangle | WindowSeed _ (StoredConversation owner) rectangle _<-frames,owner==target]
@@ -481,6 +488,8 @@ pointValue (BodyPoint (BodyItemId ident) block scalar)=toJSON (ident,block,scala
 pointValue QuestionPoint{}=Null
 anchorValue :: BodyAnchor -> Value
 anchorValue (At point)=pointValue point
+anchorValue (AtRow point@BodyPoint{} distance)=object ["row" .= pointValue point,"offset" .= distance]
+anchorValue (AtRow QuestionPoint{} _)=Null
 anchorValue FollowEnd=Null
 anchorValue (WithinItem (BodyItemId ident) fraction)=object ["withinItem" .= ident,"fraction" .= fraction]
 selectionBodyValue :: Maybe BodySelection -> Value
@@ -495,10 +504,15 @@ pointParser ids value=do
 anchorParser :: S.Set BodyItemId -> Value -> Parser BodyAnchor
 anchorParser _ Null=pure FollowEnd
 anchorParser ids value@Object{}=withObject "pending conversation anchor" (\o->do
-  ident<-o .: "withinItem"
-  fraction<-o .: "fraction" >>= boundedInt 0 1000
-  unless (S.member (BodyItemId ident) ids) (fail "Pending anchor names a missing item")
-  pure (WithinItem (BodyItemId ident) fraction)) value
+  row<-o .:? "row"
+  case row of
+    -- Negative offsets cover adjacent unselectable separators/headings.
+    Just point->AtRow <$> pointParser ids point <*> (o .: "offset" >>= boundedInt (-2) 1073741823)
+    Nothing->do
+      ident<-o .: "withinItem"
+      fraction<-o .: "fraction" >>= boundedInt 0 1000
+      unless (S.member (BodyItemId ident) ids) (fail "Pending anchor names a missing item")
+      pure (WithinItem (BodyItemId ident) fraction)) value
 anchorParser ids value=At <$> pointParser ids value
 selectionBodyParser :: S.Set BodyItemId -> Value -> Parser (Maybe BodySelection)
 selectionBodyParser _ Null=pure Nothing
