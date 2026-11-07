@@ -2331,7 +2331,7 @@ providerScript=unlines
   , "    assert sys.stdin.buffer.read(1)==b'!'"
   , "    output.write(sys.argv[3].encode('utf-8'))"
   , "  sys.exit(0)"
-  , "log=open(os.environ['THC_LOG'],'a',buffering=1)"
+  , "log=open(os.environ['THC_LOG'],'a',encoding='utf-8',buffering=1)"
   , "sid='fixture-session'; prompt=None; serial=0; terminal_serial=0; scenario=''"
   , "model='fixture-model'; effort='high'"
   , "def settings(): return [{'id':'model','name':'Model','category':'model','type':'select','currentValue':model,'options':[{'value':m,'name':m} for m in ['fixture-model','fixture-other']]},{'id':'reasoning_effort','name':'Reasoning effort','category':'thought_level','type':'select','currentValue':effort,'options':[{'value':e,'name':e} for e in ['high','ultra']]}]"
