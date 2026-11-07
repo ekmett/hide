@@ -20,7 +20,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import Data.IORef
-import Data.Maybe (isNothing)
+import Data.Maybe (isJust,isNothing)
 import Data.Unique (newUnique,hashUnique)
 import System.Mem (performGC)
 import System.Mem.Weak (Weak,mkWeakPtr,deRefWeak)
@@ -36,21 +36,26 @@ import Hide.Plugin.Provider
 collectionChecks :: IO ()
 collectionChecks=do
   directory<-getTemporaryDirectory >>= canonicalizePath
-  let caps=Capabilities False False False []
-      driver=AgentDriver directory "collection-check" caps (\_->pure (Right caps))
-        (\_ _ _ _->pure (Left "No delivery in collection check")) (pure ()) (pure ())
-        (\_ _ _->pure (Left "No steering in collection check"))
-      right=either (error.T.unpack) pure
-  bracket (newAgentHub (HubLimits 1 0) (\_ _->pure (Right driver))) closeAgentHub $ \hub->do
-    ident<-registerAgent hub "Collection" directory driver >>= right
-    weak<-recordCollectibleEvent hub ident
-    forM_ [1..1100::Int] $ \n->recordAgentEvent hub ident "event" (String (T.pack (show n)))
-    -- A sidebar read demands the current entry but not the evicted-event count.
-    _<-agentSummaries hub >>= evaluate . length . show
-    performGC
-    gone<-isNothing <$> deRefWeak weak
-    unless gone (error "Agent history retains evicted events")
-    void (agentSummaries hub >>= evaluate . length)
+  started<-newEmptyMVar
+  release<-newEmptyMVar
+  let launch request _=putMVar started (startAgent request) >> takeMVar release
+      spec=SpawnSpec "Collection" "Collection check" directory Shared Fresh Nothing Nothing
+  bracket (newAgentHub (HubLimits 1 0) launch) closeAgentHub $ \hub->
+    -- Hold startup before installDriver creates a concurrent history reader.
+    -- The provider lifetime ends with this check, including assertion failures.
+    withAsync (spawnAgent hub Human spec) $ \_->do
+      ident<-timeout 10000000 (takeMVar started) >>= maybe (error "Collection agent did not reserve its identity") pure
+      weak<-recordCollectibleEvent hub ident
+      performGC
+      retained<-isJust <$> deRefWeak weak
+      unless retained (error "Agent history did not retain its current event")
+      forM_ [1..1100::Int] $ \n->recordAgentEvent hub ident "event" (String (T.pack (show n)))
+      -- A sidebar read demands the current entry but not the evicted-event count.
+      _<-agentSummaries hub >>= evaluate . length . show
+      performGC
+      gone<-isNothing <$> deRefWeak weak
+      unless gone (error "Agent history retains evicted events")
+      void (agentSummaries hub >>= evaluate . length)
 
 {-# NOINLINE recordCollectibleEvent #-}
 recordCollectibleEvent :: AgentHub -> AgentId -> IO (Weak Value)
