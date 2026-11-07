@@ -18,7 +18,7 @@
 module Hide.GitOperations (withGitOperations, gitOperationEffects, tickGitOperations, gitTools, gitToolNames, gitTool) where
 
 import Control.Concurrent
-import Control.Exception (IOException, SomeException, bracket, displayException, mask_, try)
+import Control.Exception (IOException, SomeException, bracket, displayException, evaluate, mask_, try)
 import Control.Monad (foldM, forM, forM_, unless, void)
 import Data.Aeson hiding (Result)
 import Data.Aeson.Types (Pair,parseEither)
@@ -37,8 +37,8 @@ import Hide.Process (readProcessUtf8)
 import Hide.Buffer
 import Hide.Files
 import Hide.Model
-import Hide.Git (GitReview(..),GitCommit(..),reviewRepositoryChecked,commitReviewChecked,checkIntegrationState,checkIncomingChanges)
-import Hide.GuestAccess (protectedPathParent)
+import Hide.Git (GitReview(..),GitCommit(..),reviewRepositoryChecked,commitReviewChecked,checkIntegrationState,checkIncomingChanges,repositoryRangeDiffFiltered)
+import Hide.GuestAccess (protectedPath,protectedPathParent)
 import Hide.RemoteEndpoint (randomIdentity)
 
 data Result = Branches FilePath [T.Text]
@@ -47,6 +47,7 @@ data Result = Branches FilePath [T.Text]
   | IntegrationFailed FilePath (Maybe ExitCode) Value
   | Reviewed T.Text [FilePath] (Either T.Text GitReview)
   | Committed FilePath (Either T.Text GitCommit) (Maybe T.Text)
+  | RangeDiff FilePath [FilePath] (Either T.Text Buffer)
 data Worker = Worker Bool (Maybe Integer) ThreadId (MVar (Either SomeException Result))
 data GitOperations = GitOperations (IORef (Maybe Worker)) (IORef (Maybe FilePath)) (IORef (Integer,M.Map Integer Value)) (IORef (Maybe (T.Text,GitReview))) (IO Bool)
 
@@ -177,6 +178,27 @@ readBranches root = do
   refs <- checkedGit root ["for-each-ref","--format=%(refname:short)%09%(symref)","refs/heads","refs/remotes"]
   pure (Branches root [name | line<-T.lines refs, let (name,symbolic)=T.breakOn "\t" line, T.null (T.drop 1 symbolic), name/=current, not (T.null name)])
 
+-- Prepare text and measured buffer geometry on the Git worker. Adoption only
+-- compares small context metadata and inserts the immutable prepared buffer.
+showRangeDiff :: Desktop -> T.Text -> T.Text -> Maybe FilePath -> IO Result
+showRangeDiff desktop from to path=do
+  let directory=startingDirectory desktop
+      paths=privateFilePaths desktop
+  range<-repositoryRangeDiffFiltered directory from to path (protectedPath desktop)
+  prepared<-case range of
+    Left err->pure (Left err)
+    Right (base,target,text,omitted)->do
+      let buffer=newBuffer (T.concat
+            ["Commits ",base,"..",target,"\n"
+            ,case omitted of
+               0->""
+               1->"1 protected file omitted.\n"
+               _->T.pack (show omitted)<>" protected files omitted.\n"
+            ,"\n",text])
+      _<-evaluate (prepareBuffer buffer)
+      pure (Right buffer)
+  pure (RangeDiff directory paths prepared)
+
 -- | Apply Git serialization/interlocks and delegate other effects.
 gitOperationEffects :: GitOperations -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Desktop -> [Effect] -> IO (Bool,Desktop)
 gitOperationEffects runtime@(GitOperations ref _ _ _ terminalLaunch) core = foldM apply . (False,)
@@ -240,6 +262,9 @@ tickGitOperations (GitOperations ref focused jobs reviews terminalLaunch) core i
         Just finished -> do
           writeIORef ref Nothing
           let usable=case finished of
+                Right (RangeDiff directory paths _)
+                  | directory/=startingDirectory desktop || paths/=privateFilePaths desktop ->
+                      Right (RangeDiff directory paths (Left "Diff context changed; request the range again."))
                 Right (Reviewed token paths outcome)
                   | paths/=privateFilePaths desktop || unsaved desktop -> Right (Reviewed token paths (Left "Review context changed."))
                   | otherwise -> Right (Reviewed token paths outcome)
@@ -247,6 +272,8 @@ tickGitOperations (GitOperations ref focused jobs reviews terminalLaunch) core i
           forM_ jobId $ \ident -> modifyIORef' jobs $ \(latest,history) ->
             (latest,M.insert ident (extend (M.findWithDefault Null ident history) (completion ident usable)) history)
           case usable of
+            Right (RangeDiff _ _ (Right buffer)) -> pure (addReadOnlyBuffer "Git range diff" buffer desktop) {status="Git range diff displayed."}
+            Right (RangeDiff _ _ (Left _)) -> pure desktop {status="Git range diff unavailable; see git_operation_status."}
             Right (Reviewed token _ (Right review)) -> do
               writeIORef reviews (if reviewText review=="No changes.\n" then Nothing else Just (token,review))
               pure desktop {status="Git review completed; read git_operation_status."}
@@ -295,23 +322,24 @@ startWorker (GitOperations ref _ _ _ _) mutates ident action=mask_ $ do
   writeIORef ref (Just (Worker mutates ident thread done))
 
 gitToolNames :: [T.Text]
-gitToolNames=["git_fetch","git_pull","git_merge","git_review","git_commit","git_operation_status"]
+gitToolNames=["editor_show_diff","git_fetch","git_pull","git_merge","git_review","git_commit","git_operation_status"]
 
 gitTools :: [Value]
 gitTools=
-  [spec "git_fetch" "Fetch the selected repository's configured default remote. Returns accepted and jobId, not completion. Poll git_operation_status. Does not change working files or expose transport output." False [] [],
+  [spec "editor_show_diff" "Show a filtered read-only colored diff between two commits, excluding the working tree. Returns accepted/jobId; poll git_operation_status for display completion. Replaces the previous range window. Patch capture truncates at 1 MiB; incomplete rename/copy tracing is refused." False ["from"] [("from",string 256),("to",string 256),("path",string 32768)],
+   spec "git_fetch" "Fetch the selected repository's configured default remote. Returns accepted and jobId, not completion. Poll git_operation_status. Does not change working files or expose transport output." False [] [],
    spec "git_pull" "Fetch configured upstream, inspect incoming changes, then fast-forward only. Requires clean saved buffers/worktree. Returns acceptance; poll actual exit, HEAD and conflicts. Protected changes, changed symlinks and submodules are refused. Ordinary Git hooks/drivers execute." False [] [],
    spec "git_merge" "Merge one named local or remote-tracking branch after checking incoming changes and clean saved files. No raw revision syntax, URL or options. Conflicts remain for resolution; no automatic abort. Poll actual exit, HEAD and conflict count." False ["ref"] [("ref",string 256)],
    spec "git_review" "Review all saved staged, unstaged and untracked changes. Poll git_operation_status for the complete diff and one-time reviewId. Protected or incomplete reviews cannot be committed. Requires no dirty buffers." True [] [],
    spec "git_commit" "Commit ALL saved changes from a complete git_review using ordinary Git staging and hooks. Requires unchanged HEAD, index and files, and no dirty buffers. Consumes reviewId; poll git_operation_status for actual HEAD, exit code and reviewedTreeMatched. Failure may leave reviewed changes staged." False ["reviewId","message"] [("reviewId",string 128),("message",string 8192)],
-   spec "git_operation_status" "Read a Git job's completion, review, commit or integration result. Integrations report phase, HEAD, fetchExitCode and conflict count. Fetch/commit/merge report actual process exit codes; review exitCode=0 denotes a completed composite review. Omit jobId for the latest. Retains the latest 16 agent jobs; busy includes human Git operations. Only the latest complete review ID can be committed." True [] [("jobId",object ["type" .= ("integer"::T.Text),"minimum" .= (1::Int)])]]
+   spec "git_operation_status" "Read a Git job's range-window display, review, commit or integration result. Integrations report phase, HEAD, fetchExitCode and conflict count. Fetch/commit/merge report actual process exit codes; review/range exitCode=0 denotes a completed composite operation. Omit jobId for the latest. Retains the latest 16 agent jobs; busy includes human Git operations. Only the latest complete review ID can be committed." True [] [("jobId",object ["type" .= ("integer"::T.Text),"minimum" .= (1::Int)])]]
   where
     string :: Int -> Value
     string limit=object ["type" .= ("string"::T.Text),"minLength" .= (1::Int),"maxLength" .= limit]
     spec :: T.Text -> T.Text -> Bool -> [T.Text] -> [Pair] -> Value
     spec name description readOnly required props=object ["name" .= name,"description" .= description,
       "inputSchema" .= object ["type" .= ("object"::T.Text),"properties" .= object props,"required" .= required,"additionalProperties" .= False],
-      "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= (name `elem` ["git_commit","git_pull","git_merge"]),"openWorldHint" .= not readOnly]]
+      "annotations" .= object ["readOnlyHint" .= readOnly,"destructiveHint" .= (name `elem` ["git_commit","git_pull","git_merge"]),"openWorldHint" .= (not readOnly && name/="editor_show_diff")]]
 
 jobValue :: Integer -> Bool -> Maybe ExitCode -> Value
 jobValue ident active code=object ["jobId" .= ident,"active" .= active,
@@ -324,6 +352,8 @@ extend _ new=new
 
 completion :: Integer -> Either SomeException Result -> Value
 completion ident result=case result of
+  Right (RangeDiff _ _ (Right _)) -> extend (jobValue ident False (Just ExitSuccess)) (object ["displayed" .= True])
+  Right (RangeDiff _ _ (Left err)) -> extend failed (object ["displayed" .= False,"error" .= err])
   Right (Finished code _ _ _ facts) -> extend (jobValue ident False (Just code)) facts
   Right (IntegrationFailed _ code facts) -> extend (jobValue ident False code) facts
   Right (Reviewed token _ (Right review)) -> extend (jobValue ident False (Just ExitSuccess)) (object
@@ -348,6 +378,12 @@ gitTool runtime@(GitOperations ref _ jobs reviews terminalLaunch) desktop name a
   Left _ -> reply desktop (Left "Expected an arguments object.")
   Right fields | any (`notElem` allowed) (KM.keys fields) -> reply desktop (Left "Unexpected Git tool argument.")
   Right fields -> case name of
+    "editor_show_diff" -> case parseEither (\_ -> (,,) <$> fields .: "from" <*> fields .:? "to" .!= "HEAD" <*> fields .:? "path") args of
+      Left _->reply desktop (Left "Expected from and optional to/path strings.")
+      Right (from,to,path)
+        | any invalidRevision [from,to] -> reply desktop (Left "Invalid revision.")
+        | maybe False (\value->null value || length value>32768 || '\0' `elem` value) path -> reply desktop (Left "Invalid path.")
+        | otherwise -> start False (pure ()) (showRangeDiff desktop from to path)
     "git_fetch" -> start False (pure ()) $ do
       root<-selectedRoot
       runOperation True root FetchRemote desktop
@@ -391,7 +427,8 @@ gitTool runtime@(GitOperations ref _ jobs reviews terminalLaunch) desktop name a
           result -> reply desktop (Right (object ["busy" .= maybe False (const True) worker,"operation" .= result]))
     _ -> reply desktop (Left "Unknown Git tool.")
   where
-    allowed=case name of "git_operation_status" -> ["jobId"]; "git_commit" -> ["reviewId","message"]; "git_merge" -> ["ref"]; _ -> []
+    invalidRevision refName=T.null refName || T.length refName>256 || T.isPrefixOf "-" refName || T.any (<' ') refName
+    allowed=case name of "editor_show_diff" -> ["from","to","path"]; "git_operation_status" -> ["jobId"]; "git_commit" -> ["reviewId","message"]; "git_merge" -> ["ref"]; _ -> []
     reply updated result=pure (updated,pure result)
     selectedRoot=selectedRepository desktop
     start mutates prepare action=do

@@ -12,7 +12,7 @@ module GitOperationsCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket)
+import Control.Exception (IOException,bracket,finally,try)
 import Control.Monad (unless, void)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -35,6 +35,7 @@ import Hide.Buffer
 import Hide.Files
 import Hide.Git
 import Hide.GitOperations
+import Hide.Process (readProcessUtf8)
 import Hide.Model
 
 checks :: IO ()
@@ -225,7 +226,11 @@ checks = bracket temporary removePathForcibly $ \base -> do
     check "pull symlink target remains unchanged" (targetBytes=="outside symlink target\n")
   integrationChecks base
   reviewCommitChecks base
-  unless (os=="mingw32") (cancellationCheck base work)
+  rangeDiffChecks base
+  unless (os=="mingw32") $ do
+    cancellationCheck base work "git_fetch" "fetch"
+    cancellationCheck base work "editor_show_diff" "--name-status"
+    decodeCleanupCheck base
   putStrLn "Git operation checks passed"
   where
     check label ok=unless ok (error label)
@@ -258,26 +263,26 @@ await tick ready initial=do
 
 -- The wrapper becomes the owned Git process, rather than leaving a sleeping
 -- grandchild behind. Closing the controller must terminate and reap it.
-cancellationCheck :: FilePath -> FilePath -> IO ()
-cancellationCheck base work=do
+cancellationCheck :: FilePath -> FilePath -> T.Text -> String -> IO ()
+cancellationCheck base work tool argument=do
   realGit<-findExecutable "git" >>= maybe (error "git unavailable") pure
-  let directory=base </> "cancellation-bin"
+  let directory=base </> ("cancellation-bin-"++T.unpack tool)
       wrapper=directory </> "git"
-      marker=base </> "cancelled-git.pid"
+      marker=directory </> "cancelled-git.pid"
       quote value="'"++concatMap (\c -> if c=='\'' then "'\\''" else [c]) value++"'"
   createDirectory directory
-  writeUtf8 wrapper (T.pack (unlines ["#!/bin/sh","for arg do", "if [ \"$arg\" = fetch ]; then", "echo $$ > "++quote marker,"exec /bin/sleep 60","fi","done","exec "++quote realGit++" \"$@\""]))
+  writeUtf8 wrapper (T.pack (unlines ["#!/bin/sh","for arg do", "if [ \"$arg\" = "++quote argument++" ]; then", "dd if=/dev/zero bs=32768 count=40 2>/dev/null", "dd if=/dev/zero bs=32768 count=40 >&2 2>/dev/null", "echo $$ > "++quote marker,"exec /bin/sleep 60","fi","done","exec "++quote realGit++" \"$@\""]))
   permissions<-getPermissions wrapper
   setPermissions wrapper (permissions {executable=True})
   bracket (lookupEnv "PATH") (maybe (unsetEnv "PATH") (setEnv "PATH")) $ \oldPath -> do
     setEnv "PATH" (directory++maybe "" (":"++) oldPath)
     ended<-timeout 5000000 $ withGitOperations (pure False) $ \runtime -> do
-      (_,receipt)<-gitTool runtime (initialDesktop (80,25)) {defaultDirectory=Just work} "git_fetch" (object [])
+      (_,receipt)<-gitTool runtime (initialDesktop (80,25)) {defaultDirectory=Just work} tool (object ["from" .= ("HEAD"::T.Text) | tool=="editor_show_diff"])
       accepted<-receipt
-      unless (either (const False) (const True) accepted) (error "cancellation fixture fetch rejected")
+      unless (either (const False) (const True) accepted) (error "cancellation fixture Git request rejected")
       let wait=doesFileExist marker >>= \exists -> unless exists (threadDelay 10000 >> wait)
       wait
-    unless (ended==Just ()) (error "closing Git controller did not reap fetch promptly")
+    unless (ended==Just ()) (error "closing Git controller did not reap Git promptly")
   pid<-T.unpack . T.strip <$> T.readFile marker
   (code,_,_)<-readCreateProcessWithExitCode (proc "/bin/kill" ["-0",pid]) ""
   unless (code/=ExitSuccess) (error "Git subprocess survived controller close")
@@ -612,3 +617,88 @@ writeUtf8 path = BS.writeFile path . TE.encodeUtf8
 
 shellPath :: FilePath -> FilePath
 shellPath = map (\c -> if c=='\\' then '/' else c)
+
+-- Completion is identified by its receipt, never by mutable status text.
+rangeDiffChecks :: FilePath -> IO ()
+rangeDiffChecks base=do
+  let check label ok=unless ok (error label)
+      root=base </> "range"
+      git args=do
+        (code,_,err)<-readCreateProcessWithExitCode (proc "git" (["-C",root,"-c","user.name=Git Test","-c","user.email=test@example.invalid","-c","commit.gpgsign=false"]++args)) ""
+        unless (code==ExitSuccess) (error err)
+      field key value=parseMaybe (withObject "object" (.: key)) value
+      texts d=[contents (documentBuffer doc) | doc<-M.elems (buffers d),documentLabel doc==Just "Git range diff"]
+  createDirectory root
+  git ["init","-b","main"]
+  git ["config","core.autocrlf","false"]
+  git ["config","core.hooksPath",root </> ".git/hooks"]
+  writeUtf8 (root </> "public.txt") "before\n"
+  writeUtf8 (root </> "thc.toml") "private-range-marker\n"
+  git ["add","-A"]
+  git ["commit","-m","base"]
+  writeUtf8 (root </> "public.txt") "after\n"
+  git ["mv","thc.toml","renamed.txt"]
+  git ["add","-A"]
+  git ["commit","-m","target"]
+  writeUtf8 (root </> "public.txt") "uncommitted\n"
+  withGitOperations (pure False) $ \runtime -> do
+    let initial=(initialDesktop (80,25)) {defaultDirectory=Just root}
+        call d name args=do
+          (next,pending)<-gitTool runtime d name args
+          response<-pending
+          pure (next,response)
+        start d from=do
+          (next,response)<-call d "editor_show_diff" (object ["from" .= (from::T.Text)])
+          receipt<-either (error . T.unpack) pure response
+          check "range diff returns acceptance" (field "accepted" receipt==Just True)
+          ident<-maybe (error "missing range job id") pure (field "jobId" receipt::Maybe Integer)
+          pure (next,ident)
+        poll ident d=do
+          next<-tickGitOperations runtime core d
+          (_,response)<-call next "git_operation_status" (object ["jobId" .= ident])
+          result<-either (error . T.unpack) pure response
+          case field "operation" result of
+            Just operation | field "active" operation==Just False -> pure (next,operation)
+            _ -> threadDelay 10000 >> poll ident next
+        finish ident d=timeout 10000000 (poll ident d) >>= maybe (error "range diff timed out") pure
+    (accepted,ident)<-start initial "HEAD~1"
+    check "range diff is deferred until adoption" (null (texts accepted))
+    (_,busy)<-call accepted "editor_show_diff" (object ["from" .= ("HEAD"::T.Text)])
+    check "range diff reserves the existing Git worker" (either (const True) (const False) busy)
+    (shown,result)<-finish ident (insertText "intervening edit" accepted)
+    check "range diff succeeds" ((field "state" result::Maybe T.Text)==Just "succeeded" && field "displayed" result==Just True)
+    check "range diff preserves intervening editor changes" (any ((=="intervening edit") . contents . documentBuffer) (M.elems (buffers shown)))
+    check "range window filters lineage and excludes working tree" (case texts shown of
+      [text]->all (`T.isInfixOf` text) ["Commits ","+after","protected files omitted"] && not (any (`T.isInfixOf` text) ["private-range-marker","renamed.txt","uncommitted"])
+      _->False)
+    (again,second)<-start shown "HEAD"
+    (replaced,_)<-finish second again
+    check "range window replaces its previous view" (length (texts replaced)==1 && any (T.isInfixOf "No changes.") (texts replaced))
+    (pending,third)<-start replaced "HEAD~1"
+    (stale,staleResult)<-finish third pending {guestPrivatePaths=[root </> "public.txt"]}
+    check "changed privacy discards range result" ((field "state" staleResult::Maybe T.Text)==Just "failed" && texts stale==texts replaced)
+    (pendingRoot,fourth)<-start initial "HEAD~1"
+    (changedRoot,rootResult)<-finish fourth pendingRoot {defaultDirectory=Just base}
+    check "changed workspace discards range result" ((field "state" rootResult::Maybe T.Text)==Just "failed" && null (texts changedRoot))
+    mapM_ (\args->do
+      (_,reply)<-call initial "editor_show_diff" args
+      check "invalid range arguments rejected" (either (const True) (const False) reply))
+      [object ["from" .= ("--output=leak"::T.Text)],object ["to" .= ("HEAD"::T.Text)],object ["from" .= ("HEAD"::T.Text),"path" .= (""::T.Text)]]
+
+-- Decode failures must still run inside the owned process-group lifetime, even
+-- when the direct child exited and its descendant has closed every pipe.
+decodeCleanupCheck :: FilePath -> IO ()
+decodeCleanupCheck base=do
+  let check label ok=unless ok (error label)
+      marker=base </> "decode-descendant.pid"
+      script="sleep 60 </dev/null >/dev/null 2>&1 & echo $! > \"$1\"; printf '\\377'"
+  outcome<-try (readProcessUtf8 (proc "/bin/sh" ["-c",script,"decode-fixture",marker]) "") :: IO (Either IOException (ExitCode,T.Text,T.Text))
+  pid<-T.unpack . T.strip <$> T.readFile marker
+  let signal arg=readCreateProcessWithExitCode (proc "/bin/kill" [arg,pid]) ""
+      gone=do
+        (code,_,_)<-signal "-0"
+        if code/=ExitSuccess then pure () else threadDelay 10000 >> gone
+  flip finally (void (signal "-KILL")) $ do
+    check "invalid UTF-8 remains an IO failure" (either (const True) (const False) outcome)
+    ended<-timeout 5000000 gone
+    check "decode failure stops detached pipe descendant" (ended==Just ())

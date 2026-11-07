@@ -15,6 +15,7 @@ import Control.Exception (bracket)
 import Control.Monad (unless, void, forM_)
 import qualified Data.Text as T
 import qualified Data.ByteString as BS
+import qualified Data.Text.Encoding as TE
 import System.Directory
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode(..))
@@ -272,3 +273,15 @@ filteredChecks base=do
   blob<-readRange "HEAD~1" "HEAD:visible.txt" Nothing
   check "range revisions must resolve to commits"
     (unknown==Left "Could not resolve from as a commit." && tree==Left "Could not resolve to as a commit." && blob==Left "Could not resolve to as a commit.")
+  BS.writeFile (root </> "large.txt") (TE.encodeUtf8 (T.replicate 600000 "λ\n"))
+  git ["add","--","large.txt"]
+  git ["commit","--quiet","-m","large patch"]
+  (_,_,bounded,_)<-readRange "HEAD~1" "HEAD" (Just "large.txt") >>= either (error . T.unpack) pure
+  check "large range patch capture is bounded and explicitly truncated"
+    (BS.length (TE.encodeUtf8 bounded)<=1048576+32 && "[Diff truncated at 1 MiB.]" `T.isInfixOf` bounded && not ("�" `T.isInfixOf` bounded))
+  BS.writeFile (root </> "invalid.txt") (BS.cons 255 (BS.replicate 1100000 97))
+  git ["add","--","invalid.txt"]
+  git ["commit","--quiet","-m","invalid UTF-8 patch"]
+  invalid<-readRange "HEAD~1" "HEAD" (Just "invalid.txt")
+  check "malformed UTF-8 in a truncated patch fails without escaping its result"
+    (case invalid of Left _->True; _->False)

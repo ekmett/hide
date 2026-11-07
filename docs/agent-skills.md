@@ -226,7 +226,8 @@ The packaged debugging skill is also available through MCP `resources/read` at
 `path` to focus the diff. Inspect `list_buffers` for unsaved edits and read them
 separately. Use `workspace_search` with `trackedOnly: true` for repository source
 search. Use `editor_show_diff` with `from` (and `to`, default `HEAD`) to show
-the person the changes between two commits.
+the person the changes between two commits. It returns acceptance; poll its
+`jobId` with `git_operation_status` for display completion.
 
 **Check:** Git describes on-disk changes. It does not include unsaved buffer
 edits, and tracked-file search does not search commit history.

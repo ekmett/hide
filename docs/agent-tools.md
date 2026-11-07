@@ -249,7 +249,7 @@ Breakpoints use 1-based lines, at most 1000. See the
 | Tool | Kind | Arguments | Result / contract |
 | --- | --- | --- | --- |
 | `workspace_git` | R | `view`, `path?` | `status` or `diff`; disk changes and unsaved buffers reported separately |
-| `editor_show_diff` | W | `from`, `to?`, `path?` | Open or replace a read-only colored window with the filtered commit-range diff; returns the layout |
+| `editor_show_diff` | W | `from`, `to?`, `path?` | Start a filtered commit-range diff window; returns `accepted` and `jobId`, then poll `git_operation_status` |
 | `git_fetch` | W | — | Fetch the selected repository’s configured default remote; returns `accepted` and `jobId` |
 | `git_pull` | W | — | Fetch configured upstream, check incoming changes, then fast-forward only |
 | `git_merge` | W | `ref` | Merge a named local or remote-tracking branch with checked incoming paths |
@@ -262,8 +262,12 @@ not a Git glob/magic pathspec. Whole-repository diffs apply the [protected conte
 destinations derived from them; `omittedFiles` reports a count without their names.
 `editor_show_diff` applies the same policy to the diff between two commits,
 excluding the working tree. Its window names the resolved commits and any
-omitted-file count, is capped at 1 Mi characters, and cannot be approved as a
-commit review. Ranges too wide for complete rename/copy tracing are refused. Agent mouse/key input cannot
+omitted-file count. Patch capture is capped at 1 MiB of UTF-8, with a visible
+truncation marker, and cannot be approved as a commit review. The work runs in
+the shared Git worker; a successful job means the prepared window was displayed.
+Changing the workspace or private paths before adoption discards the result.
+Repeated calls replace the same window. Ranges too wide for complete rename/copy
+tracing or its bounded path inventory are refused. Agent mouse/key input cannot
 open the unrestricted human Git review or commit dialog; use `workspace_git`
 for filtered review. `workspace_search` with
 `trackedOnly: true` searches tracked source. Commit-history search is not exposed as an agent tool.

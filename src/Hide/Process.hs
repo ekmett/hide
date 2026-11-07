@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE BangPatterns, ScopedTypeVariables #-}
 -- | Module      : Hide.Process
 -- Copyright   : (c) Edward Kmett 2026
 -- License     : BSD-2-Clause OR Apache-2.0
@@ -13,17 +13,17 @@
 -- PID. The returned action serializes repeated cleanup, terminates the process
 -- tree and bounds exit polling. Callers stop children before joining pipe workers;
 -- suppressed cleanup IO failures mean return is not proof every descendant exited.
-module Hide.Process (processCleanup,waitProcessExit,readProcessUtf8) where
+module Hide.Process (processCleanup,waitProcessExit,readProcessUtf8,readProcessBytesBounded) where
 
 import Control.Concurrent (modifyMVar_, newMVar, threadDelay)
 import Control.Exception (IOException, bracket, catch, mask, mask_, onException)
-import Control.Concurrent.Async (withAsync,wait)
+import Control.Concurrent.Async (withAsync,wait,link)
 import Control.Monad (forM_, unless, void)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Info (os)
-import System.IO (hClose,hSetBinaryMode)
+import System.IO (Handle,hClose,hSetBinaryMode)
 import System.Exit (ExitCode)
 import System.Process
 import System.Timeout (timeout)
@@ -64,7 +64,28 @@ waitProcessExit process
 -- UTF-8 is an IO error rather than a replacement character in a machine path.
 -- The owned process group is stopped before joining pipe readers on failure.
 readProcessUtf8 :: CreateProcess -> T.Text -> IO (ExitCode,T.Text,T.Text)
-readProcessUtf8 command input =
+readProcessUtf8 = captureProcess BS.hGetContents $ \code out err->do
+  stdout<-decode out
+  stderr<-decode err
+  pure (code,stdout,stderr)
+  where
+    decode bytes=either (const (ioError (userError "Subprocess returned invalid UTF-8"))) pure (TE.decodeUtf8' bytes)
+
+-- | Retain at most the given number of bytes per pipe while draining both pipes
+-- in fixed-size chunks. The flag reports discarded bytes. Cancellation and IO
+-- failures use the same owned process-group cleanup as complete capture.
+readProcessBytesBounded :: Int -> CreateProcess -> T.Text -> IO (ExitCode,(BS.ByteString,Bool),(BS.ByteString,Bool))
+readProcessBytesBounded limit=captureProcess (readBounded (max 0 limit) [] False) (\code out err->pure (code,out,err))
+  where
+    readBounded !remaining !chunks !truncated pipe=do
+      chunk<-BS.hGetSome pipe 32768
+      if BS.null chunk then pure (BS.concat (reverse chunks),truncated)
+      else let kept=BS.take remaining chunk
+           in readBounded (remaining-BS.length kept) (if BS.null kept then chunks else kept:chunks)
+                (truncated || BS.length chunk>remaining) pipe
+
+captureProcess :: (Handle -> IO a) -> (ExitCode -> a -> a -> IO b) -> CreateProcess -> T.Text -> IO b
+captureProcess readOutput finish command input =
   withCreateProcess command {std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,create_group=True} $ \sourcePipe outputPipe errorPipe child ->
     mask $ \restore -> do
       Just source<-pure sourcePipe
@@ -73,18 +94,18 @@ readProcessUtf8 command input =
       stop<-processCleanup child
       (do
         mapM_ (`hSetBinaryMode` True) [source,output,errors]
-        withAsync (restore (BS.hGetContents output)) $ \out ->
-          withAsync (restore (BS.hGetContents errors)) $ \err ->
+        withAsync (restore (readOutput output)) $ \out ->
+          withAsync (restore (readOutput errors)) $ \err ->
             restore (do
+              link out
+              link err
               BS.hPut source (TE.encodeUtf8 input)
               hClose source
               code<-waitProcessExit child
-              stdout<-wait out >>= decode
-              stderr<-wait err >>= decode
-              pure (code,stdout,stderr)) `onException` stop
+              stdout<-wait out
+              stderr<-wait err
+              finish code stdout stderr) `onException` stop
         ) `onException` stop
-  where
-    decode bytes=either (const (ioError (userError "Subprocess returned invalid UTF-8"))) pure (TE.decodeUtf8' bytes)
 
 ignore :: IO a -> IO ()
 ignore operation=void operation `catch` (\(_::IOException) -> pure ())

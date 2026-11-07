@@ -22,6 +22,8 @@ module Hide.Git
   , checkIntegrationState, checkIncomingChanges
   ) where
 
+import Control.Exception (evaluate, try)
+import Data.Text.Encoding.Error (UnicodeException)
 import Control.Monad (forM, forM_, unless, when)
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
@@ -35,8 +37,8 @@ import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
 import System.FilePath
 import System.IO.Error (ioeGetErrorString, tryIOError)
-import System.Process (proc, cwd, env)
-import Hide.Process (readProcessUtf8)
+import System.Process (CreateProcess, proc, cwd, env)
+import Hide.Process (readProcessUtf8,readProcessBytesBounded)
 import Text.Read (readMaybe)
 
 data RepoStatus = RepoStatus
@@ -136,13 +138,24 @@ repositoryRangeDiffFiltered path from to selected excluded=do
           prepared<-result $ do
             -- Wide ranges can exceed -l256; Git then only warns and stops
             -- tracing edited private copies, so refuse rather than leak them.
-            (code,names,warnings)<-runGit root (diffArgs++["--name-status","-z","-M","-C","--find-copies-harder","-l256"]++range)
-            unless (code==ExitSuccess && T.null warnings) (failGit incompleteLineage)
+            (code,(nameBytes,namesTruncated),(warnings,warningsTruncated))<-runGitBounded root (diffArgs++["--name-status","-z","-M","-C","--find-copies-harder","-l256"]++range)
+            unless (code==ExitSuccess && BS.null warnings && not warningsTruncated && not namesTruncated) (failGit incompleteLineage)
+            names<-either (const (failGit incompleteLineage)) pure (TE.decodeUtf8' nameBytes)
             (changed,renames)<-either failGit pure (parseChanges names)
             let files=Set.toAscList (Set.fromList changed)
             when (length files>10000) (failGit "Git range diff exceeds 10000 files.")
             selectedRows<-selectRows root selection <$> classifyPaths root excluded files renames
-            text<-filteredText selectedRows (\allowed->git root (diffArgs++["--no-renames","--submodule=short"]++range++allowed))
+            text<-filteredText selectedRows $ \allowed->do
+              (patchCode,(bytes,truncated),_)<-runGitBounded root (diffArgs++["--no-renames","--submodule=short"]++range++allowed)
+              unless (patchCode==ExitSuccess) (failGit filteredFailure)
+              -- An incomplete trailing UTF-8 character belongs to the omitted
+              -- suffix. Complete malformed output still fails closed.
+              decoded<-if truncated
+                then do
+                  prefix<-try (evaluate (case TE.streamDecodeUtf8 bytes of TE.Some text _ _->text)) :: IO (Either UnicodeException Text)
+                  either (const (failGit filteredFailure)) pure prefix
+                else either (const (failGit filteredFailure)) pure (TE.decodeUtf8' bytes)
+              pure (decoded<>if truncated then "\n[Diff truncated at 1 MiB.]\n" else "")
             recheckRows root excluded selectedRows
             pure (base,target,text,omittedRows selectedRows)
           pure (either (\err->Left (if err==incompleteLineage then err else filteredFailure)) Right prepared)
@@ -427,13 +440,21 @@ runGit :: FilePath -> [String] -> IO (ExitCode, Text, Text)
 runGit dir args = runGitInput dir args ""
 
 runGitInput :: FilePath -> [String] -> String -> IO (ExitCode, Text, Text)
-runGitInput dir args input = do
+runGitInput dir args input = gitCommand dir args >>= \command->readProcessUtf8 command (T.pack input)
+
+-- The name-status inventory must fit in full; only the human patch may truncate.
+-- Bound stderr too: Git configuration and failures must not allocate unbounded
+-- diagnostics before the privacy-safe error is selected.
+runGitBounded :: FilePath -> [String] -> IO (ExitCode,(BS.ByteString,Bool),(BS.ByteString,Bool))
+runGitBounded dir args=gitCommand dir args >>= \command->readProcessBytesBounded 1048576 command ""
+
+gitCommand :: FilePath -> [String] -> IO CreateProcess
+gitCommand dir args = do
   inherited <- getEnvironment
   let environment = ("GIT_OPTIONAL_LOCKS", "0") : filter (\(name, _) -> name `notElem`
         ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OPTIONAL_LOCKS"]) inherited
-  readProcessUtf8
-    ((proc "git" (["--no-pager", "--literal-pathspecs", "-c", "core.fsmonitor=false"] ++ args))
-      { cwd = Just dir, env = Just environment }) (T.pack input)
+  pure ((proc "git" (["--no-pager", "--literal-pathspecs", "-c", "core.fsmonitor=false"] ++ args))
+      { cwd = Just dir, env = Just environment })
 
 git :: FilePath -> [String] -> IO Text
 git root args = do
