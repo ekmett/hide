@@ -22,6 +22,7 @@ import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BL
 import Data.Maybe (fromJust)
 import qualified Data.Text as T
+import GHC.Stack (HasCallStack)
 import Network.Socket
 import System.IO
 import System.Environment (lookupEnv)
@@ -196,8 +197,10 @@ failed :: Int -> DAP.Event -> Bool
 failed ident (DAP.Response actual (Left _)) = ident == actual
 failed _ _ = False
 
-await :: DAP.Client -> ([DAP.Event] -> Bool) -> IO [DAP.Event]
-await client done = timeout (if os=="mingw32" then 8000000 else 3000000) (loop []) >>= maybe (error "Timed out waiting for DAP") pure
+-- A failed managed launch can spend five seconds probing the port and five
+-- cancelling its readiness connection, then use the Windows cleanup budget.
+await :: HasCallStack => DAP.Client -> ([DAP.Event] -> Bool) -> IO [DAP.Event]
+await client done = timeout (if os=="mingw32" then 20000000 else 3000000) (loop []) >>= maybe (error "Timed out waiting for DAP") pure
   where
     loop previous = do
       events <- (previous ++) <$> DAP.pollEvents client
