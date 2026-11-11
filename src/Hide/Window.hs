@@ -453,7 +453,7 @@ runWindow backend scale effects tick initial = do
       bytes <- c_text >>= BS.packCString
       case TE.decodeUtf8' bytes of
         Left _ -> pure (d,[])
-        Right text -> foldText text d
+        Right text -> foldText (T.length text>1) text d
     dispatch (17:_) d = check "Present typing animation" c_present >> pure (d,[])
     dispatch (3:x:y:clicks:mods:button:_) d
       | clicks == 0 = pure (mouseMotion x y (keyMods mods) d)
@@ -525,11 +525,13 @@ runWindow backend scale effects tick initial = do
       (prefix d == Just 'k' && key `elem` [V.KChar 'c',V.KChar 'v'])
     copies _ _ = False
     -- Text events still pass through key handling for menu mnemonics and WordStar prefixes.
-    foldText text d = case T.uncons text of
-      Nothing -> pure (d,[])
-      Just (c,rest) -> do
-        result@(d',fx)<-dispatchKey (V.EvKey (V.KChar c) []) d
-        if null fx then foldText rest d' else pure result
+    foldText multi text d
+      | multi && vimSourceMode d==Just VimNormal = pure (d,[])
+      | otherwise = case T.uncons text of
+          Nothing -> pure (d,[])
+          Just (c,rest) -> do
+            result@(d',fx)<-dispatchKey (V.EvKey (V.KChar c) []) d
+            if null fx then foldText multi rest d' else pure result
 #else
 runWindow :: Backend -> Double -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> (Desktop -> IO Desktop) -> Desktop -> IO ()
 runWindow _ _ _ _ _ = ioError (userError "Graphical support is not built. Install SDL3 and rebuild with: cabal build -fwindow")

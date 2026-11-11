@@ -77,7 +77,7 @@ const rgb=n=>`#${n.toString(16).padStart(6,'0')}`;
 function send(value){
  if(socket?.readyState!==WebSocket.OPEN||detaching||!ready&&!(sessionFrontend&&['frontend','theme','resize'].includes(value.type)))return;
  value.attachment=peerAttachment;value.seq=++serial;
- if(['key','paste','command','upload','mouse'].includes(value.type)){pendingEdit=serial;guardLeave();}
+ if(['key','paste','text-input','command','upload','mouse'].includes(value.type)){pendingEdit=serial;guardLeave();}
  socket.send(JSON.stringify(value));
 }
 function mods(e){return [e.shiftKey?'shift':null,e.ctrlKey?'ctrl':null,e.metaKey?'cmd':null,e.altKey&&!e.getModifierState?.('AltGraph')?'alt':null].filter(Boolean);}
@@ -707,8 +707,8 @@ window.addEventListener('keydown',e=>{
 });
 window.addEventListener('keyup',e=>{if(!semanticReadingTarget(e.target))send({type:'modifiers',mods:mods(e)});});
 input.addEventListener('compositionstart',()=>{composing=true;});
-input.addEventListener('compositionend',e=>{composing=false;if(e.data)send({type:'paste',text:e.data});input.value='';});
-input.addEventListener('input',e=>{if(!composing){const text=input.value.replace(/^\u200b/,'');if(text)send({type:'paste',text});input.value='\u200b';input.setSelectionRange(1,1);}});
+input.addEventListener('compositionend',e=>{composing=false;if(e.data)send({type:'text-input',text:e.data});input.value='';});
+input.addEventListener('input',e=>{if(!composing){const text=input.value.replace(/^\u200b/,'');if(text)send({type:'text-input',text});input.value='\u200b';input.setSelectionRange(1,1);}});
 window.addEventListener('paste',e=>{if(e.target===fullscreen||semanticReadingTarget(e.target))return;e.preventDefault();send({type:'paste',text:e.clipboardData.getData('text/plain')});});
 window.addEventListener('copy',e=>{if(semanticReadingTarget(e.target))return;e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('hide.edit.copy');});
 window.addEventListener('cut',e=>{if(semanticReadingTarget(e.target))return;e.preventDefault();e.clipboardData.setData('text/plain',clipboard);nativeCopies.push(clipboard);command('hide.edit.cut');});

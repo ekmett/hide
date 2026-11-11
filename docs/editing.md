@@ -409,4 +409,28 @@ Second letters also accept Ctrl and Shift. Escape cancels a prefix; unknown or
 unbound steps end it without editing. Alt/Command menu and platform shortcuts
 retain their own priority.
 
+## Vim keys
+
+Select Vim in **Options > Preferences > Key bindings**. Editable source
+windows in Current view start in Normal mode. The status bar shows Normal or
+Insert. Changing the input owner or resuming a session returns to Normal.
+
+| Keys | Action |
+| --- | --- |
+| `h` / `j` / `k` / `l` | Move left / down / up / right |
+| `0` / `$` | Move to the first / last character on the line |
+| `i` / `a` | Insert before / after the caret |
+| Escape | Return to Normal |
+| `x` | Delete the character under the caret |
+| `u` | Undo the last editor edit |
+
+Configured shortcuts and clipboard paste remain available. Insert uses the
+editor’s regular text entry, including composed input. Browser Normal mode
+uses keyboard events, so it requires a keyboard that sends those events.
+Native SDL treats single-character text commits as layout-aware key input.
+Multi-character commits are ignored in Normal.
+
+This mode covers the keys above. Operators, counts, registers, Visual mode,
+and the Vim command line are outside its scope.
+
 See also [Haskell tools](haskell.md), [Git](git.md) and [hex editing](hex.md).

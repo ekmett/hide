@@ -78,7 +78,7 @@ data RenderState = RenderState
   , keyNextId :: Int
   , keyMenu :: Maybe (Int,Int)
   , keyDrag :: Maybe Drag
-  , keyWordStar :: Bool
+  , keyEditingKeys :: !EditingKeys
   , keyPrefix :: Maybe Char
   , keyStatus :: Text
   , keyBlockStart :: Maybe (Int,Int)
@@ -235,7 +235,7 @@ renderKey original = do
         , keyNextId=nextId original
         , keyMenu=menu original
         , keyDrag=drag original
-        , keyWordStar=wordStar original
+        , keyEditingKeys=editingKeys original
         , keyPrefix=prefix original
         , keyStatus=status original
         , keyBlockStart=blockStart original

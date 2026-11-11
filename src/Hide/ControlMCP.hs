@@ -115,7 +115,7 @@ parseSettings d=withObject "settings" $ \o -> do
   cols<-o .:? "columns" .!= fst defaults
   rows<-o .:? "rows" .!= snd defaults
   unless ((not (KM.member "columns" o) || cols>=40 && cols<=512) && (not (KM.member "rows" o) || rows>=12 && rows<=256)) (fail "Use 40..512 columns and 12..256 rows")
-  wordstar<-o .:? "wordStar" .!= wordStar d
+  wordstar<-o .:? "wordStar"
   blink<-o .:? "blinkCursor" .!= blinkCursor d
   crt<-o .:? "crtFilter" .!= crtFilter d
   macSymbols<-o .:? "macKeySymbols" .!= macKeySymbols d
@@ -123,8 +123,12 @@ parseSettings d=withObject "settings" $ \o -> do
   pixelate<-o .:? "pixelateUnicode" .!= pixelateUnicode d
   material<-o .:? "materialIcons" .!= materialIcons d
   let resized=if (cols,rows)==screenSize d then d else resizeScreenMode (cols,rows) d
+      keys=case wordstar of
+        Just True->WordStarEditing
+        Just False | wordStar d->ModernEditing
+        _->editingKeys d
   pure resized {appearance=selected,videoMode=case mode of Nothing -> videoMode d; Just value -> Just value,
-    macKeySymbols=macSymbols,hapticFeedback=haptics,wordStar=wordstar,blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=material}
+    macKeySymbols=macSymbols,hapticFeedback=haptics,editingKeys=keys,blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=material}
 
 settingsValue :: Desktop -> Value
 settingsValue d=object ["appearance" .= themeName (appearance d),"screenMode" .= videoMode d,"columns" .= fst (screenSize d),"rows" .= snd (screenSize d),

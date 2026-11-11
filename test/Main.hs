@@ -378,7 +378,7 @@ modelChecks = do
       discarded = case dialog asked of Just dg -> fst (submitDialog 1 dg asked); Nothing -> asked
       cancelled = key V.KEsc [] discarded
   check "discard then cancel cannot bless unsaved text" (all (dirty . documentBuffer) (M.elems (buffers cancelled)))
-  let star = key (V.KChar 'b') [] (key (V.KChar 'k') [V.MCtrl] changed {wordStar=True})
+  let star = key (V.KChar 'b') [] (key (V.KChar 'k') [V.MCtrl] changed {editingKeys=WordStarEditing})
       starMoved = key (V.KChar 's') [V.MCtrl] star
       starBlock = key (V.KChar 'k') [] (key (V.KChar 'k') [V.MCtrl] starMoved)
   check "WordStar block marker survives movement" (maybe False ((== (0,1)) . ordered . selection) (activeWindow starBlock))

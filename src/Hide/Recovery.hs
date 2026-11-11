@@ -439,7 +439,7 @@ desktopValueWith buffer baseline plugin body desktop=do
     "windows" .= map (windowValue d) persistedWindows,"nextId" .= nextId d,
     "conversationTarget" .= conversationTarget d,"conversationViews" .= views,
     "directory" .= defaultDirectory d,"sidebar" .= fmap sidebarValue (sideTree d),"preferences" .= object
-      ["wordStar" .= wordStar d,"wideSectionTitles" .= wideSectionTitles d,"hapticFeedback" .= hapticFeedback d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
+      ["wordStar" .= wordStar d,"vim" .= (case editingKeys d of VimEditing{}->True; _->False),"wideSectionTitles" .= wideSectionTitles d,"hapticFeedback" .= hapticFeedback d,"blinkCursor" .= blinkCursor d,"crtFilter" .= crtFilter d,"pixelateUnicode" .= pixelateUnicode d,
        "defaultBufferView" .= fromEnum (defaultBufferView d),"chatSubmit" .= chatSubmitName (chatSubmit d),"macKeySymbols" .= macKeySymbols d,"materialIcons" .= materialIcons d,"streamerMode" .= streamerMode d,"appearance" .= fromEnum (appearance d),"videoMode" .= videoMode d,
        "problemsVisible" .= problemsVisible d,"problemsHeight" .= problemsPreferredHeight d,"messagesNumber" .= messagesNumber d]])
   where
@@ -660,7 +660,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   prefs<-o .: "preferences"
   wideTitles<-prefs .:? "wideSectionTitles" .!= False
   haptics<-prefs .:? "hapticFeedback" .!= False
-  wordStar'<-prefs .: "wordStar"; blink<-prefs .: "blinkCursor"; crt<-prefs .: "crtFilter"
+  wordStar'<-prefs .: "wordStar"; vim<-prefs .:? "vim" .!= False; blink<-prefs .: "blinkCursor"; crt<-prefs .: "crtFilter"
   pixelate<-prefs .: "pixelateUnicode"; icons<-prefs .: "materialIcons"; streamer<-prefs .: "streamerMode"
   defaultView<-prefs .:? "defaultBufferView" .!= 0 >>= boundedInt 0 (fromEnum (maxBound :: BufferView))
   macSymbols<-prefs .:? "macKeySymbols" .!= macKeySymbols baseline
@@ -671,7 +671,7 @@ desktopParser baseline=withObject "checkpoint" $ \o->do
   problems<-prefs .: "problemsVisible"; preferred<-prefs .: "problemsHeight" >>= boundedInt 0 4096
   messages<-prefs .: "messagesNumber" >>= traverse positive
   pure (baseline {windowTabs=groups,terminalMouseTracking=S.empty,dockedTerminals=M.fromList pinned,bottomTerminal=selectedTerminal,screenSize=size,buffers=documents,windows=[],pluginWindows=M.empty,retiredPluginWindows=S.empty,nextId=ident,editorDrafts=M.empty,editingInput=MountedInput,
-    conversationTarget=selectedTarget,conversationViews=M.empty,defaultDirectory=directory,sideTree=sidebar,wideSectionTitles=wideTitles,hapticFeedback=haptics,windowPresentations=M.empty,wordStar=wordStar',blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
+    conversationTarget=selectedTarget,conversationViews=M.empty,defaultDirectory=directory,sideTree=sidebar,wideSectionTitles=wideTitles,hapticFeedback=haptics,windowPresentations=M.empty,editingKeys=if vim then VimEditing VimNormal else if wordStar' then WordStarEditing else ModernEditing,blinkCursor=blink,crtFilter=crt,pixelateUnicode=pixelate,materialIcons=icons,streamerMode=streamer,
     defaultBufferView=toEnum defaultView,chatSubmit=submit,macKeySymbols=macSymbols,appearance=toEnum look,videoMode=mode,problemsVisible=problems,problemsPreferredHeight=preferred,messagesNumber=messages,
     menu=Nothing,dialog=Nothing,drag=Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing,clipboard="",clipboardCode=Nothing,clipboardExport=(0,Nothing),prefix=Nothing,blockStart=Nothing,
     status="Recovered session. Background processes ended; reconnect agents as needed.",lastFind="",branchStatus="",branchAdded=0,branchDeleted=0,branchRoot=Nothing,

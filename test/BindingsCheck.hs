@@ -13,6 +13,8 @@ import EditorFixture (withEditorTextFixture)
 import qualified Hide.Plugin.Editor as E
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Monad (unless,forM_)
+import Data.Aeson (object,(.=))
+import Data.Aeson.Types (parseEither)
 import Data.List (subsequences)
 import Control.Concurrent (threadDelay)
 import Control.Exception (bracket, bracket_)
@@ -49,6 +51,7 @@ checks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBase->do
   prefixChecks
   dialogInputChecks
   debuggerNavigationChecks
+  vimChecks chatBase
   let check name ok=unless ok (error name)
       prepare=either (error . show) id . platformBindings [] TerminalPlatform . M.singleton "source" . M.fromList
       bindings=prepare [("hide.file.save",["Ctrl+Shift+S"]),("hide.file.open",[])]
@@ -166,7 +169,7 @@ checks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBase->do
     [(V.KChar 'c',[V.MCtrl]),(V.KChar 'q',[V.MCtrl]),(V.KFun 1,[]),(V.KFun 4,[]),(V.KFun 7,[]),(V.KFun 9,[]),(V.KUp,[])])
   check "resolved reload retains guest origin policy" (not (guestKeyAllowed source {keyBindings=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "source" (M.singleton "hide.bindings.reload" ["Alt+F11"])))} (V.KFun 11) [V.MAlt]))
   let starMaps=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.fromList [("hide.file.save",["Ctrl+Shift+J"]),("hide.edit.undo",[])])))
-      star=base {wordStar=True,keyBindings=starMaps}
+      star=base {editingKeys=WordStarEditing,keyBindings=starMaps}
   check "WordStar Save remap dispatches its named command" (case snd (key (V.KChar 'j') [V.MCtrl,V.MShift] star) of [SaveDocument{}]->True; _->False)
   check "WordStar unspecified Control keys retain their old inactive default" (clipboard (fst (key (V.KChar 'c') [V.MCtrl] (modifyActive (\w->w {selection=Selection 0 5}) star)))=="")
   check "WordStar old named command chords stay removed" (noEffects (key (V.KFun 2) [] star) && activeText (fst (key (V.KChar 'z') [V.MCtrl] (fst (key (V.KChar '!' ) [] star))))=="!hello")
@@ -234,7 +237,7 @@ windowChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBa
      current (step V.KBackTab [V.MCtrl] base {keyBindings=defaults})==current first)
   check "window remaps use the existing cycle owner"
     (current (step (V.KFun 13) [] configured)==current second && current (step (V.KFun 14) [] configured)==current first)
-  forM_ [configured,base {keyBindings=removed},configured {wordStar=True}] $ \d->
+  forM_ [configured,base {keyBindings=removed},configured {editingKeys=WordStarEditing}] $ \d->
     check "removed window aliases neither cycle nor edit source"
       (all (\(k,mods)->state (step k mods d)==state d && null (snd (event k mods d))) aliases)
   let terminal=(addReadOnly "Terminal test" "output" base) {keyBindings=removed}
@@ -303,7 +306,7 @@ horizontalChecks=do
   let check label ok=unless ok (error label)
       compile entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton "wordstar" (M.fromList entries)))
       base=modifyActive (\w->w {selection=Selection 2 2}) (addDocument Nothing (newBuffer "abc\ndef\n") (initialDesktop (80,25)))
-      configured=base {wordStar=True,keyBindings=compile [("hide.cursor.left",["Ctrl+Shift+J"]),("hide.selection.left",["Ctrl+Shift+I"]),("hide.edit.delete-line",["Ctrl+Shift+U"])]}
+      configured=base {editingKeys=WordStarEditing,keyBindings=compile [("hide.cursor.left",["Ctrl+Shift+J"]),("hide.selection.left",["Ctrl+Shift+I"]),("hide.edit.delete-line",["Ctrl+Shift+U"])]}
       event key mods d=fst (handleEvent (V.EvKey key mods) d)
       range d=selection <$> activeWindow d
   check "horizontal remap invokes its semantic cursor owner" (range (event (V.KChar 'j') [V.MCtrl,V.MShift] configured)==Just (Selection 1 1))
@@ -311,7 +314,7 @@ horizontalChecks=do
   check "selection remap preserves its anchor" (range (event (V.KChar 'i') [V.MCtrl,V.MShift] configured)==Just (Selection 2 1))
   let deleted=event (V.KChar 'u') [V.MCtrl,V.MShift] configured
   check "remapped line deletion uses one existing undo operation" (activeText deleted=="def\n" && activeText (fst (runCommand Undo deleted))=="abc\ndef\n")
-  let unbound=base {wordStar=True,keyBindings=compile [("hide.cursor.left",[]),("hide.selection.left",[]),("hide.edit.delete-backward",[]),("hide.edit.delete-line",[])]}
+  let unbound=base {editingKeys=WordStarEditing,keyBindings=compile [("hide.cursor.left",[]),("hide.selection.left",[]),("hide.edit.delete-backward",[]),("hide.edit.delete-line",[])]}
   check "unbound horizontal editing cannot replay physical defaults" (all (\(key,mods)->let d=event key mods unbound in range d==Just (Selection 2 2) && activeText d=="abc\ndef\n") [(V.KLeft,[]),(V.KLeft,[V.MShift]),(V.KBS,[]),(V.KChar 's',[V.MCtrl]),(V.KChar 'y',[V.MCtrl])])
   let defaults=either (error . show) id (configuredBindings [] M.empty)
       position text p=modifyActive (\w->w {selection=Selection p p}) (addDocument Nothing (newBuffer text) (initialDesktop (80,25)))
@@ -319,7 +322,7 @@ horizontalChecks=do
   check "horizontal commands preserve complete combining boundaries" (range (event V.KLeft [] unicode {keyBindings=defaults})==Just (Selection 2 2) && activeText (event V.KBS [] unicode {keyBindings=defaults})=="a界z\r\n")
   check "selection extension and reverse selections keep the original anchor" (range (event V.KRight [V.MShift] base {keyBindings=defaults})==Just (Selection 2 3) && range (event V.KLeft [] (modifyActive (\w->w {selection=Selection 3 1}) base {keyBindings=defaults}))==Just (Selection 0 0))
   check "empty and end-of-file editing stays bounded" (range (event V.KLeft [] (position "" 0) {keyBindings=defaults})==Just (Selection 0 0) && activeText (event V.KDel [] (position "a" 1) {keyBindings=defaults})=="a")
-  let star=base {wordStar=True,keyBindings=defaults}
+  let star=base {editingKeys=WordStarEditing,keyBindings=defaults}
   check "default shifted WordStar movement retains its non-extending semantics" (all (\(c,expected)->range (event (V.KChar c) [V.MCtrl,V.MShift] star)==Just (Selection expected expected)) [('s',1),('d',3)])
   check "default shifted WordStar line deletion retains its owner" (activeText (event (V.KChar 'y') [V.MCtrl,V.MShift] star)=="def\n")
   let selected=modifyActive (\w->w {selection=Selection 1 3}) base {keyBindings=defaults}
@@ -357,7 +360,7 @@ verticalChecks=do
       defaults=either (error . show) id (configuredBindings [] M.empty)
       compile context entries=either (error . show) id (platformBindings [] TerminalPlatform (M.singleton context (M.fromList entries)))
       base=modifyActive (\w->w {selection=Selection 8 8}) (addDocument Nothing (newBuffer "ab界e\x301\&z\nx\nab界e\x301\&z\n") (initialDesktop (80,25)))
-      star=base {wordStar=True,keyBindings=defaults}
+      star=base {editingKeys=WordStarEditing,keyBindings=defaults}
       configured=star {keyBindings=compile "wordstar" [("hide.cursor.up",["Ctrl+Shift+J"]),("hide.selection.up",["Ctrl+Shift+I"])]}
       unbound=star {keyBindings=compile "wordstar" [("hide.cursor.up",[]),("hide.selection.up",[])]}
   check "WordStar vertical remap executes direct movement and removes former chords"
@@ -428,7 +431,7 @@ edgePageChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chat
     check "edge/page labels and frontend projection use the effective binding" (commandBindingKeys configured command==["F"<>T.pack (show n)] && menuShortcut configured (MenuItem "Edge" "Home" command)=="F"<>T.pack (show n) && lookup ("F"<>T.pack (show n)) (focusedBindingChords configured)==Just name)
   check "edge/page replacement consumes every former modifier alias" (all (\(k,mods)->range (event k mods configured)==range configured) originalKeys)
   check "explicit edge/page unbind consumes physical fallback" (all (\(k,mods)->range (event k mods unbound)==range unbound) originalKeys)
-  let star=base {wordStar=True,keyBindings=compile "wordstar" [(name,[]) | (name,_,_,_)<-actions]}
+  let star=base {editingKeys=WordStarEditing,keyBindings=compile "wordstar" [(name,[]) | (name,_,_,_)<-actions]}
       prefixStep c=event (V.KChar c) [] (event (V.KChar 'q') [V.MCtrl] star)
   check "WordStar quick defaults are independent non-extending semantic steps" (map (range . prefixStep) ['s','d','r','c']==map (Just . (\p->Selection p p)) [20*stride,20*stride+T.length line,0,T.length text])
   let hex=narrow (modifyActive (\w->w {selection=Selection 17 17}) (addDocument Nothing (newByteBuffer (BS.pack (take 1600 (cycle [0..255])))) (initialDesktop (80,25)))) {keyBindings=maps}
@@ -507,10 +510,10 @@ wordChecks=withEditorTextFixture "" "reply" (initialDesktop (80,25)) $ \chatBase
     let placed=modifyActive (\w->w {selection=Selection p p}) configured
     check "word boundaries preserve punctuation CRLF and Unicode scalar policy" (range (event (V.KFun 13) [] placed)==Just (Selection left left) && range (event (V.KFun 14) [] placed)==Just (Selection right right))
   let starMaps=compile "wordstar" [(name,["F"<>T.pack (show n)]) | ((name,_),n)<-zip actions [13::Int ..]]
-      star=base {wordStar=True,keyBindings=starMaps}
+      star=base {editingKeys=WordStarEditing,keyBindings=starMaps}
       aliases=[(V.KChar 'a',[V.MCtrl]),(V.KChar 'a',[V.MCtrl,V.MShift]),(V.KChar 'a',[V.MCtrl,V.MAlt]),(V.KChar 'a',[V.MCtrl,V.MAlt,V.MShift]),(V.KChar 'f',[V.MCtrl]),(V.KChar 'f',[V.MCtrl,V.MShift])]
       starUnbound=star {keyBindings=compile "wordstar" [(name,[]) | (name,_)<-actions]}
-      starDefaults=base {wordStar=True,keyBindings=compile "wordstar" []}
+      starDefaults=base {editingKeys=WordStarEditing,keyBindings=compile "wordstar" []}
   check "WordStar word remaps consume former A F aliases" (range (event (V.KFun 13) [] star)==Just (Selection 5 5) && range (event (V.KFun 14) [] star)==Just (Selection 8 8) && all (\(k,mods)->state (event k mods star)==state star) aliases)
   check "WordStar word unbinding consumes A F and arrow aliases" (all (\(k,mods)->state (event k mods starUnbound)==state starUnbound) (aliases++sourceWordKeys))
   check "WordStar default shifted A F aliases remain non-extending" (map (\c->range (event (V.KChar c) [V.MCtrl,V.MShift] starDefaults)) ['a','f']==map Just [Selection 5 5,Selection 8 8])
@@ -773,11 +776,11 @@ prefixChecks=do
       configuration=M.fromList [("wordstar",M.fromList [("hide.wordstar.block-prefix",["Ctrl+J"]),("hide.edit.copy",[])])
         ,("wordstar-block",M.fromList [("hide.edit.copy",["Y"]),("hide.edit.delete-selection",[]),("hide.edit.undo",["Z"]),("hide.edit.paste",["P"]),("hide.cursor.right",[])])]
       base=modifyActive (\w->w {selection=Selection 0 5}) $ addDocument Nothing (newBuffer "hello") (initialDesktop (80,25))
-      configured=base {wordStar=True,keyBindings=prepare TerminalPlatform configuration}
+      configured=base {editingKeys=WordStarEditing,keyBindings=prepare TerminalPlatform configuration}
       event key mods=fst . handleEvent (V.EvKey key mods)
       pending=event (V.KChar 'j') [V.MCtrl] configured
       copied=event (V.KChar 'y') [] pending
-      defaults=base {wordStar=True,keyBindings=prepare TerminalPlatform M.empty}
+      defaults=base {editingKeys=WordStarEditing,keyBindings=prepare TerminalPlatform M.empty}
       started=event (V.KChar 'k') [V.MCtrl] defaults
       selected d=selection <$> activeWindow d
   check "remapped WordStar starter and continuation copy the selected source" (prefix pending==Just 'k' && clipboard copied=="hello" && prefix copied==Nothing && sourceText copied=="hello")
@@ -858,3 +861,105 @@ prefixChecks=do
   check "macOS prefix has no inherited Command clipboard default"
     (boundKeyCommand (V.KChar 'c') [V.MMeta] macPending==Nothing && menuShortcut mac (MenuItem "Copy" "Cmd+C" Copy)=="⌃J Y")
   where sourceText d=maybe "" (contents . documentBuffer) (activeDocument d)
+
+-- Use the same key and packet dispatchers as the terminal, native and browser owners.
+vimChecks :: Desktop -> IO ()
+vimChecks chatBase=do
+  let original="áβc\nz"
+      prepare=either (error.show) id . configuredBindings []
+      maps=prepare M.empty
+      base=(addDocument (Just (FileState "/project/Main.hs" Nothing)) (newBuffer original) (initialDesktop (80,25))) {keyBindings=maps}
+      preferences=fst (runCommand EditorOptions base)
+      settings=maybe (error "Missing editor preferences") id (dialog preferences)
+      choose (Radio "Key bindings" options _)=Radio "Key bindings" options 2
+      choose field=field
+      normal=fst (submitDialog 0 settings {fields=map choose (fields settings)} preferences)
+      event key mods=fst . handleEvent (V.EvKey key mods)
+      char c=event (V.KChar c) []
+      pos d=caret . selection <$> activeWindow d
+      mode=vimSourceMode
+      statusHas label=any (T.isInfixOf label.fst) . statusHints
+      check label ok=unless ok (error label)
+      packet value=either (error.show) id (parseEither P.parseInput value)
+      web value=fst . P.applyInput (packet value)
+      webKey ch mods=web (object ["type" .= ("key"::T.Text),"key" .= (ch::T.Text),"mods" .= (mods::[T.Text])])
+      commit text asKey=object ["type" .= ("text-input"::T.Text),"text" .= (text::T.Text),"asKey" .= asKey]
+      rejected value=case parseEither P.parseInput value of Left _->True; _->False
+  check "Vim is opt-in through Preferences and starts in Normal"
+    (editingKeys base==ModernEditing && activeText (char 'i' base)=="i"<>original &&
+     mode normal==Just VimNormal && statusHas "Vim Normal" normal)
+  let end=webKey "$" ["shift"] normal
+      second=char 'j' end
+      start=char '0' (char 'k' second)
+  check "Vim Normal moves by grapheme and stays within the line"
+    (pos (char 'h' normal)==Just 0 && pos (char 'l' normal)==Just 2 &&
+     pos end==Just 3 && pos (char 'l' end)==Just 3 && pos second==Just 5 && pos start==Just 0)
+  let selected=modifyActive (\w->w {selection=Selection 4 0}) normal
+      deleted=char 'x' selected
+      emptyLine=addDocument Nothing (newBuffer "\nz") normal
+  check "Vim x edits one grapheme, never a selection or newline"
+    (activeText deleted=="βc\nz" && activeText (char 'u' deleted)==original &&
+     activeText (char 'x' emptyLine)=="\nz")
+  let visibleEnd=event V.KEnd [] normal
+  check "Normal x and i honor the caret at the displayed line end"
+    (pos visibleEnd==Just 4 && activeText (char 'x' visibleEnd)==original &&
+     pos (char 'l' visibleEnd)==Just 4 && pos (char 'h' visibleEnd)==Just 3 &&
+     activeText (char '!' (char 'i' visibleEnd))=="áβc!\nz")
+  let typing=char 'i' (char 'l' normal)
+      inserted=web (commit "界β" False) typing
+      escaped=event V.KEsc [] inserted
+      appended=event V.KEsc [] (char '!' (char 'a' end))
+  check "Vim Insert retains Unicode commits and Escape places the Normal caret"
+    (statusHas "Vim Insert" typing && activeText inserted=="á界ββc\nz" &&
+     mode escaped==Just VimNormal && pos escaped==Just 3 &&
+     activeText appended=="áβc!\nz" && pos appended==Just 4)
+  let textCommit=web (commit "ix" False) normal
+      nativeCommit=web (commit "x" True) (web (commit "i" True) normal)
+      pasted=web (object ["type" .= ("paste"::T.Text),"text" .= ("ix"::T.Text)]) normal
+  check "Normal ignores composed text and literal insertion keys while clipboard paste remains deliberate"
+    (mode textCommit==Just VimNormal && activeText textCommit==original &&
+     mode nativeCommit==Just VimNormal && activeText nativeCommit==original &&
+     activeText (event V.KEnter [V.MCtrl] (event V.KEnter [] (event (V.KChar '\t') [] normal)))==original &&
+     activeText pasted=="ix"<>original &&
+     activeText (web (commit "ix" False) base)=="ix"<>original &&
+     activeText (web (commit "Q" True) typing)=="áQβc\nz")
+  check "Committed text is bounded and a native committed key is exactly one scalar"
+    (rejected (commit "" True) && rejected (commit "ix" True) && rejected (commit (T.replicate 1048577 "x") False))
+  let remap=prepare (M.singleton "terminal" (M.singleton "source" (M.singleton "hide.cursor.right" ["Ctrl+Shift+J"])))
+      saved=snd (handleEvent (V.EvKey (V.KFun 2) []) normal)
+  check "Compiled source shortcuts keep their established priority in Vim"
+    (pos (event (V.KChar 'j') [V.MCtrl,V.MShift] normal {keyBindings=remap})==Just 2 && any (\effect->case effect of SaveDocument{}->True; _->False) saved)
+  let split=fst (runCommand SplitVertical typing)
+      source=maybe (error "Missing Vim source window") id (activeWindow typing)
+      returned=activateEditorWindow (windowId source) split
+      published=addDocument Nothing (newBuffer "") typing
+      refocused=activateEditorWindow (windowId source) published
+      closedPublication=fst (runCommand Close published)
+      clickX=left (bounds source)+1
+      clickY=top (bounds source)+1
+      pressed=fst (handleEvent (V.EvMouseDown clickX clickY V.BLeft []) typing)
+      released=fst (handleEvent (V.EvMouseUp clickX clickY (Just V.BLeft)) pressed)
+      modal=fst (runCommand Find typing)
+      inDialog=char 'i' modal
+      closed=event V.KEsc [] inDialog
+      readOnly=normal {buffers=M.map (\doc->doc {documentLabel=Just "Read-only source"}) (buffers normal)}
+      review=modifyActive (\w->w {bufferView=MarkdownView}) normal
+      sidebar=normal {sideTree=Just ((emptySidebar "." 20 False) {treeFocused=True})}
+      chat=setComposerInput (newBuffer "") (Selection 0 0) True chatBase {editingKeys=VimEditing VimNormal,keyBindings=maps}
+  check "Changing even to a shared-buffer split ends Vim Insert"
+    (length (windows split)==2 && (activeWindow typing >>= bufferId)==(activeWindow split >>= bufferId) &&
+     mode split==Just VimNormal && mode returned==Just VimNormal)
+  check "An asynchronously opened source retires the previous Insert owner"
+    (mode published==Just VimNormal && mode refocused==Just VimNormal &&
+     length (windows closedPublication)==1 && mode closedPublication==Just VimNormal)
+  check "Selecting within the same source preserves Vim Insert" (mode released==mode typing)
+  check "Dialog, read-only views, sidebar and composer keep their input owners"
+    (mode modal==Nothing && activeText inDialog==original && mode closed==Just VimNormal &&
+     all ((==Nothing).mode) [readOnly,review,sidebar,chat] &&
+     all ((==original).activeText.char 'x') [readOnly,review,sidebar] &&
+     contents (composerBuffer (char 'i' chat))=="i")
+  let protected=normal {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc)
+        {undoStack=error "Vim render key forced source Undo",redoStack=error "Vim render key forced source Redo"}}) (buffers normal)}
+  normalKey<-renderKey protected
+  insertKey<-renderKey protected {editingKeys=editingKeys typing}
+  check "Vim mode invalidates the render key without forcing source history" (normalKey/=insertKey)

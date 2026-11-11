@@ -782,8 +782,10 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
         2:_ -> do
           bytes <- c_text >>= BS.packCString
           case TE.decodeUtf8' bytes of
-            Right text -> do
-              forM_ (T.unpack text) $ \c -> sendEvent [1,fromEnum c,0]
+            Right text -> case T.unpack text of
+              [ch] -> sendEvent [1,fromEnum ch,0]
+              chars -> forM_ chars $ \ch -> sendJSON (object
+                ["type" .= ("text-input"::T.Text),"text" .= T.singleton ch,"asKey" .= True])
             Left _ -> pure ()
         18:_ -> when connected $ do
           bytes<-c_text >>= BS.packCString

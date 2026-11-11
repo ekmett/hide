@@ -367,6 +367,12 @@ data EditingInput = MountedInput | QuestionInput deriving (Eq,Show)
 -- recovery never persists file bytes or an armed native gesture.
 data FileExport = ExportFileCopy !Text !ByteString !Rect ![Integer] deriving (Eq,Show)
 
+data EditingKeys = ModernEditing | WordStarEditing | VimEditing !VimMode deriving (Eq,Show)
+data VimMode = VimNormal | VimInsert !Int !Int deriving (Eq,Show)
+
+wordStar :: Desktop -> Bool
+wordStar d=editingKeys d==WordStarEditing
+
 -- | Session UI state and references to immutable document payloads.
 -- This record is not a cheap equality key; use the dedicated rendering projection.
 data Desktop = Desktop
@@ -374,7 +380,7 @@ data Desktop = Desktop
   , pluginWindows :: M.Map PluginWindow.WindowRef PluginWindow.PreparedWindow
   , retiredPluginWindows :: S.Set PluginWindow.WindowRef
   , nextId :: Int, menu :: Maybe (Int,Int), dialog :: Maybe Dialog, drag :: Maybe Drag
-  , clipboard :: Text, clipboardCode :: Maybe Text, wordStar :: Bool, prefix :: Maybe Char, status :: Text
+  , clipboard :: Text, clipboardCode :: Maybe Text, editingKeys :: !EditingKeys, prefix :: Maybe Char, status :: Text
   , blockStart :: Maybe (Int,Int), lastFind :: Text, sideTree :: Maybe Sidebar, branchStatus :: Text, nativeMac :: Bool, gitReview :: Maybe GitReview, videoMode :: Maybe Int
   , hoverTarget :: Maybe (Int,Int,Int), typeHint :: Text
   , buttonHover :: Maybe Int, buttonPressed :: Maybe Int, contextMenu :: Maybe (Rect,Int)
@@ -649,7 +655,12 @@ statusItems :: Desktop -> [(Text,Maybe (Either Command V.Event))]
 statusItems d=statusHints d++[(toolchainBadgeText d,if dialog d==Nothing then Just (Left ToolchainOptions) else Nothing) | not (T.null (toolchainBadgeText d))]
 
 statusHints :: Desktop -> [(Text,Maybe (Either Command V.Event))]
-statusHints d = [(if action==Nothing then text else keyLabel d text,action) | (text,action)<-statusHintsRaw d]
+statusHints d = modeHint ++ [(if action==Nothing then text else keyLabel d text,action) | (text,action)<-statusHintsRaw d]
+  where
+    modeHint=case vimSourceMode d of
+      Just VimNormal->[(" Vim Normal |",Nothing)]
+      Just VimInsert{}->[(" Vim Insert |",Nothing)]
+      Nothing->[]
 
 statusHintsRaw :: Desktop -> [(Text,Maybe (Either Command V.Event))]
 statusHintsRaw d
@@ -844,7 +855,7 @@ menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
         w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
 
 initialDesktop :: (Int,Int) -> Desktop
-initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing False Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing Nothing False False M.empty [] [] False Nothing False M.empty 0 (0,Nothing) S.empty False 0 Nothing "." [] Nothing Nothing
+initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing ModernEditing Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing Nothing False False M.empty [] [] False Nothing False M.empty 0 (0,Nothing) S.empty False 0 Nothing "." [] Nothing Nothing
 
 activeWindow :: Desktop -> Maybe Window
 activeWindow d = listToMaybe (filter (windowVisible d) (windows d))
@@ -861,7 +872,7 @@ windowDocument documents w=bufferId w >>= (`M.lookup` documents)
 
 -- | Adopt worker-prepared content without creating an editable document.
 addPluginWindow :: PluginWindow.WindowRef -> PluginWindow.PreparedWindow -> Desktop -> Desktop
-addPluginWindow reference prepared d=d {windows=w:windows d,pluginWindows=M.insert reference prepared (pluginWindows d),nextId=i+1,
+addPluginWindow reference prepared d=retainVimInsert d {windows=w:windows d,pluginWindows=M.insert reference prepared (pluginWindows d),nextId=i+1,
   problemsFocused=False,sideTree=fmap (\tree->tree {treeFocused=False}) (sideTree d)}
   where
     i=nextId d
@@ -1041,7 +1052,7 @@ fitRect (sw,sh) (Rect x y w h) = Rect (max 0 (min x (sw-w'))) (max 1 (min y (sh-
   where w' = max 1 (min sw (max 16 w)); h' = max 1 (min (max 1 (sh-2)) (max 5 h))
 
 addDocument :: Maybe FileState -> Buffer -> Desktop -> Desktop
-addDocument file b d = d { windows = w : windows d, buffers = M.insert i document (buffers d), nextId = i+1, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d) }
+addDocument file b d = retainVimInsert d { windows = w : windows d, buffers = M.insert i document (buffers d), nextId = i+1, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d) }
   where
     document=(newDocument b file) {documentPrivate=maybe False (\state->filePath state `elem` privateFilePaths d) file}
     i = nextId d
@@ -1122,10 +1133,12 @@ activateEditorWindow ident d
   | otherwise = d
 
 focusWindow :: Int -> Desktop -> Desktop
-focusWindow i d = revealWindowTab i $ d { bottomTerminal=if M.member i (dockedTerminals d) then Just i else bottomTerminal d, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++
+focusWindow i original = retainVimInsert $ revealWindowTab i $ d { bottomTerminal=if M.member i (dockedTerminals d) then Just i else bottomTerminal d, problemsFocused=False, sideTree=fmap (\tree -> tree {treeFocused=False}) (sideTree d), windows = filter ((==i) . windowId) (windows d) ++
   filter (\w->windowId w/=i && windowId w `elem` members) (windows d) ++
   filter ((`notElem` members) . windowId) (windows d) }
-  where members=windowTabMembers d i
+  where
+    d=retainVimInsert original
+    members=windowTabMembers d i
 
 -- Stable window numbers make every member reachable even when selecting a tab
 -- raises its whole group. Descending order retains next-window navigation from
@@ -1448,29 +1461,32 @@ prompt title p fs d = d {dialog = Just (Dialog title p fs 0 ["OK","Cancel"] []),
 
 -- | Apply a semantic editor command and return any required host effects.
 runCommand :: Command -> Desktop -> (Desktop,[Effect])
-runCommand (FormChoice reference version selected) source
+runCommand command d=Bifunctor.first retainVimInsert (runCommandCore command d)
+
+runCommandCore :: Command -> Desktop -> (Desktop,[Effect])
+runCommandCore (FormChoice reference version selected) source
   | commandEnabled source (FormChoice reference version selected)=
       (source {contextMenu=Nothing,contextKind=SubmittedChoicesContext reference version,menu=Nothing},
        [SubmitPopupChoiceForm reference version selected Plugin.HumanMenu])
   | otherwise=(source {contextMenu=Nothing,contextKind=SourceContext,contextTarget=Nothing},[])
-runCommand cmd source | dialog source==Nothing,menu source==Nothing,contextMenu source==Nothing,not (questionActive source),
+runCommandCore cmd source | dialog source==Nothing,menu source==Nothing,contextMenu source==Nothing,not (questionActive source),
   Just key<-lookup cmd [(CursorLeft False,V.KLeft),(CursorRight False,V.KRight),(CursorUp False,V.KUp),(CursorDown False,V.KDown)],
   Just next<-imageKey key [] source = (next,[])
-runCommand cmd source | cmd `elem` [WordStarBlockPrefix,WordStarQuickPrefix], not (commandEnabled source cmd) = (source,[])
-runCommand cmd source | sourceKeyCommand cmd, not (commandEnabled source cmd) =
+runCommandCore cmd source | cmd `elem` [WordStarBlockPrefix,WordStarQuickPrefix], not (commandEnabled source cmd) = (source,[])
+runCommandCore cmd source | sourceKeyCommand cmd, not (commandEnabled source cmd) =
   (if horizontalMutation cmd && sourceNavigationOwner source && not (activeMarkdown source) &&
       maybe False ((/=Nothing) . documentLabel) (activeDocument source)
     then source {status="This window is read-only."} else source,[])
-runCommand cmd source | dialog source==Nothing, activeMarkdown source, markdownSourceCommand cmd = (source {status="Markdown view is read-only. Switch to Current to edit."},[])
-runCommand cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd,not ((composerActive source || questionActive source) && cmd `elem` [Undo,Redo,Cut,Paste]) = (source {status="This plugin window is read-only."},[])
-runCommand cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
+runCommandCore cmd source | dialog source==Nothing, activeMarkdown source, markdownSourceCommand cmd = (source {status="Markdown view is read-only. Switch to Current to edit."},[])
+runCommandCore cmd source | dialog source==Nothing, Just _<-activePluginWindow source, sourceOnlyCommand cmd,not ((composerActive source || questionActive source) && cmd `elem` [Undo,Redo,Cut,Paste]) = (source {status="This plugin window is read-only."},[])
+runCommandCore cmd source | browserFrontend source, cmd `elem` [Copy,Cut,CopyAllMessages,CopyLocation] =
   let (next,requests)=runCommand cmd source {browserFrontend=False}
   in (next {browserFrontend=True},requests++[WriteBrowserClipboard (clipboard next) | not (any deferredCopy requests)])
   where deferredCopy CopyConversation{}=True; deferredCopy _=False
-runCommand Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing,prefix=Nothing},[ReadBrowserClipboard])
-runCommand cmd source | dialogCommandAllowed cmd source = applyDialogCommand cmd source
-runCommand cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
-runCommand Copy source | dialog source==Nothing,activeConversation source,
+runCommandCore Paste source | browserFrontend source = (source {menu=Nothing,contextMenu=Nothing,prefix=Nothing},[ReadBrowserClipboard])
+runCommandCore cmd source | dialogCommandAllowed cmd source = applyDialogCommand cmd source
+runCommandCore cmd source | problemsVisible source && problemsFocused source, cmd `elem` [Undo,Redo,Cut,Paste,SelectAll] = (source {menu=Nothing,contextMenu=Nothing},[])
+runCommandCore Copy source | dialog source==Nothing,activeConversation source,
   not (questionActive source),Just window<-activeWindow source,
   Just target<-conversationTargetFor source window,Just view<-M.lookup target (conversationViews source),
   Just logical<-conversationLogical view,Just chosen@(BodySelection a z)<-conversationCopySelection source target window,a/=z,
@@ -1478,21 +1494,21 @@ runCommand Copy source | dialog source==Nothing,activeConversation source,
     let serial=fst (clipboardExport source)+1
     in (source {clipboardExport=(serial,Nothing),status="Preparing conversation copy.",menu=Nothing,contextMenu=Nothing},
       [CopyConversation (ConversationCopy reference target logical chosen serial)])
-runCommand cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionCommand cmd source,[])
-runCommand cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
-runCommand Copy source | dialog source==Nothing,activeMarkdown source,maybe False (windowFocused source) (activeWindow source) =
+runCommandCore cmd source | questionActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (questionCommand cmd source,[])
+runCommandCore cmd source | not (problemsFocused source), composerActive source, cmd `elem` [Undo,Redo,Copy,Cut,Paste,SelectAll] = (composerCommand cmd source,[])
+runCommandCore Copy source | dialog source==Nothing,activeMarkdown source,maybe False (windowFocused source) (activeWindow source) =
   let text=case activeWindow source >>= windowMarkdown source of
         Just (_,content,_)->let (a,z)=ordered (selection (displayWindow (fromMaybe (error "Missing Markdown window") (activeWindow source)))) in contentSlice content a (z-a)
         Nothing->""
   in (copyClipboard False text source {menu=Nothing,contextMenu=Nothing},[])
-runCommand SelectAll source | dialog source==Nothing,activeMarkdown source,maybe False (windowFocused source) (activeWindow source) =
+runCommandCore SelectAll source | dialog source==Nothing,activeMarkdown source,maybe False (windowFocused source) (activeWindow source) =
   (modifyActive (modifyDisplayedWindow (\w->w {selection=Selection 0 (maybe 0 (\(_,text,_)->contentLength text) (windowMarkdown source w))})) source,[])
-runCommand Copy source | dialog source==Nothing,Just view<-activePluginWindow source, Just w<-activeWindow source,windowFocused source w =
+runCommandCore Copy source | dialog source==Nothing,Just view<-activePluginWindow source, Just w<-activeWindow source,windowFocused source w =
   let (a,b)=ordered (selection w)
   in (copyClipboard False (PluginWindow.copyPreparedSelection view a b) source {menu=Nothing,contextMenu=Nothing},[])
-runCommand SelectAll source | dialog source==Nothing,Just view<-activePluginWindow source =
+runCommandCore SelectAll source | dialog source==Nothing,Just view<-activePluginWindow source =
   (modifyActive (\w->w {selection=Selection 0 (contentLength (PluginWindow.preparedWindowText view))}) source,[])
-runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, contextKind=case contextKind source of FormChoicesContext{}->SourceContext; SubmittedChoicesContext{}->SourceContext; other->other, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing})
+runCommandCore cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source {menu = Nothing, contextMenu=Nothing, contextKind=case contextKind source of FormChoicesContext{}->SourceContext; SubmittedChoicesContext{}->SourceContext; other->other, buttonHover=Nothing, buttonPressed=Nothing, prefix = Nothing, drag = Nothing,dragOriginal=Nothing,dragTabs=Nothing,tabDropTarget=Nothing})
   where
     go DialogAccept d = applyDialogCommand DialogAccept d
     go DialogCancel d = applyDialogCommand DialogCancel d
@@ -1688,7 +1704,7 @@ runCommand cmd source = Bifunctor.first (clampHexScroll source) $ go cmd (source
     go GitMerge d = (d,[ReadMergeBranches])
     -- Docs: docs/site/screenshots/preferences.png (docs/display.md); refresh with the controls.
     go EditorOptions d = (prompt "Preferences" Settings
-      ([Radio "Key bindings" ["Modern","WordStar"] (if wordStar d then 1 else 0)] ++
+      ([Radio "Key bindings" ["Modern","WordStar","Vim"] (case editingKeys d of ModernEditing->0; WordStarEditing->1; VimEditing{}->2)] ++
        [Radio "Screen size" ["Mode 3 (80x25)","Mode 259 (80x50)"] (if mode == 259 then 1 else 0) | Just mode <- [videoMode d]] ++
        [Radio "Appearance" ["Light","Dark","System"] (fromEnum (appearance d)),CheckBox "Wide section titles" (wideSectionTitles d),CheckBox "Blinking cursor" (blinkCursor d),CheckBox "Haptic Feedback" (hapticFeedback d),CheckBox "Streamer mode" (streamerMode d)] ++
        [CheckBox "Mac key symbols" (macKeySymbols d) | videoMode d==Nothing] ++
@@ -2077,10 +2093,13 @@ resizeScreenMode (sw,sh) d = layoutBottomWindows (ensureVisibleAfterLayout d (cl
 -- | Dispatch a Vty event through modal, gesture and focused-view handling.
 -- The caller must interpret returned effects in order.
 handleEvent :: V.Event -> Desktop -> (Desktop,[Effect])
+handleEvent event d=Bifunctor.first retainVimInsert (handleInputEvent event d)
+
+handleInputEvent :: V.Event -> Desktop -> (Desktop,[Effect])
 -- Fresh status clicks dispatch before invalidating a proposal. Captured drags
 -- keep their original owner and unmodified coordinates, even outside its window.
-handleEvent event@(V.EvMouseDown _ y V.BLeft _) d | drag d==Nothing, y==snd (screenSize d)-1 = handleEventCore event d
-handleEvent event d=case inlineEvent event d of
+handleInputEvent event@(V.EvMouseDown _ y V.BLeft _) d | drag d==Nothing, y==snd (screenSize d)-1 = handleEventCore event d
+handleInputEvent event d=case inlineEvent event d of
   Just result->result
   Nothing->handleEventCore event (case event of
     V.EvKey{}->clearInline d
@@ -3914,6 +3933,7 @@ unboundKey key mods d
   | Just _<-effectiveBindings d, sourceNavigationOwner d,
     not (bindingPlatform d==Bindings.TerminalPlatform && V.MMeta `elem` mods),
     key `elem` [V.KUp,V.KDown,V.KHome,V.KEnd,V.KPageUp,V.KPageDown,V.KLeft,V.KRight,V.KBS,V.KDel] = (d,[])
+unboundKey key mods d | Just next<-vimSourceKey key mods d = next
 unboundKey key mods d | dialog d==Nothing, Just next<-imageKey key mods d = (next,[])
 unboundKey key mods d | activeMarkdown d, dialog d==Nothing,maybe False (windowFocused d) (activeWindow d) = (markdownKey key mods d,[])
 unboundKey key mods d | dialog d==Nothing,activeEditorMount d/=Nothing,maybe False (windowFocused d) (activeWindow d),
@@ -3959,6 +3979,7 @@ boundKeyCommand key mods d
 
 keyEvent :: V.Key -> [V.Modifier] -> Desktop -> (Desktop,[Effect])
 keyEvent key mods d
+  | Just result<-vimSourceKey key mods d = result
   | key==V.KEsc = (d {prefix=Nothing},[])
   | wordStarPrefixOwner d, effectiveBindings d==Nothing, Just p <- prefix d, V.KChar c <- key, all (`elem` [V.MCtrl,V.MShift]) mods = starPrefix p (toLower c) d {prefix=Nothing}
   | V.MAlt `elem` mods, V.MMeta `notElem` mods, V.KChar c <- key, Just i <- findIndex (\(_,mn,_) -> mn==toLower c) menus = (d {menu=Just (i,0)},[])
@@ -3982,6 +4003,76 @@ keyEvent key mods d
   | ctrl, V.KChar c <- key, Just cmd <- lookup (toLower c) [('b',ToggleTree),('s',Save),('o',Open),('n',New),('z',Undo),('y',Redo),('c',Copy),('x',Cut),('v',Paste),('a',SelectAll),('f',Find),('h',Replace),('r',Replace),('g',GoTo),('l',FindNext),('q',Quit)] = runCommand cmd d
   | otherwise = (editorKey key mods d,[])
   where ctrl = V.MCtrl `elem` mods
+
+-- | Vim owns only the focused editable source. Its Insert receipt identifies
+-- both the window and its buffer, including when two windows share one buffer.
+vimSource :: Desktop -> Maybe (VimMode,Window,Buffer,Int)
+vimSource d=do
+  VimEditing mode<-pure (editingKeys d)
+  guard (dialog d==Nothing && menu d==Nothing && contextMenu d==Nothing && bindingContext d==Just Bindings.SourceKeys)
+  w<-activeWindow d
+  guard (windowFocused d w && bufferView w==CurrentView && reviewSelection w==Nothing && windowEditorMount w==Nothing)
+  ident<-bufferId w
+  doc<-activeDocument d
+  let buffer=documentBuffer doc
+  guard (documentLabel doc==Nothing && textBuffer buffer)
+  let current=if mode==VimInsert (windowId w) ident then mode else VimNormal
+  pure (current,w,buffer,ident)
+
+vimSourceMode :: Desktop -> Maybe VimMode
+vimSourceMode d=(\(mode,_,_,_)->mode) <$> vimSource d
+
+retainVimInsert :: Desktop -> Desktop
+retainVimInsert d
+  | VimEditing mode@VimInsert{}<-editingKeys d, vimSourceMode d/=Just mode = d {editingKeys=VimEditing VimNormal}
+  | otherwise=d
+
+vimSourceKey :: V.Key -> [V.Modifier] -> Desktop -> Maybe (Desktop,[Effect])
+vimSourceKey key mods d=do
+  (mode,w,buffer,ident)<-vimSource d
+  guard (bindingInputAvailable d)
+  let cursor=caret (selection w)
+      (start,end)=vimLineBounds buffer cursor
+      lastPosition=if start<end then bufferPreviousCharacter buffer end else start
+      next=bufferNextCharacter buffer cursor
+      move target=(moveTo False target d,[])
+      insert target=(moveTo False target d {editingKeys=VimEditing (VimInsert (windowId w) ident)},[])
+  case (mode,key) of
+    (VimInsert{},V.KEsc) | null mods->
+      Just (moveTo False (max start (bufferPreviousCharacter buffer cursor)) d {editingKeys=VimEditing VimNormal},[])
+    (VimNormal,V.KChar ch) | all (==V.MShift) mods, textInputChar ch->Just $ case ch of
+      'i'->insert cursor
+      'a'->insert (if cursor<end then min end next else cursor)
+      'h'->move (max start (bufferPreviousCharacter buffer cursor))
+      'l'->move (if cursor<lastPosition then min lastPosition next else cursor)
+      'j'->(clampVimCursor (verticalMove 1 False d),[])
+      'k'->(clampVimCursor (verticalMove (-1) False d),[])
+      '0'->move start
+      '$'->move lastPosition
+      'x' | cursor<end->(clampVimCursor (deleteAdjacent True (moveTo False cursor d)),[])
+      'u'->Bifunctor.first clampVimCursor (runCommand Undo d)
+      _->(d,[])
+    (VimNormal,V.KEnter)->Just (d,[])
+    (VimNormal,V.KChar '\t')->Just (d,[])
+    _->Nothing
+
+vimLineBounds :: Buffer -> Int -> (Int,Int)
+vimLineBounds buffer cursor=(start,start+sourceLineLength (contentSourceLineAt (bufferContent buffer) row))
+  where
+    row=fst (bufferLineColumn buffer cursor)
+    start=bufferLineOffset buffer row
+
+vimNormalPosition :: Buffer -> Int -> Int
+vimNormalPosition buffer cursor
+  | start<end && cursor>=end=bufferPreviousCharacter buffer end
+  | otherwise=cursor
+  where (start,end)=vimLineBounds buffer cursor
+
+clampVimCursor :: Desktop -> Desktop
+clampVimCursor d=case vimSource d of
+  Just (_,w,buffer,_)
+    | let cursor=caret (selection w),let position=vimNormalPosition buffer cursor,position/=cursor->moveTo False position d
+  _->d
 
 -- | Finite source operations resolve semantic positions, never replay key events.
 sourceKeyCommand :: Command -> Bool
@@ -4539,7 +4630,8 @@ submitDialog button dg original
     AutocompleteDialog action -> (d,[AutocompleteAction action (T.pack (show button):values++[if enabled then "true" else "false" | CheckBox _ enabled<-fields dg])])
     ChatInputSettings -> let chosen=if any (\f -> case f of Radio "Enter action" _ 1 -> True; _ -> False) (fields dg) then SteerSubmit else QuerySubmit
                          in (d {chatSubmit=chosen},[SaveChatSubmit chosen])
-    Settings -> (reprojectWindowPresentations d d {wideSectionTitles=fromMaybe (wideSectionTitles d) (listToMaybe [value | CheckBox "Wide section titles" value<-fields dg]),macKeySymbols=fromMaybe (macKeySymbols d) (listToMaybe [value | CheckBox "Mac key symbols" value<-fields dg]),wordStar=any (\f -> case f of Radio "Key bindings" _ 1 -> True; _ -> False) (fields dg),
+    Settings -> (reprojectWindowPresentations d d {wideSectionTitles=fromMaybe (wideSectionTitles d) (listToMaybe [value | CheckBox "Wide section titles" value<-fields dg]),macKeySymbols=fromMaybe (macKeySymbols d) (listToMaybe [value | CheckBox "Mac key symbols" value<-fields dg]),editingKeys=fromMaybe (editingKeys d) (listToMaybe [profile | Radio "Key bindings" _ choice<-fields dg,
+        let profile=case choice of 1->WordStarEditing; 2->VimEditing VimNormal; _->ModernEditing]),
       appearance=fromMaybe (appearance d) (listToMaybe [toEnum (max 0 (min 2 value)) | Radio "Appearance" _ value<-fields dg]),
       streamerMode=fromMaybe (streamerMode d) (listToMaybe [value | CheckBox "Streamer mode" value<-fields dg]),
       blinkCursor=fromMaybe (blinkCursor d) (listToMaybe [value | CheckBox "Blinking cursor" value<-fields dg]),

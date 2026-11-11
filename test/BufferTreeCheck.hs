@@ -385,7 +385,7 @@ wordChecks profile=withEditorTextFixture "" "trace" (Model.initialDesktop (80,25
   check "selected word deletion remains one ordinary undo"
     (contents (Model.documentBuffer result)=="alpha  gamma" && length (undoStack (Model.documentBuffer result))==1 &&
       contents (undo (Model.documentBuffer result))==source)
-  let wordStar=Model.modifyActive (\w->w {Model.selection=Selection 8 8}) base {Model.wordStar=True}
+  let wordStar=Model.modifyActive (\w->w {Model.selection=Selection 8 8}) base {Model.editingKeys=Model.WordStarEditing}
       star=fst (Model.handleEvent (V.EvKey (V.KChar 'f') [V.MCtrl]) wordStar)
       composer=Model.setComposerInput (newBuffer source) (Selection 8 8) True chatBase
       moved=fst (Model.handleEvent (V.EvKey V.KRight [V.MCtrl]) composer)

@@ -180,7 +180,7 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
       approvalId=sourceFixtureBuffer (fromJust (activeWindow approval))
       desktop=approval {defaultDirectory=Just root,
         sideTree=Just ((emptySidebar root 23 True) {treeHints=Just (SidebarHints (M.singleton sourcePath False) (Just sourcePath) (Just sourcePath))}),problemsVisible=True,problemsPreferredHeight=9,
-        wordStar=True,wideSectionTitles=True,hapticFeedback=True,blinkCursor=False,pixelateUnicode=True,materialIcons=True,appearance=DarkMode,streamerMode=True,chatSubmit=SteerSubmit,
+        editingKeys=WordStarEditing,wideSectionTitles=True,hapticFeedback=True,blinkCursor=False,pixelateUnicode=True,materialIcons=True,appearance=DarkMode,streamerMode=True,chatSubmit=SteerSubmit,
         dialog=Just (Dialog "Pending permission" (PermissionDialog "approve:secret") [] 0 ["Allow"] []),
         menu=Just (0,0),drag=Just (Selecting sourceId),clipboard="transient clipboard",clipboardCode=Just "transient clipboard",clipboardExport=(3,Just "export"),
         agentReplying=True,agentQueued=3,agentSettings=[AgentSetting "token" "Token" "private" "secret" []],
@@ -210,6 +210,19 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   check "project sidebar dock geometry and display preferences survive"
     (defaultDirectory recovered==Just root && fmap (\tree->(treeRoot tree,treeWidth tree,treeFocused tree)) (sideTree recovered)==Just (root,23,True) && screenSize recovered==(100,35) && problemsVisible recovered && problemsPreferredHeight recovered==9 &&
      wordStar recovered && hapticFeedback recovered && not (blinkCursor recovered) && pixelateUnicode recovered && materialIcons recovered && appearance recovered==DarkMode && streamerMode recovered && chatSubmit recovered==SteerSubmit)
+  let vimPath=root </> "vim.checkpoint"
+  writeCheckpoint vimPath source {editingKeys=VimEditing (VimInsert 1 sourceId)} >>= right
+  resumedVim<-readCheckpoint vimPath fresh >>= right
+  check "recovery retains the Vim profile and enters Normal" (editingKeys resumedVim==VimEditing VimNormal)
+  let legacyPath=root </> "legacy-key-profile.checkpoint"
+  legacyBytes<-BS.readFile path
+  legacyValue<-either error pure (eitherDecodeStrict' legacyBytes)
+  case legacyValue of
+    Object fields | Just (Object prefs)<-KM.lookup "preferences" fields->
+      BL.writeFile legacyPath (encode (Object (KM.insert "preferences" (Object (KM.delete "vim" prefs)) fields)))
+    _->error "Missing checkpoint preferences"
+  legacy<-readCheckpoint legacyPath fresh >>= right
+  check "checkpoints predating Vim preserve their WordStar preference" (editingKeys legacy==WordStarEditing)
   let groupedPath=root </> "tabs.checkpoint"
       from=windowId (fromJust (activeWindow binary))
       into=windowId (fromJust (activeWindow source))
@@ -239,7 +252,7 @@ checks=bracket temporary removePathForcibly $ \root->W.withWindowScope $ \scope-
   let destinationBuffer=replaceSelection (Selection 0 0) "destination edit " original
       destinationFile=FileState sourcePath (Just (bufferBytes original))
       destination=addDocument (Just destinationFile) destinationBuffer unpublished
-        {screenSize=(64,18),guestPrivatePaths=[sourcePath],wordStar=True,
+        {screenSize=(64,18),guestPrivatePaths=[sourcePath],editingKeys=WordStarEditing,
          terminalMouseTracking=S.singleton 9000,agentSettings=[AgentSetting "model" "Model" "model" "current" []]}
       destinationId=sourceFixtureBuffer (fromJust (activeWindow destination))
       merged=adoptRecoveredSources importedSources destination

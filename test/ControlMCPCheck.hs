@@ -38,7 +38,7 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
   bracket (lookupEnv "XDG_CONFIG_HOME") (maybe (unsetEnv "XDG_CONFIG_HOME") (setEnv "XDG_CONFIG_HOME")) $ \_ -> do
     setEnv "XDG_CONFIG_HOME" root
     observed<-newIORef []
-    let base=(addDocument Nothing (newBuffer "old") (initialDesktop (100,35))) {wordStar=False,browserFrontend=True}
+    let base=(addDocument Nothing (newBuffer "old") (initialDesktop (100,35))) {editingKeys=ModernEditing,browserFrontend=True}
         shaped=base {windows=map (\w -> w {bounds=Rect 3 4 51 17}) (windows base)}
         check label ok=unless ok (error label)
         apply d effects=modifyIORef' observed (++effects) >> pure (Exit `elem` effects,d)
@@ -91,6 +91,12 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
     (same,readSettings)<-call shaped "editor_settings" (object [])
     checkUnchanged "reading settings preserves window geometry and focus" same shaped (success readSettings)
     check "settings read exposes disabled haptic feedback" (either (const False) ((==Just False).field "hapticFeedback") readSettings)
+    let vim=shaped {editingKeys=VimEditing VimNormal}
+    (_,vimSettings)<-call vim "editor_settings" (object [])
+    let reportedWordStar=either (const Nothing) (field "wordStar") vimSettings :: Maybe Bool
+    (echoedVim,echoReply)<-settings vim ["wordStar" .= reportedWordStar]
+    check "Echoing the reported WordStar preference preserves Vim"
+      (reportedWordStar==Just False && editingKeys echoedVim==VimEditing VimNormal && success echoReply)
     (hapticEnabled,hapticReply)<-settings shaped ["hapticFeedback" .= True]
     checkUnchanged "haptic update preserves geometry and other settings" hapticEnabled (shaped {hapticFeedback=True}) (hapticFeedback hapticEnabled && either (const False) ((==Just True).field "hapticFeedback") hapticReply)
     (hapticInvalid,hapticInvalidReply)<-settings hapticEnabled ["hapticFeedback" .= ("true"::T.Text)]
@@ -176,7 +182,7 @@ checks=withEditorTextFixture "" "Public reply" (initialDesktop (100,35)) $ \conv
     check "chat submit behavior remains readable" (either (const False) ((==Just ("steer"::T.Text)).field "chatSubmit") chatRead)
     (_,privateRead)<-input base {clipboard="secret"} [object ["type" .= ("blur"::T.Text)]]
     check "no-op guest events do not expose the human clipboard" (either (const False) ((==Just (""::T.Text)).field "clipboard") privateRead)
-    let humanPrefix=base {wordStar=True,prefix=Just 'k',heldModifiers=[]}
+    let humanPrefix=base {editingKeys=WordStarEditing,prefix=Just 'k',heldModifiers=[]}
     (plainCharacter,_)<-input humanPrefix [key "y" []]
     check "guest characters do not complete a human WordStar prefix" (activeText plainCharacter=="yold" && prefix plainCharacter==Nothing)
     putStrLn "editor control MCP checks passed"

@@ -49,7 +49,7 @@ import qualified Hide.Plugin.Menu as Plugin
 import Hide.Commands (commandIdentifier)
 import Hide.Unicode (Script(..), CellSpan(..), clusterWidth)
 
-data WebInput = Key T.Text [V.Modifier] | Paste T.Text | PasteReply T.Text T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
+data WebInput = Key T.Text [V.Modifier] | Paste T.Text | CommittedText T.Text | CommittedKey Char | PasteReply T.Text T.Text | Mouse T.Text Int Int Int Int [V.Modifier]
               | ImageControlAction ImageControl ImageAction | Wheel Int Int Int [V.Modifier] | SystemTheme Bool | FocusWindow Int | BrowserCommand Command | MenuCommand Command | ContributedMenu T.Text T.Text Integer | UploadFile T.Text BS.ByteString | Frontend (Maybe Int) Bool | OpenPath FilePath | Resize Int Int | SuspendSession | Blur | Modifiers [V.Modifier] deriving (Eq,Show)
 
 -- | The gesture receipt belongs to the prepared offer, not the later send frame.
@@ -116,6 +116,15 @@ parseInput = withObject "browser event" $ \o -> do
       text<-o .: "text"
       unless (validClipboardRequest request && T.length text<=1048576) (fail "Invalid requested paste reply")
       pure (PasteReply request text)
+    "text-input" -> do
+      text <- o .: "text"
+      asKey <- o .:? "asKey" .!= False
+      if asKey then case T.uncons text of
+        Just (ch,rest) | T.null rest -> pure (CommittedKey ch)
+        _ -> fail "Expected one committed key"
+      else do
+        unless (T.length text<=1048576) (fail "Committed text too large")
+        pure (CommittedText text)
     "paste" -> do
       text <- o .: "text"
       unless (T.length text<=1048576) (fail "Paste too large")
@@ -166,6 +175,8 @@ applyGuestInput input d
     allowed=not (guestModalBlocked d) && case input of
       Key name mods -> maybe False (\key->guestKeyAllowed d key mods) (inputKey name mods)
       Paste _ -> guestKeyboardAllowed d
+      CommittedText _ -> guestKeyboardAllowed d
+      CommittedKey ch -> guestKeyAllowed d (V.KChar ch) []
       Mouse _ x y _ _ _ -> pointerAllowedAt d x y
       Wheel x y _ _ -> pointerAllowedAt d x y
       Blur -> True
@@ -196,6 +207,10 @@ applyInputUnchecked input d = case input of
   Key name mods -> maybe (d,[]) (\key -> handleEvent (V.EvKey key mods) d) (inputKey name mods)
   PasteReply _ _ -> (d,[]) -- Only the serialized human owner can consume a receipt.
   Paste text -> handleEvent (V.EvPaste (TE.encodeUtf8 text)) d
+  CommittedText text | vimSourceMode d/=Just VimNormal -> handleEvent (V.EvPaste (TE.encodeUtf8 text)) d
+  CommittedKey ch | vimSourceMode d/=Just VimNormal -> handleEvent (V.EvKey (V.KChar ch) []) d
+  CommittedText _ -> (d,[])
+  CommittedKey _ -> (d,[])
   Frontend mode mac -> (d {videoMode=mode,nativeMac=mac && mode/=Nothing},[])
   OpenPath path -> (d,[OpenFile Plugin.HumanMenu path])
   Resize w h -> handleEvent (V.EvResize w h) d

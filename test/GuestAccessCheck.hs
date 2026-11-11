@@ -49,7 +49,7 @@ checks=do
 checksWithBody :: Desktop -> IO ()
 checksWithBody conversation=do
   let check label ok=unless ok (error label)
-      base=(addDocument Nothing (newBuffer "file") (initialDesktop (100,35))) {wordStar=False}
+      base=(addDocument Nothing (newBuffer "file") (initialDesktop (100,35))) {editingKeys=ModernEditing}
       sourceId=maybe (-1) sourceFixtureBuffer (activeWindow base)
       firstRect d dg=case fieldRects d dg of r:_->r; _->error "missing field rectangle"
       chat=setComposerInput (newBuffer "private draft") (Selection 0 0) True conversation
