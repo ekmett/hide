@@ -72,8 +72,9 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
       (service,after)<-withSessionSidebar host (Just (sessionId current)) initial $ \service->do
         let core=sessionSidebarEffects service (\d _->pure (False,d))
             tick d=tickSessionSidebar service host d >>= tickSidebar host core
-            wait label predicate d=timeout 5000000 (loop d) >>= maybe (fail (label<>" timed out")) pure
-              where loop value=do updated<-tick value; if predicate updated then pure updated else threadDelay 1000 >> loop updated
+            wait=waitUsing tick
+            waitUsing pump label predicate d=timeout 5000000 (loop d) >>= maybe (fail (label<>" timed out")) pure
+              where loop value=do updated<-pump value; if predicate updated then pure updated else threadDelay 1000 >> loop updated
             rows d=maybe [] (M.elems . treeRows) (sideTree d)
             has name=any ((==name).P.infoLabel.rowInfo).rows
             hasId value=any ((==value).P.nodeIdText.P.infoId.rowInfo).rows
@@ -159,12 +160,12 @@ checks=W.withWindowScope $ \scope->bracket temporary removePathForcibly $ \root-
                 null (menuLabels (popup currentNode catalogued)) &&
                 null (menuLabels (popup ("session:"<>T.pack (sessionId other)) catalogued)))
           (fail "Session deletion menu does not distinguish stopped local/current/remote targets")
-        -- Replies belong to the clicked display/project. Dispatch first;
-        -- then change the owner before
-        -- any tick can consume its worker result.
+        -- Change the owner before adopting its worker result. Pump adoption
+        -- without publishing the temporary workspace to the independent catalog.
         let expireRecovery changed d=do
               requested<-choose savedNode "Recover buffers here" d
-              refused<-wait "expired buffer recovery" (T.isInfixOf "expired" . status) (changed requested)
+              refused<-waitUsing (tickSidebar host core) "expired buffer recovery"
+                ((=="Recovery result expired.").status) (changed requested)
               unless (M.keys (buffers refused)==M.keys (buffers d) && nextId refused==nextId d)
                 (fail "Expired buffer recovery added windows")
               pure refused {sessionAttachment=sessionAttachment d,sideTree=fmap (\tree->tree {treeRoot=maybe root treeRoot (sideTree d)}) (sideTree refused),dialog=Nothing,status="Ready"}
