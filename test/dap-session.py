@@ -343,7 +343,10 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
             else:
                 reply(req, success=False)
     except (ConnectionResetError, BrokenPipeError):
-        if mode != 'reconnect' or session != 1:
+        # A deliberately replaced connection can close with unread bytes.
+        replacing = (mode == 'reconnect' and session == 1 or
+                     mode == 'output-owner' and session < 3)
+        if not replacing:
             raise
     finally:
         stream.close()
