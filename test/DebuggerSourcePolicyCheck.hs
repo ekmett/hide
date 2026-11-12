@@ -154,7 +154,8 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
               value<-reply >>= either (fail . T.unpack) pure
               pure (parseMaybe (withObject "status" (\o->o .: "frame" >>= withObject "frame" (.:"id"))) value==Just (11::Int))
             awaitFrame d=do next<-tick d; ready<-frameReady next; if ready then pure next else threadDelay 1000 >> awaitFrame next
-            awaitPreparation expected d=do
+            awaitPreparation expected=awaitPreparationWhen expected (const True)
+            awaitPreparationWhen expected workerReady d=do
               observed<-newIORef ("not polled"::T.Text,""::T.Text,Null)
               let loop current=do
                     next<-tick current
@@ -164,7 +165,7 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                       (parseMaybe (withObject "status" (.:"sourcePreparation")) value :: Maybe T.Text)
                     let detail=maybe Null id (parseMaybe (withObject "status" (.:"sourcePreparationDetail")) value)
                     writeIORef observed (phase,status next,detail)
-                    if phase==expected then pure next else threadDelay 1000 >> loop next
+                    if phase==expected && workerReady detail then pure next else threadDelay 1000 >> loop next
               timeout 5000000 (loop d) >>= maybe (do
                 actual<-readIORef observed
                 -- Inspect this invocation's FIFO before debugger/peer teardown
@@ -193,6 +194,15 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                     (take 16 (ownedFifoReaders (show ownerPid) source (lines out)))
                   _->pure []
                 fail ("Source preparation did not reach "++T.unpack expected++" in "++T.unpack action++": "++show actual++"; FIFO descriptors for owned PIDs "++owners++" (omitted/inaccessible descriptors are inconclusive): "++attribution++"; kernel read readiness (fd, (nonblocking, ready)): "++show readiness)) pure
+#ifdef darwin_HOST_OS
+            drainBeforeClose=action=="modal"
+#else
+            drainBeforeClose=False
+#endif
+            readerParked detail=parseMaybe (withObject "worker" (\o->do
+              stage<-o .: "stage"
+              activity<-o .: "threadStatus"
+              pure (stage==("reading-file"::T.Text) && "ThreadBlocked " `T.isPrefixOf` activity))) detail==Just True
             base=addDocument (Just (FileState (takeDirectory source </> "Foreground.hs") (Just "foreground")))
               (newBuffer "foreground") (initialDesktop (80,25))
         (_,attached)<-debuggerEffects runtime core base [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
@@ -201,22 +211,23 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
           -- Close the gate before waiting/cancelling the owner even when the
           -- baseline owner is blocked in its read. One-byte consumption proves
           -- a real filesystem reader entered, rather than an early load error.
-          -- Final data plus close wakes EOF readiness, also on exception cleanup.
-          -- Only this bracket owns the writer; child processes must not keep it alive.
+          -- Release the writer even when an assertion fails. Only this bracket
+          -- owns it; child processes must not keep it alive.
+          drained<-newIORef False
           returned<-bracket (openFd source ReadWrite defaultFileFlags {nonBlock=True,cloexec=True})
-            (\gate->void (fdWrite gate "y") `finally` closeFd gate) $ \gate->do
+            (\gate->(readIORef drained >>= \done->unless done (void (fdWrite gate "y"))) `finally` closeFd gate) $ \gate->do
             _<-fdWrite gate "x"
             -- Do not let the reader observe a FIFO with no writer. Keep the
             -- existing cleanup order: close the gate before joining the owner.
             putMVar writerReady ()
-            let readStarted=do
+            let awaitConsumed marker=do
                   result<-tryIOError (PosixBytes.fdRead gate 1)
                   case result of
                     Left err | isFullError err->pure ()
                              | otherwise->ioError err
-                    Right bytes | BS.length bytes==1->fdWrite gate "x" >> threadDelay 1000 >> readStarted
+                    Right bytes | BS.length bytes==1->fdWrite gate marker >> threadDelay 1000 >> awaitConsumed marker
                     _->fail "Local source gate lost its writer"
-            entered<-timeout 1000000 readStarted
+            entered<-timeout 1000000 (awaitConsumed "x")
             unless (maybe False (const True) entered) (fail "Local source worker did not enter its file read")
             queued<-timeout 1000000 (wait owner)
             interruption<-case queued of
@@ -229,7 +240,16 @@ delayedLocalSourceCheck=mapM_ scenario ["continue","close","disconnect","opened"
                   else snd <$> debuggerEffects runtime core loading [DebugAction action []]
                 responsive<-timeout 1000000 (tick interrupted) >>= maybe
                   (fail "Debugger source retirement blocked the UI owner") pure
-                pure (Just responsive)
+                if drainBeforeClose then do
+                  -- Exercise EOF with an empty FIFO and the exact file reader
+                  -- waiting, so a final readable byte cannot wake it.
+                  _<-fdWrite gate "y"
+                  consumed<-timeout 1000000 (awaitConsumed "y")
+                  unless (maybe False (const True) consumed) (fail "Local source worker did not consume the final FIFO byte")
+                  parked<-awaitPreparationWhen "preparing" readerParked responsive
+                  writeIORef drained True
+                  pure (Just parked)
+                else pure (Just responsive)
             pure interruption
           _<-timeout 1000000 (wait owner)
           case returned of

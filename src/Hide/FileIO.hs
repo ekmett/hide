@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
+{-# LANGUAGE InterruptibleFFI #-}
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
 -- | Module      : Hide.FileIO
 -- Copyright   : (c) Edward Kmett 2026
@@ -21,6 +22,20 @@ module Hide.FileIO (withFileRead, readFileBytes, openTemporaryFile, replaceFile)
 
 import qualified Data.ByteString as BS
 import System.IO (Handle, IOMode(ReadMode), withBinaryFile, openBinaryTempFile)
+#ifdef darwin_HOST_OS
+import qualified Data.ByteString.Internal as Bytes
+import Data.Typeable (cast)
+import Data.Word (Word8)
+import Foreign.C.Error (throwErrnoIfMinus1Retry)
+import Foreign.C.Types (CInt(..), CSize(..))
+import Foreign.Ptr (Ptr)
+import qualified GHC.IO.FD as FD
+import GHC.IO.Handle.Internals (wantReadableHandle_)
+import GHC.IO.Handle.Types (Handle__(Handle__,haDevice))
+import System.Posix.Files (getFdStatus, isNamedPipe)
+import System.Posix.IO (FdOption(NonBlockingRead), setFdOption)
+import System.Posix.Types (CSsize(..), Fd(..))
+#endif
 #ifdef mingw32_HOST_OS
 import Control.Exception (bracket, mask_, onException)
 import Control.Monad (unless, void)
@@ -71,7 +86,38 @@ withFileRead path = withBinaryFile path ReadMode
 -- | Read strict bytes and close the handle before returning.
 -- Use 'withFileRead' for bounded reads; this operation reads the whole file.
 readFileBytes :: FilePath -> IO BS.ByteString
+#ifdef darwin_HOST_OS
+readFileBytes path = withFileRead path $ \handle -> do
+  pipe <- wantReadableHandle_ "readFileBytes" handle $ \Handle__ {haDevice=device} ->
+    case cast device of
+      Just fd | FD.fdIsNonBlocking fd /= 0 -> do
+        let descriptor=Fd (FD.fdFD fd)
+        fifo<-isNamedPipe <$> getFdStatus descriptor
+        pure (if fifo then Just descriptor else Nothing)
+      _->pure Nothing
+  -- Keep the interruptible read outside the masked Handle operation so a
+  -- canceled load can release the reader while a writer is still open.
+  maybe (BS.hGetContents handle) readPipeBytes pipe
+
+-- Darwin can leave a drained FIFO's readiness waiter parked at final writer
+-- close even though read returns EOF. Read this one owned FIFO descriptor
+-- directly. The surrounding Handle keeps sole ownership of close.
+readPipeBytes :: Fd -> IO BS.ByteString
+readPipeBytes descriptor@(Fd raw)=do
+  setFdOption descriptor NonBlockingRead False
+  gather []
+  where
+    chunkSize=32768
+    gather chunks=do
+      bytes<-Bytes.createAndTrim chunkSize $ \pointer->
+        fromIntegral <$> throwErrnoIfMinus1Retry "readFileBytes" (readPipe raw pointer (fromIntegral chunkSize))
+      if BS.null bytes then pure (BS.concat (reverse chunks)) else gather (bytes:chunks)
+
+foreign import ccall interruptible "read"
+  readPipe :: CInt -> Ptr Word8 -> CSize -> IO CSsize
+#else
 readFileBytes path = withFileRead path BS.hGetContents
+#endif
 
 -- | Create an exclusive binary temporary file in the supplied directory.
 -- The caller owns the returned Handle and path, and must close and remove them.

@@ -23,6 +23,18 @@ import System.IO (hClose, openBinaryTempFile)
 import Hide.Buffer
 import Hide.Files
 import Hide.FileIO (withFileRead, replaceFile)
+#ifdef darwin_HOST_OS
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (asyncThreadId, cancel, withAsync)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, readMVar)
+import Control.Exception (bracket_)
+import GHC.Conc (ThreadStatus(ThreadBlocked), threadStatus)
+import System.IO.Error (isFullError, tryIOError)
+import System.Posix.Files (createNamedPipe)
+import System.Posix.IO (OpenMode(ReadWrite), cloexec, closeFd, defaultFileFlags, fdWrite, nonBlock, openFd)
+import qualified System.Posix.IO.ByteString as PosixBytes
+import System.Timeout (timeout)
+#endif
 
 check :: String -> Bool -> IO ()
 check name ok = unless ok (error name)
@@ -36,6 +48,9 @@ isLeft _ = False
 
 checks :: IO ()
 checks = bracket makeDirectory removePathForcibly $ \dir -> do
+#ifdef darwin_HOST_OS
+  cancelPipeRead (dir </> "held-source")
+#endif
   let path = dir </> "source.hs"
       original = "x = \206\187\r\nlast" :: BS.ByteString
   BS.writeFile path original
@@ -210,3 +225,31 @@ checks = bracket makeDirectory removePathForcibly $ \dir -> do
       removeFile path
       createDirectory path
       pure path
+
+#ifdef darwin_HOST_OS
+-- Close the writer before withAsync joins on failure, but keep it open until
+-- the explicit cancel returns on success.
+cancelPipeRead :: FilePath -> IO ()
+cancelPipeRead path = bracket_ (createNamedPipe path 0o600) (removeFile path) $ do
+  armed <- newEmptyMVar
+  withAsync (readMVar armed >> loadFile path) $ \reader ->
+    bracket (openFd path ReadWrite defaultFileFlags {nonBlock=True,cloexec=True}) closeFd $ \writer -> do
+      _ <- fdWrite writer "x"
+      putMVar armed ()
+      let awaitConsumed = do
+            result <- tryIOError (PosixBytes.fdRead writer 1)
+            case result of
+              Left err | isFullError err -> pure ()
+                       | otherwise -> ioError err
+              Right bytes | bytes == "x" -> fdWrite writer "x" >> threadDelay 1000 >> awaitConsumed
+              _ -> fail "FIFO cancellation gate lost its writer"
+          awaitParked = do
+            activity <- threadStatus (asyncThreadId reader)
+            case activity of
+              ThreadBlocked _ -> pure ()
+              _ -> threadDelay 1000 >> awaitParked
+      parked <- timeout 1000000 (awaitConsumed >> awaitParked)
+      check "FIFO reader consumed its byte and parked" (parked == Just ())
+      canceled <- timeout 1000000 (cancel reader)
+      check "FIFO reader cancels while the writer remains open" (canceled == Just ())
+#endif
