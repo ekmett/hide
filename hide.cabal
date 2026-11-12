@@ -573,3 +573,5 @@ test-suite coverage-smoke
     , tasty >=1.5.4 && <1.6
     , tasty-hunit >=0.10.2 && <0.11
     , tasty-ant-xml >=1.1.9 && <1.2
+  if os(darwin)
+    build-depends: unix
