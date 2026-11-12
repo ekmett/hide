@@ -8,10 +8,11 @@
 -- Stability   : experimental
 -- Portability : CPP, OverloadedStrings
 
-module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, questionInsertionChecks, withConversationMenusFixture, humanMenuAction) where
+module ConversationCheck (checks, composerCodeChecks, draftReceiptChecks, completionOrderChecks, questionInsertionChecks, withConversationMenusFixture, humanMenuAction) where
 import AgentHubCheck (completedTurn)
 import qualified Hide.Plugin.ConversationSession as Session
 import qualified Hide.Plugin.Provider as Provider
+import qualified Hide.Plugin.Agent as ProviderAgent
 import qualified Hide.Plugin.Session as ProviderPlugin
 import qualified Hide.AgentUI
 import AllocationProfile (AllocationProfile, withinBudget)
@@ -39,7 +40,7 @@ import Control.Concurrent.Async (withAsync,wait,cancel,poll)
 import qualified Control.Concurrent.STM as STM
 import Control.Exception (bracket, evaluate)
 import Control.DeepSeq (force)
-import Control.Monad (unless, when, forM_, foldM)
+import Control.Monad (unless, when, forM_, foldM, void)
 import Data.Aeson hiding (Number)
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.Key as K
@@ -607,6 +608,82 @@ draftReceiptChecks=withTextPresentation $ \presentation->
         case reply of Right _->tryPutMVar acknowledged services >> pure (); Left _->pure ()
         pure reply}) arguments result
 #endif
+
+-- The linked provider boundary controls arrival order without changing the
+-- conversation tick. Each reply cell and first-poll observation belongs to its
+-- exact turn; public idle state is checked only after that receipt was observed.
+completionOrderChecks :: IO ()
+completionOrderChecks=bracket temporary removePathForcibly $ \root->
+  scoped "XDG_CONFIG_HOME" (Just (root </> "config")) $
+  scoped "XDG_DATA_HOME" (Just (root </> "data")) $
+  scoped "THC_EDIT_SESSION" Nothing $ do
+    delivered<-STM.newTQueueIO
+    replies<-STM.newTVarIO []
+    let caps=AH.Capabilities False False False []
+        stop=STM.atomically $ STM.readTVar replies >>= mapM_ (\cell->void (STM.tryPutTMVar cell (Left "Provider stopped.")))
+        acquire _ _ _ _ _ host _ _=pure $ Right AH.AgentDriver
+          { AH.driverDirectory=root,AH.driverSessionKey="completion-order",AH.driverCapabilities=caps
+          , AH.driverConfigure=const (pure (Right caps)),AH.driverCancel=stop,AH.driverStop=stop
+          , AH.driverSteer= \_ _ _->pure (Left "No steering in this provider.")
+          , AH.driverDeliver= \turn query _ submission->do
+              admitted<-STM.atomically (Provider.claimProviderSubmission submission)
+              unless admitted (error "Completion submission was already retired")
+              cell<-STM.newEmptyTMVarIO
+              firstPoll<-STM.newTVarIO (Nothing,False)
+              STM.atomically (STM.modifyTVar' replies (cell:))
+              let publish ident=case ProviderAgent.providerContent host of
+                    Just content->content (Just ident) (ProviderAgent.ProviderTurnBoundary ident)
+                    Nothing->error "Primary content callback is missing"
+                  finish=STM.atomically (void (STM.tryPutTMVar cell (Right (object ["stopReason" .= AH.messageText query]))))
+                  pollReply=STM.atomically $ do
+                    result<-STM.tryReadTMVar cell
+                    (seen,alreadySucceeded)<-STM.readTVar firstPoll
+                    let first=case seen of Nothing->Just (case result of Just _->True; Nothing->False); Just _->seen
+                        succeeded=case result of Just (Right _)->True; _->False
+                    STM.writeTVar firstPoll (first,alreadySucceeded || succeeded)
+                    pure result
+                  retire=STM.atomically (void (STM.tryPutTMVar cell (Left "Turn retired.")))
+                  receipt=Provider.ProviderTurn turn (Provider.ProviderReply pollReply (STM.atomically (STM.readTMVar cell)) retire) retire
+              when (AH.messageText query=="early") (publish turn >> finish)
+              STM.atomically (STM.writeTQueue delivered (turn,publish,finish,firstPoll))
+              pure (Right receipt) }
+        send runtime text d=snd <$> conversationEffects runtime (\desktop _->pure (False,desktop)) d
+          [AgentAction "send" ["0",text,"false","false","false"]]
+        await runtime label predicate desktop=timeout 8000000 (loop desktop) >>= maybe (error ("Completion order: "++label)) pure
+          where loop d=do
+                  next<-Conversation.tickConversation runtime d
+                  ready<-predicate next
+                  if ready then pure next else threadDelay 1000 >> loop next
+        completed runtime observation d=do
+          (_,succeeded)<-STM.readTVarIO observation
+          (succeeded &&) <$> idle runtime d
+        idle runtime d=do
+          value<-agentSettingsReply runtime d >>= id >>= either (error . T.unpack) pure
+          active<-AR.primaryDeliveryActive (conversationAgents runtime)
+          pure (field "replying" value==Just False && agentQueued d==0 && not active)
+    C.withConsoles $ \consoles->withConversationAt (Just acquire) (Just AgentTranscript.presentConversation) (Just ConversationInput.primaryInput) Nothing consoles root $ \runtime->do
+      started<-send runtime "early" (initialDesktop (80,25))
+      received<-await runtime "early send admission" (const (not <$> STM.atomically (STM.isEmptyTQueue delivered))) started
+      (early,_,_,earlyPoll)<-STM.atomically (STM.readTQueue delivered)
+      polled<-await runtime "early exact receipt polled" (const ((/=Nothing) . fst <$> STM.readTVarIO earlyPoll)) received
+      check "completed before admission is ready on its first owner poll" . (==(Just True,True)) =<< STM.readTVarIO earlyPoll
+      settled<-await runtime "early completion adopted" (completed runtime earlyPoll) polled
+      next<-send runtime "late" settled
+      admitted<-await runtime "late send admission" (const (not <$> STM.atomically (STM.isEmptyTQueue delivered))) next
+      (late,publish,finish,latePoll)<-STM.atomically (STM.readTQueue delivered)
+      pending<-await runtime "late exact receipt polled" (const ((/=Nothing) . fst <$> STM.readTVarIO latePoll)) admitted
+      check "second turn has a fresh receipt and first polls pending" . (&&early/=late) . (==(Just False,False)) =<< STM.readTVarIO latePoll
+      check "pending exact receipt keeps the owner busy" . not =<< idle runtime pending
+      -- Both boundaries arrive before the terminal reply, as required by the
+      -- adapter. The old boundary must not overwrite the current completion.
+      publish late
+      publish early
+      finish
+      _<-await runtime "late completion survives old boundary" (completed runtime latePoll) pending
+      pure ()
+  where
+    scoped name value action=bracket (lookupEnv name <* put value) put (const action)
+      where put=maybe (unsetEnv name) (setEnv name)
 
 checks :: AllocationProfile -> IO ()
 checks profile = (composerCodeChecks profile >>) $ withTextPresentation $ \presentation->

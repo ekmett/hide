@@ -262,6 +262,7 @@ tests = askOption $ \profile->withResource
   , testCase "Build" (BuildCheck.checks profile)
   , testCase "Run" RunCheck.checks
   , testCase "Conversation.drafts" ConversationCheck.draftReceiptChecks
+  , testCase "Conversation.completion" ConversationCheck.completionOrderChecks
   , testCase "Conversation" (ConversationCheck.checks profile)
   , testCase "AgentFiles" AgentFilesCheck.checks
   , testCase "Terminal" TerminalCheck.checks
