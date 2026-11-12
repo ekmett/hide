@@ -514,7 +514,15 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
       let changed=change held
       putMVar release ()
       (rejected,reply)<-finish ("reject "++label) tooling changed answer
-      check ("workspace adoption rejects "++label++" atomically") (isLeft reply && buffers rejected==buffers changed)
+      let expected="An edit target changed or became private; no files changed."
+          outcome=case reply of
+            Left reason | reason==expected -> "adoption rejected the target"
+            Left "HLS request timed out" -> "request timed out"
+            Left "HLS request cancelled" -> "request cancelled"
+            Left _ -> "unexpected rejection"
+            Right _ -> "unexpected success"
+      check ("workspace adoption rejects "++label++" atomically ("++outcome++")")
+        (reply==Left expected && buffers rejected==buffers changed)
   withHeld "post-read disk change" $ \tooling held answer release->do
     -- The checked read already completed. A subsequent external write must
     -- remain protected by the FileState baseline when the user later saves.
