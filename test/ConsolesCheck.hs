@@ -12,7 +12,10 @@ module ConsolesCheck (checks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
-import Control.Monad (unless,forM_)
+import Control.Exception (evaluate)
+import Control.Monad (unless,forM_,foldM)
+import GHC.Conc (getAllocationCounter)
+import AllocationProfile (AllocationProfile,withinBudget)
 import qualified Graphics.Vty as V
 import qualified Data.Set as S
 import qualified Hide.Protocol as P
@@ -32,9 +35,10 @@ import Hide.Consoles
 import Hide.Model
 import Hide.Syntax (Style(..))
 import Hide.Terminal
+import Hide.Render (renderKey)
 
-checks :: IO ()
-checks = withConsoles $ \consoles -> do
+checks :: AllocationProfile -> IO ()
+checks profile = withConsoles $ \consoles -> do
   routingChecks
   let desktop = initialDesktop (80,25)
   check "unknown output is rejected" . isLeft =<< consoleOutput consoles "missing"
@@ -43,10 +47,45 @@ checks = withConsoles $ \consoles -> do
   check "unknown release is rejected" . isLeft =<< releaseConsole consoles "missing"
   unchanged <- tickConsoles consoles desktop
   check "empty collection leaves desktop unchanged" (unchanged == desktop)
-  if terminalAvailable then (if os=="mingw32" then windowsChecks else nativeChecks) consoles desktop else do
+  if terminalAvailable then do
+    idleChecks profile consoles
+    (if os=="mingw32" then windowsChecks else nativeChecks) consoles desktop
+  else do
     unavailable <- startConsole consoles (config "true") 4096 desktop
     check "unavailable backend does not create terminal" (isLeft unavailable)
   putStrLn "Consoles checks passed"
+
+-- Polling output tools and polling the desktop share one terminal owner. An
+-- intervening read must neither consume a screen update nor rebuild idle text.
+idleChecks :: AllocationProfile -> Consoles -> IO ()
+idleChecks profile consoles = do
+  shell<-maybe "cmd.exe" id <$> lookupEnv "COMSPEC"
+  let launch=if os=="mingw32" then TerminalConfig shell ["/d","/c","echo prepared-screen & exit /b 0"] [] "." 160 50
+        else TerminalConfig "/bin/sh" ["-c","printf prepared-screen"] [] "." 160 50
+  (ident,opened)<-startConsole consoles launch 4096 (initialDesktop (162,54)) >>= requireRight
+  _<-waitOutput consoles ident (\(_,_,code)->code/=Nothing)
+  ready<-tickConsoles consoles opened {windows=map (\w->w {bounds=Rect 0 1 162 52}) (windows opened)}
+  let bid=maybe (error "missing idle terminal") sourceFixtureBuffer (activeWindow ready)
+  check "output read preserves the screen for subsequent desktop adoption"
+    (maybe False (T.isPrefixOf "prepared-screen" . contents . documentBuffer) (activeDocument ready))
+  key<-renderKey ready
+  before<-getAllocationCounter
+  idle<-foldM (\d _->do
+    _<-consoleOutput consoles ident >>= requireRight
+    next<-tickConsoles consoles d
+    nextKey<-renderKey next
+    check "idle console polling does not request a redraw" (key==nextKey)
+    pure next) ready [1..20::Int]
+  after<-getAllocationCounter
+  check ("idle terminal polling avoids screen-sized allocation: "++show (before-after))
+    (withinBudget profile (before-after) 1000000)
+  let hidden=idle {buffers=M.adjust (\doc->doc {documentHighlight=error "idle adoption inspected the old highlighted screen"}) bid (buffers idle)}
+  adopted<-tickConsoles consoles hidden
+  _<-evaluate (length (documentHighlight (buffers adopted M.! bid)))
+  repeated<-tickConsoles consoles ready
+  repeatedKey<-renderKey repeated
+  check "repeated adoption after intervening polls retains prepared payload identity" (key==repeatedKey)
+  releaseConsole consoles ident >>= requireRight
 
 windowsChecks :: Consoles -> Desktop -> IO ()
 windowsChecks consoles desktop = do

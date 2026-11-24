@@ -11,8 +11,9 @@
 -- Own named terminals and their corresponding editor documents.
 --
 -- Process preparation can run off the UI worker; adoption transfers an already
--- started terminal into the console service. Screen polling updates documents,
--- while a separate bounded byte suffix serves output tools. Closing a view does
+-- started terminal into the console service. Screen polling prepares immutable
+-- document payloads once per native revision; adoption only installs references.
+-- A separate bounded byte suffix serves output tools. Closing a view does
 -- not implicitly reopen it on the next terminal update.
 module Hide.Consoles
   ( Consoles, withConsoles, startConsole, tickConsoles, consoleOutput
@@ -28,6 +29,7 @@ import Data.List (find, intercalate)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Text (Text)
+import Data.Word (Word64)
 import qualified Data.Text as T
 import Hide.Buffer
 import Hide.Model hiding (message)
@@ -40,8 +42,18 @@ data Console = Console
   { consoleTerminal :: ~Terminal -- Opaque capability; the disabled backend has no inhabitants.
   , consoleBuffer :: Int, outputLimit :: Int
   , retainedOutput :: ByteString, outputTruncated :: Bool
-  , latestSnapshot :: TerminalSnapshot, consoleError :: Maybe Text, consoleRetiring :: Bool
+  , latestSnapshot :: TerminalSnapshot, latestScreen :: ConsoleScreen
+  , consoleError :: Maybe Text, consoleRetiring :: Bool
   , consoleMouse :: Maybe TerminalMouseEvent }
+
+-- The revision belongs to this Console's Terminal. Keep preparation at the
+-- polling owner, including polls made by output readers before desktop adoption.
+data ConsoleScreen = ConsoleScreen
+  { screenRevision :: Word64, screenBuffer :: Buffer, screenStyles :: StyledText }
+
+prepareScreen :: TerminalSnapshot -> ConsoleScreen
+prepareScreen snapshot = ConsoleScreen (snapshotScreenRevision snapshot) (newBuffer (styledContents styled)) styled
+  where styled = snapshotStyles snapshot
 
 withConsoles :: (Consoles -> IO a) -> IO a
 withConsoles = bracket (Consoles <$> newMVar (1,M.empty)) closeAll
@@ -66,7 +78,7 @@ prepareConsole unset config limit = mask_ $ do
         Left message -> closeTerminal terminal >> pure (Left message)
         Right snapshot -> do
           console<-evaluate (recordOutput snapshot
-            (Console terminal 0 (max 0 (min (16*1024*1024) limit)) BS.empty False snapshot Nothing False Nothing))
+            (Console terminal 0 (max 0 (min (16*1024*1024) limit)) BS.empty False snapshot (prepareScreen snapshot) Nothing False Nothing))
           pure (Right (PreparedConsole console)))
       `onException` closeTerminal terminal
 
@@ -218,11 +230,14 @@ refresh console
           pure console {consoleError=Just message}
 
 recordOutput :: TerminalSnapshot -> Console -> Console
-recordOutput snapshot console
-  | BS.null (snapshotOutput snapshot) = console {latestSnapshot=snapshot}
+recordOutput snapshot original
+  | BS.null (snapshotOutput snapshot) = console
   | otherwise = console
-  { retainedOutput=retained, outputTruncated=truncated, latestSnapshot=snapshot }
+  { retainedOutput=retained, outputTruncated=truncated }
   where
+    previous = latestScreen original
+    console = original {latestSnapshot=snapshot,latestScreen=
+      if screenRevision previous == snapshotScreenRevision snapshot then previous else prepareScreen snapshot}
     bytes = retainedOutput console <> snapshotOutput snapshot
     dropped = max 0 (BS.length bytes-outputLimit console)
     truncated = outputTruncated console || dropped > 0
@@ -235,12 +250,13 @@ showConsole :: Console -> Desktop -> Desktop
 showConsole console desktop = case M.lookup bid (buffers desktop) of
   Nothing -> desktop -- Closing a window must not reopen it on the next tick.
   Just original ->
-    let styled = snapshotStyles snapshot
-        text = styledContents styled
-        -- Terminal snapshots only produce TerminalStyle, never script hints.
-        rendered = if documentHighlight original == styled then original else original
-          {documentBuffer=newBuffer text,documentHighlight=styled,documentHasLayoutMetadata=False}
-        document = rendered {documentWidth=snapshotColumns snapshot,documentCursorVisible=snapshotCursor snapshot /= Nothing}
+    let prepared = latestScreen console
+        -- Reinstall the same prepared references, without inspecting the old
+        -- document. This also handles stale desktops and intervening output
+        -- polls; no consumer can consume another view's pending screen update.
+        document = original {documentBuffer=screenBuffer prepared,documentHighlight=screenStyles prepared,
+          documentHasLayoutMetadata=False,documentWidth=snapshotColumns snapshot,
+          documentCursorVisible=snapshotCursor snapshot /= Nothing}
         buffer = documentBuffer document
         count = bufferLength buffer
         cursor = fmap (\(col,row) -> bufferLineOffset buffer row + columnOffset (bufferLineAt buffer row) col) (snapshotCursor snapshot)
@@ -251,8 +267,10 @@ showConsole console desktop = case M.lookup bid (buffers desktop) of
               { selection=let Selection a c = selection window in case cursor of
                   Just pos | a == c -> Selection (clamp pos) (clamp pos)
                   _ -> Selection (clamp a) (clamp c)
-              , scrollRow=max 0 (min (scrollbarLimit desktop True document window) (scrollRow window))
-              , scrollColumn=max 0 (min (scrollbarLimit desktop False document window) (scrollColumn window)) }
+              -- A terminal already owns exact grid extents. Generic source
+              -- scrollbar discovery would scan visible text on every poll.
+              , scrollRow=max 0 (min (max 0 (snapshotRows snapshot-max 1 (windowContentRows desktop document window))) (scrollRow window))
+              , scrollColumn=max 0 (min (max 0 (snapshotColumns snapshot-max 1 (width (bounds window)-2)+1)) (scrollColumn window)) }
     in desktop {buffers=M.insert bid document (buffers desktop),windows=map adjust (windows desktop),
       terminalMouseTracking=if snapshotMouseTracking snapshot && snapshotExitCode snapshot==Nothing && consoleError console==Nothing && not (consoleRetiring console)
         then S.insert bid (terminalMouseTracking desktop) else S.delete bid (terminalMouseTracking desktop)}

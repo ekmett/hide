@@ -265,7 +265,7 @@ tests = askOption $ \profile->withResource
   , testCase "Conversation" (ConversationCheck.checks profile)
   , testCase "AgentFiles" AgentFilesCheck.checks
   , testCase "Terminal" TerminalCheck.checks
-  , testCase "Consoles" ConsolesCheck.checks
+  , testCase "Consoles" (ConsolesCheck.checks profile)
   , testCase "Main.model" modelChecks
   , testCase "Unicode" (UnicodeCheck.checks profile)
 #ifdef WITH_REMOTE

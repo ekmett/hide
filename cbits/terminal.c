@@ -44,6 +44,7 @@ struct thc_terminal {
     GhosttyMouseEncoder mouse_encoder;
     GhosttyMouseEvent mouse_event;
     int columns, rows, master, exited, exit_code, drained, reaped, preserve_output;
+    uint64_t screen_revision;
 #ifdef _WIN32
     HPCON console, closing_console;
     HANDLE child, job, input_pipe, output_pipe, reader, writer, closer;
@@ -472,15 +473,21 @@ int thc_terminal_resize(thc_terminal *t, int columns, int rows) {
 static uint32_t rgb(GhosttyColorRgb c) { return (uint32_t)c.r << 16 | (uint32_t)c.g << 8 | c.b; }
 static int snapshot(thc_terminal *t) {
     if (!vt_check(t, ghostty_render_state_update(t->render, t->terminal))) return 0;
+    GhosttyRenderStateDirty dirty;
     GhosttyRenderStateColors colors = GHOSTTY_INIT_SIZED(GhosttyRenderStateColors);
     GhosttyRenderStateCursor cursor = GHOSTTY_INIT_SIZED(GhosttyRenderStateCursor);
-    if (!vt_check(t, ghostty_render_state_get(t->render, GHOSTTY_RENDER_STATE_DATA_COLORS, &colors)) ||
-        !vt_check(t, ghostty_render_state_get(t->render, GHOSTTY_RENDER_STATE_DATA_CURSOR, &cursor)) ||
-        !vt_check(t, ghostty_render_state_get(t->render, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &t->row))) return 0;
+    if (!vt_check(t, ghostty_render_state_get(t->render, GHOSTTY_RENDER_STATE_DATA_DIRTY, &dirty)) ||
+        !vt_check(t, ghostty_render_state_get(t->render, GHOSTTY_RENDER_STATE_DATA_CURSOR, &cursor))) return 0;
     t->cursor_x = t->cursor_y = -1;
     if (cursor.visible && cursor.viewport_has_value) {
         t->cursor_x = cursor.viewport_x; t->cursor_y = cursor.viewport_y;
     }
+    /* Cursor visibility, mouse modes and process/output state can change with
+     * a clean cell grid. Only the copied cell payload is revision-cached. The
+     * first poll must materialize even an entirely blank screen. */
+    if (dirty == GHOSTTY_RENDER_STATE_DIRTY_FALSE && t->screen_revision) return 1;
+    if (!vt_check(t, ghostty_render_state_get(t->render, GHOSTTY_RENDER_STATE_DATA_COLORS, &colors)) ||
+        !vt_check(t, ghostty_render_state_get(t->render, GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &t->row))) return 0;
     size_t count = (size_t)t->columns * t->rows;
     uint32_t *cells = realloc(t->cells, count * 6 * sizeof(uint32_t));
     if (!cells) return fail(t, "cell allocation");
@@ -526,7 +533,9 @@ static int snapshot(thc_terminal *t) {
             t->text_length += length;
         }
     }
-    return vt_check(t, ghostty_render_state_clean(t->render));
+    if (!vt_check(t, ghostty_render_state_clean(t->render))) return 0;
+    ++t->screen_revision;
+    return 1;
 }
 #ifndef _WIN32
 static int read_output(thc_terminal *t) {
@@ -572,6 +581,7 @@ int thc_terminal_poll(thc_terminal *t) {
     return snapshot(t);
 }
 const uint32_t *thc_terminal_cells(thc_terminal *t) { return t->cells; }
+uint64_t thc_terminal_revision(thc_terminal *t) { return t->screen_revision; }
 const uint8_t *thc_terminal_text(thc_terminal *t, size_t *length) { *length = t->text_length; return t->text; }
 const uint8_t *thc_terminal_output(thc_terminal *t, size_t *length) { *length = t->output_length; return t->output; }
 int thc_terminal_pid(thc_terminal *t) {

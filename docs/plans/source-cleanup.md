@@ -15,9 +15,12 @@ findings, not measured performance results.
 - [x] Conversation question presentation uses a stable question identity;
   `ConversationCheck` covers unchanged polling with poisoned answer history and
   replacement of the answer buffer.
-- [ ] `Consoles.showConsole` compares a document's complete highlighted screen to
-  the next snapshot. Carry a screen revision or changed result from its owner;
-  verify idle polling avoids the comparison and changed cells remain visible.
+- [x] Terminal screen revisions retain copied native cells and prepared console
+  payloads until the owner reports a changed grid. `Consoles.showConsole` adopts
+  those immutable references without inspecting the previous highlighted screen.
+  `ConsolesCheck` covers idle allocation/redraw, intervening output readers and
+  old-screen strictness; native terminal checks cover metadata-only changes,
+  appearance and resize alongside changed cells.
 - [x] Routine reconciliation tracks immutable baseline identities and change
   serials. One scoped worker compares disk bytes and prepares replacement buffers;
   adoption checks baseline, source identity and the latest observation. Duplicate

@@ -11,7 +11,8 @@
 -- Managed PTY/ConPTY and libghostty-vt foreign-function boundary.
 --
 -- An MVar serializes access and prevents native-pointer use after release.
--- Snapshots copy native memory into Haskell values; output chunks are incremental,
+-- Changed screens copy native memory once and retain immutable cells by revision;
+-- small metadata is refreshed on every poll. Output chunks are incremental,
 -- not cumulative transcripts. Stopping the process and releasing the native
 -- terminal are separate operations so output can remain visible after exit.
 module Hide.Terminal
@@ -25,16 +26,16 @@ module Hide.Terminal
 import Control.Exception (bracket)
 import Data.ByteString (ByteString)
 import Data.Text (Text)
-import Data.Word (Word32)
+import Data.Word (Word32,Word64)
 #ifdef WITH_TERMINAL
 import Control.Concurrent.MVar
-import Control.Exception (IOException, try, mask_, onException)
+import Control.Exception (IOException, try, mask_, onException, evaluate)
 import Control.Monad (forM)
 import qualified Data.ByteString as BS
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
-import Foreign hiding (Word32)
+import Foreign hiding (Word32,Word64)
 import Foreign.C
 import System.Directory (doesFileExist, getPermissions, executable, makeAbsolute)
 import System.Environment (getEnvironment)
@@ -58,11 +59,11 @@ data TerminalConfig = TerminalConfig
   } deriving (Eq, Show)
 
 data TerminalCell = TerminalCell
-  { cellText :: Text
-  , cellForeground :: Word32 -- 0xRRGGBB
-  , cellBackground :: Word32
-  , cellAttributes :: Word32 -- bold=1, italic=2, underline=4, strike=8, faint=16
-  , cellWidth :: Int -- 0 for the continuation of a wide glyph.
+  { cellText :: !Text
+  , cellForeground :: !Word32 -- 0xRRGGBB
+  , cellBackground :: !Word32
+  , cellAttributes :: !Word32 -- bold=1, italic=2, underline=4, strike=8, faint=16
+  , cellWidth :: !Int -- 0 for the continuation of a wide glyph.
   } deriving (Eq, Show)
 
 -- | Normalized pointer action; wheel ticks use 'TerminalMousePress'.
@@ -92,6 +93,7 @@ data TerminalMouseEvent = TerminalMouseEvent
 data TerminalSnapshot = TerminalSnapshot
   { snapshotColumns :: Int
   , snapshotRows :: Int
+  , snapshotScreenRevision :: !Word64 -- Cell payload identity, scoped to its Terminal.
   , snapshotCells :: [TerminalCell] -- Row-major, including wide continuations.
   , snapshotMouseTracking :: Bool -- Application-requested tracking, never host input authority.
   , snapshotCursor :: Maybe (Int, Int) -- Column, row, zero-based.
@@ -107,7 +109,7 @@ withTerminal config action = bracket (startTerminal config) release use
 
 #ifdef WITH_TERMINAL
 data NativeTerminal
-data Terminal = Terminal (MVar (Maybe (Ptr NativeTerminal)))
+data Terminal = Terminal (MVar (Maybe (Ptr NativeTerminal,Maybe (Word64,[TerminalCell]))))
 
 foreign import ccall unsafe "thc_terminal_appearance" c_appearance :: Ptr NativeTerminal -> CInt -> IO CInt
 foreign import ccall unsafe "thc_terminal_new" c_new :: CInt -> CInt -> IO (Ptr NativeTerminal)
@@ -122,6 +124,7 @@ foreign import ccall unsafe "thc_terminal_mouse_tracking" c_mouseTracking :: Ptr
 foreign import ccall safe "thc_terminal_resize" c_resize :: Ptr NativeTerminal -> CInt -> CInt -> IO CInt
 foreign import ccall safe "thc_terminal_poll" c_poll :: Ptr NativeTerminal -> IO CInt
 foreign import ccall unsafe "thc_terminal_cells" c_cells :: Ptr NativeTerminal -> IO (Ptr Word32)
+foreign import ccall unsafe "thc_terminal_revision" c_revision :: Ptr NativeTerminal -> IO Word64
 foreign import ccall unsafe "thc_terminal_text" c_text :: Ptr NativeTerminal -> Ptr CSize -> IO (Ptr Word8)
 foreign import ccall unsafe "thc_terminal_output" c_output :: Ptr NativeTerminal -> Ptr CSize -> IO (Ptr Word8)
 foreign import ccall unsafe "thc_terminal_pid" c_pid :: Ptr NativeTerminal -> IO CInt
@@ -190,7 +193,7 @@ startTerminalUnsetting unset config
                   err <- nativeError ptr
                   c_free ptr
                   pure (Left err)
-                else Right . Terminal <$> newMVar (Just ptr)) `onException` c_free ptr
+                else Right . Terminal <$> newMVar (Just (ptr,Nothing))) `onException` c_free ptr
     findExecutableIn [] = pure Nothing
     findExecutableIn (p:ps) = do
       exists <- doesFileExist p
@@ -216,7 +219,7 @@ terminalProcessId :: Terminal -> IO (Either Text Int)
 terminalProcessId terminal = withOpen terminal (fmap (Right . fromIntegral) . c_pid)
 
 withOpen :: Terminal -> (Ptr NativeTerminal -> IO (Either Text a)) -> IO (Either Text a)
-withOpen (Terminal state) action = withMVar state $ maybe (pure (Left "Terminal has been released")) action
+withOpen (Terminal state) action = withMVar state $ maybe (pure (Left "Terminal has been released")) (action . fst)
 
 writeTerminal :: Terminal -> ByteString -> IO (Either Text ())
 writeTerminal terminal bytes = withOpen terminal $ \ptr -> BS.useAsCStringLen bytes $ \(buffer,len) -> do
@@ -255,34 +258,55 @@ resizeTerminal terminal columns rows
       ok <- c_resize ptr (fromIntegral columns) (fromIntegral rows)
       if ok == 0 then Left <$> nativeError ptr else pure (Right ())
 
--- | Copy a row-major cell snapshot and incremental raw output.
+-- | Capture metadata and incremental output, reusing the decoded row-major cells
+-- until the native owner publishes a new screen revision.
 -- Wide-grapheme continuation cells have width zero.
 pollTerminal :: Terminal -> IO (Either Text TerminalSnapshot)
-pollTerminal terminal = withOpen terminal $ \ptr -> do
-  ok <- c_poll ptr
-  if ok == 0 then Left <$> nativeError ptr else allocaArray 6 $ \info -> do
-    c_info ptr info
-    values <- map fromIntegral <$> peekArray 6 info
-    case values of
-      [columns,rows,cx,cy,exited,code] -> do
-        tracking <- c_mouseTracking ptr
-        text <- copyBuffer c_text ptr
-        output <- copyBuffer c_output ptr
-        cells <- c_cells ptr
-        decoded <- forM [0 .. columns * rows - 1] $ \i -> do
-          words' <- peekArray 6 (cells `advancePtr` (i * 6))
-          case words' of
-            [offset,len,fg,bg,attrs,width] -> pure TerminalCell
-              { cellText = if len == 0 && width /= 0 then " " else TE.decodeUtf8With lenientDecode (BS.take (fromIntegral len) (BS.drop (fromIntegral offset) text))
-              , cellForeground = fg, cellBackground = bg, cellAttributes = attrs, cellWidth = fromIntegral width }
-            _ -> error "terminal cell ABI"
-        if tracking < 0 then Left <$> nativeError ptr else pure $ Right TerminalSnapshot
-          { snapshotColumns = columns, snapshotRows = rows, snapshotCells = decoded
-          , snapshotMouseTracking = tracking /= 0
-          , snapshotCursor = if cx < 0 || cy < 0 then Nothing else Just (cx,cy)
-          , snapshotOutput = output, snapshotExitCode = if exited == 0 then Nothing else Just (nativeExit code) }
-      _ -> error "terminal info ABI"
+pollTerminal (Terminal state) = modifyMVar state $ \current -> case current of
+  Nothing -> pure (Nothing,Left "Terminal has been released")
+  Just (ptr,cached) -> do
+    result <- poll ptr cached
+    updated <- case result of
+      Left _ -> pure current
+      Right snap
+        | Just (previous,_) <- cached, previous == snapshotScreenRevision snap -> pure current
+        | otherwise -> do
+            -- Publish evaluated payload references, never selector chains that
+            -- retain intermediate metadata snapshots or incremental output.
+            screenRevision <- evaluate (snapshotScreenRevision snap)
+            cells <- evaluate (snapshotCells snap)
+            pure (Just (ptr,Just (screenRevision,cells)))
+    pure (updated,result)
   where
+    poll ptr cached = do
+      ok <- c_poll ptr
+      if ok == 0 then Left <$> nativeError ptr else allocaArray 6 $ \info -> do
+        c_info ptr info
+        values <- map fromIntegral <$> peekArray 6 info
+        case values of
+          [columns,rows,cx,cy,exited,code] -> do
+            tracking <- c_mouseTracking ptr
+            screenRevision <- c_revision ptr
+            output <- copyBuffer c_output ptr
+            decoded <- case cached of
+              Just (previous,cells) | previous == screenRevision -> pure cells
+              _ -> decodeCells ptr (columns * rows)
+            if tracking < 0 then Left <$> nativeError ptr else pure $ Right TerminalSnapshot
+              { snapshotColumns = columns, snapshotRows = rows, snapshotCells = decoded
+              , snapshotScreenRevision = screenRevision, snapshotMouseTracking = tracking /= 0
+              , snapshotCursor = if cx < 0 || cy < 0 then Nothing else Just (cx,cy)
+              , snapshotOutput = output, snapshotExitCode = if exited == 0 then Nothing else Just (nativeExit code) }
+          _ -> error "terminal info ABI"
+    decodeCells ptr count = do
+      text <- copyBuffer c_text ptr
+      cells <- c_cells ptr
+      forM [0 .. count - 1] $ \i -> do
+        words' <- peekArray 6 (cells `advancePtr` (i * 6))
+        case words' of
+          [offset,len,fg,bg,attrs,width] -> evaluate TerminalCell
+            { cellText = if len == 0 && width /= 0 then " " else TE.decodeUtf8With lenientDecode (BS.take (fromIntegral len) (BS.drop (fromIntegral offset) text))
+            , cellForeground = fg, cellBackground = bg, cellAttributes = attrs, cellWidth = fromIntegral width }
+          _ -> error "terminal cell ABI"
 #ifdef mingw32_HOST_OS
     nativeExit code = fromIntegral (fromIntegral code :: Word32)
 #else
@@ -295,12 +319,12 @@ pollTerminal terminal = withOpen terminal $ \ptr -> do
 
 -- | Stop the child while retaining its native terminal and screen.
 killTerminal :: Terminal -> IO ()
-killTerminal (Terminal state) = withMVar state $ maybe (pure ()) c_kill
+killTerminal (Terminal state) = withMVar state $ maybe (pure ()) (c_kill . fst)
 
 -- | Idempotently release the native terminal; subsequent pointer access is guarded.
 closeTerminal :: Terminal -> IO ()
 closeTerminal (Terminal state) = mask_ $ modifyMVar_ state $ \current -> do
-  maybe (pure ()) c_free current
+  maybe (pure ()) (c_free . fst) current
   pure Nothing
 #else
 setTerminalAppearance :: Terminal -> Bool -> IO (Either Text ())

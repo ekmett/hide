@@ -39,6 +39,9 @@ int thc_terminal_poll(thc_terminal *);
 /* Parser-only entry point also supports deterministic native tests. */
 void thc_terminal_feed(thc_terminal *, const uint8_t *, size_t);
 const uint32_t *thc_terminal_cells(thc_terminal *);
+/* Revision of the last successfully copied cell grid, scoped to this terminal.
+ * Zero before its first poll. Metadata and incremental output are independent. */
+uint64_t thc_terminal_revision(thc_terminal *);
 const uint8_t *thc_terminal_text(thc_terminal *, size_t *length);
 const uint8_t *thc_terminal_output(thc_terminal *, size_t *length);
 int thc_terminal_pid(thc_terminal *);
