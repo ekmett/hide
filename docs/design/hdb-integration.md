@@ -85,7 +85,7 @@ and planned controls.
 | Function breakpoints | Implemented, including condition/hit count | Planned; no function-breakpoint request or editor yet |
 | Exception filters and details | Implemented | Existing filters plus exception details panel/tool |
 | Valid breakpoint locations | Single-position query returns an executable span | Current-source chooser and read-only inspection; captured-source and UTF-16 validation; no range enumeration or breakpoint mutation |
-| Value formatting | Advertised | Planned; no editor formatting controls yet |
+| Value formatting | Advertised; `format.hex` ignored by `variables` and `evaluate` at this pin | Live audit confirms decimal-only machine values; formatting controls await adapter implementation |
 | Program input | POSIX reverse terminal route; Windows route disabled | Shared owned terminal; macOS stdin, Unicode and Ctrl+C qualified |
 | Stop | Terminate and disconnect destroy debuggee | Stop; no misleading “detach and leave running” for hdb |
 | Pause, request cancellation | Pause handler is a no-op; cancel unsupported | Disable Pause for hdb; Stop/relaunch is recovery, not resumable cancellation |
@@ -198,7 +198,10 @@ the socket closed”.
 - [ ] Add source breakpoint conditions, hit counts and logpoints.
 - [x] Add capability-gated single-position executable-location discovery through
       a human source chooser and read-only inspection, preserving source ownership.
-- [ ] Add function breakpoints and formatting controls.
+- [ ] Add function breakpoints.
+- [x] Audit advertised value formatting on the live pin: ordinary variables and
+      explicit Evaluate ignore `format.hex`; keep ineffective controls absent.
+- [ ] Add formatting controls after an adapter implementation honors the choice.
 - [ ] Add an expression console/history and executing Evaluate/Force MCP tools.
 - [x] Add terminal reverse requests; qualify macOS stdin, Unicode, Ctrl+C and
       owned cleanup. Shared terminal fixtures cover resize and retained output.
@@ -415,3 +418,24 @@ conversion, empty/malformed/oversized replies, source edits, private source,
 retired caller admission, and one-shot chooser cancellation. Source-coordinate conversion and reply validation run on the waiting worker;
 interaction checks retain small source/version receipts and never compare buffer
 contents.
+
+
+Value-formatting qualification on 2026-11-24 used an owned real hdb 0.14.0.0
+adapter with GHC 9.14.1 on macOS arm64. It advertised
+`supportsValueFormattingOptions: true`. Already-evaluated `Int` values `4660`
+and `-42`, and a `Word` value `255`, stayed decimal when the same stopped frame
+and Locals reference received `variables` requests with no format, `hex: true`
+and `hex: false`. Explicit `evaluate` of the same `Int` on the exact frame likewise
+returned `4660` for all three requests. The stopped source location stayed the
+same, and no continue, stop or termination event occurred during the probes.
+Both runs completed with owned process cleanup; the repeated run also confirmed
+that the adapter process group had no live members.
+
+The inspected `commandVariables` handler forwards only thread/frame/reference
+through `GetVariables` and copies the runtime-rendered `varValue` string.
+`commandEvaluate` forwards expression/frame through `DoEval` and copies
+`resultVal`. Neither path uses its decoded formatting argument. Thus successful
+responses and the advertised capability do not qualify hexadecimal rendering
+at this pin. The audit used direct owned DAP requests, with evaluation explicitly
+requested for qualification; no executing read-only agent tool or ineffective
+editor control was added.
