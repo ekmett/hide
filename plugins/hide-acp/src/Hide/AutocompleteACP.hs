@@ -131,10 +131,11 @@ runPrompt completion@(ACPCompletion _ instructions _ serial state feedback _) pe
 
 -- | Queue bounded acceptance feedback for the next completion prompt. This
 -- never starts a provider turn just to report that a suggestion was shown.
+-- Partial counts include prefixes and words already removed from the preview.
 feedbackACP :: ACPCompletion -> CompletionFeedback -> Proposal -> IO ()
 feedbackACP completion@(ACPCompletion _ _ _ _ _ feedback _) action proposal=do
   let status=case action of Shown -> "shown"; Accepted -> "accepted"; Ignored -> "ignored"; PartiallyAccepted _ -> "partially-accepted" :: Text
-      partial=case action of PartiallyAccepted count -> Just (max 0 (min (T.length (proposalText proposal)) count)); _ -> Nothing
+      partial=case action of PartiallyAccepted count -> Just (max 0 count); _ -> Nothing
       entry=object ["status" .= status,"startOffset" .= proposalStart proposal,"endOffset" .= proposalEnd proposal
         ,"text" .= T.copy (T.take 2048 (proposalText proposal)),"truncated" .= (T.length (proposalText proposal)>2048),"acceptedCharacters" .= partial]
   atomicModifyIORef' feedback (\old -> (drop (max 0 (length old-15)) old++[entry],()))

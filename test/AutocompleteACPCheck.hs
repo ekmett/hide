@@ -31,6 +31,8 @@ import qualified Data.Map.Strict as M
 import Data.List (sort)
 import System.Environment (getEnvironment)
 import Hide.Plugin.Completion
+import Hide.Buffer (newBuffer, replaceSelection, Selection(..))
+import Hide.InlineState (prepareOption, proposalWord, optionProposal, optionPrefixLength)
 import Hide.AgentHub (ConfigChoice(..))
 
 checks :: IO ()
@@ -112,6 +114,17 @@ checks=bracket temporary removePathForcibly $ \root ->
     lateSubmission<-submitted completion "first" []
     check "completed request cannot accept late tools" (isLeft lateSubmission)
     forM_ [Shown,Accepted,Ignored,PartiallyAccepted 2] $ \action -> reportCompletion completion action (Proposal 9 14 "new😀\r\n" Nothing)
+    let source=newBuffer "foo old end"
+        prepare buffer=either (error . T.unpack) pure . prepareOption buffer
+    firstWord<-prepare source (Proposal 0 11 "foo baz quux zap end" Nothing)
+    let (start,end,firstText,remaining)=proposalWord source (optionProposal firstWord)
+        firstCount=optionPrefixLength firstWord+T.length firstText
+        afterFirst=replaceSelection (Selection start end) firstText source
+    secondWord<-maybe (error "Missing word remainder") (prepare afterFirst) remaining
+    let (_,_,secondText,_)=proposalWord afterFirst (optionProposal secondWord)
+        secondCount=firstCount+optionPrefixLength secondWord+T.length secondText
+    reportCompletion completion (PartiallyAccepted firstCount) (optionProposal firstWord)
+    reportCompletion completion (PartiallyAccepted secondCount) (optionProposal secondWord)
     beforeFeedback<-logs
     check "feedback never starts its own provider task" (length [() | entry<-beforeFeedback,field "method" entry==Just ("session/prompt"::T.Text)]==1)
     let region=CompletionRegion 0 ["private"]
@@ -129,6 +142,10 @@ checks=bracket temporary removePathForcibly $ \root ->
             Just params<-[field "params" entry::Maybe Value],block<-maybe [] id (field "prompt" params),
             Just text<-[field "text" block::Maybe T.Text],Just value<-[decodeStrict' (TE.encodeUtf8 text)::Maybe Value],
             field "requestId" value==Just ("second"::T.Text)]
+      let partials=[count | context<-contexts,entry<-maybe [] id (field "feedback" context::Maybe [Value]),
+            field "status" entry==Just ("partially-accepted"::T.Text),
+            Just count<-[field "acceptedCharacters" entry::Maybe Int]]
+      check "prefix trimming and repeated word acceptance report original cumulative counts" (partials==[2,7,12])
       check "prompt and private tool expose the same exact read-only source region"
         (case (snapshot,contexts) of
           (Right value,[context])->field "regions" value==Just [regionValue] && field "regions" context==Just [regionValue]

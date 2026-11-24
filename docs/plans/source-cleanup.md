@@ -30,10 +30,10 @@ payload forcing, alongside behavior checks for the changed operation.
 
 ## Provider and file contracts
 
-- [ ] `AutocompleteACP.feedbackACP` clamps cumulative accepted-character feedback
-  to the remaining proposal text. Check prefix trimming and repeated word
-  acceptance against the original normalized insertion, and report the cumulative
-  count without truncating it to the suffix length.
+- [x] `AutocompleteACP.feedbackACP` preserves cumulative accepted-character
+  counts from the original normalized insertion. The provider check covers
+  prefix trimming and repeated word acceptance through the next prompt's
+  feedback payload.
 - [x] `AgentFiles` capture, identity and write admission select the highest
   eligible buffer ID for duplicate paths. Focused checks cover unchanged
   acceptance, stale rejection and private or hex duplicate refusal with
