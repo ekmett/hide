@@ -21,6 +21,9 @@ findings, not measured performance results.
   `ConsolesCheck` covers idle allocation/redraw, intervening output readers and
   old-screen strictness; native terminal checks cover metadata-only changes,
   appearance and resize alongside changed cells.
+  Prepared rows coalesce equal-style cells; the console checks retain a frame
+  allocation bound and exact scene comparisons for wide/combining glyphs and
+  selected text.
 - [x] Routine reconciliation tracks immutable baseline identities and change
   serials. One scoped worker compares disk bytes and prepares replacement buffers;
   adoption checks baseline, source identity and the latest observation. Duplicate

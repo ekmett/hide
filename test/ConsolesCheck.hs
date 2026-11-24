@@ -13,6 +13,7 @@ module ConsolesCheck (checks) where
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
 import Control.Exception (evaluate)
+import Control.DeepSeq (force)
 import Control.Monad (unless,forM_,foldM)
 import GHC.Conc (getAllocationCounter)
 import AllocationProfile (AllocationProfile,withinBudget)
@@ -36,6 +37,7 @@ import Hide.Model
 import Hide.Syntax (Style(..))
 import Hide.Terminal
 import Hide.Render (renderKey)
+import Hide.Unicode (graphemes)
 
 checks :: AllocationProfile -> IO ()
 checks profile = withConsoles $ \consoles -> do
@@ -79,6 +81,12 @@ idleChecks profile consoles = do
   after<-getAllocationCounter
   check ("idle terminal polling avoids screen-sized allocation: "++show (before-after))
     (withinBudget profile (before-after) 1000000)
+  _<-evaluate (force (P.frameRows idle))
+  frameBefore<-getAllocationCounter
+  _<-evaluate (force (P.frameRows idle {status="Terminal redraw"}))
+  frameAfter<-getAllocationCounter
+  check ("prepared terminal frame avoids per-cell style runs: "++show (frameBefore-frameAfter))
+    (withinBudget profile (frameBefore-frameAfter) 8000000)
   let hidden=idle {buffers=M.adjust (\doc->doc {documentHighlight=error "idle adoption inspected the old highlighted screen"}) bid (buffers idle)}
   adopted<-tickConsoles consoles hidden
   _<-evaluate (length (documentHighlight (buffers adopted M.! bid)))
@@ -123,7 +131,7 @@ nativeChecks consoles desktop = do
     (bytes,_,_)<-waitOutput consoles ident (\(_,_,code)->code/=Nothing)
     check ("lost "++label++" capture releases the actual PTY press") ("\ESC[<0;3;2M\ESC[<0;3;2m" `BS.isInfixOf` bytes)
     releaseConsole consoles ident >>= requireRight
-  (ident,opened) <- startConsole consoles (config "printf '\\033[1;38;2;12;34;56;48;2;65;43;21mA\\033[0m界'; exit 7") 4096 desktop >>= requireRight
+  (ident,opened) <- startConsole consoles (config "printf '\\033[1;38;2;12;34;56;48;2;65;43;21mA\\033[0m界é'; exit 7") 4096 desktop >>= requireRight
   let bid = maybe (error "missing terminal window") sourceFixtureBuffer (activeWindow opened)
   check "numbered read-only terminal window" (maybe False (\doc -> documentLabel doc == Just ("Terminal " <> ident)) (activeDocument opened) && maybe False ((>0) . windowNumber) (activeWindow opened))
   (raw,truncated,exitCode) <- waitOutput consoles ident (\(_,_,code) -> code /= Nothing)
@@ -136,11 +144,17 @@ nativeChecks consoles desktop = do
       screen = contents (documentBuffer doc)
       terminalView = case [w | w <- windows painted,sourceFixtureBuffer w == bid] of w:_ -> w; [] -> error "missing terminal window"
   check "truecolor and attributes reach document" (any (\(text,style)->"A" `T.isInfixOf` text && style==TerminalStyle 0x0c2238 0x412b15 1) (documentHighlight doc))
-  check "wide continuation omitted and blank cells preserved" ("A界" `T.isPrefixOf` screen && T.length (T.takeWhile (/= '\n') screen) == 19 && length (T.lines screen) == 4)
+  check "wide continuation omitted and combining clusters and blank cells preserved" ("A界é" `T.isPrefixOf` screen && T.length (T.takeWhile (/= '\n') screen) == 20 && length (T.lines screen) == 4)
+  let perCell (text,style@TerminalStyle{})=[(cluster,style) | cluster<-graphemes text]
+      perCell styled=[styled]
+      expanded d=d {buffers=M.adjust (\value->value {documentHighlight=concatMap perCell (documentHighlight value)}) bid (buffers d)}
+  check "coalesced terminal styles preserve exact rendered cells across wide and combining glyphs"
+    (P.frameRows painted==P.frameRows (expanded painted))
   check "terminal selection and scrolling clamped" (caret (selection terminalView) <= T.length screen && scrollRow terminalView <= scrollbarLimit painted True doc terminalView && scrollColumn terminalView <= scrollbarLimit painted False doc terminalView)
-  check "collapsed selection follows terminal cursor across wide glyph" (caret (selection terminalView) == 2)
+  check "collapsed selection follows terminal cursor across wide and combining glyphs" (caret (selection terminalView) == 4)
   selecting <- tickConsoles consoles painted {windows=map (\w -> if sourceFixtureBuffer w == bid then w {selection=Selection 0 2} else w) (windows painted)}
   check "tick preserves selected terminal text" (all ((== Selection 0 2) . selection) [w | w <- windows selecting,sourceFixtureBuffer w == bid])
+  check "coalesced terminal runs preserve rendered selection" (P.frameRows selecting==P.frameRows (expanded selecting))
   let closed = painted {windows=filter ((/=bid) . sourceFixtureBuffer) (windows painted),buffers=M.delete bid (buffers painted)}
   afterClose <- tickConsoles consoles closed
   check "closing window does not reopen it" (windows afterClose == windows closed && M.notMember bid (buffers afterClose))

@@ -279,11 +279,17 @@ showConsole console desktop = case M.lookup bid (buffers desktop) of
     snapshot = latestSnapshot console
 
 snapshotStyles :: TerminalSnapshot -> StyledText
-snapshotStyles snapshot = intercalate [("\n",Plain)] (map (concatMap cell) (rows (snapshotCells snapshot)))
+snapshotStyles snapshot = intercalate [("\n",Plain)] (map styleRow (rows (snapshotCells snapshot)))
   where
     columns = max 1 (snapshotColumns snapshot)
     rows [] = []
     rows cells = let (row,rest) = splitAt columns cells in row : rows rest
+    -- Prepare contiguous paint runs once, rather than making the compositor
+    -- handle a separate styled slice for every terminal cell on every frame.
+    -- Accumulate fragments before concatenating to keep each row linear.
+    styleRow = map (\(texts,style)->(T.concat texts,style)) . foldr join [] . concatMap cell
+    join (text,style) ((texts,previous):rest) | style==previous = (text:texts,previous):rest
+    join (text,style) rest = ([text],style):rest
     cell value
       | cellWidth value == 0 = []
       | otherwise = [(if T.null (cellText value) then " " else cellText value,TerminalStyle (cellForeground value) (cellBackground value) (cellAttributes value))]
