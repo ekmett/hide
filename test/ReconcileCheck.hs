@@ -35,6 +35,7 @@ import qualified Hide.AgentFiles as AgentFiles
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \runtime -> do
   synchronizationCheck dir
+  duplicatePathCheck dir
   let path = dir </> "source.hs"
       tick = tickReconciliation runtime applyEffects
       effects = reconciliationEffects runtime applyEffects
@@ -174,6 +175,31 @@ queuedSave dir agent = withReconciliation $ \runtime -> do
   settled<-foldM (\desktop _ -> verify desktop) savedDesktop ([1..20] :: [Int])
   (_,stale)<-effects settled [ResolveConflict staleChoice ReloadDisk]
   check "captured pre-save baseline cannot resolve against saved buffer" (activeText stale==expected)
+
+-- Separately opened buffers for one path must each receive the disk observation.
+duplicatePathCheck :: FilePath -> IO ()
+duplicatePathCheck dir=withReconciliation $ \runtime->do
+  let path=dir </> "duplicate.hs"
+      tick=tickReconciliation runtime applyEffects
+      source bid desktop=maybe (error "missing duplicate buffer") id (M.lookup bid (buffers desktop))
+      effects=reconciliationEffects runtime applyEffects
+      text bid=contents . documentBuffer . source bid
+      isConflict desktop=case purpose <$> dialog desktop of Just DiskConflict{}->True; _->False
+  externalWrite path "original\n"
+  (first,one)<-loadFile path >>= either error pure
+  (second,two)<-loadFile path >>= either error pure
+  let desktop=addDocument (Just second) two (addDocument (Just first) one (initialDesktop (80,25)))
+  registered<-tick desktop
+  externalWrite path "both refreshed\n"
+  clean<-await tick (\d->text 1 d=="both refreshed\n" && text 2 d=="both refreshed\n") registered
+  let changedFirst=clean {buffers=M.adjust (\doc->doc {documentBuffer=replaceBuffer False "saved local" (documentBuffer doc)}) 1 (buffers clean)}
+  (_,saved)<-effects changedFirst [SaveDocument 1 Nothing Nothing]
+  shared<-await tick (\d->text 1 d=="saved local" && text 2 d=="saved local") saved
+  let edited=shared {buffers=M.adjust (\doc->doc {documentBuffer=replaceBuffer False "local" (documentBuffer doc)}) 1 (buffers shared)}
+  externalWrite path "new disk\n"
+  changed<-await tick (\d->text 2 d=="new disk\n" && isConflict d) edited
+  unless (text 1 changed=="local" && (documentFile (source 1 changed) >>= diskBytes)==Just "saved local")
+    (error "duplicate path observation overwrote dirty buffer or baseline")
 
 -- Subscription maintenance observes immutable baseline identity, never its bytes.
 synchronizationCheck :: FilePath -> IO ()

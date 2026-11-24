@@ -25,7 +25,6 @@ import Control.Monad (foldM, unless)
 import Control.Exception (evaluate)
 import qualified Data.ByteString as BS
 import Data.IORef
-import Data.List (find)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as S
@@ -44,6 +43,7 @@ import Hide.Model
 data Reconciliation = Reconciliation Watcher (IORef Tracking)
 data Tracking = Tracking
   { watched :: M.Map Int (FilePath, StableName FileState, Int), generation :: Int
+  , subscriptions :: M.Map FilePath ([Int],Int)
   , changedDisk :: M.Map Int (Either T.Text (Maybe BS.ByteString))
   , announced :: M.Map Int (Maybe BS.ByteString)
   , directoryEntries :: M.Map FilePath [Entry]
@@ -52,7 +52,7 @@ data Tracking = Tracking
 -- | Scope the filesystem watcher and reconciliation state.
 withReconciliation :: (Reconciliation -> IO a) -> IO a
 withReconciliation action = withWatcher $ \watcher -> do
-  state <- newIORef (Tracking M.empty 0 M.empty M.empty M.empty)
+  state <- newIORef (Tracking M.empty 0 M.empty M.empty M.empty M.empty)
   action (Reconciliation watcher state)
 
 -- Tokens belong to a disk baseline, not an edit revision: local edits must not
@@ -68,16 +68,23 @@ synchronize (Reconciliation watcher ref) desktop = do
   let retain (previousCounter, result) (bid,path,identity) = case M.lookup bid (watched old) of
         Just pair@(previousPath,previous,_) | previousPath==path && previous==identity -> (previousCounter, M.insert bid pair result)
         _ -> (previousCounter+1, M.insert bid (path,identity,previousCounter+1) result)
-      (counter,current) = foldl retain (generation old,M.empty) documents
+      (baselineCounter,current) = foldl retain (generation old,M.empty) documents
+      -- One disk read serves every buffer for a path. Any owner/baseline change
+      -- retires the shared observation token before the next adoption.
+      grouped=M.fromListWith (++) [(path,[token]) | (path,_,token)<-M.elems current]
+      subscribe (previousCounter,result) (path,tokens)=case M.lookup path (subscriptions old) of
+        Just pair@(previous,_) | previous==tokens->(previousCounter,M.insert path pair result)
+        _->(previousCounter+1,M.insert path (tokens,previousCounter+1) result)
+      (counter,currentSubscriptions)=foldl subscribe (baselineCounter,M.empty) (M.toList grouped)
       unchanged bid _ = M.lookup bid current==M.lookup bid (watched old) && M.member bid current
       directories = case sideTree desktop of
         Nothing -> []
         Just tree -> treeRoot tree : treeWatchPaths tree
       desiredDirs = S.fromList directories
-  writeIORef ref old {watched=current,generation=counter,
+  writeIORef ref old {watched=current,generation=counter,subscriptions=currentSubscriptions,
     changedDisk=M.filterWithKey unchanged (changedDisk old),announced=M.filterWithKey unchanged (announced old),
     directoryEntries=M.restrictKeys (directoryEntries old) desiredDirs}
-  watchPaths watcher [(path,token) | (path,_,token) <- M.elems current] directories
+  watchPaths watcher [(path,token) | (path,(_,token)) <- M.toList currentSubscriptions] directories
 
 -- | Wrap core effects so baseline changes are synchronized before/after handling.
 reconciliationEffects :: Reconciliation -> (Desktop -> [Effect] -> IO (Bool,Desktop))
@@ -108,13 +115,12 @@ observe :: Reconciliation -> (Desktop -> [Effect] -> IO (Bool,Desktop)) -> Deskt
 observe runtime@(Reconciliation _ ref) core desktop observation = do
   tracking <- readIORef ref
   case observation of
-    FileObserved path token bytes -> case owner tracking path token of
-      Nothing -> pure desktop
-      Just bid -> recordDisk runtime bid bytes desktop
-    FileUnavailable path token err -> case owner tracking path token of
-      Nothing -> pure desktop
-      Just bid -> do
-        modifyIORef' ref (\s -> s {changedDisk=M.insert bid (Left err) (changedDisk s)})
+    FileObserved path token bytes ->
+      foldM (\d bid->recordDisk runtime bid bytes d) desktop (owners tracking path token)
+    FileUnavailable path token err -> case owners tracking path token of
+      [] -> pure desktop
+      bids -> do
+        modifyIORef' ref (\s -> s {changedDisk=foldr (\bid->M.insert bid (Left err)) (changedDisk s) bids})
         pure desktop {status="Cannot check "<>T.pack path<>": "<>err}
     DirectoryObserved path entries -> do
       let cache=M.insert path entries (directoryEntries tracking)
@@ -122,7 +128,9 @@ observe runtime@(Reconciliation _ ref) core desktop observation = do
       snd <$> core desktop [RefreshTree path entries]
     DirectoryUnavailable path err -> pure desktop {status="Cannot refresh "<>T.pack path<>": "<>err}
   where
-    owner tracking path token = fst <$> find (\(_, (watchedPath,_,version)) -> watchedPath==path && version==token) (M.toList (watched tracking))
+    owners tracking path token=case M.lookup path (subscriptions tracking) of
+      Just (_,version) | version==token->[bid | (bid,(watchedPath,_,_))<-M.toList (watched tracking),watchedPath==path]
+      _->[]
 
 recordDisk :: Reconciliation -> Int -> Maybe BS.ByteString -> Desktop -> IO Desktop
 recordDisk (Reconciliation _ ref) bid bytes desktop = case M.lookup bid (buffers desktop) of
