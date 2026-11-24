@@ -43,9 +43,10 @@ payload forcing, alongside behavior checks for the changed operation.
 
 ## Portability and API scope
 
-- [ ] `BrowserServer` still assumes `/dev/urandom` and uses `xdg-open` outside
-  macOS. Native Windows browser startup needs platform entropy and URL opening;
-  verify capability generation and actual launch on Windows.
+- [ ] Qualify native Windows browser startup with a real display. `BrowserServer`
+  uses `randomIdentity`, whose Windows implementation uses native randomness,
+  and shares the platform opener with `Links` (ebb1f92). Existing browser relay
+  checks disable automatic opening; they do not verify a real browser launch.
 - [x] Retired the unused experimental `Hide.Help` plain Markdown API and its
   dedicated tests. Interactive F1 Help continues through the registered
   CommonMark document path, covered by `MenuCommandsCheck`, `LinksCheck` and
