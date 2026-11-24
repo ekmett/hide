@@ -298,7 +298,7 @@ tests = askOption $ \profile->withResource
   , testCase "ProjectBrowser" ProjectBrowserCheck.checks
   , testCase "Files" FilesCheck.checks
   , testCase "External" ExternalCheck.checks
-  , testCase "Reconcile" ReconcileCheck.checks
+  , testCase "Reconcile" (ReconcileCheck.checks profile)
   , testCase "ACP" ACPCheck.checks
   , testCase "Links" LinksCheck.checks
   , testCase "Markdown" MarkdownCheck.checks

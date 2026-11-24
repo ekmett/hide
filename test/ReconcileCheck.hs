@@ -10,8 +10,10 @@
 
 module ReconcileCheck (checks) where
 
+import AllocationProfile (AllocationProfile, withinBudget)
+import GHC.Conc (getAllocationCounter)
 import Control.Concurrent (threadDelay)
-import Control.Exception (bracket, finally)
+import Control.Exception (bracket, finally, evaluate)
 import Control.Monad (foldM, unless)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as M
@@ -32,10 +34,11 @@ import Hide.Model
 import Hide.Reconcile
 import qualified Hide.AgentFiles as AgentFiles
 
-checks :: IO ()
-checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \runtime -> do
+checks :: AllocationProfile -> IO ()
+checks profile = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \runtime -> do
   synchronizationCheck dir
   duplicatePathCheck dir
+  preparedReloadCheck profile dir
   let path = dir </> "source.hs"
       tick = tickReconciliation runtime applyEffects
       effects = reconciliationEffects runtime applyEffects
@@ -175,6 +178,28 @@ queuedSave dir agent = withReconciliation $ \runtime -> do
   settled<-foldM (\desktop _ -> verify desktop) savedDesktop ([1..20] :: [Int])
   (_,stale)<-effects settled [ResolveConflict staleChoice ReloadDisk]
   check "captured pre-save baseline cannot resolve against saved buffer" (activeText stale==expected)
+
+-- The observer and preparation worker own full-file work; adoption stays small.
+preparedReloadCheck :: AllocationProfile -> FilePath -> IO ()
+preparedReloadCheck profile dir=withReconciliation $ \runtime->do
+  let path=dir </> "prepared.hs"
+      tick desktop=do
+        before<-getAllocationCounter
+        next<-tickReconciliation runtime applyEffects desktop
+        mapM_ (evaluate . prepareBuffer . documentBuffer) (M.elems (buffers next))
+        after<-getAllocationCounter
+        unless (withinBudget profile (before-after) (2*1024*1024))
+          (error "reconciliation adoption constructed a source buffer")
+        pure next
+  externalWrite path "original\n"
+  (file,buffer)<-loadFile path >>= either error pure
+  let initial=addDocument (Just file) buffer (initialDesktop (80,25))
+  registered<-tick initial
+  let replacement=BS.concat (replicate 65536 "changed line\n")
+  externalWrite path replacement
+  loaded<-await tick (\d->maybe False ((==65537) . bufferLineCount . documentBuffer) (activeDocument d)) registered
+  unless ((activeDocument loaded >>= documentFile >>= diskBytes)==Just replacement)
+    (error "prepared reload lost exact disk baseline")
 
 -- Separately opened buffers for one path must each receive the disk observation.
 duplicatePathCheck :: FilePath -> IO ()
