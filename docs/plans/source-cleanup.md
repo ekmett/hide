@@ -3,19 +3,18 @@ SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
 # Source cleanup follow-up
 
-The module documentation pass identified these implementation concerns. These
-are review findings, not completed fixes or measured performance results.
+The module documentation pass identified these implementation concerns. Checked
+items cite landed code and regression coverage; unchecked items remain review
+findings, not measured performance results.
 
 ## Interaction cost
 
-- [ ] `GuestAccess.guestTransitionAllowed` compares protected documents, the
-  conversation composer buffer and question state structurally. Replace payload
-  equality with explicit immutable identities and small state keys while preserving
-  post-transition authority checks. Verify that attempted edits to protected
-  controls are refused without forcing buffer contents or undo histories.
-- [ ] `Conversation.tickConversation` and `paint` compare `ChatQuestion` values,
-  which contain a buffer. Give question presentation a cheap change key; verify
-  unchanged polling does not inspect the answer buffer and real edits still repaint.
+- [x] `GuestAccess.guestTransitionAllowed` uses buffer versions and stable
+  constructor identities for protected state; `GuestAccessCheck` exercises
+  guest input with hidden payloads that must not be forced.
+- [x] Conversation question presentation uses a stable question identity;
+  `ConversationCheck` covers unchanged polling with poisoned answer history and
+  replacement of the answer buffer.
 - [ ] `Consoles.showConsole` compares a document's complete highlighted screen to
   the next snapshot. Carry a screen revision or changed result from its owner;
   verify idle polling avoids the comparison and changed cells remain visible.
@@ -35,10 +34,11 @@ payload forcing, alongside behavior checks for the changed operation.
   to the remaining proposal text. Check prefix trimming and repeated word
   acceptance against the original normalized insertion, and report the cumulative
   count without truncating it to the suffix length.
-- [ ] `AgentFiles.sourceSnapshots` and `sourceIdentity` select the highest eligible
-  buffer ID for duplicate paths, while `acceptWrite` selects the lowest. Choose
-  one consistent target and verify both unchanged acceptance and stale rejection
-  with two separately opened buffers for the same canonical file.
+- [ ] `AgentFiles.sourceSnapshots` and `sourceIdentity` now agree on the last
+  eligible duplicate path (`AgentFilesCheck` covers their freshness identity),
+  but `acceptWrite` still selects the first matching buffer. Choose one consistent
+  target and verify unchanged acceptance and stale rejection with two separately
+  opened buffers for the same canonical file.
 
 ## Portability and API scope
 
