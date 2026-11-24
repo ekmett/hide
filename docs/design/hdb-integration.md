@@ -184,8 +184,9 @@ the socket closed”.
       breakpoints through the UI and MCP, sharing permission/state handling.
 - [x] Add terminal reverse requests; qualify macOS stdin, Unicode, Ctrl+C and
       owned cleanup. Shared terminal fixtures cover resize and retained output.
-- [ ] Qualify debugger terminal frontend reconnect end to end and test the
-      upstream Windows fallback separately.
+- [x] Qualify debugger terminal frontend reconnect end to end on macOS with
+      a saved GHC source target.
+- [ ] Test the upstream Windows fallback separately.
 - [ ] Capture actual dialogs and stopped code in Metal, document workflows, and
       qualify both successful and exceptional exits plus agent background/reveal.
 
@@ -270,8 +271,8 @@ completed with DAP exit 0. A second run received Ctrl+C while waiting in
 `getLine`; hdb ended that session with exit 42. This establishes interruption,
 not a resumable exception stop. Both probe processes finished cleanup. A real
 Metal capture showed the source above its pinned terminal while awaiting input.
-Cabal component discovery, a complete display-detach/reconnect cycle and Windows
-input remain separate qualification items.
+Cabal component discovery and Windows input remain separate qualification
+items. Terminal frontend reconnect was qualified in the follow-up below.
 
 The bindist's reverse request names its inner executable, bypassing the wrapper
 that locates matching GHC shared libraries. Owned hdb sessions therefore run
@@ -286,3 +287,18 @@ Focused DAP, debugger, terminal and console checks cover literal argv, environme
 unsetting, process IDs, failed reverse requests, Unicode input, Ctrl+C, retained
 output and exactly-once delivery of the final drained tail. Output-only adapters
 also update the shared live Debugger output view.
+
+On 2026-11-24, the official hdb 0.14.0.0 bindist with GHC 9.14.1 on macOS
+arm64 passed a complete terminal frontend detach/resume qualification. The
+existing managed acquisition path verified the catalog-pinned archive hash,
+layout and selected-compiler startup. **Debug > Launch > Selected target**
+launched a saved loose-source GHC target with a direct cradle. The program
+accepted `typed λ` and printed its first echo, then waited for another line.
+Ctrl+] detached the display while the debugger stayed active.
+`--terminal --resume` returned to the same editor session identity, debugger
+generation, terminal window and terminal buffer, retaining the first output.
+The resumed frontend delivered `resumed 界`; its echo and separate stderr output
+were retained, and DAP reported exit 0. The qualification then closed its editor
+session. This covers macOS terminal frontend reconnect for the saved-source
+launch path. Cabal component discovery and upstream Windows fallback remain
+open.
