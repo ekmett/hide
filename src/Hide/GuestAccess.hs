@@ -362,7 +362,7 @@ privateDialogFieldWith paths d dg field=pluginForm dg || privateSourceWatchWith 
 privateSourceWatchWith :: [FilePath] -> Desktop -> Dialog -> Bool
 privateSourceWatchWith paths d dg=case purpose dg of
   DebugSourceWatchDialog _ bid origin captured->captured || protectedBufferWith paths d bid || maybe False (protectedFilePath paths) origin
-  DebugBreakpointDialog _ bid origin captured->captured || maybe False (protectedBufferWith paths d) bid || maybe False (protectedFilePath paths) origin
+  DebugBreakpointDialog _ owners captured->captured || any (\(bid,origin)->maybe False (protectedBufferWith paths d) bid || maybe False (protectedFilePath paths) origin) owners
   DebuggerWatchDialog _ origin captured->captured || maybe False (protectedFilePath paths) origin
   _->False
 

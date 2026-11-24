@@ -43,7 +43,7 @@ import Hide.PluginWindowHost (tickPluginWindows)
 import Hide.Debugger
 import Hide.DebuggerSidebarTypes (DebugSidebarRequest(..),DebuggerWatch(..))
 import Hide.Files (FileState(..))
-import Hide.GuestAccess (guestEffectsAllowed,guestCommandAllowed,privateDialogField)
+import Hide.GuestAccess (guestEffectsAllowed,guestCommandAllowed,privateDialogField,protectedBuffer)
 import qualified Hide.Protocol as P
 import Hide.EditorMCP (debugTools)
 import Hide.Model
@@ -424,7 +424,10 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
         finish final
 
 richBreakpointChecks :: IO ()
-richBreakpointChecks=bracket (fixture "rich-breakpoints") cleanup $ \(port,path,_) ->
+richBreakpointChecks=duplicateBreakpointProvenanceCheck >> richBreakpointFixtureChecks
+
+richBreakpointFixtureChecks :: IO ()
+richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(port,path,_) ->
   bracket (BL.writeFile (path<>".rich.json") (encode (object ["host" .= ("127.0.0.1"::T.Text),"port" .= (read port::Int),"adapterId" .= ("graalvm"::T.Text),"request" .= ("attach"::T.Text)])))
     (const (removeFile (path<>".rich.json"))) $ \_->withDebugger $ \runtime->do
   let core desktop _=pure (False,desktop)
@@ -606,6 +609,66 @@ richBreakpointChecks=bracket (fixture "rich-breakpoints") cleanup $ \(port,path,
   check "rich breakpoint mutations retain execution permission admission" ((field "annotations" spec >>= field "readOnlyHint")==Just False)
   _<-send "disconnect" [] privateOutput >>= await "rich disconnect" (pure . T.isInfixOf "Debugger disconnected" . status)
   putStrLn "rich source breakpoint checks passed"
+
+-- Same-path views can have different private roles. Preserving an expression
+-- through another view must preserve every original host-owned source identity.
+duplicateBreakpointProvenanceCheck :: IO ()
+duplicateBreakpointProvenanceCheck=bracket (fixture "rich-breakpoints") cleanup $ \(port,path,_)->withDebugger $ \runtime->do
+  let core desktop _=pure (False,desktop)
+      send action values desktop=snd <$> debuggerEffects runtime core desktop [DebugAction action values]
+      tool name args desktop=do
+        (next,finish)<-debuggerTool runtime desktop name (object args)
+        value<-finish >>= either (error . T.unpack) pure
+        pure (next,value)
+      state desktop=snd <$> tool "debug_status" [] desktop
+      await desktop=do
+        next<-tickDebugger runtime desktop
+        value<-state next
+        if field "ready" value==Just True && field "configured" value==Just True then pure next
+          else threadDelay 1000 >> await next
+      edit desktop=do
+        listed<-send "breakpoints" [] desktop {dialog=Nothing}
+        dg<-maybe (error "missing duplicate breakpoint list") pure (dialog listed)
+        let (next,effects)=submitDialog 0 dg listed
+        snd <$> debuggerEffects runtime core next effects
+      condition dg=case [value|Input "Condition" value _<-fields dg] of value:_->value;_->""
+  attached<-send "connect" ["0","127.0.0.1",T.pack port] (initialDesktop (80,25))
+  ready<-timeout debuggerTimeout (await attached) >>= maybe (error "duplicate breakpoint adapter readiness") pure
+  canonical<-canonicalizePath (path<>".hs")
+  let first=addDocument (Just (FileState canonical Nothing)) (newBuffer "one\ntwo\n") ready
+      original=maybe (error "missing original source") sourceFixtureBuffer (activeWindow first)
+      originalWindow=maybe (error "missing original source window") windowId (activeWindow first)
+  initial<-state first
+  let epoch=fromMaybe (error "missing duplicate generation") (field "generation" initial)::Int
+  (configured,_)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= original,"breakpoints" .= [object ["line" .= (1::Int),"condition" .= ("ORIGINAL_OWNER_EXPRESSION"::T.Text)]]] first
+  let duplicate=addDocument (Just (FileState canonical Nothing)) (newBuffer "one\ntwo\n") configured
+      second=maybe (error "missing duplicate source") sourceFixtureBuffer (activeWindow duplicate)
+  (preserved,_)<-tool "debug_set_breakpoints" ["generation" .= epoch,"bufferId" .= second,"lines" .= ([1,2]::[Int])] duplicate
+  editing<-edit preserved
+  dg<-maybe (error "missing duplicate expression form") pure (dialog editing)
+  let private=editing {buffers=M.adjust (\doc->doc {documentLabel=Just "Git diff"}) original (buffers editing)}
+  check "duplicate fixture changes only original source role"
+    (original/=second && protectedBuffer private original && not (protectedBuffer private second) && null (privateFilePaths private))
+  hidden<-state private
+  check "line-only duplicate cannot replace retained expression provenance"
+    (null (fromMaybe [] (field "breakpoints" hidden)::[Value]))
+  check "open duplicate expression form follows original source privacy"
+    (condition dg=="ORIGINAL_OWNER_EXPRESSION" && all (privateDialogField private dg) [f|f@Input{}<-fields dg])
+  (_,attempt)<-debuggerTool runtime private "debug_configure_breakpoints" (object ["generation" .= epoch,"bufferId" .= second,"breakpoints" .= [object ["line" .= (1::Int),"condition" .= ("PUBLIC_DUPLICATE_REPLACEMENT"::T.Text)]]])
+  refused<-attempt
+  check "public duplicate cannot admit edits to retained private expressions" (refused==Left "Debugger source is private.")
+  -- Ordinary membership edits and human disable/re-enable retain the same owner.
+  toggled<-send "breakpoint" [] (moveTo False 4 private {dialog=Nothing}) >>= send "breakpoint" [] . moveTo False 0 >>= send "breakpoint" []
+  again<-edit toggled
+  kept<-maybe (error "missing retained private expression form") pure (dialog again)
+  after<-state again
+  check "human toggles preserve private expression provenance and contents"
+    (condition kept=="ORIGINAL_OWNER_EXPRESSION" && all (privateDialogField again kept) [f|f@Input{}<-fields kept] &&
+     null (fromMaybe [] (field "breakpoints" after)::[Value]))
+  let (closedOriginal,_)=Hide.Model.runCommand Close (focusWindow originalWindow again {dialog=Nothing})
+  retained<-state closedOriginal
+  check "captured private provenance survives original view closure"
+    (M.notMember original (buffers closedOriginal) && null (fromMaybe [] (field "breakpoints" retained)::[Value]))
 
 fixture :: String -> IO (String,FilePath,ProcessHandle)
 fixture mode=do

@@ -173,10 +173,10 @@ refreshOutputPrivacy runtime desktop=do
 retainOutputSource :: Debugger -> State -> Text -> Value -> [Breakpoint] -> IO ()
 retainOutputSource runtime state key source points=when (any richBreakpoint (activeBreakpoints state points)) $ do
   token<-outputDisclosure runtime
-  let (bid,origin,private)=M.findWithDefault (Nothing,T.unpack <$> (field "path" source::Maybe Text),False) key (breakpointOwners state)
+  let BreakpointOwner contributors private=M.findWithDefault (BreakpointOwner (M.singleton (Nothing,T.unpack <$> (field "path" source::Maybe Text)) ()) False) key (breakpointOwners state)
   atomicModifyIORef' token $ \value->case value of
     OutputShared True owners _ stamp->
-      let next=M.insertWith (||) (bid,origin) private owners
+      let next=M.unionWith (||) owners (M.map (const private) contributors)
           visible=not private && M.size next<=1024
       in (OutputShared visible (if visible then next else M.empty) Nothing (stamp+1),())
     _->(value,())
@@ -335,6 +335,10 @@ data SourceObservation = SourceObservation !Int !(Maybe FilePath)
 data Breakpoint = Breakpoint
   { bpLine :: !Int, bpEnabled :: !Bool, bpCondition :: !(Maybe Text)
   , bpHitCondition :: !(Maybe Text), bpResult :: !Value } deriving (Eq,Show)
+-- Source sets conservatively retain all contributing host identities. Duplicate
+-- views cannot transfer expression authority; overflow fails closed until clear.
+data BreakpointOwner = BreakpointOwner !(M.Map (Maybe Int,Maybe FilePath) ()) !Bool
+
 data BreakpointInput = BreakpointLine !Int | BreakpointRecord !Breakpoint
 plainBreakpoint :: Int -> Breakpoint
 plainBreakpoint row=Breakpoint row True Nothing Nothing Null
@@ -417,7 +421,7 @@ data State = State
   , endedAt :: Maybe Integer, programExitCode :: Maybe Int
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
   , breakpointDialog :: Maybe (Int,Int,Text,Breakpoint,Dialog)
-  , breakpointOwners :: M.Map Text (Maybe Int,Maybe FilePath,Bool)
+  , breakpointOwners :: M.Map Text BreakpointOwner
   , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
   , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
   , sidebarThreads :: M.Map Int (), sidebarFrames :: M.Map (Int,Int) Value
@@ -1206,8 +1210,8 @@ debuggerStatus s=do
        "pending" .= (breakpointSetPending s key || (bpEnabled bp && breakpointUnavailable s bp==Nothing && bpResult bp==Null)),"result" .= bpResult bp,
        "enabled" .= bpEnabled bp,"condition" .= bpCondition bp,"hitCondition" .= bpHitCondition bp,"unavailable" .= breakpointUnavailable s bp,
        "sourceModified" .= M.findWithDefault False key (breakModified s),
-       "ownerBufferId" .= (\(bid,_,_)->bid) owner,"origin" .= (\(_,origin,_)->origin) owner,"private" .= (\(_,_,private)->private) owner]
-       | (key,src,bp)<-allBreakpoints s,let owner=M.findWithDefault (Nothing,Nothing,False) key (breakpointOwners s)],
+       "owners" .= [object ["bufferId" .= bid,"origin" .= origin] | (bid,origin)<-M.keys contributors],"private" .= captured]
+       | (key,src,bp)<-allBreakpoints s,let BreakpointOwner contributors captured=M.findWithDefault (BreakpointOwner M.empty False) key (breakpointOwners s)],
    "output" .= output s,"error" .= failure s]
 
 -- Public metadata is prepared on the waiting tool worker. Entire private rows
@@ -1219,7 +1223,7 @@ publicDebuggerStatus base private privateBuffer value=case boundedResult value o
     visibleFrame<-visibleRow base private (fromMaybe Null (field "frame" value))
     visibleSource<-visibleBacking base private (fromMaybe Null (field "source" value))
     visiblePoints<-filterM publicBreakpoint (items "breakpoints" value)
-    let points=map (\row->case row of Object fields->Object (foldr KM.delete fields ["ownerBufferId","origin","private"]); _->row) visiblePoints
+    let points=map (\row->case row of Object fields->Object (foldr KM.delete fields ["owners","private"]); _->row) visiblePoints
     publicAssistance<-case field "assistance" value of
       Just (Object fields)->do
         observations<-filterM publicObservation (fromMaybe [] (field "observations" (Object fields)))
@@ -1232,8 +1236,8 @@ publicDebuggerStatus base private privateBuffer value=case boundedResult value o
   where
     publicBreakpoint row=do
       visible<-visibleRow base private row
-      pure (visible && not (flag "private" row) && not (maybe False privateBuffer (field "ownerBufferId" row)) &&
-        not (maybe False (protectedFilePath private . T.unpack) (field "origin" row)))
+      pure (visible && not (flag "private" row) && all (\owner->not (maybe False privateBuffer (field "bufferId" owner)) &&
+        not (maybe False (protectedFilePath private . T.unpack) (field "origin" owner))) (items "owners" row))
     publicObservation observation=do
       selected<-visibleRow base private (fromMaybe Null (field "location" observation))
       stack<-mapM (visibleRow base private) (items "stack" observation)
@@ -2553,7 +2557,7 @@ sourceAction runtime@(Debugger ref _ _ _ _) request d=do
 -- closes. Neither tool records nor adapter replies may downgrade that privacy.
 breakpointPrivate :: State -> Desktop -> Text -> Bool
 breakpointPrivate state desktop key=case M.lookup key (breakpointOwners state) of
-  Just (bid,origin,captured)->captured || maybe False (protectedBuffer desktop) bid || maybe False (protectedPath desktop) origin
+  Just (BreakpointOwner contributors captured)->captured || any (\(bid,origin)->maybe False (protectedBuffer desktop) bid || maybe False (protectedPath desktop) origin) (M.keys contributors)
   Nothing->False
 
 rememberBreakpointOwner :: IORef State -> Desktop -> Maybe Int -> Value -> IO ()
@@ -2563,18 +2567,20 @@ rememberBreakpointOwner ref desktop bid source=modifyIORef' ref $ \state->
       origin=case doc >>= documentFile of
         Just file->Just (filePath file)
         Nothing->case doc >>= documentOrigin of Just path->Just path; Nothing->T.unpack <$> (field "path" source::Maybe Text)
-      captured=breakpointPrivate state desktop key || maybe False (protectedBuffer desktop) bid || maybe False (protectedPath desktop) origin
-  in state {breakpointOwners=M.insert key (bid,origin,captured) (breakpointOwners state)}
+      BreakpointOwner previous capturedBefore=M.findWithDefault (BreakpointOwner M.empty False) key (breakpointOwners state)
+      contributors=M.insert (bid,origin) () previous
+      captured=capturedBefore || breakpointPrivate state desktop key || maybe False (protectedBuffer desktop) bid || maybe False (protectedPath desktop) origin || M.size contributors>64
+      owner=BreakpointOwner (if captured then M.empty else contributors) captured
+  in state {breakpointOwners=M.insert key owner (breakpointOwners state)}
 
 editBreakpoint :: Debugger -> Text -> Value -> Breakpoint -> Desktop -> IO Desktop
 editBreakpoint (Debugger ref _ _ _ _) key source point desktop=do
   state<-readIORef ref
   let ident=choiceId state+1
-      (ownerBuffer,capturedOrigin,_)=M.findWithDefault (Nothing,Nothing,False) key (breakpointOwners state)
-      origin=case capturedOrigin of Just path->Just path; Nothing->T.unpack <$> (field "path" source::Maybe Text)
-      private=breakpointPrivate state desktop key || maybe False (protectedPath desktop) origin
+      BreakpointOwner contributors captured=M.findWithDefault (BreakpointOwner (M.singleton (Nothing,T.unpack <$> (field "path" source::Maybe Text)) ()) False) key (breakpointOwners state)
+      private=captured || breakpointPrivate state desktop key
       input label value=Input label (fromMaybe "" value) (maybe 0 T.length value)
-      form=Dialog "Edit breakpoint" (DebugBreakpointDialog ident ownerBuffer origin private)
+      form=Dialog "Edit breakpoint" (DebugBreakpointDialog ident (M.keys contributors) private)
         [ReadOnly "Source" (sourceLabel source<>":"<>tshow (bpLine point)),input "Condition" (bpCondition point),
          input "Hit condition" (bpHitCondition point),CheckBox "Enabled" (bpEnabled point)]
         1 ["Save","Cancel"] (["Conditions can execute program code.","Hit condition syntax belongs to the adapter; hdb uses a positive integer skip count."]++maybe [] pure (breakpointUnavailable state point))
