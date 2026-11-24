@@ -47,8 +47,11 @@ Select **GHC** in the status-bar dropdown, then **Debug > Launch > Selected
 target**. This starts `hdb` from PATH using the saved source entry, canonical
 project root, `main` and configured program arguments. Use **Adapter config**
 for explicit cradle/entry arguments. The installed hdb owns its GHC version;
-a custom compiler command requires an explicit adapter configuration. Automatic
-Cabal component/cradle selection and richer launch fields remain planned.
+a custom compiler command requires an explicit adapter configuration.
+The Cabal sidebar can capture a runnable component and prepare an owned explicit
+Cabal cradle. A governing custom `hie.yaml` or `.hie-bios` requires Adapter
+config. Live component/cradle qualification and richer launch fields remain
+planned.
 A normal GHC native build remains available independently.
 
 Use the same Breakpoints, Threads, Call stack and Scopes controls as THC.
@@ -174,9 +177,10 @@ the socket closed”.
 
 - [x] Qualify a pinned hdb with GHC 9.14.1 on the current macOS host using an
       isolated toy/cradle; record exact versions and actual protocol behavior.
-- [ ] Add owned loopback server launch and launch deadlines, using the existing
-      DAP transport and process cleanup. Test occupied port, missing executable,
-      failed cradle, cold load, Stop during launch and repeated sessions.
+- [x] Add owned loopback server launch and launch deadlines through the shared
+      DAP transport and process cleanup. DAP/debugger fixtures cover occupied
+      ports, missing executables and cold-load deadlines; real macOS hdb
+      qualification covers failed cradles, Stop during launch and repeated runs.
 - [ ] Protect lazy references and implement invalidation before exposing hdb
       scopes to read-only agents. Test an observable thunk, cyclic structures,
       stale/unknown handles, exceptions and a nonterminating evaluation.
@@ -302,3 +306,15 @@ were retained, and DAP reported exit 0. The qualification then closed its editor
 session. This covers macOS terminal frontend reconnect for the saved-source
 launch path. Cabal component discovery and upstream Windows fallback remain
 open.
+
+A further 2026-11-24 qualification exercised the real pinned hdb 0.14.0.0 and
+GHC 9.14.1 through the shared debugger owner on macOS arm64. A failing bios
+cradle surfaced its failure and closed the session and listener. A second bios
+cradle published readiness and its process identity, then held the launch
+request. **Debug > Disconnect** returned to the owner within one second;
+the identified cradle child exited and the listener was released. Two subsequent
+sessions reused that endpoint, each produced its own distinct output token and
+DAP exit 0, and their debugger generations advanced. These checks required no
+production correction. The deadline and occupied-port claims above remain
+covered by the DAP/debugger fixtures. Live Cabal component/cradle selection and
+the upstream Windows fallback remain open.
