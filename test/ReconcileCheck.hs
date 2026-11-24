@@ -12,9 +12,9 @@ module ReconcileCheck (checks) where
 
 import AllocationProfile (AllocationProfile, withinBudget)
 import GHC.Conc (getAllocationCounter)
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (threadDelay, newEmptyMVar, putMVar, takeMVar, tryTakeMVar)
 import Control.Exception (bracket, finally, evaluate)
-import Control.Monad (foldM, unless)
+import Control.Monad (foldM, unless, forM_)
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -39,6 +39,8 @@ checks profile = bracket temporary removePathForcibly $ \dir -> withReconciliati
   synchronizationCheck dir
   duplicatePathCheck dir
   preparedReloadCheck profile dir
+  stalePreparedCheck dir
+  preparationFailureCheck dir
   let path = dir </> "source.hs"
       tick = tickReconciliation runtime applyEffects
       effects = reconciliationEffects runtime applyEffects
@@ -178,6 +180,64 @@ queuedSave dir agent = withReconciliation $ \runtime -> do
   settled<-foldM (\desktop _ -> verify desktop) savedDesktop ([1..20] :: [Int])
   (_,stale)<-effects settled [ResolveConflict staleChoice ReloadDisk]
   check "captured pre-save baseline cannot resolve against saved buffer" (activeText stale==expected)
+
+-- Gate the normal watcher operation after dequeue and signal only after actual
+-- preparation/publication. Delayed work must observe the live buffer identity.
+stalePreparedCheck :: FilePath -> IO ()
+stalePreparedCheck dir=forM_ [False,True] $ \replace->do
+  entered<-newEmptyMVar
+  release<-newEmptyMVar
+  finished<-newEmptyMVar
+  let around action=putMVar entered () >> takeMVar release >> action >> putMVar finished ()
+      receipt label action=timeout 5000000 action >>= maybe (error label) pure
+  withReconciliationUsing around $ \runtime->do
+    let path=dir </> if replace then "prepared-replaced.hs" else "prepared-dirty.hs"
+        tick=tickReconciliation runtime applyEffects
+        source=maybe (error "missing delayed source") documentBuffer . activeDocument
+    externalWrite path "original"
+    (file,buffer)<-loadFile path >>= either error pure
+    externalWrite path "external"
+    let enter desktop=do
+          next<-tick desktop
+          ready<-tryTakeMVar entered
+          case ready of
+            Just ()->pure next
+            Nothing->threadDelay 10000 >> enter next
+    queued<-receipt "reload did not enter preparation" (enter (addDocument (Just file) buffer (initialDesktop (80,25))))
+    let changed=if replace
+          then queued {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "replacement"}) 1 (buffers queued)}
+          else insertText "local " queued
+        expected=if replace then "replacement" else "local original"
+    putMVar release ()
+    receipt "reload did not publish preparation" (takeMVar finished)
+    rejected<-tick changed
+    unless (contents (source rejected)==expected) (error "delayed reload overwrote intervening buffer")
+    if replace then do
+      receipt "replacement did not request fresh preparation" (takeMVar entered)
+      putMVar release ()
+      receipt "replacement preparation did not publish" (takeMVar finished)
+      loaded<-await tick ((=="external") . contents . source) rejected
+      unless (contents (undo (source loaded))=="replacement") (error "fresh reload lost replacement Undo")
+    else unless (case purpose <$> dialog rejected of Just DiskConflict{}->True; _->False)
+      (error "delayed reload did not preserve dirty disk conflict")
+
+preparationFailureCheck :: FilePath -> IO ()
+preparationFailureCheck dir=withReconciliation $ \runtime->do
+  let path=dir </> "preparation-error.hs"
+      file=FileState path (Just (error "worker baseline failure"))
+      initial=insertText "prefix " (addDocument (Just file) (newBuffer "local") (initialDesktop (80,25)))
+      tick=tickReconciliation runtime applyEffects
+      failed desktop=status desktop=="Cannot prepare disk version; your buffer is unchanged."
+  externalWrite path "external"
+  preserved<-await tick failed initial
+  unless (activeText preserved=="prefix local" && maybe False (\doc->revision (documentBuffer doc)==1 && contents (undo (documentBuffer doc))=="local") (activeDocument preserved))
+    (error "preparation failure changed source or Undo version")
+  (healthy,buffer)<-loadFile path >>= either error pure
+  let reopened=preserved {buffers=M.adjust (\doc->doc {documentFile=Just healthy,documentBuffer=buffer}) 1 (buffers preserved)}
+  externalWrite path "recovered"
+  recovered<-await tick ((=="recovered") . activeText) reopened
+  unless (maybe False ((=="external") . contents . undo . documentBuffer) (activeDocument recovered))
+    (error "preparation worker did not recover with correct Undo")
 
 -- The observer and preparation worker own full-file work; adoption stays small.
 preparedReloadCheck :: AllocationProfile -> FilePath -> IO ()

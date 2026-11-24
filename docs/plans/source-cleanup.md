@@ -18,10 +18,12 @@ findings, not measured performance results.
 - [ ] `Consoles.showConsole` compares a document's complete highlighted screen to
   the next snapshot. Carry a screen revision or changed result from its owner;
   verify idle polling avoids the comparison and changed cells remain visible.
-- [ ] `Reconcile.synchronize` compares file states containing disk bytes, and
-  reload adoption constructs replacement buffers. Review the worker/adoption
-  boundary so routine observation adoption uses baseline identities and prepared
-  buffers. Preserve checked saves, undo and concurrent edit rejection.
+- [x] Routine reconciliation tracks immutable baseline identities and change
+  serials. One scoped worker compares disk bytes and prepares replacement buffers;
+  adoption checks baseline, source identity and the latest observation. Duplicate
+  path subscriptions share one read and update every buffer. Regression checks
+  cover allocation, delayed dirty/replaced sources, worker failures, Undo and
+  checked saves. Explicit conflict actions retain their checked disk reread.
 
 Do not replace these comparisons with whole-desktop hashing or serialization.
 Keep full-text checks at operations that actually need them, outside input and

@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, StrictData #-}
 -- |
 -- Module      : Hide.Reconcile
 -- Copyright   : (c) 2026 Edward Kmett
@@ -16,7 +16,7 @@
 -- conflict decisions recheck buffer revision, baseline and disk. Keeping a buffer
 -- retains save-conflict checks rather than accepting an unseen disk overwrite.
 module Hide.Reconcile
-  ( Reconciliation, withReconciliation, reconciliationEffects, tickReconciliation ) where
+  ( Reconciliation, withReconciliation, withReconciliationUsing, reconciliationEffects, tickReconciliation ) where
 
 import Hide.FileIO (readFileBytes)
 
@@ -24,9 +24,10 @@ import Hide.Sidebar
 import Control.Monad (foldM, unless, forever)
 import Control.Concurrent.Async (withAsync, link)
 import Control.Concurrent.STM
-import Control.Exception (evaluate)
+import Control.Exception (evaluate, try, SomeException, SomeAsyncException, fromException, throwIO)
 import qualified Data.ByteString as BS
 import Data.IORef
+import Data.List (foldl')
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, listToMaybe)
 import qualified Data.Set as S
@@ -44,23 +45,30 @@ import Hide.Model
 -- | Session-owned watcher subscriptions, baseline tokens and conflict state.
 data Reconciliation = Reconciliation Watcher (IORef Tracking) (TVar Preparation)
 -- Buffer, baseline token and request serial identify the exact captured input.
-data ReloadRequest = ReloadRequest Int Int Int (StableName Buffer) Buffer FileState BS.ByteString
-data ReloadResult = ReloadResult ReloadRequest Buffer
+data ReloadRequest = ReloadRequest Int Int Int (StableName Buffer) Buffer FileState (Maybe BS.ByteString)
+data PreparedDisk = SameDisk | ChangedDisk (Maybe Buffer)
+data ReloadResult = ReloadResult ReloadRequest (Either T.Text PreparedDisk)
 data Preparation = Preparation (M.Map Int ReloadRequest) (M.Map Int ReloadResult)
 data Tracking = Tracking
   { watched :: M.Map Int (FilePath, StableName FileState, Int), generation :: Int
   , subscriptions :: M.Map FilePath ([Int],Int), scheduled :: M.Map Int Int
-  , changedDisk :: M.Map Int (Either T.Text (Maybe BS.ByteString))
-  , announced :: M.Map Int (Maybe BS.ByteString)
+  , changedDisk :: M.Map Int (Int,Either T.Text (Maybe BS.ByteString))
+  , announced :: M.Map Int Int
+  , watchDirectories :: S.Set FilePath
   , directoryEntries :: M.Map FilePath [Entry]
   }
 
 -- | Scope the filesystem watcher and reconciliation state.
 withReconciliation :: (Reconciliation -> IO a) -> IO a
-withReconciliation action = withWatcher $ \watcher -> do
-  state <- newIORef (Tracking M.empty 0 M.empty M.empty M.empty M.empty M.empty)
+withReconciliation=withReconciliationUsing id
+
+-- | Scope instrumentation around actual observation processing and publication.
+-- The default uses the same worker without instrumentation.
+withReconciliationUsing :: (IO () -> IO ()) -> (Reconciliation -> IO a) -> IO a
+withReconciliationUsing around action = withWatcher $ \watcher -> do
+  state <- newIORef (Tracking M.empty 0 M.empty M.empty M.empty M.empty S.empty M.empty)
   work<-newTVarIO (Preparation M.empty M.empty)
-  withAsync (prepareReloads work) $ \worker->do
+  withAsync (prepareReloads around work) $ \worker->do
     link worker
     action (Reconciliation watcher state work)
 
@@ -71,36 +79,39 @@ synchronize (Reconciliation watcher ref work) desktop = do
   old <- readIORef ref
   documents <- mapM (\(bid,file)->do
     identity<-makeStableName =<< evaluate file
-    pure (bid,filePath file,identity))
+    path<-evaluate (filePath file)
+    pure (bid,path,identity))
     [(bid,file) | (bid,doc) <- M.toList (buffers desktop),
       documentLabel doc==Nothing, Just file <- [documentFile doc]]
   let retain (previousCounter, result) (bid,path,identity) = case M.lookup bid (watched old) of
         Just pair@(previousPath,previous,_) | previousPath==path && previous==identity -> (previousCounter, M.insert bid pair result)
         _ -> (previousCounter+1, M.insert bid (path,identity,previousCounter+1) result)
-      (baselineCounter,current) = foldl retain (generation old,M.empty) documents
+      (baselineCounter,current) = foldl' retain (generation old,M.empty) documents
       -- One disk read serves every buffer for a path. Any owner/baseline change
       -- retires the shared observation token before the next adoption.
       grouped=M.fromListWith (++) [(path,[token]) | (path,_,token)<-M.elems current]
       subscribe (previousCounter,result) (path,tokens)=case M.lookup path (subscriptions old) of
         Just pair@(previous,_) | previous==tokens->(previousCounter,M.insert path pair result)
         _->(previousCounter+1,M.insert path (tokens,previousCounter+1) result)
-      (counter,currentSubscriptions)=foldl subscribe (baselineCounter,M.empty) (M.toList grouped)
+      (counter,currentSubscriptions)=foldl' subscribe (baselineCounter,M.empty) (M.toList grouped)
       unchanged bid _ = M.lookup bid current==M.lookup bid (watched old) && M.member bid current
       directories = case sideTree desktop of
         Nothing -> []
         Just tree -> treeRoot tree : treeWatchPaths tree
       desiredDirs = S.fromList directories
-  writeIORef ref old {watched=current,generation=counter,subscriptions=currentSubscriptions,
-    changedDisk=M.filterWithKey unchanged (changedDisk old),announced=M.filterWithKey unchanged (announced old),
-    scheduled=M.filterWithKey unchanged (scheduled old),
-    directoryEntries=M.restrictKeys (directoryEntries old) desiredDirs}
-  atomically $ do
-    Preparation pending ready<-readTVar work
-    let valid (ReloadRequest bid token serial _ _ _ _)=
-          maybe False (\(_,_,currentToken)->currentToken==token) (M.lookup bid current) &&
-          M.lookup bid (scheduled old)==Just serial
-    writeTVar work $! Preparation (M.filter valid pending) (M.filter (\(ReloadResult request _)->valid request) ready)
-  watchPaths watcher [(path,token) | (path,(_,token)) <- M.toList currentSubscriptions] directories
+  unless (current==watched old && desiredDirs==watchDirectories old) $ do
+    writeIORef ref $! old {watched=current,generation=counter,subscriptions=currentSubscriptions,
+      changedDisk=M.filterWithKey unchanged (changedDisk old),announced=M.filterWithKey unchanged (announced old),
+      scheduled=M.filterWithKey unchanged (scheduled old),watchDirectories=desiredDirs,
+      directoryEntries=M.restrictKeys (directoryEntries old) desiredDirs}
+    atomically $ do
+      Preparation pending ready<-readTVar work
+      let valid (ReloadRequest bid token serial _ _ _ _)=
+            maybe False (\(_,_,currentToken)->currentToken==token) (M.lookup bid current) &&
+            M.lookup bid (scheduled old)==Just serial
+      unless (M.null pending && M.null ready) $
+        writeTVar work $! Preparation (M.filter valid pending) (M.filter (\(ReloadResult request _)->valid request) ready)
+    watchPaths watcher [(path,token) | (path,(_,token)) <- M.toList currentSubscriptions] directories
 
 -- | Wrap core effects so baseline changes are synchronized before/after handling.
 reconciliationEffects :: Reconciliation -> (Desktop -> [Effect] -> IO (Bool,Desktop))
@@ -138,7 +149,8 @@ observe runtime@(Reconciliation _ ref _) core desktop observation = do
       [] -> pure desktop
       bids -> do
         mapM_ (retireReload runtime) bids
-        modifyIORef' ref (\s -> s {changedDisk=foldr (\bid->M.insert bid (Left err)) (changedDisk s) bids})
+        modifyIORef' ref (\s->let serial=generation s+1 in s {generation=serial,
+          changedDisk=foldr (\bid->M.insert bid (serial,Left err)) (changedDisk s) bids})
         pure desktop {status="Cannot check "<>T.pack path<>": "<>err}
     DirectoryObserved path entries -> do
       let cache=M.insert path entries (directoryEntries tracking)
@@ -152,57 +164,75 @@ observe runtime@(Reconciliation _ ref _) core desktop observation = do
 
 -- One session worker owns replacement decoding, line trees and Undo preparation.
 -- Pending work coalesces by buffer; no prepared Desktop can overwrite live views.
-prepareReloads :: TVar Preparation -> IO ()
-prepareReloads work=forever $ do
-  request@(ReloadRequest bid _ _ _ original _ raw)<-atomically $ do
+prepareReloads :: (IO () -> IO ()) -> TVar Preparation -> IO ()
+prepareReloads around work=forever $ do
+  request@(ReloadRequest bid _ _ _ original file bytes)<-atomically $ do
     Preparation pending ready<-readTVar work
     case M.minViewWithKey pending of
       Nothing->retry
       Just ((_,request),rest)->writeTVar work (Preparation rest ready) >> pure request
-  let fresh=prepareReload original raw
-  _<-evaluate (prepareBuffer fresh)
-  atomically $ do
-    Preparation pending ready<-readTVar work
-    writeTVar work $! Preparation pending (M.insert bid (ReloadResult request fresh) ready)
+  around $ do
+    outcome<-try $ if bytes==diskBytes file then pure SameDisk else do
+      fresh<-case bytes of
+        Just raw | not (dirty original)->do
+          let prepared=prepareReload original raw
+          _<-evaluate (prepareBuffer prepared)
+          pure (Just prepared)
+        _->pure Nothing
+      pure (ChangedDisk fresh)
+    result<-case outcome of
+      Right prepared->pure (Right prepared)
+      Left (err::SomeException)
+        | Just async<-(fromException err::Maybe SomeAsyncException)->throwIO async
+        | otherwise->pure (Left "Cannot prepare disk version; your buffer is unchanged.")
+    atomically $ do
+      Preparation pending ready<-readTVar work
+      writeTVar work $! Preparation pending (M.insert bid (ReloadResult request result) ready)
 
 recordObserved :: Reconciliation -> Int -> Maybe BS.ByteString -> Desktop -> IO Desktop
-recordObserved runtime@(Reconciliation _ ref work) bid bytes desktop=case M.lookup bid (buffers desktop) of
-  Just doc | Just file<-documentFile doc,Just raw<-bytes,not (dirty (documentBuffer doc))->do
-    if bytes==diskBytes file then recordDisk runtime bid bytes desktop else do
-      tracking<-readIORef ref
-      case M.lookup bid (watched tracking) of
-        Nothing->pure desktop
-        Just (_,_,token)->do
-          original<-evaluate (documentBuffer doc)
-          identity<-makeStableName original
-          let serial=generation tracking+1
-              request=ReloadRequest bid token serial identity original file raw
-          writeIORef ref tracking {generation=serial,scheduled=M.insert bid serial (scheduled tracking),
-            changedDisk=M.delete bid (changedDisk tracking),announced=M.delete bid (announced tracking)}
-          atomically $ do
-            Preparation pending ready<-readTVar work
-            writeTVar work $! Preparation (M.insert bid request pending) (M.delete bid ready)
-          pure desktop
-  _->recordDisk runtime bid bytes desktop
+recordObserved (Reconciliation _ ref work) bid bytes desktop=case M.lookup bid (buffers desktop) of
+  Just doc | Just file<-documentFile doc->do
+    tracking<-readIORef ref
+    case M.lookup bid (watched tracking) of
+      Nothing->pure desktop
+      Just (_,_,token)->do
+        original<-evaluate (documentBuffer doc)
+        identity<-makeStableName original
+        let serial=generation tracking+1
+            request=ReloadRequest bid token serial identity original file bytes
+        writeIORef ref $! tracking {generation=serial,scheduled=M.insert bid serial (scheduled tracking)}
+        atomically $ do
+          Preparation pending ready<-readTVar work
+          writeTVar work $! Preparation (M.insert bid request pending) (M.delete bid ready)
+        pure desktop
+  _->pure desktop
 
 adoptReloads :: Reconciliation -> Desktop -> IO Desktop
 adoptReloads runtime@(Reconciliation _ ref work) desktop=do
   completed<-atomically $ do
     Preparation pending ready<-readTVar work
-    writeTVar work $! Preparation pending M.empty
+    unless (M.null ready) (writeTVar work $! Preparation pending M.empty)
     pure (M.elems ready)
   foldM adopt desktop completed
   where
-    adopt current (ReloadResult (ReloadRequest bid token serial captured _ file raw) fresh)=do
+    adopt current (ReloadResult (ReloadRequest bid token serial captured _ file bytes) result)=do
       tracking<-readIORef ref
       case (M.lookup bid (watched tracking),M.lookup bid (buffers current)) of
         (Just (_,_,currentToken),Just doc)
           | currentToken==token,M.lookup bid (scheduled tracking)==Just serial->do
-              identity<-makeStableName =<< evaluate (documentBuffer doc)
-              if identity==captured then do
-                modifyIORef' ref (\s->s {scheduled=M.delete bid (scheduled s)})
-                pure (adoptReload bid file (Just raw) fresh current)
-              else recordObserved runtime bid (Just raw) current
+              let forget s=s {scheduled=M.delete bid (scheduled s),changedDisk=M.delete bid (changedDisk s),announced=M.delete bid (announced s)}
+                  changed value=modifyIORef' ref (\s->s {scheduled=M.delete bid (scheduled s),changedDisk=M.insert bid (serial,value) (changedDisk s)})
+              case result of
+                Left err->changed (Left err) >> pure current {status=err}
+                Right SameDisk->modifyIORef' ref forget >> pure current
+                Right (ChangedDisk prepared)->do
+                  identity<-makeStableName =<< evaluate (documentBuffer doc)
+                  case prepared of
+                    Just fresh | identity==captured->do
+                      modifyIORef' ref forget
+                      pure (adoptReload bid file bytes fresh current)
+                    _ | dirty (documentBuffer doc) || bytes==Nothing->changed (Right bytes) >> pure current
+                      | otherwise->recordObserved runtime bid bytes current
         _->pure current
 
 recordDisk :: Reconciliation -> Int -> Maybe BS.ByteString -> Desktop -> IO Desktop
@@ -212,7 +242,8 @@ recordDisk runtime@(Reconciliation _ ref _) bid bytes desktop = do
     Just doc | Just file <- documentFile doc -> do
       let forget s = s {changedDisk=M.delete bid (changedDisk s),announced=M.delete bid (announced s)}
       if bytes==diskBytes file then modifyIORef' ref forget >> pure desktop else do
-        modifyIORef' ref (\s -> s {changedDisk=M.insert bid (Right bytes) (changedDisk s)})
+        modifyIORef' ref (\s->let serial=generation s+1 in s {generation=serial,
+          changedDisk=M.insert bid (serial,Right bytes) (changedDisk s)})
         case bytes of
           Just raw | not (dirty (documentBuffer doc)) -> do
             modifyIORef' ref forget
@@ -259,11 +290,10 @@ adoptReload bid file bytes fresh desktop=case M.lookup bid (buffers desktop) of
 
 pendingConflict :: Tracking -> Desktop -> Int -> Maybe Conflict
 pendingConflict tracking desktop bid = do
-  Right bytes <- M.lookup bid (changedDisk tracking)
+  (_,Right bytes) <- M.lookup bid (changedDisk tracking)
   doc <- M.lookup bid (buffers desktop)
   file <- documentFile doc
-  if bytes==diskBytes file then Nothing
-    else Just (Conflict bid (revision (documentBuffer doc)) file bytes)
+  pure (Conflict bid (revision (documentBuffer doc)) file bytes)
 
 showConflict :: Conflict -> Desktop -> Desktop
 showConflict conflict desktop = desktop {dialog=Just (Dialog "File changed on disk" (DiskConflict conflict) [] 0
@@ -280,10 +310,12 @@ promptPending (Reconciliation _ ref _) desktop
   | otherwise = do
       tracking <- readIORef ref
       case listToMaybe [conflict | bid <- M.keys (changedDisk tracking), Just conflict <- [pendingConflict tracking desktop bid],
-           M.lookup bid (announced tracking)/=Just (conflictDisk conflict)] of
+           M.lookup bid (announced tracking)/=(fst <$> M.lookup bid (changedDisk tracking))] of
         Nothing -> pure desktop
         Just conflict -> do
-          modifyIORef' ref (\s -> s {announced=M.insert (conflictBuffer conflict) (conflictDisk conflict) (announced s)})
+          modifyIORef' ref (\s->s {announced=case M.lookup (conflictBuffer conflict) (changedDisk s) of
+            Just (serial,_)->M.insert (conflictBuffer conflict) serial (announced s)
+            Nothing->announced s})
           pure (showConflict conflict desktop)
 
 reviewPending :: Reconciliation -> Desktop -> IO Desktop
@@ -292,7 +324,9 @@ reviewPending (Reconciliation watcher ref _) desktop = do
   let choices=maybe [] pure (activeWindow desktop >>= bufferId) ++ M.keys (changedDisk tracking)
   case listToMaybe [conflict | bid <- choices, Just conflict <- [pendingConflict tracking desktop bid]] of
     Just conflict -> do
-      modifyIORef' ref (\s -> s {announced=M.insert (conflictBuffer conflict) (conflictDisk conflict) (announced s)})
+      modifyIORef' ref (\s->s {announced=case M.lookup (conflictBuffer conflict) (changedDisk s) of
+            Just (serial,_)->M.insert (conflictBuffer conflict) serial (announced s)
+            Nothing->announced s})
       pure (showConflict conflict desktop)
     Nothing -> forceCheck watcher >> pure desktop {status="No observed disk changes. Checking open files again."}
 
