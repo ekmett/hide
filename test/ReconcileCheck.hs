@@ -34,6 +34,7 @@ import qualified Hide.AgentFiles as AgentFiles
 
 checks :: IO ()
 checks = bracket temporary removePathForcibly $ \dir -> withReconciliation $ \runtime -> do
+  synchronizationCheck dir
   let path = dir </> "source.hs"
       tick = tickReconciliation runtime applyEffects
       effects = reconciliationEffects runtime applyEffects
@@ -173,6 +174,16 @@ queuedSave dir agent = withReconciliation $ \runtime -> do
   settled<-foldM (\desktop _ -> verify desktop) savedDesktop ([1..20] :: [Int])
   (_,stale)<-effects settled [ResolveConflict staleChoice ReloadDisk]
   check "captured pre-save baseline cannot resolve against saved buffer" (activeText stale==expected)
+
+-- Subscription maintenance observes immutable baseline identity, never its bytes.
+synchronizationCheck :: FilePath -> IO ()
+synchronizationCheck dir=withReconciliation $ \runtime->do
+  let file=FileState (dir </> "opaque-baseline.hs") (Just (error "subscription forced disk baseline"))
+      desktop=addDocument (Just file) (newBuffer "local") (initialDesktop (80,25))
+      effects=reconciliationEffects runtime (\d _->pure (False,d))
+  (_,registered)<-effects desktop [ReviewExternal]
+  (_,edited)<-effects (insertText "!" registered) [ReviewExternal]
+  unless (activeText edited=="!local") (error "subscription changed local edits")
 
 await :: (Desktop -> IO Desktop) -> (Desktop -> Bool) -> Desktop -> IO Desktop
 await tick ready desktop = do

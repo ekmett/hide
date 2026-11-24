@@ -22,6 +22,7 @@ import Hide.FileIO (readFileBytes)
 
 import Hide.Sidebar
 import Control.Monad (foldM, unless)
+import Control.Exception (evaluate)
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.List (find)
@@ -31,6 +32,7 @@ import qualified Data.Set as S
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import System.Directory (canonicalizePath, pathIsSymbolicLink)
+import System.Mem.StableName (StableName, makeStableName)
 import System.IO.Error (catchIOError, isDoesNotExistError, tryIOError)
 import Hide.Browser (Entry)
 import Hide.Buffer
@@ -41,7 +43,7 @@ import Hide.Model
 -- | Session-owned watcher subscriptions, baseline tokens and conflict state.
 data Reconciliation = Reconciliation Watcher (IORef Tracking)
 data Tracking = Tracking
-  { watched :: M.Map Int (FileState, Int), generation :: Int
+  { watched :: M.Map Int (FilePath, StableName FileState, Int), generation :: Int
   , changedDisk :: M.Map Int (Either T.Text (Maybe BS.ByteString))
   , announced :: M.Map Int (Maybe BS.ByteString)
   , directoryEntries :: M.Map FilePath [Entry]
@@ -58,11 +60,14 @@ withReconciliation action = withWatcher $ \watcher -> do
 synchronize :: Reconciliation -> Desktop -> IO ()
 synchronize (Reconciliation watcher ref) desktop = do
   old <- readIORef ref
-  let documents = [(bid,file) | (bid,doc) <- M.toList (buffers desktop),
-        documentLabel doc==Nothing, Just file <- [documentFile doc]]
-      retain (previousCounter, result) (bid,file) = case M.lookup bid (watched old) of
-        Just pair@(previous,_) | previous==file -> (previousCounter, M.insert bid pair result)
-        _ -> (previousCounter+1, M.insert bid (file,previousCounter+1) result)
+  documents <- mapM (\(bid,file)->do
+    identity<-makeStableName =<< evaluate file
+    pure (bid,filePath file,identity))
+    [(bid,file) | (bid,doc) <- M.toList (buffers desktop),
+      documentLabel doc==Nothing, Just file <- [documentFile doc]]
+  let retain (previousCounter, result) (bid,path,identity) = case M.lookup bid (watched old) of
+        Just pair@(previousPath,previous,_) | previousPath==path && previous==identity -> (previousCounter, M.insert bid pair result)
+        _ -> (previousCounter+1, M.insert bid (path,identity,previousCounter+1) result)
       (counter,current) = foldl retain (generation old,M.empty) documents
       unchanged bid _ = M.lookup bid current==M.lookup bid (watched old) && M.member bid current
       directories = case sideTree desktop of
@@ -72,7 +77,7 @@ synchronize (Reconciliation watcher ref) desktop = do
   writeIORef ref old {watched=current,generation=counter,
     changedDisk=M.filterWithKey unchanged (changedDisk old),announced=M.filterWithKey unchanged (announced old),
     directoryEntries=M.restrictKeys (directoryEntries old) desiredDirs}
-  watchPaths watcher [(filePath file,token) | (file,token) <- M.elems current] directories
+  watchPaths watcher [(path,token) | (path,_,token) <- M.elems current] directories
 
 -- | Wrap core effects so baseline changes are synchronized before/after handling.
 reconciliationEffects :: Reconciliation -> (Desktop -> [Effect] -> IO (Bool,Desktop))
@@ -117,7 +122,7 @@ observe runtime@(Reconciliation _ ref) core desktop observation = do
       snd <$> core desktop [RefreshTree path entries]
     DirectoryUnavailable path err -> pure desktop {status="Cannot refresh "<>T.pack path<>": "<>err}
   where
-    owner tracking path token = fst <$> find (\(_, (file,version)) -> filePath file==path && version==token) (M.toList (watched tracking))
+    owner tracking path token = fst <$> find (\(_, (watchedPath,_,version)) -> watchedPath==path && version==token) (M.toList (watched tracking))
 
 recordDisk :: Reconciliation -> Int -> Maybe BS.ByteString -> Desktop -> IO Desktop
 recordDisk (Reconciliation _ ref) bid bytes desktop = case M.lookup bid (buffers desktop) of
