@@ -23,6 +23,7 @@ import qualified Network.Socket as N
 import Data.IORef
 import qualified Data.Text as T
 import System.IO
+import System.IO.Error (annotateIOError,ioeGetLocation)
 import System.Directory (getTemporaryDirectory, createDirectory, createDirectoryIfMissing, removeFile, removePathForcibly, canonicalizePath, withCurrentDirectory)
 import System.Environment (lookupEnv, setEnv, unsetEnv, withArgs)
 #ifndef mingw32_HOST_OS
@@ -205,10 +206,14 @@ checks = isolatedStore $ do
   agentDetachCheck
   localExitOwnershipCheck
   sessionSwitchCheck
-  inspectionExitCheck
-  inspectionViewerExitCheck
-  promptedExitCheck
-  sshFailureCheck
+  remoteCheckIO "inspectionExitCheck" inspectionExitCheck
+  remoteCheckIO "inspectionViewerExitCheck" inspectionViewerExitCheck
+  remoteCheckIO "promptedExitCheck" promptedExitCheck
+  remoteCheckIO "sshFailureCheck" sshFailureCheck
+  remoteCheckIO "transportCheck" transportCheck
+
+transportCheck :: IO ()
+transportCheck = do
   let assert label ok=unless ok (error label)
   session <- randomIdentity
   path <- sessionEndpoint session
@@ -267,10 +272,10 @@ checks = isolatedStore $ do
     assert "session ownership hook runs before serving" =<< readIORef ownership
     writePacket first (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= (999::Int),"session" .= session,"client" .= client]))
     void (control first "error")
-    hClose first
+    remoteCheckIO "transport/invalid-version-close" (hClose first)
     connected <- open
     greeting <- attach connected client 0
-    bracket open hClose $ \inspector -> do
+    bracket open (remoteCheckIO "transport/inspector-close" . hClose) $ \inspector -> do
       writePacket inspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= object ["jsonrpc" .= ("2.0"::T.Text),"id" .= (41::Int),"method" .= ("initialize"::T.Text),"params" .= object ["protocolVersion" .= ("2025-11-25"::T.Text)]]]))
       inspected <- receive inspector
       assert "inspection works while an editor owns the writer slot" (case inspected of
@@ -280,7 +285,7 @@ checks = isolatedStore $ do
           "agentToken" .= ("spoofed-top-level"::T.Text),"params" .= object ["agentToken" .= ("spoofed-param"::T.Text)]]
         credential=T.replicate 48 "e"
         inspectToken :: Maybe T.Text -> IO (Maybe WirePacket)
-        inspectToken outer=bracket open hClose $ \h -> do
+        inspectToken outer=bracket open (remoteCheckIO "transport/token-inspector-close" . hClose) $ \h -> do
           writePacket h (JsonPacket (object (["type" .= ("inspect"::T.Text),"request" .= rpcToken 51]++["agentToken" .= token | Just token<-[outer]])))
           receive h
     forwarded<-inspectToken (Just credential)
@@ -296,7 +301,7 @@ checks = isolatedStore $ do
     let bridgeTokenCheck credential' expected=withBridgeHandles $ \bridgeHandle shutdownBridge clientHandle ->
           withAsync (maybe (runEditorMCPWithHandles session) (\token->runEditorMCPWithToken session (Just token)) credential' bridgeHandle bridgeHandle) $ \_ ->
             -- Finish the simulated stdio client before joining its input reader.
-            flip finally (hClose clientHandle >> shutdownBridge) $ do
+            flip finally (remoteCheckIO "transport/token-bridge-client-close" (hClose clientHandle) >> shutdownBridge) $ do
               BL.hPut clientHandle (encode (rpcToken 52)<>"\n") >> hFlush clientHandle
               response<-timeout 3000000 (readMCPLine clientHandle BS.empty)
               assert "bridge token binding ignores caller-supplied RPC identities" (case response of
@@ -304,14 +309,14 @@ checks = isolatedStore $ do
                 _->False)
     bridgeTokenCheck (Just credential) (String credential)
     bridgeTokenCheck Nothing Null
-    bracket open hClose $ \clipboardInspector -> do
+    bracket open (remoteCheckIO "transport/clipboard-inspector-close" . hClose) $ \clipboardInspector -> do
       writePacket clipboardInspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("clipboard-export"::T.Text)]))
       reply<-receive clipboardInspector
       assert "explicit clipboard output is queued" (case reply of Just (JsonPacket (String "queued")) -> True; _ -> False)
     copied<-control connected "copy"
     assert "explicit clipboard output reaches attached frontend" (KM.lookup "text" copied==Just (String "synthetic fixture λ"))
     let awaitClipboardClear=do
-          cleared<-bracket open hClose $ \clipboardInspector -> do
+          cleared<-bracket open (remoteCheckIO "transport/clipboard-status-close" . hClose) $ \clipboardInspector -> do
             writePacket clipboardInspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("clipboard-status"::T.Text)]))
             reply<-receive clipboardInspector
             pure (case reply of Just (JsonPacket value) -> value==toJSON ((1::Int),Nothing::Maybe T.Text); _ -> False)
@@ -326,7 +331,7 @@ checks = isolatedStore $ do
     threadDelay 150000
     ticksAfter<-readIORef ticks
     assert "deferred MCP wait never holds desktop lock" (ticksAfter>ticksBefore)
-    hClose inspector
+    remoteCheckIO "transport/deferred-inspector-close" (hClose inspector)
     cancelled<-timeout 3000000 (takeMVar inspectionFinished)
     assert "closing MCP connection cancels deferred tool" (cancelled==Just ())
     -- Keep bridge input open across cancellation and a subsequent request.
@@ -349,21 +354,21 @@ checks = isolatedStore $ do
             _ -> False)
           send (rpc 103 "test/deferred")
           started
-          hClose clientHandle
+          remoteCheckIO "transport/cancel-bridge-client-close" (hClose clientHandle)
           finished
           exited<-timeout 3000000 (wait bridge)
           assert "bridge EOF cancels and joins pending calls" (exited==Just ())
     input connected 1
     ack connected 1
-    bracket open hClose $ \other -> do
+    bracket open (remoteCheckIO "transport/other-client-close" . hClose) $ \other -> do
       hello other (replicate 48 'c') 0
       void (control other "error")
-    hClose connected
+    remoteCheckIO "transport/detach-client-close" (hClose connected)
     before <- readIORef ticks
     threadDelay 180000
     after <- readIORef ticks
     assert "remote tooling ticks continue while detached" (after>before)
-    bracket open hClose $ \second -> do
+    bracket open (remoteCheckIO "transport/second-client-close" . hClose) $ \second -> do
       resumed <- attach second client 0
       assert "lost ACK reconnect retains committed sequence" (KM.lookup "ack" resumed==Just (toJSON (1::Int)))
       assert "same client retains server epoch" (KM.lookup "epoch" resumed==KM.lookup "epoch" greeting)
@@ -383,7 +388,7 @@ checks = isolatedStore $ do
       committed <- timeout 3000000 cutCommitted
       assert "Cut commits before its unread reply is dropped" (committed==Just ())
     threadDelay 100000
-    bracket open hClose $ \recovered -> do
+    bracket open (remoteCheckIO "transport/recovered-client-close" . hClose) $ \recovered -> do
       resumed <- attach recovered client 0
       assert "unacknowledged Cut remains committed" (KM.lookup "ack" resumed==Just (toJSON (3::Int)))
       replies <- readIORef replayed
@@ -392,7 +397,7 @@ checks = isolatedStore $ do
       d <- readIORef observed
       assert "Cut changes the buffer exactly once" (T.null (activeText d))
     threadDelay 100000
-    bracket open hClose $ \third -> do
+    bracket open (remoteCheckIO "transport/third-client-close" . hClose) $ \third -> do
       replaced <- attach third (replicate 48 'c') 0
       assert "new launcher resumes with independent sequences" (KM.lookup "ack" replaced==Just (toJSON (0::Int)))
       assert "changing writers invalidates old reconnect journals" (KM.lookup "epoch" replaced/=KM.lookup "epoch" greeting)
@@ -833,6 +838,11 @@ sessionSwitchCheck = do
 inspect :: Desktop -> Maybe T.Text -> Value -> IO (Bool, Desktop, IO (Maybe Value))
 inspect d _ request=pure (False,d,pure (editorResponse d request))
 
+-- Keep the original IOException and exact failing cleanup site in CI reports.
+remoteCheckIO :: String -> IO a -> IO a
+remoteCheckIO location action=action `catch` \(err::IOException)->
+  ioError (annotateIOError err ("RemoteCheck/"++location++"/"++ioeGetLocation err) Nothing Nothing)
+
 -- Use a fresh loopback pair so the bridge regression runs on native Windows
 -- without POSIX pipes or replacing the test process's standard handles.
 withBridgeHandles :: (Handle -> IO () -> Handle -> IO a) -> IO a
@@ -847,8 +857,8 @@ withBridgeHandles action=bracket (N.socket N.AF_INET N.Stream N.defaultProtocol)
     (serverHandle,shutdown,_)<-socketToEndpoint server
     action serverHandle shutdown clientHandle `finally` do
       shutdown
-      hClose serverHandle
-      hClose clientHandle
+      remoteCheckIO "withBridgeHandles/server-close" (hClose serverHandle)
+      remoteCheckIO "withBridgeHandles/client-close" (hClose clientHandle)
 
 inspectionExitCheck :: IO ()
 inspectionExitCheck=do
@@ -861,7 +871,7 @@ inspectionExitCheck=do
         if attempts<=0 then throwIO err else threadDelay 10000 >> open (attempts-1)
   withAsync (runRemoteDaemon session 1 effects pure inspectExit initial) $ \daemon -> do
     link daemon
-    bracket (open (100::Int)) hClose $ \connection -> do
+    bracket (open (100::Int)) (remoteCheckIO "inspectionExitCheck/client-close" . hClose) $ \connection -> do
       writePacket connection (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= Null]))
       reply<-timeout 3000000 (readPacket connection)
       unless (case reply of Just (Just (JsonPacket (String "exiting"))) -> True; _ -> False) (error "MCP Exit must deliver its reply before ending the daemon")
@@ -908,7 +918,7 @@ promptedExitCheck=do
       await label barrier=timeout 3000000 (takeMVar barrier) >>= \result -> unless (result==Just ()) (error label)
   withAsync (runRemoteDaemon session 1 effects pure inspectPrompt initial) $ \daemon -> do
     link daemon
-    bracket (open (100::Int)) hClose $ \inspector -> bracket (open (0::Int)) hClose $ \pending -> bracket (open (0::Int)) hClose $ \display -> do
+    bracket (open (100::Int)) (remoteCheckIO "promptedExitCheck/inspector-close" . hClose) $ \inspector -> bracket (open (0::Int)) (remoteCheckIO "promptedExitCheck/pending-close" . hClose) $ \pending -> bracket (open (0::Int)) (remoteCheckIO "promptedExitCheck/display-close" . hClose) $ \display -> do
       writePacket inspector (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("exit-after-approval"::T.Text)]))
       await "Prompted Exit inspection did not start" started
       writePacket pending (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("unapproved"::T.Text)]))
@@ -919,7 +929,7 @@ promptedExitCheck=do
       writePacket display (JsonPacket (object ["type" .= ("command"::T.Text),"seq" .= (1::Int),"command" .= ("hide.app.quit"::T.Text)]))
       writePacket display (JsonPacket (object ["type" .= ("paste"::T.Text),"seq" .= (2::Int),"text" .= ("must not reopen session"::T.Text)]))
       control display "closed"
-      bracket (open (0::Int)) hClose $ \late -> do
+      bracket (open (0::Int)) (remoteCheckIO "promptedExitCheck/late-close" . hClose) $ \late -> do
         writePacket late (JsonPacket (object ["type" .= ("inspect"::T.Text),"request" .= ("late request"::T.Text)]))
         denied<-receive late
         unless (case denied of Just (JsonPacket (Object fields)) -> KM.lookup "type" fields==Just (String "error"); _ -> False) (error "Closing session admitted a new inspection")
@@ -964,7 +974,7 @@ inspectionViewerExitCheck=do
           Nothing -> error "MCP Exit looked like a reconnectable EOF to its viewer"
   withAsync (runRemoteDaemon session 1 effects tick inspectExit initial) $ \daemon -> do
     link daemon
-    bracket (open (100::Int)) hClose $ \display -> bracket (open (0::Int)) hClose $ \inspector -> do
+    bracket (open (100::Int)) (remoteCheckIO "inspectionViewerExitCheck/display-close" . hClose) $ \display -> bracket (open (0::Int)) (remoteCheckIO "inspectionViewerExitCheck/inspector-close" . hClose) $ \inspector -> do
       writePacket display (JsonPacket (object ["type" .= ("hello"::T.Text),"version" .= (1::Int),"session" .= session,"client" .= replicate 48 'f',"ack" .= (0::Int)]))
       control display "hello"
       control display "assets"
