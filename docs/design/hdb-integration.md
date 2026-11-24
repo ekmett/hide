@@ -43,16 +43,19 @@ never label unimplemented behavior as supported just because DAP has a request.
 
 ## The user experience
 
-Select **GHC** in the status-bar dropdown, then **Debug > Launch > Selected
-target**. This starts `hdb` from PATH using the saved source entry, canonical
-project root, `main` and configured program arguments. Use **Adapter config**
-for explicit cradle/entry arguments. The installed hdb owns its GHC version;
-a custom compiler command requires an explicit adapter configuration.
-The Cabal sidebar can capture a runnable component and prepare an owned explicit
-Cabal cradle. A governing custom `hie.yaml` or `.hie-bios` requires Adapter
-config. Live component/cradle qualification and richer launch fields remain
-planned.
-A normal GHC native build remains available independently.
+Select **GHC** in the status-bar dropdown. The matching external hdb owns its
+GHC version; the selected compiler must agree with Cabal's project compiler.
+A custom compiler command requires an explicit adapter configuration.
+
+| Launch path | Entry and cradle | Live qualification |
+| --- | --- | --- |
+| **Debug > Launch > Selected target** | Current saved Haskell source, saved compiler and program arguments; hdb discovers its governing cradle | Direct and bios cradles on macOS |
+| Cabal sidebar **Debug** | Captured runnable component and checked `main-is`; an owned explicit Cabal cradle selects the component. A governing `hie.yaml` or `.hie-bios` requires Adapter config | Library plus executable on macOS, including custom-cradle refusal |
+| **Debug > Launch > Adapter config** | Configuration supplies project, entry, cradle and adapter arguments; custom cradle files stay owned by the project | Direct and explicit custom Cabal cradles on macOS |
+
+The sidebar action preserves the saved run target and the source that was active
+when it was invoked. Conditional or ambiguous entry paths still require Adapter
+config. A normal GHC native build remains available independently.
 
 Use the same Breakpoints, Threads, Call stack and Scopes controls as THC.
 Expanding an ordinary value shows its children. An unevaluated value displays
@@ -68,8 +71,8 @@ user with `debug_present`; it never gets a second hidden debugger state.
 
 ## Capability map
 
-All rows below are planned exposure. Existing editor support is identified
-separately so upstream features are not confused with finished integration.
+Editor exposure below distinguishes implemented behavior, live qualification
+and planned controls.
 
 | Facility | Upstream at inspected revision | Editor exposure |
 | --- | --- | --- |
@@ -78,11 +81,11 @@ separately so upstream features are not confused with finished integration.
 | Ordinary variable children | Implemented | Existing expansion after validating reference provenance |
 | Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; nested-watch Force has live hdb list-tail qualification; root Force is fixture-tested, executing MCP tool remains planned |
 | Expression evaluation | `evaluate` with optional frame; returns value/type/reference without a lazy root hint | Manually evaluated Watches have live scalar/list qualification; console, history and executing MCP tool remain planned |
-| Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Breakpoint editor; preserve all fields when replacing a source's set |
-| Function breakpoints | Implemented, including condition/hit count | Function breakpoint rows and separate replace operation |
+| Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Planned; current source breakpoint requests contain line numbers only |
+| Function breakpoints | Implemented, including condition/hit count | Planned; no function-breakpoint request or editor yet |
 | Exception filters and details | Implemented | Existing filters plus exception details panel/tool |
-| Valid breakpoint locations | Implemented | Resolve executable spans and show relocation/unverified state |
-| Value formatting | Advertised | Offer only formatting verified to affect actual output |
+| Valid breakpoint locations | Implemented | Discovery is planned; current source breakpoint replies retain verification and relocation results |
+| Value formatting | Advertised | Planned; no editor formatting controls yet |
 | Program input | POSIX reverse terminal route; Windows route disabled | Shared owned terminal; macOS stdin, Unicode and Ctrl+C qualified |
 | Stop | Terminate and disconnect destroy debuggee | Stop; no misleading “detach and leave running” for hdb |
 | Pause, request cancellation | Pause handler is a no-op; cancel unsupported | Disable Pause for hdb; Stop/relaunch is recovery, not resumable cancellation |
@@ -181,18 +184,29 @@ the socket closed”.
       DAP transport and process cleanup. DAP/debugger fixtures cover occupied
       ports, missing executables and cold-load deadlines; real macOS hdb
       qualification covers failed cradles, Stop during launch and repeated runs.
-- [ ] Protect lazy references and implement invalidation before exposing hdb
-      scopes to read-only agents. Test an observable thunk, cyclic structures,
-      stale/unknown handles, exceptions and a nonterminating evaluation.
-- [ ] Expose GHC launch selection, exception details, Evaluate/Force and rich
-      breakpoints through the UI and MCP, sharing permission/state handling.
+- [x] Protect read-only scopes with observed-reference provenance, lazy/unknown
+      handle refusal and invalidation. Fixtures cover stale handles and watch
+      ownership; real hdb checks cover inert lazy values and explicit child Force.
+- [ ] Extend live qualification to observable thunk side effects, cyclic values,
+      exception stops and nonterminating evaluation. Root Force is fixture-only
+      because hdb Evaluate results omit the lazy-root hint.
+- [x] Expose GHC source/component launch, exception filters/details and human
+      Watch Evaluate/Force through shared debugger state and permission handling.
+- [ ] Add source breakpoint conditions, hit counts and logpoints.
+- [ ] Add function breakpoints, executable-location discovery and formatting
+      controls.
+- [ ] Add an expression console/history and executing Evaluate/Force MCP tools.
 - [x] Add terminal reverse requests; qualify macOS stdin, Unicode, Ctrl+C and
       owned cleanup. Shared terminal fixtures cover resize and retained output.
 - [x] Qualify debugger terminal frontend reconnect end to end on macOS with
       a saved GHC source target.
 - [ ] Test the upstream Windows fallback separately.
-- [ ] Capture actual dialogs and stopped code in Metal, document workflows, and
-      qualify both successful and exceptional exits plus agent background/reveal.
+- [x] Capture actual shared debugger dialogs and live hdb Watches in Metal and
+      document their workflows. The qualification below also records a real
+      source/pinned-terminal Metal capture.
+- [x] Qualify successful and exceptional program completion on real hdb
+      (exit 0 and exit 42).
+- [ ] Qualify agent background inspection and explicit reveal on real hdb.
 
 Do not add a GHC API dependency to hide. The external hdb installation owns
 that compiler coupling. Keep upstream capability gaps explicit; a local GHC
@@ -235,8 +249,8 @@ group on cancellation or completion. Readiness is bounded to five minutes and
 launch requests to two minutes; ordinary requests retain fifteen seconds.
 A real hdb run through this path repeated breakpoint, scopes, lazy inspection
 protection, stepping and termination, and left no listener on its selected port.
-Component discovery and failed-cradle/exception-stop qualification remain open
-items above.
+Later checkpoints below qualify Cabal component selection and failed-cradle
+cleanup. Live exception-stop qualification remains open.
 
 The shared status bar now selects THC/GHC for build, run and Selected target
 debug launch. GHC Selected target starts hdb on PATH using the saved source
@@ -275,8 +289,8 @@ completed with DAP exit 0. A second run received Ctrl+C while waiting in
 `getLine`; hdb ended that session with exit 42. This establishes interruption,
 not a resumable exception stop. Both probe processes finished cleanup. A real
 Metal capture showed the source above its pinned terminal while awaiting input.
-Cabal component discovery and Windows input remain separate qualification
-items. Terminal frontend reconnect was qualified in the follow-up below.
+Later checkpoints below qualify Cabal component selection and terminal
+frontend reconnect. Windows input remains open.
 
 The bindist's reverse request names its inner executable, bypassing the wrapper
 that locates matching GHC shared libraries. Owned hdb sessions therefore run
@@ -304,8 +318,8 @@ generation, terminal window and terminal buffer, retaining the first output.
 The resumed frontend delivered `resumed 界`; its echo and separate stderr output
 were retained, and DAP reported exit 0. The qualification then closed its editor
 session. This covers macOS terminal frontend reconnect for the saved-source
-launch path. Cabal component discovery and upstream Windows fallback remain
-open.
+launch path. The following checkpoint covers a Cabal library/executable project;
+the upstream Windows fallback remains open.
 
 A further 2026-11-24 qualification exercised the real pinned hdb 0.14.0.0 and
 GHC 9.14.1 through the shared debugger owner on macOS arm64. A failing bios
@@ -316,5 +330,21 @@ the identified cradle child exited and the listener was released. Two subsequent
 sessions reused that endpoint, each produced its own distinct output token and
 DAP exit 0, and their debugger generations advanced. These checks required no
 production correction. The deadline and occupied-port claims above remain
-covered by the DAP/debugger fixtures. Live Cabal component/cradle selection and
-the upstream Windows fallback remain open.
+covered by the DAP/debugger fixtures. The following checkpoint qualifies Cabal
+component/cradle selection; the upstream Windows fallback remains open.
+
+
+The same pinned hdb/GHC pair passed live Cabal qualification on macOS arm64
+using a minimal package with a library and an executable that imports it. The
+actual sidebar **Debug** action captured the qualified executable and its
+`app/Main.hs` entry while another saved source was active and the saved run
+target named a different component. hdb consumed the owned explicit Cabal
+cradle, loaded the library dependency and produced its expected result with
+DAP exit 0. The saved run settings stayed unchanged, and the scoped cradle was
+retired. Governing `hie.yaml` and `.hie-bios` files each caused preflight
+refusal without a new debugger generation or modification of those files.
+An **Adapter config** launch then used an explicit custom Cabal cradle to run
+the same library-backed executable, retained that cradle byte-for-byte and
+completed with exit 0. These checks cover a library/executable dependency and
+the three existing launch lanes. Broader multi-component, generated-source and
+other-platform qualification remains open.
