@@ -34,11 +34,10 @@ payload forcing, alongside behavior checks for the changed operation.
   to the remaining proposal text. Check prefix trimming and repeated word
   acceptance against the original normalized insertion, and report the cumulative
   count without truncating it to the suffix length.
-- [ ] `AgentFiles.sourceSnapshots` and `sourceIdentity` now agree on the last
-  eligible duplicate path (`AgentFilesCheck` covers their freshness identity),
-  but `acceptWrite` still selects the first matching buffer. Choose one consistent
-  target and verify unchanged acceptance and stale rejection with two separately
-  opened buffers for the same canonical file.
+- [x] `AgentFiles` capture, identity and write admission select the highest
+  eligible buffer ID for duplicate paths. Focused checks cover unchanged
+  acceptance, stale rejection and private or hex duplicate refusal with
+  separately opened buffers for the same canonical file.
 
 ## Portability and API scope
 

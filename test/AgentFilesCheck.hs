@@ -104,6 +104,49 @@ checks = bracket temporary removePathForcibly $ \base -> do
   check "freshness identity uses same last duplicate as source snapshots" (fmap snapshotText (M.lookup path (sourceSnapshots duplicate))==Just "last duplicate")
   check "earlier duplicate does not replace the winning source identity" . (==duplicateIdentity) =<< sourceIdentity path changedEarlier
   check "editing the last duplicate invalidates its source identity" . (/=duplicateIdentity) =<< sourceIdentity path (insertText "changed " duplicate)
+  separatelyOpened<-open written path
+  let highestId=maybe (error "missing duplicate ID") id (activeWindow separatelyOpened >>= bufferId)
+      duplicateEdited=insertText "duplicate " separatelyOpened
+      latestText=contents (bufferOf duplicateEdited)
+      staleError="File changed in the editor after the agent read it; request a fresh read."
+      rejectDuplicate label current=do
+        proposal<-capture path duplicateEdited
+        result<-acceptWrite proposal "rejected duplicate write" current
+        disk<-BS.readFile path
+        check label (case result of Left err->err==staleError && disk=="new\n"; Right _->False)
+  duplicateSnapshot<-capture path duplicateEdited
+  check "separately opened duplicate captures the highest eligible source"
+    (snapshotText duplicateSnapshot==latestText && fmap snapshotText (M.lookup path (sourceSnapshots duplicateEdited))==Just latestText)
+  let earlierEdited=duplicateEdited {buffers=M.adjust (\doc->doc {documentBuffer=newBuffer "earlier changed"}) 1 (buffers duplicateEdited)}
+  duplicateWritten<-acceptWrite duplicateSnapshot "duplicate saved\n" earlierEdited >>= right "write unchanged highest duplicate"
+  duplicateBytes<-BS.readFile path
+  check "unchanged highest duplicate accepts while preserving the earlier source"
+    (duplicateBytes=="duplicate saved\n" && contents (bufferOf duplicateWritten)=="duplicate saved\n" &&
+      contents (undo (bufferOf duplicateWritten))==latestText &&
+      fmap (contents.documentBuffer) (M.lookup 1 (buffers duplicateWritten))==Just "earlier changed")
+  BS.writeFile path "new\n"
+  rejectDuplicate "editing the captured duplicate rejects the write without touching disk" (insertText "later " duplicateEdited)
+  rejectDuplicate "removing the captured duplicate rejects an earlier source with the same path"
+    duplicateEdited {buffers=M.delete highestId (buffers duplicateEdited)}
+  laterDuplicate<-open duplicateEdited path
+  rejectDuplicate "a newly opened duplicate invalidates the captured source" laterDuplicate
+  let labelledLater=laterDuplicate {buffers=M.adjust (\doc->doc {documentLabel=Just "Read only"}) (nextId duplicateEdited) (buffers laterDuplicate)}
+  ignoredLabel<-acceptWrite duplicateSnapshot "new\n" labelledLater >>= right "write with a later ineligible duplicate"
+  check "a later labelled duplicate preserves the highest eligible write target"
+    (fmap (contents.documentBuffer) (M.lookup highestId (buffers ignoredLabel))==Just "new\n" &&
+      fmap (contents.documentBuffer) (M.lookup (nextId duplicateEdited) (buffers ignoredLabel))==Just "new\n")
+  let privateDuplicate=duplicateEdited {buffers=M.adjust (\doc->doc {documentPrivate=True}) highestId (buffers duplicateEdited)}
+  assertRejected "a duplicate that became private rejects its captured write" duplicateSnapshot "private overwrite" privateDuplicate
+  let privateEarlier=duplicateEdited {buffers=M.adjust (\doc->doc {documentPrivate=True}) 1 (buffers duplicateEdited)}
+  assertRejected "privacy on an earlier duplicate refuses the captured public source" duplicateSnapshot "private earlier overwrite" privateEarlier
+  let hexDuplicate=addDocument (documentFile (document separatelyOpened)) (newByteBuffer (BS.pack [0,255])) duplicateEdited
+  hexResult<-acceptWrite duplicateSnapshot "hex overwrite" hexDuplicate
+  hexBytes<-BS.readFile path
+  check "a new hex duplicate refuses the captured write across the whole matching set"
+    (case hexResult of Left err->err=="Hex buffers are not available through ACP text file APIs." && hexBytes=="new\n"; Right _->False)
+  diskOnlyDuplicate<-capture path empty
+  let labelledDuplicate=separatelyOpened {buffers=M.map (\doc->doc {documentLabel=Just "Read only"}) (buffers separatelyOpened)}
+  assertRejected "opening an ineligible duplicate invalidates a disk-only snapshot" diskOnlyDuplicate "read-only overwrite" labelledDuplicate
   let opaque=written {buffers=M.adjust (\doc->doc {documentFile=Just originalFile {diskBytes=error "freshness forced disk bytes"}}) 1 (buffers written)}
   opaqueIdentity<-sourceIdentity path opaque
   check "freshness identity does not compare disk bytes" (opaqueIdentity/=Nothing)

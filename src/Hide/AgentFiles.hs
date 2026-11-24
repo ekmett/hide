@@ -62,12 +62,16 @@ textTooLarge text = T.length text>fileLimit || BS.length (TE.encodeUtf8 text)>fi
 data SourceIdentity = SourceIdentity !Int !ContentVersion (StableName FileState) deriving Eq
 
 sourceIdentity :: FilePath -> Desktop -> IO (Maybe SourceIdentity)
-sourceIdentity path d = case find eligible (reverse (matchingSources path d)) of
+sourceIdentity path d = case selectedSource d (matchingSources path d) of
   Nothing -> pure Nothing
   Just (bid,doc,file) -> do
     current<-captureVersion (documentBuffer doc)
     baseline<-evaluate file >>= makeStableName
     pure (Just (SourceIdentity bid current baseline))
+
+-- Highest eligible buffer ID owns a duplicate path for capture and admission.
+selectedSource :: Desktop -> [(Int,Document,FileState)] -> Maybe (Int,Document,FileState)
+selectedSource d=find eligible . reverse
   where eligible (bid,doc,_)=not (protectedBuffer d bid) && documentLabel doc==Nothing && textBuffer (documentBuffer doc)
 
 -- Filter on path metadata before inspecting a buffer. Unrelated contents and
@@ -125,7 +129,7 @@ captureFileInput resolved d
   | any (not . textBuffer . documentBuffer . second) matching =
       pure (Left "Hex buffers are not available through ACP text file APIs.")
   | otherwise=do
-      opened<-case find (\(_,doc,_)->documentLabel doc==Nothing) (reverse matching) of
+      opened<-case selectedSource d matching of
         Nothing->pure Nothing
         Just (bid,doc,file)->do
           let buffer=documentBuffer doc
@@ -184,7 +188,8 @@ ioResult action=do
 -- This explicit write boundary can compare full contents; it is not a redraw check.
 acceptWrite :: Snapshot -> Text -> Desktop -> IO (Either Text Desktop)
 acceptWrite (Snapshot file expected oldText) text d
-  | protectedPath d (filePath file) = pure (Left "Private files require human input.")
+  | protectedPath d (filePath file) || any (\(bid,_,_)->protectedBuffer d bid) matching = pure (Left "Private files require human input.")
+  | any (\(_,doc,_)->not (textBuffer (documentBuffer doc))) matching = pure (Left "Hex buffers are not available through ACP text file APIs.")
   | T.any (=='\0') text = pure (Left "Text contains NUL bytes.")
   | textTooLarge text = pure (Left "ACP text files are limited to 16 MiB.")
   | otherwise = case current of
@@ -199,12 +204,12 @@ acceptWrite (Snapshot file expected oldText) text d
             ,windows=map (clamp bid (bufferLength edited)) (windows opened)
             ,status="Agent edit saved; Undo restores the previous buffer."}
   where
-    matching=find (\(_,doc) -> fmap filePath (documentFile doc)==Just (filePath file)) (M.toList (buffers d))
-    current=case (expected,matching) of
-      (Just (bid,version),Just (now,doc))
-        | bid==now,not (protectedBuffer d bid),documentLabel doc==Nothing,textBuffer (documentBuffer doc),revision (documentBuffer doc)==version,
+    matching=matchingSources (filePath file) d
+    current=case (expected,selectedSource d matching) of
+      (Just (bid,version),Just (now,doc,_))
+        | bid==now,revision (documentBuffer doc)==version,
           contents (documentBuffer doc)==oldText,documentFile doc==Just file -> Right (bid,documentBuffer doc,d)
-      (Nothing,Nothing) -> let opened=addDocument (Just file) (newBuffer oldText) d
+      (Nothing,Nothing) | null matching -> let opened=addDocument (Just file) (newBuffer oldText) d
         in Right (nextId d,newBuffer oldText,opened)
       _ -> Left "File changed in the editor after the agent read it; request a fresh read."
     clamp bid size w | bufferId w==Just (bid) = w {selection=Selection (max 0 (min size (anchor (selection w)))) (max 0 (min size (caret (selection w)))),scrollRow=0,scrollColumn=0}
