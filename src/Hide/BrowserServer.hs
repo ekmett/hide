@@ -31,12 +31,12 @@ import qualified Network.Wai.Handler.Warp as Warp
 import Network.Wai.Handler.WebSockets (websocketsOr)
 import qualified Network.WebSockets as WS
 import Hide.RemoteEndpoint (randomIdentity)
+import Hide.Links (openerCommand)
 import Paths_hide (getDataFileName)
 import System.Environment (lookupEnv)
 import System.Directory (canonicalizePath, doesDirectoryExist, doesFileExist)
 import System.FilePath ((</>), takeExtension)
 import Text.Read (readMaybe)
-import System.Info (os)
 import System.IO (hPutStrLn, stderr)
 import System.Process (callProcess)
 
@@ -94,7 +94,7 @@ serveBrowser done session = do
     hPutStrLn stderr ("Haskell browser: "++B8.unpack url)
     withAsync (Warp.runSettingsSocket Warp.defaultSettings socket app) $ \server->do
       autoOpen<-( /=Just "0") <$> lookupEnv "THC_EDIT_WEB_OPEN"
-      when autoOpen $ callProcess (if os=="darwin" then "open" else "xdg-open") [B8.unpack url]
+      when autoOpen $ uncurry callProcess (openerCommand (B8.unpack url))
         `catch` \(_::IOException)->hPutStrLn stderr "Open the browser URL above to connect."
       race_ (wait server) (takeMVar done)
 

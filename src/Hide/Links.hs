@@ -14,7 +14,7 @@
 -- installed as an immutable document. External resources travel as HTTP(S) URLs
 -- or bounded MIME-tagged bytes, never a remote filesystem path. Native openers
 -- receive argument vectors; their process exit is reaped asynchronously.
-module Hide.Links (followLink, prepareLink, prepareMarkdown, LinkResult, applyLink, openResource, validWebURL) where
+module Hide.Links (followLink, prepareLink, prepareMarkdown, LinkResult, applyLink, openResource, validWebURL, openerCommand) where
 
 import Hide.FileIO (withFileRead)
 
@@ -148,14 +148,17 @@ boundedRead path=withFileRead path $ \h->do
   unless (BS.length bytes<=8388608) (ioError (userError "Link exceeds 8 MiB"))
   pure bytes
 
--- OS invocation uses argument vectors, not shell interpolation of link text.
+-- | Default-application opener arguments, without shell interpolation.
+-- Callers own process lifetime and error handling.
+openerCommand :: FilePath -> (FilePath,[String])
+openerCommand target=case os of
+  "darwin"->("open",[target])
+  "mingw32"->("rundll32.exe",["url.dll,FileProtocolHandler",target])
+  _->("xdg-open",[target])
+
 launch :: FilePath -> IO ()
 launch target=do
-  let command=case os of
-        "darwin"->proc "open" [target]
-        "mingw32"->proc "rundll32.exe" ["url.dll,FileProtocolHandler",target]
-        _->proc "xdg-open" [target]
-  (_,_,_,process)<-createProcess command {std_in=NoStream,std_out=NoStream,std_err=NoStream}
+  (_,_,_,process)<-createProcess (uncurry proc (openerCommand target)) {std_in=NoStream,std_out=NoStream,std_err=NoStream}
   void (forkIO (void (waitForProcess process)))
 
 -- | Validate a client resource packet and launch the OS opener.
