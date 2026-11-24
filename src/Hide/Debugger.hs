@@ -247,11 +247,13 @@ data DebugPageBody = AdapterPage !Value | CachedPage !Int !Value
 data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text DebugPageBody)) | CacheDebugPage !DebugPageRequest !Value
   | ReadAssistance !AssistanceReceipt !Text !Value !(MVar (Either Text Value))
   | ReadDebugSource !Int !Int !Int !(Maybe FilePath) !(MVar (Either Text Value))
+  | ReadDebugLocations !Int !DebugSourceRequest !Value !Int !(Maybe Int) !(IO (Either Text ())) !(MVar (Either Text Value))
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
   | Stack Bool Int Int | Scopes Int | Variables Int | ExceptionDetails | Source Bool Int Int Value | Control Bool | Detach
   | AssistedControl !Text !Int !Text !Bool
   | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text DebugPageBody))
   | WatchRequest !WatchOperation !(Maybe Text) !FilePath ![FilePath]
+  | LocationInspection !DebugSourceRequest !(MVar (Either Text Value))
   deriving (Eq)
 data WatchMode = EvaluateWatch | ForceWatch !Int | ForceWatchChild !Int !Int !Int !Int deriving Eq
 data WatchOperation = WatchOperation !Int !Int !WatchFrame !WatchMode deriving Eq
@@ -302,6 +304,8 @@ data State = State
   , sidebarReferences :: M.Map (ReferenceOwner,Int) Bool
   , watchProvider :: Maybe WatchProvider, watchPreparing :: Maybe WatchPreparation
   , sourcePreparing :: Maybe SourcePreparation
+  , locationPreparing :: Maybe (Int,DebugSourceRequest,IORef Bool,Async (Either Text [Value]))
+  , locationDialog :: Maybe (Text,DebugSourceRequest)
   , sourceReferences :: M.Map Int SourceObservation, nextSourceObservation :: Int
   , watchExpressions :: M.Map Int DebuggerWatch, watchCatalogueRevision :: Int, nextWatch :: Int, watchDialog :: Maybe (Int,Maybe (Int,Int)), sourceWatchDialog :: Maybe (Int,DebugSourceRequest)
   }
@@ -310,7 +314,7 @@ emptyState :: State
 emptyState = State {systemOne=Nothing,assistance=Nothing,client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
+  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -519,6 +523,15 @@ drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue _) _) d=forM
         | generation s/=captured || not (stopped s && ready s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing) || not (sourceStampCurrent s reference stamp) || maybe False (protectedPath d) origin ->void (tryPutMVar reply (Left "Debugger source is private or expired."))
         | length [() | (SourceInspection{},_,_)<-M.elems (pending s)]>=4 ->void (tryPutMVar reply (Left "Debugger source inspection is busy."))
         | otherwise->send runtime (SourceInspection reference stamp origin reply) "source" (object ["sourceReference" .= reference])
+      ReadDebugLocations captured sourceRequest source row column caller reply->do
+        admitted<-caller
+        valid<-locationsCurrent sourceRequest d
+        if either (const True) (const False) admitted || generation s/=captured || not (locationsAvailable s) || not (knownLocationSource s sourceRequest) || not valid || maybe False (protectedPath d . T.unpack) (field "path" source::Maybe Text)
+          then void (tryPutMVar reply (Left "Executable location source is private or expired."))
+          else if length [()|(LocationInspection{},_,_)<-M.elems(pending s)]>=4
+            then void (tryPutMVar reply (Left "Executable location inspection is busy."))
+            else send runtime (LocationInspection sourceRequest reply) "breakpointLocations"
+              (object (["source" .= source,"line" .= row]++["column" .= value|Just value<-[column]]))
       CacheDebugPage request value | current request && (M.member request (sidebarPages s) || M.size (sidebarPages s)<64)->do
         recordSidebarResponse ref request value
         modifyIORef' ref (\state->state {sidebarPages=M.insert request value (sidebarPages state)})
@@ -833,6 +846,25 @@ debuggerToolWithCaller caller runtime@(Debugger ref _ _ _ _) d name arguments = 
                 breakModified=M.insert key modified (breakModified state)})
               when (configured s) (sendBreakpoints runtime key src points)
             snapshot d
+    run (ToolLocations bid row column)=case (activeWindow d,M.lookup bid (buffers d)) of
+      (Just window,Just doc) | bufferId window==Just bid,windowFocused d window,bufferView window==CurrentView,reviewSelection window==Nothing,not(byteMode(documentBuffer doc)),not(protectedBuffer d bid),dialog d==Nothing,not(questionActive d)->do
+        state<-readIORef ref
+        version<-captureVersion(documentBuffer doc)
+        let request=DebugSourceRequest SourceBreakpointLocations (windowId window) bid version (selection window)
+              (filePath <$> documentFile doc) Nothing row Nothing False
+            image=documentBuffer doc
+            dirty=captureDirty image
+            generated=liveBufferSource state bid
+            epoch=generation state
+        pure(d,do
+          changed<-evaluate(snapshotDirty dirty)
+          if changed then pure(Left "Save source before requesting executable locations.") else do
+            result<-queryLocations runtime caller epoch request generated image row column
+            pure $ do
+              body<-result
+              rows<-prepareLocations image body
+              boundedResult(object["generation" .= epoch,"request" .= ("breakpointLocations"::Text),"body" .= object["breakpoints" .= map nativeLocation rows]]))
+      _->immediate d (Left "Executable locations require the current public source text buffer.")
     run (ToolInspect "source" args)=do
       state<-readIORef ref
       let reference=integer "sourceReference" args
@@ -870,7 +902,7 @@ debuggerToolWithCaller caller runtime@(Debugger ref _ _ _ _) d name arguments = 
 
 data ToolRequest = ToolStatus | ToolStart Text [Text] | ToolControl Text
   | ToolAssist Text (Maybe Text) Int Int
-  | ToolBreakpoints Int [Int] | ToolInspect Text Value | ToolPresent (Maybe Bool) (Maybe Text)
+  | ToolBreakpoints Int [Int] | ToolLocations Int Int (Maybe Int) | ToolInspect Text Value | ToolPresent (Maybe Bool) (Maybe Text)
 
 parseTool :: State -> Text -> Value -> Parser ToolRequest
 parseTool s name = withObject "debugger tool arguments" $ \o -> do
@@ -952,45 +984,54 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       unless (bid>=0 && length rows<=1000 && all (>0) rows) (fail "bufferId must be nonnegative and lines must contain at most 1000 positive integers")
       pure (ToolBreakpoints bid rows)
     "debug_inspect" -> do
-      fieldsAllowed ["generation","request","threadId","frameId","variablesReference","sourceReference","start","count"]
+      fieldsAllowed ["generation","request","threadId","frameId","variablesReference","sourceReference","start","count","bufferId","line","column"]
       epoch
       live
       unless (ready s && configured s) (fail "Debugger is not ready for inspection")
       command<-o .: "request"
-      unless (command `elem` ["threads","stackTrace","scopes","variables","source","exceptionInfo"]) (fail "Unsupported debugger inspection")
+      unless (command `elem` ["threads","stackTrace","scopes","variables","source","exceptionInfo","breakpointLocations"]) (fail "Unsupported debugger inspection")
       when (command `elem` ["stackTrace","scopes","variables","exceptionInfo"] && not (stopped s)) (fail "Debugger must be stopped for this inspection")
       -- Validate even unused optional fields: malformed handles are never ignored.
       mapM_ positive ["threadId","frameId","variablesReference","sourceReference"]
       start<-o .:? "start" .!= (0::Int)
       count<-o .:? "count" .!= (100::Int)
       unless (start>=0 && count>0 && count<=1000) (fail "start must be nonnegative and count must be between 1 and 1000")
-      args<-case command of
-        "threads" -> pure (object [])
-        "stackTrace" -> do
-          tid<-required "threadId" (thread s)
-          pure (object ["threadId" .= tid,"startFrame" .= start,"levels" .= count])
-        "exceptionInfo" -> do
-          unless (flag "supportsExceptionInfoRequest" (capabilities s)) (fail "This debugger does not support exception details")
-          tid<-required "threadId" (thread s)
-          pure (object ["threadId" .= tid])
-        "scopes" -> do
-          ident<-required "frameId" (frame s >>= field "id")
-          pure (object ["frameId" .= ident])
-        "variables" -> do
-          ident<-required "variablesReference" Nothing
-          case M.lookup ident (variableRefs s) of
-            Just False -> pure ()
-            Just True -> fail "Lazy variable requires explicit evaluation; read-only inspection cannot force it"
-            Nothing -> fail "Unknown or expired variable reference; request scopes/variables again"
-          pure (object ["variablesReference" .= ident,"start" .= start,"count" .= count])
-        _ -> do
-          let selected=frame s >>= field "source"
-              reference=selected >>= field "sourceReference" >>= \n -> if n>0 then Just n else Nothing
-          unless (stopped s) (fail "Debugger must be stopped for source inspection")
-          ident<-required "sourceReference" reference
-          unless (M.member ident (sourceReferences s)) (fail "Unknown or expired source reference; inspect a stopped stack again")
-          pure (object ["sourceReference" .= ident])
-      pure (ToolInspect command args)
+      if command=="breakpointLocations" then do
+        unless (locationsAvailable s) (fail "This debugger does not support executable locations")
+        bid<-o .: "bufferId"
+        row<-o .: "line"
+        column<-o .:? "column"
+        unless (bid>=0 && row>0 && maybe True (>0) column) (fail "bufferId must be nonnegative; line and column must be positive")
+        pure(ToolLocations bid row column)
+      else do
+        when (any (`KM.member` o) ["bufferId","line","column"]) (fail "Source position fields require breakpointLocations")
+        args<-case command of
+          "threads" -> pure (object [])
+          "stackTrace" -> do
+            tid<-required "threadId" (thread s)
+            pure (object ["threadId" .= tid,"startFrame" .= start,"levels" .= count])
+          "exceptionInfo" -> do
+            unless (flag "supportsExceptionInfoRequest" (capabilities s)) (fail "This debugger does not support exception details")
+            tid<-required "threadId" (thread s)
+            pure (object ["threadId" .= tid])
+          "scopes" -> do
+            ident<-required "frameId" (frame s >>= field "id")
+            pure (object ["frameId" .= ident])
+          "variables" -> do
+            ident<-required "variablesReference" Nothing
+            case M.lookup ident (variableRefs s) of
+              Just False -> pure ()
+              Just True -> fail "Lazy variable requires explicit evaluation; read-only inspection cannot force it"
+              Nothing -> fail "Unknown or expired variable reference; request scopes/variables again"
+            pure (object ["variablesReference" .= ident,"start" .= start,"count" .= count])
+          _ -> do
+            let selected=frame s >>= field "source"
+                reference=selected >>= field "sourceReference" >>= \n -> if n>0 then Just n else Nothing
+            unless (stopped s) (fail "Debugger must be stopped for source inspection")
+            ident<-required "sourceReference" reference
+            unless (M.member ident (sourceReferences s)) (fail "Unknown or expired source reference; inspect a stopped stack again")
+            pure (object ["sourceReference" .= ident])
+        pure (ToolInspect command args)
     _ -> fail "Unknown debugger tool"
 
 debuggerStatus :: State -> IO Value
@@ -1083,6 +1124,7 @@ boundedResult value | BL.length (encode value)>=1024*1024 = Left "Debugger respo
                     | otherwise = Right value
 
 completeInspection :: Pending -> Either Text Value -> IO ()
+completeInspection (LocationInspection _ reply) result=void(tryPutMVar reply result)
 completeInspection (SourceInspection _ _ _ reply) result=void (tryPutMVar reply result)
 completeInspection (Inspection _ reply) result=tryPutMVar reply result >> pure ()
 completeInspection (SidebarRead _ reply) result=atomically (void (tryPutTMVar reply (AdapterPage <$> result)))
@@ -1507,11 +1549,12 @@ debuggerConsoles (Debugger _ _ (HdbRuntime _ _ _ _ consoles _ _) _ _) = consoles
 stopTransport :: Debugger -> State -> IO ()
 stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) s = mask $ \restore -> do
   revokeAssistance runtime "finished" "disconnected"
+  forM_ (locationPreparing s) $ \(_,_,alive,_)->writeIORef alive False
   -- No old worker can publish into the replacement session. Process cleanup is
   -- joined only at daemon teardown, outside the desktop lock.
-  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing,debugCradle=Nothing})
+  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,debugCradle=Nothing})
   cleanups<-mapM (C.retireConsole (debuggerConsoles runtime)) (debugConsoles s)
-  when (isJust (client s) || isJust (terminalLaunch s) || isJust (sourcePreparing s) || isJust (watchPreparing s) || not (null cleanups) || isJust (debugCradle s)) $ do
+  when (isJust (client s) || isJust (terminalLaunch s) || isJust (sourcePreparing s) || isJust (watchPreparing s) || isJust(locationPreparing s) || not (null cleanups) || isJust (debugCradle s)) $ do
     task<-async $ restore $ flip finally
       (mapM_ D.stopClient (client s) `finally` mapM_ (void . tryIOError . removeFile) (debugCradle s)) $ do
       forM_ (terminalLaunch s) $ \(_,_,worker,result) -> do
@@ -1520,6 +1563,7 @@ stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) s = 
         forM_ completed (mapM_ C.closePreparedConsole)
       forM_ (sourcePreparing s) $ \(SourcePreparation _ _ _ _ _ _ _ worker)->cancel worker
       forM_ (watchPreparing s) $ \(WatchPreparation _ worker)->cancel worker
+      forM_ (locationPreparing s) $ \(_,_,_,worker)->cancel worker
       mapM_ (either (const (pure ())) id) cleanups
     modifyIORef' retired (task:)
 
@@ -1589,7 +1633,7 @@ tickTerminalLaunch runtime@(Debugger ref _ _ _ _) d = do
 
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
-invalidate s=s {generation=generation s+1,frameRevision=frameRevision s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty}
+invalidate s=s {locationDialog=Nothing,generation=generation s+1,frameRevision=frameRevision s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty}
 
 send :: Debugger -> Pending -> Text -> Value -> IO ()
 send (Debugger ref clock _ _ _) kind command arguments = do
@@ -1615,7 +1659,8 @@ tickDebugger runtime original = do
   updated<-tickDebuggerOwner runtime original
   publishSidebarEpoch runtime
   drainSidebarReads runtime updated
-  tickAssistance runtime updated
+  located<-tickLocations runtime updated
+  tickAssistance runtime located
 
 tickDebuggerOwner :: Debugger -> Desktop -> IO Desktop
 tickDebuggerOwner runtime@(Debugger ref clock _ _ _) original = do
@@ -1778,6 +1823,10 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
               _->pure ()
             pure d
           WatchRequest operation backing base private->prepareWatch runtime operation backing base private result >> pure d
+          LocationInspection request reply->do
+            valid<-locationsCurrent request d
+            void(tryPutMVar reply (if valid && locationsAvailable s && knownLocationSource s request then result else Left "Executable location source is private or expired."))
+            pure d
           SourceInspection _ _ _ reply->void (tryPutMVar reply result) >> pure d
           SidebarRead (DebugPageRequest _ target _) reply -> do
             case target of DebugStack{}->forM_ result (recordSourceReferences ref); _->pure ()
@@ -1802,7 +1851,7 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
              pure (automaticDesktop s d) {status="DAP: "<>err}
            Right body -> if isJust (endedAt s) then pure d else response runtime kind body d
   where
-    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; WatchRequest{} -> True; _ -> False
+    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; WatchRequest{} -> True; LocationInspection{} -> True; _ -> False
 
 -- Selection controls presentation/source follow only. Stopped handles remain
 -- valid for sibling frames until the stop epoch itself expires.
@@ -1839,6 +1888,7 @@ liveBufferSource s bid=do
 sourceInspectionExpired :: State -> Desktop -> Pending -> Bool
 sourceInspectionExpired s d (SourceInspection reference stamp origin _)=not (stopped s && sourceStampCurrent s reference stamp) || maybe False (protectedPath d) origin
 sourceInspectionExpired s _ (Source _ _ stamp selected)=not (stopped s && sourceStampCurrent s (integer "sourceReference" (fromMaybe Null (field "source" selected))) stamp)
+sourceInspectionExpired s _ (LocationInspection request _)=not(locationsAvailable s && knownLocationSource s request)
 sourceInspectionExpired _ _ _=False
 
 -- Observe only bounded handles supplied by current stopped stack metadata.
@@ -1950,6 +2000,7 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
     Control _ -> pure d
     AssistedControl{} -> pure d
     WatchRequest{}->pure d
+    LocationInspection _ reply->void(tryPutMVar reply (Right body)) >> pure d
     SourceInspection _ _ _ reply->void (tryPutMVar reply (Right body)) >> pure d
     Inspection command reply -> do
       recordVariables ref command body
@@ -1968,6 +2019,12 @@ select runtime@(Debugger ref _ _ _ _) fullToken action values d = do
   let rows=fromMaybe [] (M.lookup fullToken (choices s))
       selected=case values of _:index:_ -> readMaybe (T.unpack index); _ -> Nothing
   case action of
+    "locations" | Just(key,_)<-locationDialog s,key==fullToken,take 1 values/=["0"]->modifyIORef' ref (\state->state {locationDialog=Nothing}) >> pure d
+    "locations" | Just (capturedToken,request)<-locationDialog s,capturedToken==fullToken,Just chosen<-selected >>= at rows->do
+      valid<-locationsCurrent request d
+      modifyIORef' ref (\state->state {locationDialog=Nothing})
+      pure $ if valid && locationsAvailable s && knownLocationSource s request then (moveTo True (integer "endOffset" chosen) (moveTo False (integer "offset" chosen) d)) {status="Executable span selected."}
+        else d {status="Executable location source is private or expired."}
     "remove-breakpoint" | Just chosen<-selected >>= at rows,let key=text "key" chosen,Just (src,points)<-M.lookup key (breakpoints s) -> do
       let remaining=filter ((/=integer "line" chosen).bpLine) points
       modifyIORef' ref (\state -> state {breakpoints=M.insert key (src,remaining) (breakpoints state)})
@@ -2134,6 +2191,138 @@ adoptLocalSource agent path target offset selected d
       {status=if protectedPath desktop path then "Stopped in private debugger source." else if changed
         then "Stopped; unsaved text may differ from the running source." else "Stopped in "<>frameLabel selected}
 
+-- Single-position queries use an open, versioned source; caller JSON never
+-- supplies a path. File identity and coordinates are prepared off the UI owner.
+locationsAvailable :: State -> Bool
+locationsAvailable s=ready s && configured s && isJust(client s) && endedAt s==Nothing && disconnectAt s==Nothing && flag "supportsBreakpointLocationsRequest" (capabilities s)
+
+knownLocationSource :: State -> DebugSourceRequest -> Bool
+knownLocationSource state request=isJust(debugSourceFile request) || isJust(liveBufferSource state (debugSourceBuffer request))
+
+locationsCurrent :: DebugSourceRequest -> Desktop -> IO Bool
+locationsCurrent request d=do
+  valid<-sourceCurrent request d
+  pure(valid && maybe False (\window->bufferView window==CurrentView && reviewSelection window==Nothing) (activeWindow d) && not(protectedBuffer d (debugSourceBuffer request)) && not(debugSourceModified request) && maybe True (not . protectedPath d) (debugSourceCanonical request))
+
+queryLocations :: Debugger -> IO (Either Text ()) -> Int -> DebugSourceRequest -> Maybe Value -> Buffer -> Int -> Maybe Int -> IO (Either Text Value)
+queryLocations (Debugger ref _ _ (SidebarMailbox _ queue _) _) caller epoch request generated image row column=do
+  admission<-caller
+  case admission of
+    Left err->pure(Left err)
+    Right () | row<=0 || row>bufferLineCount image || maybe False (\value->value<=0 || L.bufferOffsetPosition image (L.bufferPositionOffset image (row-1,value-1))/=(row-1,value-1)) column->pure(Left "Query position does not match the current source.")
+    Right ()->do
+      state<-readIORef ref
+      canonical<-case debugSourceCanonical request of
+        Just path->pure(Right(Just path))
+        Nothing->canonicalSourcePath (root state) (debugSourceFile request)
+      case canonical of
+        Left err->pure(Left err)
+        Right path->case maybe generated (Just . object . (:[]) . ("path" .=)) path of
+          Nothing->pure(Left "Buffer has no live debugger source.")
+          Just value->do
+            origin<-canonicalSourcePath (root state) (T.unpack <$> (field "path" value::Maybe Text))
+            case origin of
+              Left err->pure(Left err)
+              Right backing->do
+                let prepared=request {debugSourceCanonical=backing}
+                reply<-newEmptyMVar
+                result<-timeout 16000000 $ do
+                  atomically(writeTBQueue queue (ReadDebugLocations epoch prepared value row column caller reply))
+                  awaitInspection ref epoch reply
+                current<-caller
+                pure $ current >> maybe (Left "Executable location inspection timed out.") id result
+
+-- Adapter coordinates are 1-based UTF-16, matching initialize and source follow.
+-- Reject mismatched source coordinates rather than silently clamping a span.
+prepareLocations :: Buffer -> Value -> Either Text [Value]
+prepareLocations image body=do
+  values<-case body of
+    Object fields | Just (Array values)<-KM.lookup "breakpoints" fields,V.length values<=128->Right(V.toList values)
+    _->Left "Executable locations must contain at most 128 spans."
+  mapM prepare values
+  where
+    prepare value=case parseEither coordinates value of
+      Left _->Left "Invalid executable span."
+      Right (row,column,endRow,endColumn)->do
+        let offset=L.bufferPositionOffset image (row-1,column-1)
+            endOffset=L.bufferPositionOffset image (endRow-1,endColumn-1)
+        unless (row>0 && column>0 && endRow>0 && endColumn>0 && (endRow,endColumn)>=(row,column) && row<=bufferLineCount image && endRow<=bufferLineCount image && L.bufferOffsetPosition image offset==(row-1,column-1) && L.bufferOffsetPosition image endOffset==(endRow-1,endColumn-1))
+          (Left "Executable span does not match the current source.")
+        pure(object["line" .= row,"column" .= column,"endLine" .= endRow,"endColumn" .= endColumn,"offset" .= offset,"endOffset" .= endOffset])
+    coordinates=withObject "executable span" $ \o->do
+      row<-o .: "line"
+      column<-o .:? "column" .!= (1::Int)
+      endRow<-o .:? "endLine" .!= row
+      endColumn<-o .:? "endColumn" .!= column
+      pure(row,column,endRow,endColumn)
+
+nativeLocation :: Value -> Value
+nativeLocation value=object[key .= integer name value|(key,name)<-[("line","line"),("column","column"),("endLine","endLine"),("endColumn","endColumn")]]
+
+locationLabel :: Value -> Text
+locationLabel value=tshow(integer "line" value)<>":"<>tshow(integer "column" value)<>"–"<>tshow(integer "endLine" value)<>":"<>tshow(integer "endColumn" value)
+
+retireLocations :: Debugger -> IO ()
+retireLocations (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _)=mask_ $ do
+  state<-readIORef ref
+  modifyIORef' ref (\s->s {locationPreparing=Nothing,locationDialog=Nothing})
+  forM_ (locationPreparing state) $ \(_,_,alive,worker)->do
+    writeIORef alive False
+    task<-async(cancel worker)
+    modifyIORef' retired (task:)
+
+startLocations :: Debugger -> DebugSourceRequest -> Desktop -> IO Desktop
+startLocations runtime@(Debugger ref _ _ _ _) captured d=do
+  let request=captured {debugSourceExpression=Nothing}
+  state<-readIORef ref
+  if not(locationsAvailable state) then pure d {status="This debugger does not support executable locations."}
+  else if debugSourceModified request then pure d {status="Save source before requesting executable locations."}
+  else if protectedBuffer d (debugSourceBuffer request) then pure d {status="Debugger source is private."}
+  else case activeDocument d of
+    Nothing->pure d {status="Choose a source text buffer first."}
+    Just doc->do
+      retireLocations runtime
+      let image=documentBuffer doc
+          epoch=generation state
+          row=debugSourceRow request
+          generated=liveBufferSource state (debugSourceBuffer request)
+      mask_ $ do
+        alive<-newIORef True
+        let admitted=readIORef alive >>= \current->pure(if current then Right() else Left "Executable location query retired.")
+        worker<-asyncWithUnmask $ \unmask->flip finally (writeIORef alive False) $ unmask $ do
+          let (caretRow,caretColumn)=L.bufferOffsetPosition image (caret(debugSourceSelection request))
+              column=if caretRow+1==row then Just(caretColumn+1) else Nothing
+          result<-queryLocations runtime admitted epoch request generated image row column
+          pure(result >>= prepareLocations image)
+        modifyIORef' ref (\s->s {locationPreparing=Just(epoch,request,alive,worker)})
+        pure d {status="Loading executable locations…"}
+
+tickLocations :: Debugger -> Desktop -> IO Desktop
+tickLocations runtime@(Debugger ref _ _ _ _) d=do
+  state<-readIORef ref
+  case locationPreparing state of
+    Nothing->pure d
+    Just(epoch,request,_,worker)->do
+      valid<-locationsCurrent request d
+      if generation state/=epoch || not(locationsAvailable state && knownLocationSource state request) || not valid then retireLocations runtime >> pure d {status="Executable location source is private or expired."}
+      else if dialog d/=Nothing || questionActive d then pure d
+      else do
+        result<-poll worker
+        case result of
+          Nothing->pure d
+          Just outcome->do
+            modifyIORef' ref (\s->s {locationPreparing=Nothing})
+            case outcome of
+              Left _->pure d {status="Executable location preparation failed."}
+              Right(Left err)->pure d {status=err}
+              Right(Right rows)->do
+                shown<-showChoices runtime "Executable locations (1-based)" "locations" rows (map locationLabel rows) d
+                case dialog shown of
+                  Just dg | DebugDialog key<-purpose dg->do
+                    modifyIORef' ref (\s->s {locationDialog=Just(key,request)})
+                    pure shown {dialog=Just dg {purpose=DebugLocationsDialog key}}
+                  _->pure shown
+
 sourceCurrent :: DebugSourceRequest -> Desktop -> IO Bool
 sourceCurrent request d=case (activeWindow d,activeDocument d) of
   (Just window,Just doc) | bufferView window/=MarkdownView, windowFocused d window, windowId window==debugSourceWindow request,
@@ -2153,6 +2342,7 @@ sourceAction runtime@(Debugger ref _ _ _ _) request d=do
   if not valid || dialog d/=Nothing then pure d {status="Source action expired."} else case source of
     Nothing->pure d {status="Buffer has no live debugger source."}
     Just captured->case debugSourceOperation request of
+      SourceBreakpointLocations->startLocations runtime request d
       ToggleSourceBreakpoint->toggleBreakpointSource runtime captured (debugSourceRow request) (debugSourceModified request) d
       -- Docs: docs/site/screenshots/debug-add-watch.png (docs/running.md) shows the source-prefilled expression.
       AddSourceWatch->do
@@ -2239,6 +2429,7 @@ clearDialog :: Desktop -> Desktop
 clearDialog d = case dialog d of
   Just dg | DebugDialog{}<-purpose dg->d {dialog=Nothing}
   Just dg | DebugSourceWatchDialog{}<-purpose dg->d {dialog=Nothing}
+  Just dg | DebugLocationsDialog{}<-purpose dg->d {dialog=Nothing}
   Just dg | DebuggerWatchDialog{}<-purpose dg->d {dialog=Nothing}
   _->d
 sourceKey :: Value -> Text

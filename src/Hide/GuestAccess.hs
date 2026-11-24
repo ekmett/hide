@@ -238,6 +238,7 @@ protectedPurpose p=case p of
   AutocompleteDialog{} -> True
   DebugSourceWatchDialog{} -> True
   DebuggerWatchDialog{} -> True
+  DebugLocationsDialog{} -> True
   DebugDialog action -> privateDebuggerAction action
   ServiceDialog action -> not (serviceActionAllowed action)
   AgentDialog{} -> True
@@ -249,7 +250,11 @@ privateDebuggerAction :: Text -> Bool
 -- Keep the host-owned chooser private until it carries canonical row provenance.
 -- Starting assistance through UI input would lose the initiating agent lifetime.
 -- Agents use debug_assist, which retains their exact caller capability.
-privateDebuggerAction action=action=="assist" || "assist-" `T.isPrefixOf` action || action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action
+privateDebuggerAction action=action=="assist" || "assist-" `T.isPrefixOf` action || action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action || privateLocationsAction action
+privateLocationsAction :: Text -> Bool
+privateLocationsAction action=case T.splitOn ":" action of
+  ["select",_,_,"locations"]->True
+  _->False
 privateFrameChooserAction :: Text -> Bool
 privateFrameChooserAction action=case T.splitOn ":" action of
   ["select",_,_,"frame"]->True

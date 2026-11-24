@@ -302,6 +302,7 @@ data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry
   | PluginChoiceForm !Form.FormRef !Integer
   | EnvironmentDialog Text | AutocompleteDialog Text | DiskConflict Conflict | ServiceDialog Text | AgentDialog Text | PermissionDialog Text | DebugDialog Text
   | DebugSourceWatchDialog !Int !Int !(Maybe FilePath) !Bool
+  | DebugLocationsDialog !Text
   | DebuggerWatchDialog !Int !(Maybe FilePath) !Bool
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
@@ -1914,6 +1915,7 @@ cancelDialog d=case dialog d of
   Just dg -> (d {dialog=Nothing,buttonHover=Nothing,buttonPressed=Nothing},case purpose dg of
     PermissionDialog action -> [PermissionAction action ["1"]]
     DebugDialog action | "hdb-accept:" `T.isPrefixOf` action -> [DebugAction action ["1"]]
+    DebugLocationsDialog action -> [DebugAction action ["1"]]
     _ -> [])
   Nothing -> (d,[])
 
@@ -4555,6 +4557,7 @@ submitDialog button dg original
         Just inputs | length inputs==length ids->(original,[SubmitInputForm ref (Form.InputValues (M.fromList (zip ids inputs))) Plugin.HumanMenu])
         _->(original {status="Input form fields do not match its schema."},[])
   | PluginChoiceForm ref version<-purpose dg = if button==0 then (original,[SubmitChoiceForm ref version selected Plugin.HumanMenu]) else (d,[RetireInputForm ref])
+  | DebugLocationsDialog action<-purpose dg = (d,[DebugAction action (T.pack(show button):[T.pack(show index)|ListBox _ _ index<-fields dg])])
   | buttons dg !! button == "Cancel" = (d,[])
   | otherwise = case purpose dg of
     Opening base pattern entries

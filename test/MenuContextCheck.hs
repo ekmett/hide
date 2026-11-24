@@ -76,7 +76,7 @@ checks=sourceSelectionCheck >> (bracket temporary removePathForcibly $ \root->wi
       packet ref=object ["type" .= ("menu"::T.Text),"command" .= Plugin.menuName ref,"registry" .= Plugin.menuEpoch ref,"generation" .= Plugin.menuGeneration ref]
   sourceActionCheck host metadata path
   check "source popup exposes registered breakpoint and watch actions"
-    (all (`elem` map fst (contextItemsFor sourcePopup)) ["Toggle breakpoint","Add watch…"])
+    (all (`elem` map fst (contextItemsFor sourcePopup)) ["Toggle breakpoint","Add watch…","Executable locations…"])
   check "Messages popup composes the actual registered source action" (requests==[InvokeMenu reference Plugin.HumanMenu target])
   check "Go to source key action resolves the same registry identity" (snd (runCommand GoToMessage pane)==requests)
   check "unselected/empty projection retains popup but disables source navigation"
@@ -311,6 +311,9 @@ sourceActionCheck host metadata path=withDebugger $ \runtime->do
       run title d=queue title d >>= waitResult
       inspect d=do (_,finish)<-debuggerTool runtime d "debug_status" (object []); finish >>= either (error . T.unpack) pure
       check label yes=unless yes (error label)
+  locations<-run "Executable locations…" base
+  check "executable locations contribution reaches capability-gated debugger owner"
+    (status locations=="This debugger does not support executable locations." && dialog locations==Nothing)
   let captured=popup base
       (_,breakpointEffects)=action "Toggle breakpoint" captured
       (_,keyEffects)=runCommand (DebugCommand "breakpoint") captured

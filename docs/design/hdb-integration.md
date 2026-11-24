@@ -84,7 +84,7 @@ and planned controls.
 | Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Planned; current source breakpoint requests contain line numbers only |
 | Function breakpoints | Implemented, including condition/hit count | Planned; no function-breakpoint request or editor yet |
 | Exception filters and details | Implemented | Existing filters plus exception details panel/tool |
-| Valid breakpoint locations | Implemented | Discovery is planned; current source breakpoint replies retain verification and relocation results |
+| Valid breakpoint locations | Single-position query returns an executable span | Current-source chooser and read-only inspection; captured-source and UTF-16 validation; no range enumeration or breakpoint mutation |
 | Value formatting | Advertised | Planned; no editor formatting controls yet |
 | Program input | POSIX reverse terminal route; Windows route disabled | Shared owned terminal; macOS stdin, Unicode and Ctrl+C qualified |
 | Stop | Terminate and disconnect destroy debuggee | Stop; no misleading “detach and leave running” for hdb |
@@ -196,8 +196,9 @@ the socket closed”.
 - [x] Expose GHC source/component launch, exception filters/details and human
       Watch Evaluate/Force through shared debugger state and permission handling.
 - [ ] Add source breakpoint conditions, hit counts and logpoints.
-- [ ] Add function breakpoints, executable-location discovery and formatting
-      controls.
+- [x] Add capability-gated single-position executable-location discovery through
+      a human source chooser and read-only inspection, preserving source ownership.
+- [ ] Add function breakpoints and formatting controls.
 - [ ] Add an expression console/history and executing Evaluate/Force MCP tools.
 - [x] Add terminal reverse requests; qualify macOS stdin, Unicode, Ctrl+C and
       owned cleanup. Shared terminal fixtures cover resize and retained output.
@@ -400,3 +401,17 @@ with both explicit matching GHC environment and bindist-wrapper compiler
 discovery. Existing source-policy and debugger-sidebar checks cover stale and
 private refusal. The visual workflows continue to use the verified Metal
 captures described above.
+
+
+Single-position executable-location discovery passed live qualification with the
+same pinned hdb/GHC pair on macOS arm64. While the toy remained stopped, the
+read-only query returned the span `5:3–5:24`. The actual registered source
+**Executable locations…** action displayed it and selected the corresponding
+source region, preserving the breakpoint records and stopped generation. Stop
+then ended the session. The unchanged probe passed twice. The pin implements a
+line with optional column query; its handler does not enumerate an end range.
+Shared transport regressions separately cover supplementary-Unicode UTF-16
+conversion, empty/malformed/oversized replies, source edits, private source,
+retired caller admission, and one-shot chooser cancellation. Source-coordinate conversion and reply validation run on the waiting worker;
+interaction checks retain small source/version receipts and never compare buffer
+contents.

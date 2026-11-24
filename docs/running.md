@@ -229,6 +229,16 @@ changed source rather than acting on a different caret. In **Add watch**, edit t
 prefilled expression and choose **Add**. Adding places the expression in Watches;
 it does not run it.
 
+**Executable locations…** in the same source menu asks a supporting adapter about
+the captured source position. Save edits first. The bounded list shows
+`start line:column–end line:column`, using one-based lines and UTF-16 columns.
+Choose **Open** to select a span in that source, or **Cancel** / **Escape** to
+leave the selection alone. This action never changes breakpoints. Changed or
+private source, a replaced debug session, and retired callers cannot reuse a
+retained result. Read-only `debug_inspect` with `request: breakpointLocations`
+exposes the same bounded spans for the current public source `bufferId`, `line`
+and optional `column`; it accepts no caller-supplied path or range.
+
 [![Source Add Watch dialog, with counter + 1 entered for the stopped hdb toy.](site/screenshots/debug-add-watch.png)](site/screenshots/debug-add-watch.png)
 
 **Watches** is a persistent collapsible root beneath Debug, available without a

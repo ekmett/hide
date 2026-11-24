@@ -99,7 +99,7 @@ withMenuCommands docs use=withRegistry $ \registry->Plugin.withMenus Model.menuC
     item<-either (ioError . userError . show) pure =<< Plugin.contributeMenu menus
       (Plugin.MenuDef name "context.source" "debug" 0 title "" False
         (Plugin.menuAction registry source (const (Right ())) (\_ ->pure . PreparedDebugSource)))
-    pure item) [("hide.debug.toggle-breakpoint","Toggle breakpoint",ToggleSourceBreakpoint),("hide.debug.add-watch","Add watch…",AddSourceWatch)]
+    pure item) [("hide.debug.toggle-breakpoint","Toggle breakpoint",ToggleSourceBreakpoint),("hide.debug.add-watch","Add watch…",AddSourceWatch),("hide.debug.executable-locations","Executable locations…",SourceBreakpointLocations)]
   bracket (MenuHost menus [reference,navigationRef] sourceReferences <$> newTBQueueIO 256 <*> newIORef (MenuState Nothing M.empty) <*> newTVarIO False <*> pure Nothing) close use
   where close (MenuHost _ _ _ changes ref closed _)=do
           atomically (writeTVar closed True >> flushTBQueue changes >> pure ())

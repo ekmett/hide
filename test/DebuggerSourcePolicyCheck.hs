@@ -13,8 +13,9 @@ module DebuggerSourcePolicyCheck (checks) where
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,poll,wait)
 import Control.Exception (bracket,finally)
-import Control.Monad (unless)
+import Control.Monad (unless,when)
 import Data.Aeson
+import Data.IORef
 import Data.Aeson.Types (parseMaybe,Parser)
 import qualified Data.Text as T
 import System.Timeout (timeout)
@@ -32,7 +33,6 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.Files (loadFile)
 #ifndef mingw32_HOST_OS
-import Data.IORef
 import Control.Concurrent.MVar (newEmptyMVar,readMVar,putMVar)
 import qualified GHC.IO.Device as Device
 import qualified GHC.IO.FD as FD
@@ -52,7 +52,7 @@ import Hide.GuestAccess
 import Hide.Recovery
 
 checks :: IO ()
-checks=localSourceCheck >> missingLocalSourceCheck >> delayedLocalSourceCheck >> sourceHandleCheck >> generatedOriginCheck >> delayedPolicyCheck >> sourceStampCheck >> originCheck >> putStrLn "Debugger source policy checks passed"
+checks=locationsCheck >> localSourceCheck >> missingLocalSourceCheck >> delayedLocalSourceCheck >> sourceHandleCheck >> generatedOriginCheck >> delayedPolicyCheck >> sourceStampCheck >> originCheck >> putStrLn "Debugger source policy checks passed"
 
 -- Use the existing DAP peer and real file owner, preserving regular file/save
 -- authority and already-open dirty text even when its disk path disappears.
@@ -465,3 +465,102 @@ sourceStampCheck=bracket (Fixture.fixture "source-stamp") Fixture.cleanup $ \(po
       (_,refused)<-debuggerEffects runtime core stopped [DebugSourceAction (DebugSourceRequest AddSourceWatch (windowId window) bid version (selection window) Nothing Nothing 1 (Just "old buffer expression") False)]
       unless ("no live debugger source" `T.isInfixOf` status refused && dialog refused==Nothing) (fail "Reobserved numeric handle must not authorize the previous generated buffer")
   putStrLn "source observation stamp check passed"
+
+-- The ordinary transport owns admission and late replies. A scalar supplementary
+-- character distinguishes DAP UTF-16 coordinates from editor scalar offsets.
+locationsCheck :: IO ()
+locationsCheck=bracket (Fixture.fixture "locations") Fixture.cleanup $ \(port,path,_)->do
+  canonical<-canonicalizePath(path<>".hs")
+  BS.writeFile canonical (TE.encodeUtf8 "first\nα界🐈Z\n")
+  Right(file,image)<-loadFile canonical
+  withDebugger $ \runtime->do
+    let core d _=pure(False,d)
+        tick=tickDebugger runtime
+        await label predicate start=timeout 5000000 (loop start) >>= maybe(fail label) pure
+          where loop d=do next<-tick d; done<-predicate next; if done then pure next else threadDelay 1000 >> loop next
+        facts d=do (_,reply)<-debuggerTool runtime d "debug_status" (object[]);reply >>= either(fail.T.unpack) pure
+        runReply d reply=withAsync reply $ \pending->do
+          completed<-await "locations reply timeout" (\_->maybe False (const True) <$> poll pending) d
+          result<-wait pending
+          pure(completed,result)
+        request d row column=do
+          state<-facts d
+          pure(object["generation" .= (locationField "generation" state::Maybe Int),"request" .= ("breakpointLocations"::T.Text),"bufferId" .= (activeWindow d >>= bufferId),"line" .= (row::Int),"column" .= (column::Int)])
+        query d row column=do
+          args<-request d row column
+          (queued,reply)<-debuggerTool runtime d "debug_inspect" args
+          runReply queued reply
+        reject label outcome=unless(either(const True)(const False)outcome)(fail label)
+        locationRequests=do
+          bytes<-BS.readFile path
+          pure [value|line<-BS.split 10 bytes,Just value<-[decodeStrict' line::Maybe Value],(locationField "request" value >>= locationField "command")==Just("breakpointLocations"::T.Text)]
+        source=moveTo False 8 (addDocument (Just file) image (initialDesktop(80,25)))
+    (background,_)<-debuggerTool runtime source "debug_present" (object["follow" .= False])
+    (_,attached)<-debuggerEffects runtime core background [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
+    ready<-await "locations adapter did not configure" (\d->do state<-facts d;pure(locationField "configured" state==Just True && locationField "stopped" state==Just True)) attached
+    (queried,result)<-query ready 2 3
+    body<-either(fail.T.unpack)(pure . locationField "body")result
+    unless ((body >>= locationField "breakpoints"::Maybe[Value])==Just[object["line" .= (2::Int),"column" .= (3::Int),"endLine" .= (2::Int),"endColumn" .= (5::Int)]]) (fail "locations tool lost one-based span coordinates")
+    unless (fmap selection(activeWindow queried)==Just(Selection 8 8) && dialog queried==Nothing) (fail "read-only locations query moved source or opened UI")
+    let human d=do
+          window<-maybe(fail "missing source window") pure(activeWindow d)
+          doc<-maybe(fail "missing source document") pure(activeDocument d)
+          version<-captureVersion(documentBuffer doc)
+          let captured=DebugSourceRequest SourceBreakpointLocations (windowId window) (maybe(-1)id(bufferId window)) version (selection window) (Just canonical) (Just canonical) 2 Nothing False
+          (_,loading)<-debuggerEffects runtime core d [DebugSourceAction captured]
+          await "human locations chooser absent" (pure . maybe False ((=="Executable locations (1-based)").dialogTitle) . dialog) loading
+        selectSpan d=case dialog d of
+          Nothing->fail "missing executable span chooser"
+          Just dg->do let (submitted,effects)=submitDialog 0 dg d
+                      snd <$> debuggerEffects runtime core submitted effects
+    chooser<-human queried
+    unless (case dialog chooser of Just dg | DebugLocationsDialog key<-purpose dg->not(guestCommandAllowed(DebugCommand key));_->False) (fail "location chooser must retain human-only authority")
+    unless (case dialog chooser of Just dg->[values|ListBox _ values _<-fields dg]==[["2:3–2:5"]];_->False) (fail "human locations did not label DAP one-based coordinates")
+    selected<-selectSpan chooser
+    unless (fmap selection(activeWindow selected)==Just(Selection 8 9)) (fail "executable span must select one supplementary scalar using UTF-16 coordinates")
+    cancelledChooser<-human (moveTo False 8 selected)
+    cancelledDialog<-maybe(fail "cancel chooser absent")pure(dialog cancelledChooser)
+    let (cancelledInput,cancelEffects)=submitDialog 1 cancelledDialog cancelledChooser
+        (_,replayEffects)=submitDialog 0 cancelledDialog cancelledChooser
+    (_,cancelled)<-debuggerEffects runtime core cancelledInput cancelEffects
+    (_,replayed)<-debuggerEffects runtime core cancelled replayEffects
+    unless (fmap selection(activeWindow replayed)==Just(Selection 8 8)) (fail "cancelled location chooser or replay moved source")
+    staleChooser<-human (moveTo False 8 selected)
+    let edited=insertText "!" staleChooser
+        editedSelection=selection <$> activeWindow edited
+    staleSelection<-selectSpan edited
+    unless (fmap selection(activeWindow staleSelection)==editedSelection && "expired" `T.isInfixOf` status staleSelection) (fail "stale chooser selected coordinates in changed source")
+    (_,emptyResult)<-query queried 2 6
+    unless ((emptyResult >>= \value->maybe(Left "missing body")Right(locationField "body" value) >>= \emptyBody->maybe(Left "missing spans")Right(locationField "breakpoints" emptyBody::Maybe[Value]))==Right[]) (fail "empty executable locations must remain a successful empty result")
+    mapM_ (\(row,column)->query queried row column >>= reject "malformed or oversized locations accepted" . snd) [(1,2),(1,3)]
+    countBefore<-length <$> locationRequests
+    mapM_ (\(row,column)->query queried row column >>= reject "invalid query position admitted" . snd) [(0,1),(2,0),(2,4),(4,1),(2,999)]
+    (_,privateReply)<-query queried {guestPrivatePaths=[canonical]} 2 3
+    reject "private source locations admitted" privateReply
+    (_,unownedReply)<-query (addReadOnly "Unowned source [9]" "first\nα界🐈Z\n" queried) 2 3
+    reject "unobserved source label granted adapter authority" unownedReply
+    (_,dirtyReply)<-query (insertText "!" queried) 2 3
+    reject "unsaved source locations admitted" dirtyReply
+    countAfter<-length <$> locationRequests
+    unless(countAfter==countBefore)(fail "refused private/dirty queries reached adapter")
+    -- The peer holds line 1/column 1 until a subsequent threads request. Its
+    -- logged request, rather than a timer, proves exact query admission.
+    mapM_ (\mode->do
+      alive<-newIORef True
+      args<-request queried 1 1
+      before<-length <$> locationRequests
+      let caller=readIORef alive >>= \current->pure(if current then Right() else Left "Attachment retired.")
+      (queued,reply)<-debuggerToolWithCaller caller runtime queried "debug_inspect" args
+      withAsync reply $ \pending->do
+        admitted<-await "held locations request not admitted" (\_->(>before).length <$> locationRequests) queued
+        let current=case mode of 0->insertText "!" admitted;1->admitted {guestPrivatePaths=[canonical]};_->admitted
+        when(mode==2)(writeIORef alive False)
+        state<-facts current
+        (barrier,finish)<-debuggerTool runtime current "debug_inspect" (object["generation" .= (locationField "generation" state::Maybe Int),"request" .= ("threads"::T.Text)])
+        (released,_)<-runReply barrier finish
+        _<-await "held query did not finish" (\_->maybe False(const True) <$> poll pending) released
+        wait pending >>= reject "late source/private/attachment change leaked executable spans") [0::Int,1,2]
+    putStrLn "Executable location identity, privacy, UTF-16 and bounded-result checks passed"
+
+locationField :: FromJSON a => Key -> Value -> Maybe a
+locationField key=parseMaybe(withObject "locations response" (.:key))

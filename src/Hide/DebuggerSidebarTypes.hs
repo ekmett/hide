@@ -60,7 +60,7 @@ data DebugPageRequest = DebugPageRequest !Int !DebugPageTarget !Int deriving (Eq
 
 -- | Host-captured source actions. A label or frontend argument cannot supply
 -- buffer identity; the menu owner validates this version before interpretation.
-data DebugSourceOperation = ToggleSourceBreakpoint | AddSourceWatch deriving (Eq,Show)
+data DebugSourceOperation = ToggleSourceBreakpoint | AddSourceWatch | SourceBreakpointLocations deriving (Eq,Show)
 data DebugSourceRequest = DebugSourceRequest
   { debugSourceOperation :: !DebugSourceOperation
   , debugSourceWindow :: !Int, debugSourceBuffer :: !Int

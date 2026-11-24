@@ -24,7 +24,7 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
         conn, _ = server.accept()
         stream = conn.makefile('rb')
     seq = 0
-    pending_attach = pending_variables = pending_source = pending_scopes = pending_evaluate = None
+    pending_attach = pending_variables = pending_source = pending_scopes = pending_evaluate = pending_locations = None
     sidebar_scopes, sidebar_variables = {}, {}
     configured, breakpoint_requests = [], []
     scope_count = 0
@@ -128,6 +128,7 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                     terminal_sequence = seq
                 event('initialized')
                 reply(req, dict(supportsConfigurationDoneRequest=True,
+                      supportsBreakpointLocationsRequest=mode == 'locations',
                       supportsExceptionInfoRequest=mode in ('exception', 'mcp'),
                       exceptionBreakpointFilters=[dict(filter='uncaught', label='Uncaught exceptions', default=True)]))
             elif cmd in ('attach', 'launch'):
@@ -162,6 +163,21 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                 reply(req)
                 reply(pending_attach)
                 event('stopped', dict(reason='entry', threadId=7, allThreadsStopped=True))
+            elif cmd == 'breakpointLocations':
+                assert mode == 'locations'
+                assert args['source']['path'] == os.path.realpath(sys.argv[1] + '.hs')
+                assert set(args) <= {'source', 'line', 'column'}
+                span = dict(line=2, column=3, endLine=2, endColumn=5)
+                if (args['line'], args.get('column')) == (1, 1):
+                    pending_locations = req
+                elif (args['line'], args.get('column')) == (1, 2):
+                    reply(req, dict(breakpoints=[dict(line=0)]))
+                elif (args['line'], args.get('column')) == (1, 3):
+                    reply(req, dict(breakpoints=[span] * 129))
+                elif (args['line'], args.get('column')) == (2, 6):
+                    reply(req, dict(breakpoints=[]))
+                else:
+                    reply(req, dict(breakpoints=[span]))
             elif cmd == 'exceptionInfo':
                 assert mode in ('exception', 'mcp') and args['threadId'] == 7
                 reply(req, dict(exceptionId='IOException', description='cannot open λ.hs', breakMode='always',
@@ -169,6 +185,9 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                                  innerException=[dict(typeName='Inner', message='nested cause')])) )
             elif cmd == 'threads':
                 thread_count += 1
+                if pending_locations:
+                    reply(pending_locations, dict(breakpoints=[dict(line=2, column=3, endLine=2, endColumn=5)]))
+                    pending_locations = None
                 if pending_evaluate and os.path.exists(sys.argv[1] + '.release'):
                     reply(pending_evaluate, dict(result='STALE delayed watch', variablesReference=0))
                     pending_evaluate = None
