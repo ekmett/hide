@@ -76,7 +76,7 @@ and planned controls.
 
 | Facility | Upstream at inspected revision | Editor exposure |
 | --- | --- | --- |
-| Source breakpoints, step in/over/out, continue | Implemented | Reuse existing UI/MCP; qualify disk sources and cradle loading |
+| Source breakpoints, step in/over/out, continue | Implemented | Line breakpoint UI/MCP and stepping implemented; saved-source and Cabal entry loading qualified on macOS |
 | Threads, frames, locals/module/globals | Implemented | Existing pickers; preserve frame/thread identity and paging bounds |
 | Ordinary variable children | Implemented | Existing expansion after validating reference provenance |
 | Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; nested-watch Force has live hdb list-tail qualification; root Force is fixture-tested, executing MCP tool remains planned |
@@ -206,7 +206,7 @@ the socket closed”.
       source/pinned-terminal Metal capture.
 - [x] Qualify successful and exceptional program completion on real hdb
       (exit 0 and exit 42).
-- [ ] Qualify agent background inspection and explicit reveal on real hdb.
+- [x] Qualify agent background inspection and explicit reveal on real hdb.
 
 Do not add a GHC API dependency to hide. The external hdb installation owns
 that compiler coupling. Keep upstream capability gaps explicit; a local GHC
@@ -348,3 +348,17 @@ the same library-backed executable, retained that cradle byte-for-byte and
 completed with exit 0. These checks cover a library/executable dependency and
 the three existing launch lanes. Broader multi-component, generated-source and
 other-platform qualification remains open.
+
+
+Live background/reveal qualification on the same pinned hdb/GHC pair kept a
+separate edited source window in front while a second breakpoint stop arrived.
+The shared `debug_inspect` tool handler read stack, scopes and variables while
+preserving that window, its draft, selection and the stopped generation.
+Explicit `debug_present` source and stack requests revealed the same paused
+source location and preserved the draft. hdb allocated a fresh stack handle for
+that location on a new stack request; the selected frame and generation stayed
+unchanged. Continue then produced the expected output and exit 0. This passed
+with both explicit matching GHC environment and bindist-wrapper compiler
+discovery. Existing source-policy and debugger-sidebar checks cover stale and
+private refusal. The visual workflows continue to use the verified Metal
+captures described above.
