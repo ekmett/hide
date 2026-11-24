@@ -189,8 +189,10 @@ the socket closed”.
       ownership; real hdb checks cover inert lazy values and explicit child Force.
 - [x] Qualify observable thunk side effects, cyclic value navigation and bounded
       Stop during explicit nonterminating human Watch Evaluate on pinned macOS hdb.
-- [ ] Extend live qualification to exception stops. Root Force is fixture-only
-      because hdb Evaluate results omit the lazy-root hint.
+- [x] Qualify caught-exception stops and exact exception details with hdb's
+      **All exceptions** filter through read-only inspection and the human view.
+- [ ] Qualify uncaught-error filter behavior and live root Force. Root Force is
+      fixture-only because hdb Evaluate results omit the lazy-root hint.
 - [x] Expose GHC source/component launch, exception filters/details and human
       Watch Evaluate/Force through shared debugger state and permission handling.
 - [ ] Add source breakpoint conditions, hit counts and logpoints.
@@ -256,7 +258,7 @@ about one second. Asynchronous retirement then closed the adapter listener and
 ended the exact evaluating process. The same unchanged probe passed twice with
 the pinned setup. These checks used the human watch actions for execution and
 the existing read-only inspection/page paths for observation. They add no
-executing agent tool. Live exception-stop and root-Force qualification remain open.
+executing agent tool. Live uncaught-error-filter and root-Force qualification remain open.
 
 The same watch route on THC AST and bytecode reached embedded source stops but
 returned a bounded error for explicit Haskell expression evaluation. Continue
@@ -272,7 +274,7 @@ launch requests to two minutes; ordinary requests retain fifteen seconds.
 A real hdb run through this path repeated breakpoint, scopes, lazy inspection
 protection, stepping and termination, and left no listener on its selected port.
 Later checkpoints below qualify Cabal component selection and failed-cradle
-cleanup. Live exception-stop qualification remains open.
+cleanup. Live uncaught-error-filter qualification remains open.
 
 The shared status bar now selects THC/GHC for build, run and Selected target
 debug launch. GHC Selected target starts hdb on PATH using the saved source
@@ -291,6 +293,20 @@ and an `exited` event after `terminated`. This does not qualify live exception
 stops/details; investigate the upstream filter behavior and preserve the exit
 code before claiming that path reliable. Fixture-backed exception presentation
 remains separate evidence.
+
+On 2026-11-24, the exact pinned adapter source grounded a supported live scenario.
+It advertises `break-on-exception` (**All exceptions**) and `break-on-error`
+(**Uncaught exceptions**); its DAP integration test selects the former for caught
+exceptions. An isolated program using qualified `Control.Exception.catch` and
+`throwIO` stopped before the catch, then the editor's actual exception-filter
+dialog enabled **All exceptions** alone. Continue reached the caught exception.
+Read-only `debug_inspect` `exceptionInfo` returned `exceptionId: IOException`,
+`breakMode: always`, the exact `user error` message, a fully qualified
+`ghc-internal:GHC.Internal.IO.Exception.IOException` type, and a stack trace at
+the throw call. **Debug > Exception details** opened the same message in its
+read-only document. Stop ended the session, and the unchanged probe passed
+twice. This qualifies caught-exception stops/details on macOS arm64 with the
+pinned hdb/GHC pair. The earlier uncaught-error-filter case remains unqualified.
 
 
 Completion retains the final output and adapter-reported exit code for up to
