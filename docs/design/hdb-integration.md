@@ -187,8 +187,9 @@ the socket closed”.
 - [x] Protect read-only scopes with observed-reference provenance, lazy/unknown
       handle refusal and invalidation. Fixtures cover stale handles and watch
       ownership; real hdb checks cover inert lazy values and explicit child Force.
-- [ ] Extend live qualification to observable thunk side effects, cyclic values,
-      exception stops and nonterminating evaluation. Root Force is fixture-only
+- [x] Qualify observable thunk side effects, cyclic value navigation and bounded
+      Stop during explicit nonterminating human Watch Evaluate on pinned macOS hdb.
+- [ ] Extend live qualification to exception stops. Root Force is fixture-only
       because hdb Evaluate results omit the lazy-root hint.
 - [x] Expose GHC source/component launch, exception filters/details and human
       Watch Evaluate/Force through shared debugger state and permission handling.
@@ -235,6 +236,27 @@ and GHC 9.14.1 on macOS arm64. Lazy children stayed inert; these Evaluate replie
 did not expose a root Force action. Explicit nested-child Force also works on a
 lazy list tail: hdb invalidates the old variable references, and a subsequent
 explicit watch refresh exposes fresh children. Root Force remains fixture-tested.
+
+On 2026-11-24, the pinned hdb 0.14.0.0 and GHC 9.14.1 pair passed further live
+qualification on macOS arm64 through the shared debugger owner and actual sidebar
+watch provider. A `NOINLINE` thunk with an observable file-writing side effect
+stayed inert through Locals/Module/Globals inspection, refusal of all observed
+lazy references and saving its watch. Explicit human **Evaluate watch** returned
+its scalar result and performed the side effect exactly once. A cyclic `Ring`
+value exposed a lazy self-tail; read-only expansion refused to force it. Human
+**Force lazy child**, followed by explicit watch refresh, exposed a non-lazy tail.
+Four successive read-only navigation pages each returned two children with fresh
+references. This qualifies bounded user-directed cyclic navigation through four
+followed edges.
+
+A separate human Watch Evaluate wrote an execution/PID marker before entering
+an explicitly recursive nonterminating computation. With that watch still
+loading, **Stop** returned to the owner within one second and disconnected at
+about one second. Asynchronous retirement then closed the adapter listener and
+ended the exact evaluating process. The same unchanged probe passed twice with
+the pinned setup. These checks used the human watch actions for execution and
+the existing read-only inspection/page paths for observation. They add no
+executing agent tool. Live exception-stop and root-Force qualification remain open.
 
 The same watch route on THC AST and bytecode reached embedded source stops but
 returned a bounded error for explicit Haskell expression evaluation. Continue
