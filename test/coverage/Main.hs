@@ -43,7 +43,6 @@ import qualified PluginMenuCheck
 import qualified PluginTreeCheck
 import qualified GuestAccessCheck
 import qualified LinksCheck
-import qualified HelpCheck
 import qualified CompletionCheck
 import qualified BufferEditsCheck
 import qualified AgentHubCheck
@@ -68,7 +67,6 @@ main = defaultMainWithIngredients
   , testCase "PluginTree" PluginTreeCheck.checks
   , testCase "GuestAccess" GuestAccessCheck.checks
   , testCase "Links" LinksCheck.checks
-  , testCase "Help" HelpCheck.checks
   , testCase "Completion" CompletionCheck.checks
   , testCase "BufferEdits" BufferEditsCheck.checks
   , testCase "AgentHub" AgentHubCheck.checks

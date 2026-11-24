@@ -44,6 +44,7 @@ payload forcing, alongside behavior checks for the changed operation.
 - [ ] `BrowserServer` still assumes `/dev/urandom` and uses `xdg-open` outside
   macOS. Native Windows browser startup needs platform entropy and URL opening;
   verify capability generation and actual launch on Windows.
-- [ ] `Help` exposes an older plain Markdown renderer used by its own checks but
-  not interactive help. Decide whether that public API is worth retaining before
-  expanding its documentation or merging it into the CommonMark renderer.
+- [x] Retired the unused experimental `Hide.Help` plain Markdown API and its
+  dedicated tests. Interactive F1 Help continues through the registered
+  CommonMark document path, covered by `MenuCommandsCheck`, `LinksCheck` and
+  the Markdown rendering checks.

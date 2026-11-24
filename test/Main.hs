@@ -127,7 +127,6 @@ import qualified ToolingCheck
 import qualified DialogMouseCheck
 import qualified GitOperationsCheck
 import qualified GitCheck
-import qualified HelpCheck
 import qualified BrowserCheck
 import Hide.Browser (Entry(..))
 import qualified MarkdownViewCheck
@@ -292,7 +291,6 @@ tests = askOption $ \profile->withResource
   , testCase "Font" FontCheck.checks
 #endif
   , testCase "Main.browser" browserChecks
-  , testCase "Help" HelpCheck.checks
   , testCase "Browser" BrowserCheck.checks
   , testCase "PackageSources" PackageSourcesCheck.checks
   , testCase "PackagePaths" PackagePathsCheck.checks

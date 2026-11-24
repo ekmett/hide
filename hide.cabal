@@ -252,7 +252,6 @@ library
     , Hide.Frontend
     , Hide.Window
     , Hide.Browser
-    , Hide.Help
     , Hide.Git
     , Hide.GitOperations
     , Hide.LSP
@@ -492,7 +491,6 @@ test-suite editor-tests
     , FilesCheck
     , WindowCheck
     , BrowserCheck
-    , HelpCheck
     , GitCheck
     , GitOperationsCheck
     , LSPCheck
@@ -547,7 +545,6 @@ test-suite coverage-smoke
     , PluginTreeCheck
     , GuestAccessCheck
     , LinksCheck
-    , HelpCheck
     , CompletionCheck
     , BufferEditsCheck
     , AgentHubCheck
