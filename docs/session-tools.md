@@ -51,6 +51,27 @@ Applications that enable terminal mouse tracking receive clicks, dragging and wh
 
 Use `debug_set_breakpoints`, `debug_control` and `debug_inspect` to set source breakpoints, continue/step/pause, and inspect threads, stack frames, scopes, variables, adapter-owned source and `exceptionInfo`. Exception inspection requires a stopped target and an adapter advertising `supportsExceptionInfoRequest`; its structured response includes nested causes when supplied. Handles belong to a debug generation; the tool rejects them after execution advances. An accepted control command does not imply that the program has reached its next stop. Variable references must come from current scopes/variables responses. Lazy handles are not expanded by read-only inspection: adapters such as hdb force the thunk when those handles are requested. Variable invalidation expires the old handles without moving the source selection.
 
+`debug_set_breakpoints` retains its integer `lines: [1, 4]` input. The separately
+permissioned `debug_configure_breakpoints` accepts
+`breakpoints: [{"line": 4, "condition": "counter > 2", "hitCondition": "3",
+"enabled": true}]`. Integer replacement
+retains the rich fields and enabled state of listed lines; it cannot activate a
+disabled expression. Rich records replace their fields;
+omitted lines are removed. Each field is bounded to 4096 characters. Readback
+retains ordinary line/verification fields and adds requested metadata, enabled
+state and an `unavailable` reason. `pending` also covers the latest source-set
+request, including a disable/clear, while it awaits an adapter reply. Check the
+active session and generation as well; retirement cancels pending requests. Unsupported fields remain stored and are never
+silently installed as an unconditional breakpoint. Conditions
+can execute arbitrary code and I/O, so configure is an executing tool with its
+own Enable/Prompt/Disable policy (Prompt by default). Existing permission to set
+integer breakpoints does not grant expression execution. Guest key/menu input
+cannot toggle rich breakpoint activation; agents use the permissioned tools. Private
+source expressions are omitted from agent readback. `logMessage` is rejected
+until program-terminal logpoint output has source privacy tracking. Retained
+DAP output becomes unavailable to tools and assistance when a contributing
+expression source becomes private; other debug status fields remain available.
+
 `debug_present` controls visibility independently of execution. Set `follow: false`
 for background stops, then reveal `source`, `stack`, `scopes` or `output` using
 the current generation. Set `follow: true` to follow future stops. The user and

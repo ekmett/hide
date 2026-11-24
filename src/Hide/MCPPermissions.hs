@@ -991,7 +991,8 @@ tickPermissions runtime@(Permissions _ _ ref _ _ _ _ _) original=do
 
 -- doc-artifact: tools/docs-screenshots.hs permission-diff -> docs/site/screenshots/permission-diff.png
 approvalReview :: Desktop -> Waiting -> Dialog
-approvalReview desktop request=Dialog "Agent permission" (PermissionDialog (approvalAction request)) reviewFields selected ["Allow once","Deny"] []
+approvalReview desktop request=Dialog "Agent permission" (PermissionDialog (approvalAction request)) reviewFields selected ["Allow once","Deny"]
+  ["Breakpoint conditions can execute arbitrary program code and perform I/O." | toolName request=="debug_configure_breakpoints"]
   where
     args=arguments request
     patches=diffFields request

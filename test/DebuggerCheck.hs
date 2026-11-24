@@ -8,7 +8,7 @@
 -- Stability   : experimental
 -- Portability : MagicHash, OverloadedStrings
 
-module DebuggerCheck (checks,fixture,cleanup,outputOwnerChecks,outputLifecycleCheck) where
+module DebuggerCheck (checks,fixture,cleanup,outputOwnerChecks,outputLifecycleCheck,richBreakpointChecks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
@@ -43,7 +43,11 @@ import Hide.PluginWindowHost (tickPluginWindows)
 import Hide.Debugger
 import Hide.DebuggerSidebarTypes (DebugSidebarRequest(..),DebuggerWatch(..))
 import Hide.Files (FileState(..))
+import Hide.GuestAccess (guestEffectsAllowed,guestCommandAllowed,privateDialogField)
+import qualified Hide.Protocol as P
+import Hide.EditorMCP (debugTools)
 import Hide.Model
+import Hide.SystemOne (withSystemOne,systemOneServices)
 import Hide.Highlighting (withHighlighting,tickHighlighting)
 import Hide.Render (snapshotHtml)
 
@@ -418,6 +422,190 @@ checks = outputOwnerChecks >> outputLifecycleCheck >> terminalLauncherCheck >> t
             pure reattached
           _ -> error "unknown fixture mode"
         finish final
+
+richBreakpointChecks :: IO ()
+richBreakpointChecks=bracket (fixture "rich-breakpoints") cleanup $ \(port,path,_) ->
+  bracket (BL.writeFile (path<>".rich.json") (encode (object ["host" .= ("127.0.0.1"::T.Text),"port" .= (read port::Int),"adapterId" .= ("graalvm"::T.Text),"request" .= ("attach"::T.Text)])))
+    (const (removeFile (path<>".rich.json"))) $ \_->withDebugger $ \runtime->do
+  let core desktop _=pure (False,desktop)
+      send action values desktop=snd <$> debuggerEffects runtime core desktop [DebugAction action values]
+      tick=tickDebugger runtime
+      await label predicate desktop=timeout debuggerTimeout (loop desktop) >>= maybe (error label) pure
+        where loop current=do
+                next<-tick current
+                ready<-predicate next
+                if ready then pure next else threadDelay 1000 >> loop next
+      tool name args desktop=do
+        (next,finish)<-debuggerTool runtime desktop name (object args)
+        value<-finish >>= either (error . T.unpack) pure
+        pure (next,value)
+      current desktop=snd <$> tool "debug_status" [] desktop
+      generationOf value=fromMaybe (error "missing generation") (field "generation" value)::Int
+      points value=fromMaybe [] (field "breakpoints" value)::[Value]
+      row :: Int -> Value -> Value
+      row n value=case filter ((==Just n).field "line") (points value) of p:_->p; _->error "missing breakpoint"
+      check label ok=unless ok (error label)
+      barrier desktop=do
+        epoch<-generationOf <$> current desktop
+        (queued,finish)<-debuggerTool runtime desktop "debug_inspect" (object ["generation" .= epoch,"request" .= ("threads"::T.Text)])
+        withAsync finish $ \reply->do
+          done<-await "breakpoint stream receipt" (\_->isJust <$> poll reply) queued
+          _<-wait reply >>= either (error . T.unpack) pure
+          pure done
+      connect=send "connect" ["0","127.0.0.1",T.pack port]
+      rich condition=object ["line" .= (1::Int),"enabled" .= True,"condition" .= (condition::T.Text),"hitCondition" .= ("3"::T.Text)]
+      edit desktop=do
+        listed<-send "breakpoints" [] desktop {dialog=Nothing}
+        case dialog listed of
+          Nothing->error "missing breakpoint list"
+          Just picker->let chosen=picker {fields=map (\field->case field of ListBox title choices _->ListBox title choices (max 0 (length choices-1)); _->field) (fields picker)}
+                           (next,effects)=submitDialog 0 chosen listed in snd <$> debuggerEffects runtime core next effects
+      save dg desktop=let (next,effects)=submitDialog 0 dg desktop in snd <$> debuggerEffects runtime core next effects
+  attached<-send "launch-config" ["1",T.pack (path<>".rich.json")] (initialDesktop (80,25))
+  stopped<-await "rich initial source" (pure . T.isInfixOf "value = λ" . activeText) attached
+  let virtualId=maybe (error "missing virtual source") sourceFixtureBuffer (activeWindow stopped)
+      hidden=stopped {buffers=M.adjust (\doc->doc {documentPrivate=True}) virtualId (buffers stopped)}
+  virtualPoint<-send "breakpoint" [] hidden
+  virtualEditor<-edit virtualPoint
+  virtualDialog<-maybe (error "missing private breakpoint editor") pure (dialog virtualEditor)
+  let secretDialog=virtualDialog {fields=map (\field->case field of Input "Condition" _ _->Input "Condition" "PRIVATE_FIXTURE_CONDITION" 0; _->field) (fields virtualDialog)}
+  privateStored<-save secretDialog virtualEditor >>= barrier
+  check "adapter breakpoint rejection never echoes private expressions" (status privateStored=="Debugger rejected source breakpoints; review their settings.")
+  let sourceWindow=maybe (error "missing private source window") windowId (activeWindow stopped)
+      (closed,_) = Hide.Model.runCommand Close (focusWindow sourceWindow privateStored)
+  closedStatus<-current closed
+  check "closed private adapter-only source never reveals stored expressions"
+    (M.notMember virtualId (buffers closed) && null (points closedStatus))
+  canonical<-canonicalizePath (path<>".hs")
+  let local=addDocument (Just (FileState canonical Nothing)) (newBuffer "one\ntwo\n") closed
+      bid=maybe (error "missing source") sourceFixtureBuffer (activeWindow local)
+  epoch<-generationOf <$> current local
+  (unchanged,malformed)<-debuggerTool runtime local "debug_configure_breakpoints" (object ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [object ["line" .= (1::Int),"condition" .= Null]]])
+  malformedResult<-malformed
+  malformedStatus<-current unchanged
+  check "malformed rich fields cannot silently become unconditional" (unchanged==local && null (points malformedStatus) && either (const True) (const False) malformedResult)
+  (_,rejectedLog)<-debuggerTool runtime local "debug_configure_breakpoints" (object ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [object ["line" .= (1::Int),"logMessage" .= ("not-supported"::T.Text)]]])
+  logResult<-rejectedLog
+  check "logpoints are rejected until terminal privacy is supported" (either (const True) (const False) logResult)
+  (stored,_)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [rich "counter > 1"]] local
+  (invalid,invalidStatus)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [object ["line" .= (1::Int),"hitCondition" .= ("INVALID_FIXTURE_HIT"::T.Text)]]] stored
+  invalidDrained<-barrier invalid
+  invalidLines<-map (fromMaybe (error "invalid breakpoint log") . decodeStrictText) . T.lines <$> TIO.readFile path
+  let invalidSets=[args | entry<-invalidLines,Just req<-[field "request" entry],field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req],(field "source" args >>= field "path"::Maybe T.Text)==Just (T.pack canonical)]
+  check "invalid known-backend hit condition stays unavailable and never installs unconditional"
+    (maybe False (T.isInfixOf "positive count") (field "unavailable" (row 1 invalidStatus)) &&
+     not ("INVALID_FIXTURE_HIT" `T.isInfixOf` fromMaybe "" (field "unavailable" (row 1 invalidStatus))) &&
+     case reverse invalidSets of args:_->(field "breakpoints" args::Maybe[Value])==Just []; _->False)
+  (orderedOld,_)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [rich "ORDER_OLD"]] invalidDrained
+  (orderedNew,_)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [rich "ORDER_NEW"]] orderedOld
+  ordered<-barrier orderedNew
+  orderedStatus<-current ordered
+  check "new expression on the same line owns reversed source-set replies"
+    (field "condition" (row 1 orderedStatus)==Just ("ORDER_NEW"::T.Text) &&
+     (field "result" (row 1 orderedStatus) >>= field "line")==Just (202::Int))
+  (restored,_)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [rich "counter > 1"]] ordered
+  (replaced,_)<-tool "debug_set_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"lines" .= ([1,2]::[Int])] restored
+  changed<-send "breakpoint" [] (moveTo False 4 replaced)
+  ordinary<-current changed
+  check "integer replacement and ordinary toggle retain rich metadata"
+    (length (points ordinary)==1 && field "condition" (row 1 ordinary)==Just ("counter > 1"::T.Text))
+  disabled<-send "breakpoint" [] (moveTo False 0 changed)
+  disabledStatus<-current disabled
+  check "rich toggle disables without erasing metadata" (field "enabled" (row 1 disabledStatus)==Just False && field "pending" (row 1 disabledStatus)==Just True)
+  (_,oldGrant)<-debuggerTool runtime disabled "debug_set_breakpoints" (object ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [rich "counter > 99"]])
+  oldRejected<-oldGrant
+  check "old line-tool grant cannot introduce executable expressions" (either (const True) (const False) oldRejected)
+  (stillDisabled,_)<-tool "debug_set_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"lines" .= ([1]::[Int])] disabled
+  preserved<-current stillDisabled
+  check "old line-tool grant cannot enable a disabled executable breakpoint" (field "enabled" (row 1 preserved)==Just False)
+  cleared<-barrier stillDisabled
+  clearedStatus<-current cleared
+  check "disabled source-set pending state ends only after actual adapter reply"
+    (field "pending" (row 1 clearedStatus)==Just False && field "result" (row 1 clearedStatus)==Just Null)
+  enabled<-send "breakpoint" [] cleared >>= barrier
+  enabledStatus<-current enabled
+  check "rich toggle re-enables and receives actual verification" (field "enabled" (row 1 enabledStatus)==Just True && field "verified" (row 1 enabledStatus)==Just True)
+  editing<-edit enabled
+  dg<-maybe (error "missing breakpoint editor") pure (dialog editing)
+  deniedInput<-P.applyGuestInput (P.Key "Enter" []) editing
+  check "breakpoint editing is human-only and private fields follow source policy"
+    (either (const True) (const False) deniedInput && not (guestEffectsAllowed [DebugAction "breakpoint-edit:1" []]) && not (guestEffectsAllowed [DebugAction "breakpoint" []]) && not (guestCommandAllowed (DebugCommand "breakpoint")) && all (privateDialogField editing {guestPrivatePaths=[canonical]} dg) [f | f@Input{}<-fields dg] &&
+     all (privateDialogField editing {buffers=M.adjust (\doc->doc {documentPrivate=True}) bid (buffers editing)} dg) [f | f@Input{}<-fields dg])
+  let oversized=dg {fields=map (\field->case field of Input "Condition" _ _->Input "Condition" (T.replicate 4097 "x") 0; _->field) (fields dg)}
+  retained<-save oversized editing
+  retry<-maybe (error "invalid breakpoint edit discarded its draft") pure (dialog retained)
+  check "invalid breakpoint editor retains entered text"
+    (any (\field->case field of Input "Condition" value _->T.length value==4097; _->False) (fields retry))
+  let updated=retry {fields=map (\f->case f of Input "Condition" _ _->Input "Condition" "counter > 2" 11; _->f) (fields retry)}
+  edited<-save updated retained >>= barrier
+  editedStatus<-current edited
+  check "human editor updates the shared DAP record" (field "condition" (row 1 editedStatus)==Just ("counter > 2"::T.Text))
+  stale<-edit edited
+  oldDialog<-maybe (error "missing stale editor") pure (dialog stale)
+  (newer,_)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [rich "counter > 3"]] stale
+  refused<-save oldDialog newer
+  refusedStatus<-current refused
+  retryStale<-maybe (error "stale breakpoint editor discarded its draft") pure (dialog refused)
+  check "late human save preserves newer state and entered draft" (field "condition" (row 1 refusedStatus)==Just ("counter > 3"::T.Text) && "Breakpoint changed" `T.isPrefixOf` status refused &&
+    any (\field->case field of Input "Condition" value _->value=="counter > 2"; _->False) (fields retryStale))
+  (_,alreadyTainted)<-debuggerTool runtime refused "debug_status" (object [])
+  (_,privateStatus)<-tool "debug_status" [] refused {guestPrivatePaths=[canonical]}
+  secondPrivacy<-alreadyTainted
+  check "already-tainted output cannot release another newly private source snapshot"
+    (secondPrivacy==Left "Debugger source privacy changed; request status again.")
+  check "private breakpoint expressions do not appear in MCP readback" (null (points privateStatus))
+  let dismissed=fst (submitDialog 1 retryStale refused)
+  disabledRestart<-send "breakpoint" [] (moveTo False 0 dismissed) >>= barrier
+  reconnected<-connect disabledRestart >>= await "rich second session" (pure . T.isInfixOf "session = 2" . activeText)
+  unavailable<-current reconnected
+  check "restart preserves disabled metadata and exposes unsupported capability" (field "enabled" (row 1 unavailable)==Just False && field "condition" (row 1 unavailable)==Just ("counter > 3"::T.Text) && maybe False (T.isInfixOf "does not support") (field "unavailable" (row 1 unavailable)))
+  entries<-map (fromMaybe (error "invalid rich fixture log") . decodeStrictText) . T.lines <$> TIO.readFile path
+  let installed=[args | entry<-entries,field "session" entry==Just (2::Int),Just req<-[field "request" entry],field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req]]
+      requested=[point | entry<-entries,Just req<-[field "request" entry],field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req],point<-fromMaybe [] (field "breakpoints" args)]::[Value]
+  check "rich fields reach actual DAP and unsupported breakpoint never becomes unconditional"
+    (any (\p->field "condition" p==Just ("counter > 2"::T.Text) && field "hitCondition" p==Just ("3"::T.Text)) requested && not (null installed) && all ((==Just ([]::[Value])).field "breakpoints") installed)
+  currentEpoch<-generationOf <$> current reconnected
+  (genericDraft,_)<-tool "debug_configure_breakpoints" ["generation" .= currentEpoch,"bufferId" .= bid,"breakpoints" .= [object ["line" .= (1::Int),"hitCondition" .= ("adapter-defined-count"::T.Text)]]] reconnected
+  BL.writeFile (path<>".rich.json") (encode (object ["host" .= ("127.0.0.1"::T.Text),"port" .= (read port::Int),"adapterId" .= ("custom"::T.Text),"request" .= ("attach"::T.Text)]))
+  (_,retiringOutput)<-debuggerTool runtime genericDraft "debug_status" (object [])
+  generic<-send "launch-config" ["1",T.pack (path<>".rich.json")] genericDraft >>= await "generic third session" (pure . T.isInfixOf "session = 3" . activeText) >>= barrier
+  oldOutput<-retiringOutput
+  check "replacement retires already-admitted old output" (oldOutput==Left "Debugger source privacy changed; request status again.")
+  genericStatus<-current generic
+  genericEntries<-map (fromMaybe (error "invalid generic breakpoint log") . decodeStrictText) . T.lines <$> TIO.readFile path
+  let genericPoints=[point | entry<-genericEntries,field "session" entry==Just (3::Int),Just req<-[field "request" entry],field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req],point<-fromMaybe [] (field "breakpoints" args)]::[Value]
+  check "generic adapters retain their own hit-condition grammar"
+    (field "unavailable" (row 1 genericStatus)==Just Null && any ((==Just ("adapter-defined-count"::T.Text)).field "hitCondition") genericPoints)
+  idle<-tick generic {buffers=M.adjust (\doc->doc {documentBuffer=error "breakpoint privacy forced immutable source payload"}) bid (buffers generic)}
+  idleStatus<-current idle
+  check "rich-source idle privacy checks inspect metadata without forcing payloads" (generationOf idleStatus==generationOf genericStatus)
+  outputReady<-await "rich output on actual DAP stream" (\desktop->current desktop >>= pure . maybe False (T.isInfixOf "RICH_OUTPUT session=3") . field "output") generic
+  (_,inFlight)<-debuggerTool runtime outputReady "debug_status" (object [])
+  (removed,_)<-tool "debug_set_breakpoints" ["generation" .= generationOf genericStatus,"bufferId" .= bid,"lines" .= ([]::[Int])] outputReady
+  drained<-barrier removed
+  privateOutput<-tick drained {guestPrivatePaths=[canonical]}
+  late<-inFlight
+  privateRead<-current privateOutput
+  check "retained output tracks removed source privacy and protects in-flight status"
+    (late==Left "Debugger source privacy changed; request status again." && field "output" privateRead==Just (""::T.Text) &&
+     field "outputUnavailable" privateRead==Just ("Debugger output is private or retired."::T.Text) &&
+     generationOf privateRead==generationOf genericStatus && field "active" privateRead==Just True)
+  publicAgain<-current privateOutput {guestPrivatePaths=[]}
+  check "source becoming public cannot downgrade retained output privacy" (field "output" publicAgain==Just (""::T.Text))
+  withSystemOne $ \owner->withDebuggerSystemOne (systemOneServices owner) runtime $ do
+    (assisting,admittedAssist)<-tool "debug_assist" ["command" .= ("start"::T.Text),"generation" .= generationOf genericStatus,"goal" .= ("Inspect the public stopped source."::T.Text)] privateOutput
+    refusedAssist<-await "private retained output refuses assistance admission" (\desktop->do
+      value<-current desktop
+      pure ((field "assistance" value >>= field "phase")==Just ("finished"::T.Text) &&
+        (field "assistance" value >>= field "runId"::Maybe T.Text)==(field "assistance" admittedAssist >>= field "runId"))) assisting
+    assistStatus<-current refusedAssist
+    check "private output never becomes a supplier observation"
+      ((field "assistance" assistStatus >>= field "reason")==Just ("observation-expired-or-private"::T.Text) &&
+       (field "assistance" assistStatus >>= field "decisions")==Just (0::Int))
+  let spec=case filter ((==Just ("debug_configure_breakpoints"::T.Text)).field "name") debugTools of value:_->value; _->error "missing breakpoint tool"
+  check "rich breakpoint mutations retain execution permission admission" ((field "annotations" spec >>= field "readOnlyHint")==Just False)
+  _<-send "disconnect" [] privateOutput >>= await "rich disconnect" (pure . T.isInfixOf "Debugger disconnected" . status)
+  putStrLn "rich source breakpoint checks passed"
 
 fixture :: String -> IO (String,FilePath,ProcessHandle)
 fixture mode=do

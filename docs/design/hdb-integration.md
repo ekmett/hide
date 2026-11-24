@@ -81,7 +81,7 @@ and planned controls.
 | Ordinary variable children | Implemented | Existing expansion after validating reference provenance |
 | Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; nested-watch Force has live hdb list-tail qualification; root Force is fixture-tested, executing MCP tool remains planned |
 | Expression evaluation | `evaluate` with optional frame; returns value/type/reference without a lazy root hint | Manually evaluated Watches have live scalar/list qualification; console, history and executing MCP tool remain planned |
-| Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Planned; current source breakpoint requests contain line numbers only |
+| Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Shared human editor and executing MCP conditions/hit counts preserve requested fields, disabled state and restart; logpoints pending program-terminal source privacy |
 | Function breakpoints | Implemented, including condition/hit count | Planned; no function-breakpoint request or editor yet |
 | Exception filters and details | Implemented | Existing filters plus exception details panel/tool |
 | Valid breakpoint locations | Single-position query returns an executable span | Current-source chooser and read-only inspection; captured-source and UTF-16 validation; no range enumeration or breakpoint mutation |
@@ -155,10 +155,17 @@ session and cannot undo its effects. Custom visualizers also need qualification
 with an observable unevaluated thunk; do not infer their safety from the word
 “inspection”.
 
-Conditions and logpoint expressions can execute while the program runs. Their
+Conditions can execute while the program runs. Their
 editing belongs under executing breakpoint permissions, not read-only context.
-Existing integer-line breakpoint calls remain supported; richer breakpoint
-records must preserve conditions/log text when another line is toggled.
+`debug_configure_breakpoints` has a separate executing permission; the existing
+integer `debug_set_breakpoints` grant cannot introduce or enable expressions.
+Existing integer-line breakpoint calls remain supported and preserve metadata
+for retained lines. Rich source records carry `condition`, `hitCondition`,
+and `enabled`; unsupported drafts remain visible without installing
+an unconditional fallback. A rich breakpoint toggles enabled state without losing
+its expressions. Ordinary line-only toggles retain their add/remove behavior.
+File breakpoint drafts survive adapter restart; running debugger state is not a
+part of daemon recovery checkpoints.
 
 ## Input and completion of a session
 
@@ -195,7 +202,11 @@ the socket closed”.
       fixture-only because hdb Evaluate results omit the lazy-root hint.
 - [x] Expose GHC source/component launch, exception filters/details and human
       Watch Evaluate/Force through shared debugger state and permission handling.
-- [ ] Add source breakpoint conditions, hit counts and logpoints.
+- [x] Add source breakpoint conditions and hit counts through the
+      shared editor and executing MCP replacement operation. Retain metadata on
+      ordinary toggles, integer replacement and adapter restart; show unsupported
+      features as unavailable. Fixtures cover stale edits and source privacy.
+- [ ] Add logpoints with retained program-terminal source privacy and final-publication checks.
 - [x] Add capability-gated single-position executable-location discovery through
       a human source chooser and read-only inspection, preserving source ownership.
 - [ ] Add function breakpoints.

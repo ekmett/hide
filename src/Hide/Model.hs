@@ -304,6 +304,7 @@ data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry
   | DebugSourceWatchDialog !Int !Int !(Maybe FilePath) !Bool
   | DebugLocationsDialog !Text
   | DebuggerWatchDialog !Int !(Maybe FilePath) !Bool
+  | DebugBreakpointDialog !Int !(Maybe Int) !(Maybe FilePath) !Bool
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
@@ -4592,6 +4593,7 @@ submitDialog button dg original
     Renaming -> if T.null (T.strip first) then (original {status="Enter a new name."},[]) else (d,[LanguageRequest (RenameAt (T.strip first))])
     Saving bid after -> if T.null first then (original,[]) else (d,[SaveDocument bid (Just (T.unpack first)) after])
     DiskConflict conflict -> (d,[ResolveConflict conflict ([CompareDisk,ReloadDisk,KeepBuffer,SaveConflictAs] !! button)])
+    DebugBreakpointDialog ident _ _ _ -> (d,[DebugAction ("breakpoint-edit:"<>T.pack (show ident)) (T.pack (show button):values++[if enabled then "true" else "false" | CheckBox _ enabled<-fields dg])])
     DebuggerWatchDialog ident _ _ -> (d,[DebugAction ("watch-edit:"<>T.pack (show ident)) (T.pack (show button):values)])
     DebugSourceWatchDialog ident _ _ _ -> (d,[DebugAction ("source-watch:"<>T.pack (show ident)) (T.pack (show button):values)])
     DebugDialog action -> (d,[DebugAction action (T.pack (show button) : values ++

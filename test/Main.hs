@@ -246,6 +246,7 @@ tests = askOption $ \profile->withResource
   , testCase "Hex" HexCheck.checks
   , testCase "DAP" DAPCheck.checks
   , testCase "Debugger" DebuggerCheck.checks
+  , testCase "Debugger.breakpoints" DebuggerCheck.richBreakpointChecks
   , testCase "DebuggerAssistance" DebuggerAssistanceCheck.checks
   , testCase "DebuggerWatches" DebuggerWatchesCheck.checks
   , testCase "DebuggerSidebar" DebuggerSidebarCheck.checks

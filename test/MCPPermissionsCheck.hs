@@ -8,7 +8,7 @@
 -- Stability   : experimental
 -- Portability : CPP, OverloadedStrings
 
-module MCPPermissionsCheck (checks,policyResponsivenessChecks,policyWakeChecks,settledTool,settleDialog) where
+module MCPPermissionsCheck (checks,breakpointExecutionPermissionCheck,policyResponsivenessChecks,policyWakeChecks,settledTool,settleDialog) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay,yield)
@@ -48,6 +48,7 @@ import Hide.MCPPermissions
 import Hide.Model
 import Hide.Render (snapshot, snapshotHtml)
 import Hide.GuestAccess (readableAt, guestKeyboardAllowed, guestEffectsAllowed)
+import Hide.EditorMCP (debugTools)
 import Hide.RuntimeMCP (runtimeTools)
 import Hide.WorkspaceFilesMCP (fileTools)
 import qualified Hide.Plugin.Agent as Agent
@@ -59,6 +60,7 @@ import qualified Hide.WardenRuntime as WardenRuntime
 
 checks :: IO ()
 checks=do
+  breakpointExecutionPermissionCheck
   policyResponsivenessChecks
   policyWakeChecks
   wardenChecks
@@ -182,6 +184,28 @@ checks=do
 -- A live writer withholds data from the actual configuration read. The first
 -- owner tick must return while that read waits, then the same request completes.
 -- Exercise the real asynchronous owner until a reply or human approval appears.
+-- A saved line-toggle grant must not silently authorize source expressions.
+breakpointExecutionPermissionCheck :: IO ()
+breakpointExecutionPermissionCheck=bracket temporary removePathForcibly $ \directory->do
+  let path=directory </> "permissions.toml"
+      core desktop _=pure (False,desktop)
+  TIO.writeFile path "[editor.mcp.permissions]\ndebug_set_breakpoints = \"enable\"\n"
+  calls<-newIORef ([]::[T.Text])
+  let execute desktop name _=modifyIORef' calls (++[name]) >> pure (desktop,pure (Right Null))
+  withPermissionsAt path debugTools $ \owner->do
+    (ordinary,reply)<-settledCall owner execute (initialDesktop (80,25)) "debug_set_breakpoints" (object ["lines" .= ([1]::[Int])])
+    accepted<-reply
+    check "saved integer breakpoint grant still executes" (accepted==Right Null && dialog ordinary==Nothing)
+    (prompted,pending)<-settledCall owner execute ordinary "debug_configure_breakpoints" (object ["breakpoints" .= [object ["line" .= (1::Int),"condition" .= ("counter > 2"::T.Text)]]])
+    before<-readIORef calls
+    dg<-maybe (error "rich breakpoint execution did not request separate permission") pure (dialog prompted)
+    check "rich configuration defaults to an explicit execution prompt"
+      (before==["debug_set_breakpoints"] && any (T.isInfixOf "execute arbitrary program code") (body dg))
+    let (denied,effects)=submitDialog 1 dg prompted
+    _<-snd <$> policyEffects owner core denied effects >>= settleDialog owner dg
+    rejected<-pending
+    check "declining expression execution never invokes its callback" (either (const True) (const False) rejected)
+
 settledCall :: Hide.MCPPermissions.Permissions -> (Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))) -> Desktop -> T.Text -> Value -> IO (Desktop,IO (Either T.Text Value))
 settledCall runtime callback=settledTool runtime (permissionCall runtime callback)
 settledTool :: Hide.MCPPermissions.Permissions -> (desktop -> name -> args -> IO (Desktop,IO result)) -> desktop -> name -> args -> IO (Desktop,IO result)

@@ -17,7 +17,7 @@ else:
     server.listen(2)
     print(server.getsockname()[1], flush=True)
 
-for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect' else 2):
+for session in range(1, 4 if mode in ('output-owner', 'rich-breakpoints') else 3 if mode == 'reconnect' else 2):
     if stdio:
         stream = sys.stdin.buffer
     else:
@@ -130,6 +130,9 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                 reply(req, dict(supportsConfigurationDoneRequest=True,
                       supportsBreakpointLocationsRequest=mode == 'locations',
                       supportsExceptionInfoRequest=mode in ('exception', 'mcp'),
+                      supportsConditionalBreakpoints=mode == 'rich-breakpoints' and session != 2,
+                      supportsHitConditionalBreakpoints=mode == 'rich-breakpoints' and session != 2,
+                      supportsLogPoints=mode == 'rich-breakpoints' and session != 2,
                       exceptionBreakpointFilters=[dict(filter='uncaught', label='Uncaught exceptions', default=True)]))
             elif cmd in ('attach', 'launch'):
                 if mode in ('launch-fail', 'launch-fail-late'):
@@ -140,7 +143,15 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                     pending_attach = req
             elif cmd == 'setBreakpoints':
                 configured.append(cmd)
-                if mode == 'breakpoints':
+                if mode == 'rich-breakpoints' and any(b.get('condition') == 'PRIVATE_FIXTURE_CONDITION' for b in req['arguments']['breakpoints']):
+                    send(dict(type='response', request_seq=req['seq'], command=cmd, success=False, message='PRIVATE_FIXTURE_CONDITION was rejected'))
+                elif mode == 'rich-breakpoints' and any(b.get('condition') in ('ORDER_OLD', 'ORDER_NEW') for b in req['arguments']['breakpoints']):
+                    breakpoint_requests.append(req)
+                    if len(breakpoint_requests) == 2:
+                        # Same requested line; the new expression owns the reply.
+                        breakpoints(breakpoint_requests[1], 202)
+                        breakpoints(breakpoint_requests[0], 102)
+                elif mode == 'breakpoints':
                     breakpoint_requests.append(req)
                     if len(breakpoint_requests) == 3:
                         # The first and latest requests have the same line list.
@@ -149,6 +160,8 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                         breakpoints(breakpoint_requests[1], 302)
                 else:
                     breakpoints(req)
+                    if mode == 'rich-breakpoints':
+                        event('output', dict(category='console', output='RICH_OUTPUT session=' + str(session) + '\n'))
             elif cmd == 'setExceptionBreakpoints':
                 configured.append(cmd)
                 reply(req)
@@ -363,7 +376,7 @@ for session in range(1, 4 if mode == 'output-owner' else 3 if mode == 'reconnect
                 reply(req, success=False)
     except (ConnectionResetError, BrokenPipeError):
         # A deliberately replaced connection can close with unread bytes.
-        replacing = (mode == 'reconnect' and session == 1 or
+        replacing = (mode == 'reconnect' and session == 1 or mode == 'rich-breakpoints' and session < 3 or
                      mode == 'output-owner' and session < 3)
         if not replacing:
             raise

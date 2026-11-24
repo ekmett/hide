@@ -376,7 +376,7 @@ a process does not require replacing the files already on your desktop.
 | Action | Keys or menu |
 | --- | --- |
 | Toggle a source breakpoint | Ctrl+F8 |
-| List or remove breakpoints | Debug > Breakpoints |
+| Edit, enable/disable or remove breakpoints | Debug > Breakpoints |
 | Continue | F4 |
 | Pause | Debug > Pause |
 | Trace into | F7 |
@@ -387,6 +387,17 @@ a process does not require replacing the files already on your desktop.
 | Choose advertised exception filters | Debug > Exceptions |
 | Read debugger output | Debug > Output |
 | Disconnect | Debug > Disconnect |
+
+In **Debug > Breakpoints**, select a row and **Edit** its condition, hit condition,
+and enabled state. Conditions can execute program
+code. Syntax belongs to the adapter; the pinned hdb uses a positive integer skip count
+(`2` skips two hits and stops on the third).
+Unsupported features show an unavailable reason and remain stored without being
+installed as ordinary breakpoints. Toggling a rich breakpoint disables or enables
+it without erasing its fields; a line-only breakpoint keeps ordinary add/remove
+behavior. Invalid or stale edits retain entered text so you can copy it before
+reopening. File breakpoint drafts survive debugger restart. Logpoints are not yet
+available: their program-terminal output needs source privacy tracking.
 
 [![Call stack from the stopped THC program, with a selected frame and Open action.](site/screenshots/debug-stack.png)](site/screenshots/debug-stack.png)
 

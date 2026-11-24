@@ -239,6 +239,7 @@ protectedPurpose p=case p of
   DebugSourceWatchDialog{} -> True
   DebuggerWatchDialog{} -> True
   DebugLocationsDialog{} -> True
+  DebugBreakpointDialog{} -> True
   DebugDialog action -> privateDebuggerAction action
   ServiceDialog action -> not (serviceActionAllowed action)
   AgentDialog{} -> True
@@ -246,11 +247,13 @@ protectedPurpose p=case p of
   Confirm command -> not (guestCommandAllowed command)
   _ -> False
 privateDebuggerAction :: Text -> Bool
--- Frame chooser labels are adapter metadata, not prepared public semantic rows.
+-- Debugger chooser labels are adapter metadata, not prepared public semantic rows.
 -- Keep the host-owned chooser private until it carries canonical row provenance.
 -- Starting assistance through UI input would lose the initiating agent lifetime.
 -- Agents use debug_assist, which retains their exact caller capability.
-privateDebuggerAction action=action=="assist" || "assist-" `T.isPrefixOf` action || action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action || privateLocationsAction action
+-- A toggle can enable a stored condition: agents use the separately permissioned
+-- breakpoint tools instead of obtaining expression authority through UI input.
+privateDebuggerAction action=action=="breakpoint" || action=="breakpoints" || "breakpoint-edit:" `T.isPrefixOf` action || action=="assist" || "assist-" `T.isPrefixOf` action || action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action || privateLocationsAction action
 privateLocationsAction :: Text -> Bool
 privateLocationsAction action=case T.splitOn ":" action of
   ["select",_,_,"locations"]->True
@@ -258,6 +261,7 @@ privateLocationsAction action=case T.splitOn ":" action of
 privateFrameChooserAction :: Text -> Bool
 privateFrameChooserAction action=case T.splitOn ":" action of
   ["select",_,_,"frame"]->True
+  ["select",_,_,"edit-breakpoint"]->True
   _->False
 
 guestModalBlocked :: Desktop -> Bool
@@ -353,11 +357,12 @@ privateDialogFieldWith paths d dg field=pluginForm dg || privateSourceWatchWith 
   _ -> False
   where
     privateName base value=let name=T.unpack value in protectedFilePath paths (normalise (if isAbsolute name then name else base </> name))
--- Privacy is captured from the source owner when the watch prompt opens, never
+-- Privacy is captured from the source owner when an expression prompt opens, never
 -- inferred from an ordinary field label. Current policy can add protection.
 privateSourceWatchWith :: [FilePath] -> Desktop -> Dialog -> Bool
 privateSourceWatchWith paths d dg=case purpose dg of
   DebugSourceWatchDialog _ bid origin captured->captured || protectedBufferWith paths d bid || maybe False (protectedFilePath paths) origin
+  DebugBreakpointDialog _ bid origin captured->captured || maybe False (protectedBufferWith paths d) bid || maybe False (protectedFilePath paths) origin
   DebuggerWatchDialog _ origin captured->captured || maybe False (protectedFilePath paths) origin
   _->False
 
