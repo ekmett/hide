@@ -14,7 +14,7 @@ import Control.Monad (unless, when, forM_, replicateM, foldM, void)
 import Control.Concurrent (threadDelay, newEmptyMVar, readMVar, putMVar, tryPutMVar, tryReadMVar)
 import Control.Concurrent.Async (withAsync, poll, wait, cancel)
 import Data.Aeson.Types (parseMaybe)
-import Control.Exception (bracket, evaluate, finally, throwIO, uninterruptibleMask_)
+import Control.Exception (bracket, evaluate, finally, mask_, throwIO, uninterruptibleMask_)
 import System.Mem.StableName (makeStableName)
 import Data.IORef (newIORef, readIORef, writeIORef, modifyIORef', atomicModifyIORef')
 import Data.Aeson
@@ -537,15 +537,16 @@ workspaceEditChecks = bracket temporary removePathForcibly $ \root->do
     check "failed save preserves external bytes" . (=="external update\n") =<< readUtf8 extra
     writeUtf8 extra "third = 3\n"
   withHeld "cancellation" $ \tooling held answer release->do
-    withAsync answer $ \waiting->threadDelay 1000 >> cancel waiting
+    -- Keep the observer masked until its interruptible wait installs cleanup.
+    mask_ (withAsync answer cancel)
     putMVar release ()
     (unchanged,reply)<-finish "cancellation" tooling held answer
-    check "cancelled workspace adoption changes no buffers" (isLeft reply && buffers unchanged==buffers held)
+    check "cancelled workspace adoption changes no buffers" (reply==Left "HLS request cancelled" && buffers unchanged==buffers held)
   withHeld "restart" $ \tooling held answer release->do
     (_,restarted)<-bounded "workspace edit restart: blocked on workspace read" (toolingEffects tooling core held [LanguageRequest RestartLanguage])
     putMVar release ()
     reply<-bounded "workspace edit restart: matching operation reply stranded" answer
-    check "restart cancels prepared workspace edit" (isLeft reply && buffers restarted==buffers held)
+    check "restart cancels prepared workspace edit" (reply==Left "HLS stopped" && buffers restarted==buffers held)
   entered<-newEmptyMVar; release<-newEmptyMVar; readCount<-newIORef (0::Int)
   let heldRead path=do
         loaded<-loadFile path
