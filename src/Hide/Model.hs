@@ -305,6 +305,7 @@ data Purpose = Opening FilePath Text [Entry] | ChangingDirectory FilePath [Entry
   | DebugLocationsDialog !Text
   | DebuggerWatchDialog !Int !(Maybe FilePath) !Bool
   | DebugBreakpointDialog !Int ![(Maybe Int,Maybe FilePath)] !Bool
+  | DebugFunctionDialog !Int
   | DiscardDraft | Confirm Command | Information | Settings | ChatInputSettings | Widgets deriving (Eq,Show)
 data Dialog = Dialog
   { dialogTitle :: Text, purpose :: Purpose, fields :: [Field], focus :: Int
@@ -429,7 +430,7 @@ menus =
   ,("Run",'r',[mi "Run" "Ctrl+F9" RunTarget,mi "Target..." "" RunOptions,mi "Stop build/run" "" StopBuild,mi "Stop terminal" "" StopTerminal])
   ,("Compile",'c',[mi "Compile" "Alt+F9" CompileTarget,mi "Make" "F9" MakeTarget,mi "Target..." "" RunOptions,mi "Stop build" "" StopBuild])
   ,("Debug",'d',[mi "Attach..." "" (DebugCommand "attach"),mi "Launch..." "" (DebugCommand "launch"),
-      mi "Toggle breakpoint" "Ctrl+F8" (DebugCommand "breakpoint"),mi "Breakpoints..." "" (DebugCommand "breakpoints"),
+      mi "Toggle breakpoint" "Ctrl+F8" (DebugCommand "breakpoint"),mi "Breakpoints..." "" (DebugCommand "breakpoints"),mi "Function breakpoints…" "" (DebugCommand "function-breakpoints"),
       mi "Continue" "F4" (DebugCommand "continue"),mi "Pause" "" (DebugCommand "pause"),
       mi "Trace into" "F7" (DebugCommand "stepIn"),mi "Step over" "F8" (DebugCommand "next"),mi "Step out" "Ctrl+F7" (DebugCommand "stepOut"),
       mi "Threads..." "" (DebugCommand "threads"),mi "Call stack..." "" (DebugCommand "stack"),mi "Scopes..." "" (DebugCommand "scopes"),
@@ -1917,6 +1918,7 @@ cancelDialog d=case dialog d of
     PermissionDialog action -> [PermissionAction action ["1"]]
     DebugDialog action | "hdb-accept:" `T.isPrefixOf` action -> [DebugAction action ["1"]]
     DebugLocationsDialog action -> [DebugAction action ["1"]]
+    DebugFunctionDialog ident -> [DebugAction ("function-ui:"<>T.pack(show ident)) ["-1"]]
     _ -> [])
   Nothing -> (d,[])
 
@@ -4559,6 +4561,7 @@ submitDialog button dg original
         _->(original {status="Input form fields do not match its schema."},[])
   | PluginChoiceForm ref version<-purpose dg = if button==0 then (original,[SubmitChoiceForm ref version selected Plugin.HumanMenu]) else (d,[RetireInputForm ref])
   | DebugLocationsDialog action<-purpose dg = (d,[DebugAction action (T.pack(show button):[T.pack(show index)|ListBox _ _ index<-fields dg])])
+  | DebugFunctionDialog ident<-purpose dg = (d,[DebugAction ("function-ui:"<>T.pack(show ident)) (T.pack(show button):values++[if value then "true" else "false"|CheckBox _ value<-fields dg]++[T.pack(show i)|Radio _ _ i<-fields dg]++[T.pack(show i)|ListBox _ _ i<-fields dg])])
   | buttons dg !! button == "Cancel" = (d,[])
   | otherwise = case purpose dg of
     Opening base pattern entries

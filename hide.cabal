@@ -480,6 +480,7 @@ test-suite editor-tests
     , DebuggerCheck
     , DebuggerSidebarCheck
     , DebuggerWatchesCheck
+    , DebuggerFunctionsCheck
     , DebuggerSourcePolicyCheck
     , RunCheck
     , ConversationCheck

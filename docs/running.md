@@ -410,6 +410,29 @@ available.
 In a [remote editor session](remote.md), loopback is the remote host, so the
 debugger stays beside the running program.
 
+**Debug > Function breakpoints…** maintains a separate, human-only catalogue of
+literal function names. Add, edit, enable/disable or remove entries; no expression
+conditions or logpoints are accepted here. The list is retained across debugger
+restarts and adapter changes for the lifetime of the editor. A capable adapter
+receives a replacement list of enabled names. **Results** shows a bounded snapshot
+of the latest set reply, without assigning rows to names: one name can resolve to
+several locations, and later resolution events are not associated with names.
+Unsupported adapters retain the catalogue without sending it.
+
+For hdb, use qualified names such as `Main.target`; a nested local function can use
+`Main.caller.local`. Missing and ambiguous names may simply return an unverified
+row. The pinned adapter cannot preserve overlapping source and function actions.
+**Kind…** therefore selects **Source** (the default) or **Function** for the next
+hdb launch. Change it only while fully disconnected; a breakpoint stop is still
+connected. Both lists stay intact, and the inactive list can still be edited.
+Function mode sends no source replacements; source mode sends no function
+replacement, including an empty one. Other capable adapters apply both lists.
+Wait for the latest function update before continuing or stepping; a rejected
+update requires reconnecting. Catalogue names and result dialogs are hidden from agents and streaming. Sending
+names also makes adapter log output human-only for that session. Existing source
+privacy still governs stopped-frame inspection; no agent tool activates function
+breakpoints.
+
 ## Assisted debugging
 
 Pause at a breakpoint, select a [System One supplier](configuration.md#system-1-decisions),

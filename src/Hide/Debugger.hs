@@ -29,7 +29,7 @@ import Hide.PluginWindowHost (adoptWindowUpdate,replaceWindowUpdate)
 import Hide.Sidebar
 import qualified Hide.Plugin.Tree as P
 import Hide.DebuggerSidebarTypes
-import Control.Concurrent (MVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
+import Control.Concurrent (MVar, takeMVar, newEmptyMVar, tryPutMVar, tryReadMVar, threadDelay)
 import Control.Exception (IOException, SomeException, SomeAsyncException, fromException, throwIO, catch, bracket, try, evaluate, mask, mask_, finally)
 import Control.Concurrent.Async (Async, async, asyncWithUnmask, asyncThreadId, cancel, poll, race, waitCatch)
 import Control.Concurrent.STM
@@ -318,6 +318,7 @@ data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Thre
   | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text DebugPageBody))
   | WatchRequest !WatchOperation !(Maybe Text) !FilePath ![FilePath]
   | LocationInspection !DebugSourceRequest !(MVar (Either Text Value))
+  | FunctionBreaks !Int !Int !(MVar (Either Text Value))
   deriving (Eq)
 data WatchMode = EvaluateWatch | ForceWatch !Int | ForceWatchChild !Int !Int !Int !Int deriving Eq
 data WatchOperation = WatchOperation !Int !Int !WatchFrame !WatchMode deriving Eq
@@ -352,6 +353,7 @@ richBreakpoint point=any isJust [bpCondition point,bpHitCondition point]
 
 breakpointUnavailable :: State -> Breakpoint -> Maybe Text
 breakpointUnavailable state point
+  | functionSourceInactive state=Just "Source breakpoints are inactive for the hdb function-kind launch."
   | not (richBreakpoint point)=Nothing
   | not (ready state)=Just "Debugger capabilities are not available yet."
   | isJust (bpCondition point) && not (flag "supportsConditionalBreakpoints" (capabilities state))=Just "This debugger does not support breakpoint conditions."
@@ -406,6 +408,161 @@ data Assistance=Assistance
   , assistanceFlight :: !(Maybe AssistanceFlight)
   }
 
+-- Function names are human-owned opaque adapter names, not expressions. Reply
+-- locations belong to the whole request: one name can resolve to several rows.
+data FunctionDialog = FunctionList !Int !Int !Int ![Int] | FunctionEdit !Int !Int !Int !(Maybe Int) !Dialog | FunctionKind !Int !Int !Int !Dialog | FunctionResults !Int !Int !Int
+
+functionSourceInactive :: State -> Bool
+functionSourceInactive s=adapterId s=="hdb" && functionKind s
+functionActive :: State -> Bool
+functionActive s=ready s && configured s && isJust(client s) && endedAt s==Nothing && disconnectAt s==Nothing && flag "supportsFunctionBreakpoints" (capabilities s) && (adapterId s/="hdb" || functionKind s)
+functionPending :: State -> Bool
+functionPending s=maybe False (`M.member` pending s) (functionRequest s)
+
+functionSynchronizing :: State -> Bool
+functionSynchronizing s=functionActive s && (functionPending s || functionSentRevision s/=functionRevision s || isJust(functionPreparing s) || case functionResults s of Just(Left _)->True;_->False)
+
+functionDisclosure :: Debugger -> IO ()
+functionDisclosure runtime=do
+  token<-outputDisclosure runtime
+  atomicModifyIORef' token $ \value->case value of
+    OutputShared _ _ _ stamp->(OutputShared False M.empty Nothing (stamp+1),())
+    _->(value,())
+
+retireFunctionPreparation :: Debugger -> IO ()
+retireFunctionPreparation (Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _)=mask_ $ do
+  s<-readIORef ref
+  modifyIORef' ref (\state->state {functionPreparing=Nothing})
+  forM_ (functionPreparing s) $ \(_,_,worker)->async(cancel worker) >>= \task->modifyIORef' retired (task:)
+
+sendFunctions :: Debugger -> IO ()
+sendFunctions runtime@(Debugger ref _ _ _ _)=do
+  s<-readIORef ref
+  when (functionActive s && not(functionPending s) && functionSentRevision s/=functionRevision s) $ do
+    mask_ $ do
+      retireFunctionPreparation runtime
+      let names=[name|(_, (name,True))<-M.toAscList(functionNames s)]
+      when (not(null names)) (functionDisclosure runtime)
+      reply<-newEmptyMVar
+      worker<-asyncWithUnmask $ \unmask->unmask $ do
+       result<-takeMVar reply
+       pure(case result of Left err->Left(T.copy(T.take 1024 err));Right body->prepareFunctionResults body)
+      modifyIORef' ref (\state->state {functionPreparing=Just(functionRevision s,sidebarSession s,worker),functionSentRevision=functionRevision s,functionResults=Nothing})
+      send runtime (FunctionBreaks (functionRevision s) (sidebarSession s) reply) "setFunctionBreakpoints" (object["breakpoints" .= [object["name" .= name]|name<-names]])
+
+prepareFunctionResults :: Value -> Either Text (Int,Int,[Text])
+prepareFunctionResults body=case body of
+  Object fields | Just(Array rows)<-KM.lookup "breakpoints" fields,V.length rows<=4096->do
+    let values=V.toList rows
+    unless (all (\row->isJust(parseMaybe(withObject "function breakpoint" (.: "verified")) row::Maybe Bool)) values) (Left "Malformed function breakpoint verification row.")
+    let verified=length(filter(flag "verified")values)
+        clean=T.take 256 . T.map (\c->if c<' ' then ' ' else c)
+        label row=(if flag "verified" row then "verified" else "unverified")<>
+          maybe "" (\source->"  "<>T.pack(takeFileName(T.unpack(sourceLabel source)))) (field "source" row)<>
+          (if integer "line" row>0 then ":"<>tshow(integer "line" row) else "")<>
+          (if T.null(text "message" row) then "" else "  "<>text "message" row)
+    pure(V.length rows,verified,map (clean . label)(take 128 values))
+  _->Left "Function breakpoint reply exceeds the bounded result limit or has no breakpoint array."
+
+tickFunctions :: Debugger -> Desktop -> IO Desktop
+tickFunctions runtime@(Debugger ref _ _ _ _) d=do
+  s<-readIORef ref
+  case functionPreparing s of
+    Nothing->pure()
+    Just(rev,session,worker)->do
+      result<-poll worker
+      case result of
+        Nothing->pure()
+        Just outcome->do
+          modifyIORef' ref (\state->state {functionPreparing=Nothing})
+          when (rev==functionRevision s && session==sidebarSession s) $
+            modifyIORef' ref (\state->state {functionResults=Just(case outcome of Left _->Left "Function breakpoint reply preparation failed.";Right value->value)})
+  sendFunctions runtime
+  pure d
+
+functionSummary :: State -> [Text]
+functionSummary s=
+  [if adapterId s=="hdb" then (if isJust(client s) then "This hdb launch uses " else "Next hdb launch will use ")<>(if functionKind s then "function breakpoints; source settings are retained inactive." else "source breakpoints; function settings are retained inactive.")
+    else "Capable adapters apply source and function lists independently."]++
+  [if isJust(client s) then "A breakpoint stop is still connected. Disconnect fully to change the next hdb kind." else "Next hdb launch: "<>(if functionKind s then "functions" else "source (default)")<>". Both lists are retained."]++
+  [if not(ready s) then "Pending: adapter capabilities are not available yet." else if not(flag "supportsFunctionBreakpoints"(capabilities s)) then "Unavailable: this adapter does not support function breakpoints." else if not(functionActive s) then "Function requests are inactive for this session." else if functionPending s then "Applying the latest function catalogue…" else case functionResults s of
+    Nothing->"No current function reply."
+    Just(Left _)->"Function update failed; inspect Results."
+    Just(Right(total,verified,_))->tshow verified<>" verified locations in "<>tshow total<>" adapter rows in the latest set reply. Rows are not assigned to individual names."]
+
+showFunctionList :: Debugger -> Desktop -> IO Desktop
+showFunctionList (Debugger ref _ _ _ _) d=do
+  s<-readIORef ref
+  let ident=choiceId s+1
+      entries=M.toAscList(functionNames s)
+      labels=[name<>if enabled then "" else " (disabled)"|(_,(name,enabled))<-entries]
+      form=Dialog "Function breakpoints" (DebugFunctionDialog ident) [ListBox "Functions" labels 0] 0 ["Add","Edit","Toggle","Remove","Results","Kind…","Close"] (functionSummary s)
+  modifyIORef' ref (\state->state {choiceId=ident,functionDialog=Just(FunctionList ident (functionRevision s) (sidebarSession s) (map fst entries))})
+  pure d {dialog=Just form}
+
+functionForm :: Debugger -> Maybe Int -> Desktop -> IO Desktop
+functionForm (Debugger ref _ _ _ _) chosen d=do
+  s<-readIORef ref
+  let ident=choiceId s+1
+      (name,enabled)=fromMaybe("",True)(chosen >>= (`M.lookup` functionNames s))
+      form=Dialog (if isJust chosen then "Edit function breakpoint" else "Add function breakpoint") (DebugFunctionDialog ident)
+        [Input "Function name" name (T.length name),CheckBox "Enabled" enabled] 0 ["Save","Cancel"]
+        ["Literal adapter function name only; no conditions or evaluation.","Use a qualified name with hdb. Names and results are human-only."]
+  modifyIORef' ref (\state->state {choiceId=ident,functionDialog=Just(FunctionEdit ident (functionRevision s) (sidebarSession s) chosen form)})
+  pure d {dialog=Just form}
+
+functionAction :: Debugger -> Int -> [Text] -> Desktop -> IO Desktop
+functionAction runtime@(Debugger ref _ _ _ _) ident values d=do
+  s<-readIORef ref
+  let button=case values of value:_->readMaybe(T.unpack value)::Maybe Int;_->Nothing
+      selected=case values of _:value:_->readMaybe(T.unpack value)::Maybe Int;_->Nothing
+      current rev session=rev==functionRevision s && session==sidebarSession s
+      changed update=do
+        retireFunctionPreparation runtime
+        modifyIORef' ref (\state->(update state) {functionRevision=functionRevision state+1,functionResults=Nothing,functionDialog=Nothing})
+        sendFunctions runtime
+        showFunctionList runtime d {status="Function catalogue saved."}
+      stale=pure d {status="Function catalogue or session changed; reopen it before applying an action."}
+  case functionDialog s of
+    Just(FunctionList captured rev session keys) | captured==ident,current rev session->case button of
+      Just 0 | M.size(functionNames s)<128->functionForm runtime Nothing d
+      Just 0->showFunctionList runtime d {status="The 128-name catalogue limit is reached; remove an item first."}
+      Just 1 | Just key<-selected >>= at keys->functionForm runtime (Just key) d
+      Just 2 | Just key<-selected >>= at keys->changed(\state->state {functionNames=M.adjust(\(name,enabled)->(name,not enabled))key(functionNames state)})
+      Just 3 | Just key<-selected >>= at keys->changed(\state->state {functionNames=M.delete key(functionNames state)})
+      Just 4->do
+        let next=choiceId s+1
+            labels=case functionResults s of Just(Right(_,_,rows))->rows;Just(Left err)->[err];_->["No current adapter results."]
+        modifyIORef' ref (\state->state {choiceId=next,functionDialog=Just(FunctionResults next rev session)})
+        pure d {dialog=Just(Dialog "Function set reply (unassigned)" (DebugFunctionDialog next) [ListBox "Locations" labels 0] 0 ["Back","Close"] ["Snapshot of the latest set reply. One name may have several locations; later resolution events are not assigned to names."])}
+      Just 5->do
+        let next=choiceId s+1
+            form=Dialog "Next hdb breakpoint kind" (DebugFunctionDialog next) [Radio "Kind" ["Source","Function"] (if functionKind s then 1 else 0)] 0 ["Save","Cancel"]
+              ["Change only while fully disconnected, not merely paused at a breakpoint.","hdb cannot preserve overlapping source/function actions. Saved lists remain intact."]
+        modifyIORef' ref (\state->state {choiceId=next,functionDialog=Just(FunctionKind next rev session form)})
+        pure d {dialog=Just form}
+      _->modifyIORef' ref (\state->state {functionDialog=Nothing}) >> pure d
+    Just(FunctionEdit captured rev session chosen template) | captured==ident->case values of
+      "0":name:enabled:_ | current rev session->do
+        let trimmed=T.strip name
+            duplicate=any(\(key,(existing,_))->Just key/=chosen && existing==trimmed)(M.toList(functionNames s))
+            draft notice=pure d {status=notice,dialog=Just(template {fields=[Input "Function name" name(T.length name),CheckBox "Enabled"(enabled=="true")]})}
+        if T.null trimmed || T.compareLength trimmed 512==GT || T.any (`elem` ['\0','\r','\n']) trimmed then draft "Function names need 1–512 characters without NUL or line breaks."
+        else if duplicate then draft "That literal name is already in the catalogue."
+        else if isJust chosen then changed(\state->state {functionNames=M.insert(fromMaybe(-1)chosen)(trimmed,enabled=="true")(functionNames state)})
+        else changed(\state->state {functionNames=M.insert(nextFunction state)(trimmed,enabled=="true")(functionNames state),nextFunction=nextFunction state+1})
+      "0":name:enabled:_->pure d {status="Session or catalogue changed; copy the draft before reopening.",dialog=Just(template {fields=[Input "Function name" name(T.length name),CheckBox "Enabled"(enabled=="true")]})}
+      _->modifyIORef' ref (\state->state {functionDialog=Nothing}) >> pure d
+    Just(FunctionKind captured rev session template) | captured==ident->case values of
+      "0":kind:_ | current rev session,kind `elem` ["0","1"]->do
+        starting<-hdbPending runtime
+        if isJust(client s) || starting then pure d {status="Disconnect fully before changing hdb kind; a breakpoint stop is still connected.",dialog=Just template}
+        else modifyIORef' ref (\state->state {functionKind=kind=="1",functionDialog=Nothing}) >> showFunctionList runtime d {status="Next hdb kind saved; both breakpoint lists retained."}
+      "0":_->stale
+      _->modifyIORef' ref (\state->state {functionDialog=Nothing}) >> pure d
+    Just(FunctionResults captured rev session) | captured==ident,current rev session->if button==Just 0 then showFunctionList runtime d else modifyIORef' ref (\state->state {functionDialog=Nothing}) >> pure d
+    _->stale
+
 data State = State
   { systemOne :: Maybe SystemOneServices, assistance :: Maybe Assistance
   , client :: Maybe D.Client, connected :: Bool, capabilities :: Value, ready :: Bool, configured :: Bool
@@ -421,6 +578,10 @@ data State = State
   , endedAt :: Maybe Integer, programExitCode :: Maybe Int
   , choices :: M.Map Text [Value], choiceId :: Int, breakRequests :: M.Map Text Int
   , breakpointDialog :: Maybe (Int,Int,Text,Breakpoint,Dialog)
+  , functionNames :: M.Map Int (Text,Bool), nextFunction :: Int, functionRevision :: Int
+  , functionKind :: Bool, functionSentRevision :: Int, functionRequest :: Maybe Int
+  , functionPreparing :: Maybe (Int,Int,Async (Either Text (Int,Int,[Text])))
+  , functionResults :: Maybe (Either Text (Int,Int,[Text])), functionDialog :: Maybe FunctionDialog
   , breakpointOwners :: M.Map Text BreakpointOwner
   , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
   , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
@@ -438,7 +599,7 @@ emptyState :: State
 emptyState = State {systemOne=Nothing,assistance=Nothing,client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakpointDialog=Nothing,breakpointOwners=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
+  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakpointDialog=Nothing,functionNames=M.empty,nextFunction=1,functionRevision=0,functionKind=False,functionSentRevision=(-1),functionRequest=Nothing,functionPreparing=Nothing,functionResults=Nothing,functionDialog=Nothing,breakpointOwners=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -1078,7 +1239,7 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       when (command=="start") $ do
         epoch
         live
-        unless (ready s && configured s && stopped s && isJust (thread s) && isJust (frame s)) (fail "Assistance requires a ready paused frame")
+        unless (ready s && configured s && stopped s && not(functionSynchronizing s) && isJust (thread s) && isJust (frame s)) (fail "Assistance requires a ready paused frame with settled breakpoints")
         value<-maybe (fail "A debugging goal is required") pure goal
         unless (not (T.null (T.strip value)) && T.compareLength value 4096/=GT && not (T.any (=='\0') value)) (fail "Goal requires 1..4096 characters without NUL")
         unless (isJust (systemOne s)) (fail "System One is unavailable")
@@ -1117,6 +1278,7 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
       live
       command<-o .: "command"
       unless (command `elem` ["continue","next","stepIn","stepOut","pause","disconnect"]) (fail "Unsupported debugger control")
+      when (command `elem` ["continue","next","stepIn","stepOut"] && functionSynchronizing s) (fail "Wait for the function breakpoint update or reconnect before resuming")
       unless (command=="disconnect" || (ready s && configured s && isJust (thread s) &&
         if command=="pause" then not (stopped s) else stopped s)) (fail "Debugger is not ready for this control")
       pure (ToolControl command)
@@ -1285,6 +1447,7 @@ boundedResult value | BL.length (encode value)>=1024*1024 = Left "Debugger respo
                     | otherwise = Right value
 
 completeInspection :: Pending -> Either Text Value -> IO ()
+completeInspection (FunctionBreaks _ _ reply) result=void(tryPutMVar reply result)
 completeInspection (LocationInspection _ reply) result=void(tryPutMVar reply result)
 completeInspection (SourceInspection _ _ _ reply) result=void (tryPutMVar reply result)
 completeInspection (Inspection _ reply) result=tryPutMVar reply result >> pure ()
@@ -1390,6 +1553,8 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
                 pure d {status=maybe "Breakpoint saved." ("Breakpoint saved; "<>) (breakpointUnavailable s point)}
           _->retainDraft "Breakpoint changed; copy your draft before reopening."
     ("breakpoint",_) -> toggleBreakpoint runtime d
+    ("function-breakpoints",_) -> showFunctionList runtime d
+    (action,_) | Just suffix<-T.stripPrefix "function-ui:" action,Just ident<-readMaybe(T.unpack suffix)->functionAction runtime ident values d
     ("breakpoints",_) -> do
       let rows=[object ["key" .= key,"line" .= bpLine bp] | (key,_,bp)<-allBreakpoints s]
           labels=[sourceLabel src<>":"<>tshow (bpLine bp)<>if not (bpEnabled bp) then " disabled" else case breakpointUnavailable s bp of
@@ -1410,6 +1575,7 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
     ("stack",_) | stopped s, Just tid<-thread s -> sendStack runtime True tid >> pure d {status="Loading call stack..."}
     ("scopes",_) | stopped s, Just selected<-frame s,Just ident<-(field "id" selected :: Maybe Int) ->
       send runtime (Scopes (frameRevision s)) "scopes" (object ["frameId" .= ident]) >> pure d {status="Loading scopes..."}
+    (command,_) | command `elem` ["continue","next","stepIn","stepOut"],functionSynchronizing s->pure d {status="Wait for the function breakpoint update or reconnect before resuming."}
     (command,_) | command `elem` ["continue","next","stepIn","stepOut","pause"],ready s,Just tid<-thread s,
                   (command=="pause" && not (stopped s)) || (command/="pause" && stopped s) -> do
       when (command/="pause") (modifyIORef' ref invalidate)
@@ -1721,7 +1887,7 @@ initializeSession runtime@(Debugger ref _ _ _ _) directory c address requestName
   stopTransport runtime s
   resetOutputOwner runtime d
   writeIORef ref emptyState {systemOne=systemOne s,client=Just c,generation=generation s+1,root=directory,endpoint=address,
-    watchProvider=watchProvider s,watchExpressions=watchExpressions s,watchCatalogueRevision=watchCatalogueRevision s,nextWatch=nextWatch s,choiceId=choiceId s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,breakpoints=persistentBreakpoints s,breakpointOwners=M.restrictKeys (breakpointOwners s) (M.keysSet (persistentBreakpoints s)),breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
+    watchProvider=watchProvider s,watchExpressions=watchExpressions s,watchCatalogueRevision=watchCatalogueRevision s,nextWatch=nextWatch s,choiceId=choiceId s,followSource=followSource s,sidebarVisible=followSource s,sidebarSession=generation s+1,functionNames=functionNames s,nextFunction=nextFunction s,functionRevision=functionRevision s,functionKind=functionKind s,breakpoints=persistentBreakpoints s,breakpointOwners=M.restrictKeys (breakpointOwners s) (M.keysSet (persistentBreakpoints s)),breakModified=breakModified s,startRequest=(requestName,arguments),managed=owned,adapterId=adapter}
   -- Explicit session replacement retires the old dialog nonce.
   pure (if followSource s then clearDialog d else d) {status="Connecting debugger..."}
 
@@ -1736,9 +1902,9 @@ stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) s = 
   forM_ (locationPreparing s) $ \(_,_,alive,_)->writeIORef alive False
   -- No old worker can publish into the replacement session. Process cleanup is
   -- joined only at daemon teardown, outside the desktop lock.
-  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,debugCradle=Nothing})
+  modifyIORef' ref (\state -> state {client=Nothing,terminalLaunch=Nothing,debugConsoles=[],sourcePreparing=Nothing,watchPreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,functionPreparing=Nothing,functionRequest=Nothing,functionResults=Nothing,debugCradle=Nothing})
   cleanups<-mapM (C.retireConsole (debuggerConsoles runtime)) (debugConsoles s)
-  when (isJust (client s) || isJust (terminalLaunch s) || isJust (sourcePreparing s) || isJust (watchPreparing s) || isJust(locationPreparing s) || not (null cleanups) || isJust (debugCradle s)) $ do
+  when (isJust (client s) || isJust (terminalLaunch s) || isJust (sourcePreparing s) || isJust (watchPreparing s) || isJust(locationPreparing s) || isJust(functionPreparing s) || not (null cleanups) || isJust (debugCradle s)) $ do
     task<-async $ restore $ flip finally
       (mapM_ D.stopClient (client s) `finally` mapM_ (void . tryIOError . removeFile) (debugCradle s)) $ do
       forM_ (terminalLaunch s) $ \(_,_,worker,result) -> do
@@ -1748,6 +1914,7 @@ stopTransport runtime@(Debugger ref _ (HdbRuntime _ _ _ _ _ retired _) _ _) s = 
       forM_ (sourcePreparing s) $ \(SourcePreparation _ _ _ _ _ _ _ worker)->cancel worker
       forM_ (watchPreparing s) $ \(WatchPreparation _ worker)->cancel worker
       forM_ (locationPreparing s) $ \(_,_,_,worker)->cancel worker
+      forM_ (functionPreparing s) $ \(_,_,worker)->cancel worker
       mapM_ (either (const (pure ())) id) cleanups
     modifyIORef' retired (task:)
 
@@ -1828,7 +1995,8 @@ send (Debugger ref clock _ _ _) kind command arguments = do
     case result of
       Left (err::IOException) -> modifyIORef' ref (\state -> state {failure=Just ("DAP: "<>T.pack (show err))})
       Right ident -> modifyIORef' ref (\state -> state {pending=M.insert ident (kind,generation state,now) (pending state),
-        breakRequests=case kind of Breaks key _ -> M.insert key ident (breakRequests state); _ -> breakRequests state})
+        breakRequests=case kind of Breaks key _ -> M.insert key ident (breakRequests state); _ -> breakRequests state,
+        functionRequest=case kind of FunctionBreaks{}->Just ident;_->functionRequest state})
 
 -- Capture presentation revision after a stop/thread transition. The stack
 -- target remains explicit even when another thread is selected while it waits.
@@ -1844,7 +2012,8 @@ tickDebugger runtime original = do
   publishSidebarEpoch runtime
   drainSidebarReads runtime updated
   located<-tickLocations runtime updated
-  tickAssistance runtime located
+  updatedFunctions<-tickFunctions runtime located
+  tickAssistance runtime updatedFunctions
 
 tickDebuggerOwner :: Debugger -> Desktop -> IO Desktop
 tickDebuggerOwner runtime@(Debugger ref clock _ _ _) original = do
@@ -1993,7 +2162,7 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
       Just (kind,epoch,_) -> do
         watchLive<-watchProviderCurrent s
         modifyIORef' ref (\state -> state {pending=M.delete ident (pending state)})
-        if (case kind of WatchRequest{}->not watchLive; _->False) || (stale kind && epoch/=generation s) || selectionExpired s kind || sourceInspectionExpired s d kind || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident; _ -> False) then do
+        if (case kind of WatchRequest{}->not watchLive; _->False) || (stale kind && epoch/=generation s) || selectionExpired s kind || sourceInspectionExpired s d kind || (case kind of Breaks key _ -> M.lookup key (breakRequests s)/=Just ident;FunctionBreaks _ session _->functionRequest s/=Just ident || session/=sidebarSession s; _ -> False) then do
           completeInspection kind (Left "Debugger inspection expired; refresh debug_status.")
           pure d
         else case kind of
@@ -2007,6 +2176,15 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
               _->pure ()
             pure d
           WatchRequest operation backing base private->prepareWatch runtime operation backing base private result >> pure d
+          FunctionBreaks rev session reply->do
+            modifyIORef' ref (\state->state {functionRequest=Nothing})
+            void(tryPutMVar reply result)
+            when (session/=sidebarSession s || rev/=functionRevision s) (retireFunctionPreparation runtime)
+            when (either(const True)(const False)result) $ do
+              stopTransport runtime s
+              modifyIORef' ref (\state->state {client=Nothing,ready=False,configured=False,failure=Just "Function breakpoint update failed; reconnect or relaunch before retrying."})
+            sendFunctions runtime
+            pure d
           LocationInspection request reply->do
             valid<-locationsCurrent request d
             void(tryPutMVar reply (if valid && locationsAvailable s && knownLocationSource s request then result else Left "Executable location source is private or expired."))
@@ -2115,6 +2293,7 @@ configure runtime@(Debugger ref _ _ _ _) = do
   when (ready s && capabilities s/=Null && not (configured s)) $ do
     modifyIORef' ref (\state -> state {configured=True})
     forM_ (M.toList (breakpoints s)) $ \(key,(source,points)) -> sendBreakpoints runtime key source points
+    sendFunctions runtime
     when (not (null (items "exceptionBreakpointFilters" (capabilities s)))) $
       send runtime Exceptions "setExceptionBreakpoints" (object ["filters" .= exceptionFilters s])
     when (flag "supportsConfigurationDoneRequest" (capabilities s)) $
@@ -2194,6 +2373,7 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
     Control _ -> pure d
     AssistedControl{} -> pure d
     WatchRequest{}->pure d
+    FunctionBreaks _ _ reply->void(tryPutMVar reply (Right body)) >> pure d
     LocationInspection _ reply->void(tryPutMVar reply (Right body)) >> pure d
     SourceInspection _ _ _ reply->void (tryPutMVar reply (Right body)) >> pure d
     Inspection command reply -> do
@@ -2601,7 +2781,7 @@ toggleBreakpointSource runtime@(Debugger ref _ _ _ _) source row modified d=do
         Nothing->old++[plainBreakpoint row]
   modifyIORef' ref (\current->current {breakpoints=M.insert key (source,points) (breakpoints current),breakpointOwners=if null points then M.delete key (breakpointOwners current) else breakpointOwners current,breakModified=M.insert key modified (breakModified current)})
   when (configured state) (sendBreakpoints runtime key source points)
-  pure d {status=case previous of
+  pure d {status=if functionSourceInactive state then "Source setting retained inactive; disconnect and select source kind for the next hdb launch." else case previous of
     Just point | richBreakpoint point || not (bpEnabled point)->if removing then "Breakpoint disabled." else maybe "Breakpoint enabled." ("Breakpoint enabled; unavailable: "<>) (breakpointUnavailable state point)
     _->if removing then "Breakpoint removed." else "Breakpoint requested at line "<>tshow row<>if modified then "; source has unsaved changes." else "."}
 
@@ -2623,11 +2803,12 @@ toggleBreakpoint runtime@(Debugger ref _ _ _ _) d = do
 sendBreakpoints :: Debugger -> Text -> Value -> [Breakpoint] -> IO ()
 sendBreakpoints runtime@(Debugger ref _ _ _ _) key source points = do
   s<-readIORef ref
-  retainOutputSource runtime s key source points
-  let active=map breakpointFields (activeBreakpoints s points)
-  send runtime (Breaks key (map bpLine (activeBreakpoints s points))) "setBreakpoints"
-    (object ["source" .= source,"breakpoints" .= active,
-      "sourceModified" .= M.findWithDefault False key (breakModified s)])
+  unless (functionSourceInactive s) $ do
+   retainOutputSource runtime s key source points
+   let active=map breakpointFields (activeBreakpoints s points)
+   send runtime (Breaks key (map bpLine (activeBreakpoints s points))) "setBreakpoints"
+     (object ["source" .= source,"breakpoints" .= active,
+       "sourceModified" .= M.findWithDefault False key (breakModified s)])
 
 allBreakpoints :: State -> [(Text,Value,Breakpoint)]
 allBreakpoints s=[(key,source,bp) | (key,(source,points))<-M.toList (breakpoints s),bp<-points]
@@ -2665,6 +2846,7 @@ retireBackgroundDialog :: Desktop -> Desktop
 retireBackgroundDialog d=case dialog d of
   Just dg | DebuggerWatchDialog{}<-purpose dg->d
   Just dg | DebugBreakpointDialog{}<-purpose dg->d
+  Just dg | DebugFunctionDialog{}<-purpose dg->d
   _->clearDialog d
 
 clearDialog :: Desktop -> Desktop
@@ -2674,6 +2856,7 @@ clearDialog d = case dialog d of
   Just dg | DebugLocationsDialog{}<-purpose dg->d {dialog=Nothing}
   Just dg | DebuggerWatchDialog{}<-purpose dg->d {dialog=Nothing}
   Just dg | DebugBreakpointDialog{}<-purpose dg->d {dialog=Nothing}
+  Just dg | DebugFunctionDialog{}<-purpose dg->d {dialog=Nothing}
   _->d
 sourceKey :: Value -> Text
 sourceKey source = text "path" source<>"#"<>tshow (integer "sourceReference" source)

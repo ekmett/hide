@@ -111,6 +111,7 @@ builtinCommands =
   ,BuiltinCommand "hide.debug.launch" (DebugCommand "launch")
   ,BuiltinCommand "hide.debug.toggle-breakpoint" (DebugCommand "breakpoint")
   ,BuiltinCommand "hide.debug.breakpoints" (DebugCommand "breakpoints")
+  ,BuiltinCommand "hide.debug.function-breakpoints" (DebugCommand "function-breakpoints")
   ,BuiltinCommand "hide.debug.continue" (DebugCommand "continue")
   ,BuiltinCommand "hide.debug.pause" (DebugCommand "pause")
   ,BuiltinCommand "hide.debug.step-into" (DebugCommand "stepIn")

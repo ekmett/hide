@@ -240,6 +240,7 @@ protectedPurpose p=case p of
   DebuggerWatchDialog{} -> True
   DebugLocationsDialog{} -> True
   DebugBreakpointDialog{} -> True
+  DebugFunctionDialog{} -> True
   DebugDialog action -> privateDebuggerAction action
   ServiceDialog action -> not (serviceActionAllowed action)
   AgentDialog{} -> True
@@ -253,7 +254,7 @@ privateDebuggerAction :: Text -> Bool
 -- Agents use debug_assist, which retains their exact caller capability.
 -- A toggle can enable a stored condition: agents use the separately permissioned
 -- breakpoint tools instead of obtaining expression authority through UI input.
-privateDebuggerAction action=action=="breakpoint" || action=="breakpoints" || "breakpoint-edit:" `T.isPrefixOf` action || action=="assist" || "assist-" `T.isPrefixOf` action || action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action || privateLocationsAction action
+privateDebuggerAction action=action=="function-breakpoints" || "function-ui:" `T.isPrefixOf` action || action=="breakpoint" || action=="breakpoints" || "breakpoint-edit:" `T.isPrefixOf` action || action=="assist" || "assist-" `T.isPrefixOf` action || action=="downloads" || "downloads:" `T.isPrefixOf` action || "hdb-" `T.isPrefixOf` action || privateFrameChooserAction action || privateLocationsAction action
 privateLocationsAction :: Text -> Bool
 privateLocationsAction action=case T.splitOn ":" action of
   ["select",_,_,"locations"]->True
@@ -361,6 +362,7 @@ privateDialogFieldWith paths d dg field=pluginForm dg || privateSourceWatchWith 
 -- inferred from an ordinary field label. Current policy can add protection.
 privateSourceWatchWith :: [FilePath] -> Desktop -> Dialog -> Bool
 privateSourceWatchWith paths d dg=case purpose dg of
+  DebugFunctionDialog{}->True
   DebugSourceWatchDialog _ bid origin captured->captured || protectedBufferWith paths d bid || maybe False (protectedFilePath paths) origin
   DebugBreakpointDialog _ owners captured->captured || any (\(bid,origin)->maybe False (protectedBufferWith paths d) bid || maybe False (protectedFilePath paths) origin) owners
   DebuggerWatchDialog _ origin captured->captured || maybe False (protectedFilePath paths) origin
@@ -403,6 +405,7 @@ readableAt d=readableAtWith (privateFilePaths d) d
 
 readableAtWith :: [FilePath] -> Desktop -> Int -> Int -> Bool
 readableAtWith paths d x y
+  | Just dg<-dialog d,DebugFunctionDialog{}<-purpose dg,inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d,pluginForm dg,inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, DebugDialog action<-purpose dg, privateDebuggerAction action,
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
@@ -426,6 +429,7 @@ streamerReadableAt d=streamerReadableAtWith (privateFilePaths d) d
 streamerReadableAtWith :: [FilePath] -> Desktop -> Int -> Int -> Bool
 streamerReadableAtWith paths d x y
   | contextKind d==WindowRowsContext,Just (rect,_)<-contextMenu d,inside rect x y=False
+  | Just dg<-dialog d,DebugFunctionDialog{}<-purpose dg,inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d,pluginForm dg,inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False
   | Just dg<-dialog d, DebugDialog action<-purpose dg, (action=="downloads" || "downloads:" `T.isPrefixOf` action || privateFrameChooserAction action),
     inside (dialogRect d dg) x y || y==snd (screenSize d)-1=False

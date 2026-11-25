@@ -86,6 +86,7 @@ import qualified AgentWorkspaceCheck
 import qualified UnicodeCheck
 import qualified HexCheck
 import qualified DAPCheck
+import qualified DebuggerFunctionsCheck
 import qualified DebuggerSourcePolicyCheck
 import qualified DebuggerWatchesCheck
 import qualified DebuggerSidebarCheck
@@ -250,6 +251,7 @@ tests = askOption $ \profile->withResource
   , testCase "DebuggerAssistance" DebuggerAssistanceCheck.checks
   , testCase "DebuggerWatches" DebuggerWatchesCheck.checks
   , testCase "DebuggerSidebar" DebuggerSidebarCheck.checks
+  , testCase "DebuggerFunctions" DebuggerFunctionsCheck.checks
   , testCase "DebuggerSourcePolicy" DebuggerSourcePolicyCheck.checks
   , testCase "Completion" CompletionCheck.checks
   , testCase "Downloads" DownloadsCheck.checks

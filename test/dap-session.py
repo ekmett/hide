@@ -17,14 +17,14 @@ else:
     server.listen(2)
     print(server.getsockname()[1], flush=True)
 
-for session in range(1, 4 if mode in ('output-owner', 'rich-breakpoints') else 3 if mode == 'reconnect' else 2):
+for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owner', 'rich-breakpoints') else 3 if mode == 'reconnect' else 2):
     if stdio:
         stream = sys.stdin.buffer
     else:
         conn, _ = server.accept()
         stream = conn.makefile('rb')
     seq = 0
-    pending_attach = pending_variables = pending_source = pending_scopes = pending_evaluate = pending_locations = None
+    pending_attach = pending_variables = pending_source = pending_scopes = pending_evaluate = pending_locations = pending_function = late_function = held_function_source = None
     sidebar_scopes, sidebar_variables = {}, {}
     configured, breakpoint_requests = [], []
     scope_count = 0
@@ -129,6 +129,7 @@ for session in range(1, 4 if mode in ('output-owner', 'rich-breakpoints') else 3
                 event('initialized')
                 reply(req, dict(supportsConfigurationDoneRequest=True,
                       supportsBreakpointLocationsRequest=mode == 'locations',
+                      supportsFunctionBreakpoints=mode == 'functions' and session != 5,
                       supportsExceptionInfoRequest=mode in ('exception', 'mcp'),
                       supportsConditionalBreakpoints=mode == 'rich-breakpoints' and session != 2,
                       supportsHitConditionalBreakpoints=mode == 'rich-breakpoints' and session != 2,
@@ -162,6 +163,30 @@ for session in range(1, 4 if mode in ('output-owner', 'rich-breakpoints') else 3
                     breakpoints(req)
                     if mode == 'rich-breakpoints':
                         event('output', dict(category='console', output='RICH_OUTPUT session=' + str(session) + '\n'))
+            elif cmd == 'setFunctionBreakpoints':
+                assert mode == 'functions'
+                assert all(set(row) == {'name'} for row in args['breakpoints']), args
+                names = [row['name'] for row in args['breakpoints']]
+                def function_rows(request):
+                    selected = [row['name'] for row in request['arguments']['breakpoints']]
+                    if selected == ['missing'] or selected == ['ambiguous']:
+                        return dict(breakpoints=[dict(verified=False)])
+                    if selected == ['Main.multi']:
+                        return dict(breakpoints=[dict(id=1000+request['seq']*10+i, verified=True, source=dict(name='Multi.hs'), line=10+i) for i in range(4)])
+                    return dict(breakpoints=[dict(id=1000+request['seq']*10+i, verified=True, source=dict(name=name+'.hs'), line=3) for i,name in enumerate(selected)])
+                if names == ['Beta']:
+                    pending_function = req
+                elif names == ['refused']:
+                    reply(req, success=False)
+                else:
+                    event('output', dict(output='PRIVATE_FUNCTION_DIAGNOSTIC\n'))
+                    reply(req, function_rows(req))
+                    if held_function_source:
+                        breakpoints(held_function_source)
+                        held_function_source = False
+                    if late_function:
+                        reply(late_function, dict(breakpoints=[dict(verified=True, source=dict(name='STALE_FUNCTION'), line=99)]))
+                        late_function = None
             elif cmd == 'setExceptionBreakpoints':
                 configured.append(cmd)
                 reply(req)
@@ -198,6 +223,10 @@ for session in range(1, 4 if mode in ('output-owner', 'rich-breakpoints') else 3
                                  innerException=[dict(typeName='Inner', message='nested cause')])) )
             elif cmd == 'threads':
                 thread_count += 1
+                if pending_function:
+                    reply(pending_function, function_rows(pending_function))
+                    late_function = pending_function
+                    pending_function = None
                 if pending_locations:
                     reply(pending_locations, dict(breakpoints=[dict(line=2, column=3, endLine=2, endColumn=5)]))
                     pending_locations = None

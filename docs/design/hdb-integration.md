@@ -82,7 +82,7 @@ and planned controls.
 | Thunk inspection/forcing | Lazy child presentation hint; fetching lazy children forces | Read-only expansion refuses lazy references; nested-watch Force has live hdb list-tail qualification; root Force is fixture-tested, executing MCP tool remains planned |
 | Expression evaluation | `evaluate` with optional frame; returns value/type/reference without a lazy root hint | Manually evaluated Watches have live scalar/list qualification; console, history and executing MCP tool remain planned |
 | Source conditions, hit counts, logpoints | Implemented; hit count is parsed as an integer | Shared human editor and executing MCP conditions/hit counts preserve requested fields, disabled state and restart; logpoints pending program-terminal source privacy |
-| Function breakpoints | Implemented, including condition/hit count | Planned; no function-breakpoint request or editor yet |
+| Function breakpoints | Implemented, including condition/hit count; source replacements can erase function sites | Human-only literal-name catalogue, capability-gated; hdb chooses source or function kind for next launch, retaining both lists |
 | Exception filters and details | Implemented | Existing filters plus exception details panel/tool |
 | Valid breakpoint locations | Single-position query returns an executable span | Current-source chooser and read-only inspection; captured-source and UTF-16 validation; no range enumeration or breakpoint mutation |
 | Value formatting | Advertised; `format.hex` ignored by `variables` and `evaluate` at this pin | Live audit confirms decimal-only machine values; formatting controls await adapter implementation |
@@ -209,7 +209,12 @@ the socket closed”.
 - [ ] Add logpoints with retained program-terminal source privacy and final-publication checks.
 - [x] Add capability-gated single-position executable-location discovery through
       a human source chooser and read-only inspection, preserving source ownership.
-- [ ] Add function breakpoints.
+- [x] Add human-only, capability-gated plain function breakpoints, with retained
+      lists and separate request identity. Real hdb qualifies a named stop and
+      source-kind restart; hdb uses explicit next-launch exclusivity because the
+      pin cannot preserve overlapping source/function actions.
+- [ ] Qualify a live THC/Graal function hit and later resolution-event association;
+      no per-name verification is inferred from flattened set replies.
 - [x] Audit advertised value formatting on the live pin: ordinary variables and
       explicit Evaluate ignore `format.hex`; keep ineffective controls absent.
 - [ ] Add formatting controls after an adapter implementation honors the choice.
@@ -450,3 +455,38 @@ responses and the advertised capability do not qualify hexadecimal rendering
 at this pin. The audit used direct owned DAP requests, with evaluation explicitly
 requested for qualification; no executing read-only agent tool or ineffective
 editor control was added.
+
+### Named-function qualification
+
+An owned saved-source macOS run through the actual human catalogue stopped in
+`Main.target`, returned two verified locations for that one name, disconnected
+fully, switched to source kind and stopped at the retained source breakpoint.
+The named catalogue survived both launches. The protocol fixture additionally
+covers a capable adapter applying both lists, unsupported/inactive lists, stale
+forms and reordered replies, coalesced replacements, missing/ambiguous rows,
+multiple locations and failure without deleting requested settings.
+
+Direct pinned-hdb checks qualified module-qualified and nested-local names,
+replacement, empty removal and resending after restart. Missing and ambiguous
+unqualified names returned unverified rows. A multi-equation function returned
+several flattened rows; these must not be zipped to requested names. Reapplying
+functions after source replacements restored ordinary function stops, but
+same-site source/function combinations lost stops or replaced literal logpoint
+actions in either ordering. The editor therefore selects one active kind per hdb
+launch rather than claiming independence. This compatibility rule applies only
+to hdb; requested source records and names are never silently deleted.
+
+Graal's inspected implementation advertises function breakpoints, keeps separate
+source/function maps and compares literal root names. THC emits root tags and
+runtime function labels. This is static support evidence, not a live THC hit;
+that remaining qualification is explicit above. Function set replies are global
+snapshots, and later adapter resolution events are not assigned to individual
+names. No function conditions, logpoints or MCP mutation are exposed.
+
+The function catalogue and reply rows are internal debugger state, absent from
+`debug_status` and tool metadata. Human dialogs mask names, source filenames and
+adapter messages from guests and streaming. A nonempty function request marks
+the existing adapter-output owner private for the rest of that session, since
+adapter diagnostics can echo names. Failures publish only generic status text.
+Stopped-frame metadata continues through existing source-policy projection;
+function breakpoints introduce no new scopes/variables or MCP activation route.
