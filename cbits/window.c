@@ -5,6 +5,7 @@
 #include "file-drag-windows.h"
 #endif
 #include "accessibility.h"
+#include "accessibility-menu.h"
 #include "unicode.h"
 #include "shaders/cell.h"
 #include "shaders/power-mode.h"
@@ -302,6 +303,9 @@ void thc_title(const char *s) { SDL_SetWindowTitle(window, s); }
 void thc_set_clipboard(const char *s) { SDL_SetClipboardText(s); }
 
 void thc_close(void) {
+#ifdef WITH_ACCESSKIT
+    thc_ax_menu_clear();thc_ax_platform_menu_close();
+#endif
     /* Accessibility callbacks and SDL admission share this thread. Closing the
      * event type first prevents retained callbacks from enqueueing another copy. */
     Uint32 closing_canvas_event=canvas_action_event;canvas_action_event=0;
@@ -351,6 +355,9 @@ static void geometry(void) {
     rows = SDL_clamp(pixel_h / (cell_height * scale), 1, 256);
     origin_x = (pixel_w - cols * 8 * scale) / 2;
     origin_y = (pixel_h - rows * cell_height * scale) / 2;
+#ifdef WITH_ACCESSKIT
+    thc_ax_platform_menu_geometry();
+#endif
 #ifdef __APPLE__
     int ww,wh; SDL_GetWindowSize(window,&ww,&wh);
     static double previous[11];
@@ -378,9 +385,51 @@ int thc_accessibility(const char *json,size_t length) {
     void *native=window?SDL_GetPointerProperty(SDL_GetWindowProperties(window),SDL_PROP_WINDOW_COCOA_WINDOW_POINTER,NULL):NULL;
     if (!thc_accessibility_update(native,json,length)) return SDL_SetError("Invalid or unavailable accessibility metadata");
 #else
-    (void)json; (void)length;
+    (void)json;
+#ifdef WITH_ACCESSKIT
+    if (!length) thc_ax_menu_clear();
+#else
+    (void)length;
+#endif
 #endif
     return 1;
+}
+
+#ifdef WITH_ACCESSKIT
+static int menu_transfer_cols,menu_transfer_rows,menu_transfer_root_visible;
+#endif
+int thc_accessibility_menu_begin(int present,int viewport_cols,int viewport_rows) {
+#ifdef WITH_ACCESSKIT
+    if (!window || viewport_cols<1 || viewport_cols>512 || viewport_rows<1 || viewport_rows>256) { thc_ax_menu_clear();return 0; }
+    geometry();menu_transfer_cols=viewport_cols;menu_transfer_rows=viewport_rows;menu_transfer_root_visible=1;
+    return thc_ax_menu_begin(present,pixel_w,pixel_h);
+#else
+    (void)present;(void)viewport_cols;(void)viewport_rows;return 1;
+#endif
+}
+int thc_accessibility_menu_item(const char *id,int parent,int role,const char *name,const char *shortcut,
+                                int x,int y,int width,int height,int enabled,int current,int checked) {
+#ifdef WITH_ACCESSKIT
+    if (x<0 || y<0 || width<=0 || height<=0 || x>=menu_transfer_cols || y>=menu_transfer_rows || width>menu_transfer_cols-x || height>menu_transfer_rows-y) { thc_ax_menu_clear();return 0; }
+    double left=fmax(0,origin_x+cell_x(x)),top=fmax(0,origin_y+cell_y(y));
+    double right=fmin(pixel_w,origin_x+cell_x(x+width)),bottom=fmin(pixel_h,origin_y+cell_y(y+height));
+    if (right<=left || bottom<=top || !menu_transfer_root_visible) { if (parent==-1) menu_transfer_root_visible=0;return 1; }
+    return thc_ax_menu_item(id,parent,role,name,shortcut,left,top,right-left,bottom-top,enabled,current,checked);
+#else
+    (void)id;(void)parent;(void)role;(void)name;(void)shortcut;(void)x;(void)y;(void)width;(void)height;(void)enabled;(void)current;(void)checked;return 1;
+#endif
+}
+int thc_accessibility_menu_end(void) {
+#ifdef WITH_ACCESSKIT
+    return thc_ax_menu_end();
+#else
+    return 1;
+#endif
+}
+void thc_accessibility_menu_clear(void) {
+#ifdef WITH_ACCESSKIT
+    thc_ax_menu_clear();
+#endif
 }
 
 static void refresh_pointer(void) {
@@ -412,8 +461,14 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     const char *capture_exit = SDL_getenv("THC_EDIT_CAPTURE_EXIT");
     SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
     if (capture_exit && strcmp(capture_exit, "1") == 0) flags |= SDL_WINDOW_HIDDEN;
+#ifdef WITH_ACCESSKIT
+    int menu_hidden=(flags&SDL_WINDOW_HIDDEN)!=0;flags|=SDL_WINDOW_HIDDEN;
+#endif
     window = SDL_CreateWindow("Haskell", 1280, 800, flags);
     if (!window) return 0;
+#ifdef WITH_ACCESSKIT
+    if (!thc_ax_platform_menu_open(window)) { SDL_DestroyWindow(window);window=NULL;SDL_Quit();return SDL_SetError("Unable to attach accessibility provider"); }
+#endif
     if (strcmp(backend,"software")) {
         gpu=SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV|SDL_GPU_SHADERFORMAT_MSL,false,backend);
         if (!gpu) return 0;
@@ -440,6 +495,9 @@ int thc_open(const char *backend, double requested_scale, int requested_cols, in
     double density = (double)pw / SDL_max(1, ww);
     scale = requested_scale ? round(requested_scale * 8) / 8 : SDL_max(1, (int)lround(2 * density));
     if (!thc_mode(height, requested_cols, requested_rows)) return 0;
+#ifdef WITH_ACCESSKIT
+    if (!menu_hidden && !SDL_ShowWindow(window)) return 0;
+#endif
     return SDL_StartTextInput(window);
 }
 
@@ -1101,6 +1159,9 @@ int thc_wait(int32_t *out) {
         case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED: case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
             thc_cancel_file_drag();
             geometry(); refresh_pointer(); out[0] = 5; out[1] = cols; out[2] = rows; return delivered(&e,out);
+#ifdef WITH_ACCESSKIT
+        case SDL_EVENT_WINDOW_MOVED: thc_ax_platform_menu_geometry();continue;
+#endif
         case SDL_EVENT_WINDOW_EXPOSED: out[0] = 8; return delivered(&e,out);
         case SDL_EVENT_WINDOW_MOUSE_ENTER:
             refresh_pointer(); out[0] = 12; out[1] = mouse_x; out[2] = mouse_y; return delivered(&e,out);
@@ -1108,8 +1169,14 @@ int thc_wait(int32_t *out) {
             clear_pointer();
             out[0] = 12; out[1] = out[2] = -1; return delivered(&e,out);
         case SDL_EVENT_WINDOW_FOCUS_GAINED:
+#ifdef WITH_ACCESSKIT
+            thc_ax_platform_menu_focus(1);
+#endif
             out[0] = 13; out[1] = modifiers(SDL_GetModState()); return delivered(&e,out);
         case SDL_EVENT_WINDOW_FOCUS_LOST:
+#ifdef WITH_ACCESSKIT
+            thc_ax_platform_menu_focus(0);
+#endif
             thc_cancel_file_drag();
             clear_pointer(); left_down = false; held_mouse_buttons = 0; suppress_option_text = false;
             SDL_CaptureMouse(false); out[0] = 7; return delivered(&e,out);

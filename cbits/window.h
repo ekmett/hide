@@ -28,6 +28,12 @@ void thc_title(const char *text);
 void thc_close(void);
 /* Main-thread read-only sidebar snapshot; NULL/0 clears. Non-macOS is a no-op. */
 int thc_accessibility(const char *json, size_t length);
+/* Main-thread copied read-only menu transfer; clear retires nodes, not adapter. */
+int thc_accessibility_menu_begin(int present,int cols,int rows);
+int thc_accessibility_menu_item(const char *id,int parent,int role,const char *name,const char *shortcut,
+                                int x,int y,int width,int height,int enabled,int current,int checked);
+int thc_accessibility_menu_end(void);
+void thc_accessibility_menu_clear(void);
 const char *thc_error(void);
 const char *thc_backend(void);
 void thc_size(int *cols, int *rows);
