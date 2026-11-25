@@ -8,11 +8,13 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 
-module RuntimeMCPCheck (checks) where
-import Control.Concurrent (threadDelay,newEmptyMVar,tryPutMVar,tryReadMVar)
-import Control.Concurrent.Async (Async,withAsync,poll,wait,cancel)
+module RuntimeMCPCheck (checks,terminalChecks,terminalPrivacyChecks) where
+import Control.Concurrent (threadDelay,newEmptyMVar,tryPutMVar,tryReadMVar,readMVar,takeMVar,myThreadId)
+import Control.Concurrent.Async (Async,withAsync,poll,wait,cancel,race)
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (unless,when)
+import qualified Control.Concurrent.STM as STM
+import System.Environment (lookupEnv)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
 import qualified Data.Aeson.KeyMap as KM
@@ -35,7 +37,7 @@ import System.Exit (ExitCode(..))
 import Hide.Recovery (writeCheckpoint,readCheckpoint)
 import Hide.SessionServices
 import Hide.RuntimeMCP
-import Hide.Terminal (terminalAvailable)
+import Hide.Terminal (terminalAvailable,TerminalConfig(..))
 import qualified Hide.Consoles as Consoles
 import Hide.MCPPermissions
 import Hide.BufferReadServices (bufferReadServices)
@@ -111,6 +113,7 @@ checks=withSessionServices $ \runtime -> do
       check "a new job refuses the old requested identity" (either (const True) (const False) expired)
       _<-awaitJob jobs replacement (100::Int)
       pure ()
+  terminalPrivacyChecks
   terminalChecks runtime d
   _<-tickSessionServices runtime d
   _<-sessionEffects runtime core d []
@@ -223,6 +226,76 @@ terminalChecks runtime base=Tool.withTools runtimeToolNames [tool | RequestTool 
       pure path
     editable (TextArea _ True _ _ _ _)=True
     editable _=False
+
+-- Hold the sole output worker at its actual execution admission, then observe
+-- that worker's completion wake before changing source policy. No owner tick can
+-- publish its copied page between those two receipts.
+terminalPrivacyChecks :: IO ()
+terminalPrivacyChecks=when terminalAvailable $ Tool.withTools runtimeToolNames [tool | RequestTool tool<-pluginTools AgentUI.plugin] $ \tools->
+  bracket temporary removePathForcibly $ \root->Consoles.withConsoles $ \consoles->do
+    shell<-maybe "cmd.exe" id <$> lookupEnv "COMSPEC"
+    let config=if os=="mingw32" then TerminalConfig shell ["/d","/c","echo PREPARED_TERMINAL_RECEIPT"] [] root 80 10
+          else TerminalConfig "/bin/sh" ["-c","printf PREPARED_TERMINAL_RECEIPT"] [] root 80 10
+        source=addDocument Nothing (newBuffer "expression source\n") (initialDesktop (82,25))
+        sourceId=maybe (error "missing terminal expression source") id (activeWindow source >>= bufferId)
+        specs=runtimeTools++Tool.toolDefinitions tools
+    (ident,opened)<-Consoles.startConsole consoles config 4096 source >>= requireTerminal
+    -- Use the actual returned ID rather than relying on registry numbering.
+    let exited=do
+          result<-Consoles.consoleOutput consoles ident
+          case result of Right (bytes,_,Just 0) | "PREPARED_TERMINAL_RECEIPT" `BS.isInfixOf` bytes->pure ();_->threadDelay 1000 >> exited
+    bounded "owned terminal output and exit" exited
+    Consoles.retainConsoleSources consoles ident [(Just sourceId,Nothing)] False
+    cleanup<-Consoles.retireConsole consoles ident >>= requireTerminal
+    cleanup
+    TIO.writeFile (root </> "permissions.toml") "[editor.mcp.permissions]\nterminal_input = 'enable'\nterminal_stop = 'enable'\n"
+    withPermissionsAt (root </> "permissions.toml") specs $ \owner->do
+      ownerThread<-myThreadId
+      entered<-newEmptyMVar
+      release<-newEmptyMVar
+      let caller=do
+            here<-myThreadId
+            when (here/=ownerThread) $ do
+              _<-tryPutMVar entered ()
+              takeMVar release
+            pure (Right ())
+      services<-terminalServices owner consoles caller root
+      withAsync (Terminal.terminalOutput services (Terminal.TerminalId ident) 0 4096) $ \reply->do
+        let untilPreparing current=do
+              event<-race (readMVar entered) (STM.atomically (awaitPermissionWork owner))
+              case event of Left ()->pure current;Right ()->tickPermissions owner current >>= untilPreparing
+        preparing<-bounded "output execution admission" (untilPreparing opened)
+        _<-tryPutMVar release ()
+        bounded "this output worker completed preparation" (STM.atomically (awaitPermissionWork owner))
+        pending<-poll reply
+        check "prepared retained output has not published while owner is held" (case pending of Nothing->True;_->False)
+        let private=preparing {buffers=M.adjust (\doc->doc {documentPrivate=True}) sourceId (buffers preparing)}
+        rejected<-ownerUntil owner private reply
+        answer<-wait reply
+        check "in-flight terminal bytes cannot cross current source privacy at publication" (answer==Left "Terminal output is private.")
+        check "final publication protects the exact terminal view"
+          (maybe False documentPrivate (activeDocument rejected))
+        publicService<-terminalServices owner consoles (pure (Right ())) root
+        withAsync (Terminal.terminalList publicService) $ \listing->do
+          _<-ownerUntil owner rejected listing
+          result<-wait listing >>= requireTerminal
+          check "private retained terminals are omitted from agent listings" (null (Terminal.terminalEntries result))
+        withAsync (Terminal.terminalInput publicService (Terminal.TerminalId ident) "agent\n") $ \input->do
+          _<-ownerUntil owner rejected input
+          result<-wait input
+          check "an enabled shared input grant cannot enter a private terminal" (result==Left "Terminal output is private.")
+        withAsync (Terminal.terminalStop publicService (Terminal.TerminalId ident)) $ \stop->do
+          _<-ownerUntil owner rejected stop
+          result<-wait stop
+          check "an enabled shared stop grant cannot take private terminal authority" (result==Left "Terminal output is private.")
+  where
+    temporary=do
+      directory<-getTemporaryDirectory
+      (path,handle)<-openTempFile directory "hide-terminal-privacy"
+      hClose handle
+      removeFile path
+      createDirectory path
+      pure path
 
 -- Initial admission publishes a receipt without blocking the UI owner. Finish
 -- that tick, then hold further owner ticks while the real process reports its

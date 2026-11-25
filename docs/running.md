@@ -389,15 +389,19 @@ a process does not require replacing the files already on your desktop.
 | Disconnect | Debug > Disconnect |
 
 In **Debug > Breakpoints**, select a row and **Edit** its condition, hit condition,
-and enabled state. Conditions can execute program
-code. Syntax belongs to the adapter; the pinned hdb uses a positive integer skip count
+log message and enabled state. Conditions and log expressions can execute arbitrary
+program code and I/O. Syntax belongs to the adapter; the pinned hdb uses a positive integer skip count
 (`2` skips two hits and stops on the third).
 Unsupported features show an unavailable reason and remain stored without being
 installed as ordinary breakpoints. Toggling a rich breakpoint disables or enables
 it without erasing its fields; a line-only breakpoint keeps ordinary add/remove
 behavior. Invalid or stale edits retain entered text so you can copy it before
-reopening. File breakpoint drafts survive debugger restart. Logpoints are not yet
-available: their program-terminal output needs source privacy tracking.
+reopening. File breakpoint drafts survive debugger restart. Logpoint syntax belongs
+to the adapter; hdb interpolated expressions must return strings, for example
+`counter={show counter}`. Output from private expression sources remains available
+to the human, while shared terminal reads and streamer views are restricted.
+That protection follows retained output after breakpoints are disabled or removed
+and after the debugger transport retires.
 
 [![Call stack from the stopped THC program, with a selected frame and Open action.](site/screenshots/debug-stack.png)](site/screenshots/debug-stack.png)
 

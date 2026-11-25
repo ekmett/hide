@@ -54,7 +54,7 @@ Use `debug_set_breakpoints`, `debug_control` and `debug_inspect` to set source b
 `debug_set_breakpoints` retains its integer `lines: [1, 4]` input. The separately
 permissioned `debug_configure_breakpoints` accepts
 `breakpoints: [{"line": 4, "condition": "counter > 2", "hitCondition": "3",
-"enabled": true}]`. Integer replacement
+"logMessage": "counter={show counter}", "enabled": true}]`. Integer replacement
 retains the rich fields and enabled state of listed lines; it cannot activate a
 disabled expression. Rich records replace their fields;
 omitted lines are removed. Each field is bounded to 4096 characters. Readback
@@ -62,15 +62,18 @@ retains ordinary line/verification fields and adds requested metadata, enabled
 state and an `unavailable` reason. `pending` also covers the latest source-set
 request, including a disable/clear, while it awaits an adapter reply. Check the
 active session and generation as well; retirement cancels pending requests. Unsupported fields remain stored and are never
-silently installed as an unconditional breakpoint. Conditions
+silently installed as an unconditional breakpoint. Conditions and log expressions
 can execute arbitrary code and I/O, so configure is an executing tool with its
 own Enable/Prompt/Disable policy (Prompt by default). Existing permission to set
 integer breakpoints does not grant expression execution. Guest key/menu input
 cannot toggle rich breakpoint activation; agents use the permissioned tools. Private
-source expressions are omitted from agent readback. `logMessage` is rejected
-until program-terminal logpoint output has source privacy tracking. Retained
-DAP output becomes unavailable to tools and assistance when a contributing
-expression source becomes private; other debug status fields remain available.
+source expressions are omitted from agent readback. Retained DAP output becomes
+unavailable to tools and assistance when a contributing expression source becomes
+private; other debug status fields remain available. The same source provenance
+follows program-terminal output beyond breakpoint removal and transport retirement.
+Private terminal output and input are refused, and private terminals are omitted
+from shared listings. A page prepared before a privacy change cannot publish
+after it. Ordinary public debugger terminals retain their shared agent workflow.
 
 If source privacy changes while a status snapshot is prepared, its source,
 frame, breakpoint, output, assistance and adapter metadata fields are omitted.

@@ -270,10 +270,10 @@ perform runtime@(SessionServices directory consoles _ ref) action values d=case 
         when (result==Right ()) (buildSettingsChanged ref (B.buildToolchain config))
         pure $ either (\err -> d {status=err}) (const d {toolchain=Just (B.buildToolchain config),status="Target saved. F9 builds; Ctrl+F9 runs."}) result
     ("terminal-input",[tid,text]) -> do
-      result<-C.inputConsole consoles tid (TE.encodeUtf8 text)
+      result<-C.inputHumanConsole consoles tid (TE.encodeUtf8 text)
       pure (either (\err -> d {status=err}) (const d) result)
     ("terminal-stop",_) -> case activeDocument d >>= documentLabel >>= T.stripPrefix "Terminal " of
-      Just tid -> do result<-C.killConsole consoles tid; pure d {status=either id (const "Terminal command stopped.") result}
+      Just tid -> do result<-C.retireConsole consoles tid >>= either (pure . Left) (fmap Right); pure d {status=either id (const "Terminal command stopped.") result}
       Nothing -> pure d {status="Select a terminal window first."}
     _ -> pure d {status="Unknown session service action."}
 

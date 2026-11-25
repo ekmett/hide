@@ -93,6 +93,7 @@ import Hide.Debugger
 import Hide.DebuggerSidebar
 import Hide.Conversation
 import Hide.SessionServices hiding (sessionDirectory)
+import qualified Hide.Consoles as Consoles
 import qualified Hide.LSP as L
 import Hide.Tooling
 import Hide.GitOperations
@@ -372,7 +373,20 @@ runEditor plugins args = do
                           result@(quit,_)<-runtimeEffects current [effect]
                           when quit (writeIORef exiting True)
                           pure result
-                    guestCore d pending=validateGuestEffects d pending >> core d pending
+                    guestCore d pending=do
+                      prepared<-Consoles.refreshConsolePrivacy (sessionConsoles services) d
+                      current<-foldM authorizeTerminal prepared pending
+                      validateGuestEffects current pending
+                      core current pending
+                      where
+                        authorizeTerminal current effect=case effect of
+                          ServiceAction "terminal-input" [ident,_]->authorize current ident
+                          ServiceAction "terminal-stop" _->maybe (pure current) (authorize current) (activeTerminal current)
+                          TerminalMouseInput ident _->authorize current ident
+                          _->pure current
+                        authorize current ident=do
+                          (checked,allowed)<-Consoles.publicConsoleAt (sessionConsoles services) ident current
+                          either (ioError . userError . T.unpack) (const (pure checked)) allowed
                     effects d pending=do
                       writeIORef exiting False
                       (quit,updated)<-policyEffects permissions core d pending
@@ -406,7 +420,8 @@ runEditor plugins args = do
                           Left err -> pure (Left (T.pack err))
                           Right image -> capture font d image)
                       | otherwise = debuggerTool debugger d name parameters
-                    inspect d token request=do
+                    inspect original token request=do
+                      d<-Consoles.refreshConsolePrivacy (sessionConsoles services) original
                       writeIORef exiting False
                       let agents=conversationAgents conversation
                           hub=AR.agentHub agents

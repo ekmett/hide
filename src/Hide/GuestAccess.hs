@@ -163,6 +163,12 @@ validateGuestEffects d=mapM_ check
     denied=ioError (userError "Agent tools cannot access editor authority or session-key files.")
     path name=canonicalizePath name >>= \resolved->when (protectedPath d resolved) denied
     buffer ident=when (protectedBuffer d ident) denied
+    -- Host keyboard input keeps its human terminal authority. Guest effects
+    -- must name an existing public terminal view; closed/private IDs use the
+    -- separately permissioned terminal service instead of forging host effects.
+    terminal ident=case [bid | (bid,doc)<-M.toList (buffers d),documentLabel doc==Just ("Terminal "<>ident)] of
+      [bid]->buffer bid
+      _->denied
     treePath trace=case (trace,sideTree d) of
       (hit:_,Just tree)->maybe (pure ()) path (Tree.infoResource . stateInfo =<< nodeAt hit tree)
       _->denied
@@ -177,6 +183,9 @@ validateGuestEffects d=mapM_ check
       InvokeMenu _ _ (Just (MessagesTarget _ _ (Just (name,_,_))))->path name
       OpenChoice _ base input pattern->let chosen=T.unpack (if T.null input then pattern else input) in path (if isAbsolute chosen then chosen else base </> chosen)
       SaveDocument ident target _->buffer ident >> maybe (pure ()) path target
+      ServiceAction "terminal-input" [ident,_]->terminal ident
+      ServiceAction "terminal-stop" _->maybe denied terminal (activeTerminal d)
+      TerminalMouseInput ident _->terminal ident
       DownloadDocument ident->buffer ident
       ResolveConflict conflict _->buffer (conflictBuffer conflict)
       _->pure ()

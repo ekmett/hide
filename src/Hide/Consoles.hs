@@ -18,7 +18,8 @@
 module Hide.Consoles
   ( Consoles, withConsoles, startConsole, tickConsoles, consoleOutput
   , PreparedConsole, prepareConsole, adoptConsole, closePreparedConsole, consoleProcessId
-  , listConsoles, inputConsole, mouseConsole, killConsole, retireConsole, releaseConsole
+  , listConsoles, inputConsole, inputHumanConsole, mouseConsole, killConsole, retireConsole, releaseConsole
+  , retainConsoleSources, refreshConsolePrivacy, publicConsoleAt
   ) where
 
 import Control.Concurrent.MVar
@@ -30,6 +31,8 @@ import qualified Data.Map.Strict as M
 import qualified Data.Set as S
 import Data.Text (Text)
 import Data.Word (Word64)
+import System.Mem.StableName
+import Hide.GuestAccess (protectedBufferWith,protectedFilePath)
 import qualified Data.Text as T
 import Hide.Buffer
 import Hide.Model hiding (message)
@@ -44,7 +47,63 @@ data Console = Console
   , retainedOutput :: ByteString, outputTruncated :: Bool
   , latestSnapshot :: TerminalSnapshot, latestScreen :: ConsoleScreen
   , consoleError :: Maybe Text, consoleRetiring :: Bool
-  , consoleMouse :: Maybe TerminalMouseEvent }
+  , consoleMouse :: Maybe TerminalMouseEvent, consoleDisclosure :: !ConsoleDisclosure }
+
+-- Disclosure belongs to retained bytes, independent of the DAP transport and
+-- process lifetime. Private/overflowed provenance stays restricted until release.
+data ConsoleDisclosure = ConsoleDisclosure !Bool !(M.Map (Maybe Int,Maybe FilePath) ()) !(Maybe ConsolePrivacySnapshot)
+data ConsolePrivacySnapshot = ConsolePrivacySnapshot !(StableName (M.Map Int Document)) !(StableName [FilePath])
+
+privateConsole :: Console -> Bool
+privateConsole console=case consoleDisclosure console of ConsoleDisclosure private _ _->private
+
+retainConsoleSources :: Consoles -> Text -> [(Maybe Int,Maybe FilePath)] -> Bool -> IO ()
+retainConsoleSources (Consoles state) ident sources captured=modifyMVar_ state $ \(counter,consoles)->pure (counter,M.adjust retain ident consoles)
+  where
+    retain console | privateConsole console=console
+                   | otherwise=case consoleDisclosure console of
+      ConsoleDisclosure _ previous _->
+        let next=M.union previous (M.fromList [(source,()) | source<-sources])
+            private=captured || M.size next>1024
+        in console {consoleDisclosure=ConsoleDisclosure private (if private then M.empty else next) Nothing}
+
+refreshDisclosure :: [FilePath] -> Desktop -> Console -> IO Console
+refreshDisclosure paths desktop console
+  | privateConsole console=pure console
+  | protectedBufferWith paths desktop (consoleBuffer console)=pure console {consoleDisclosure=ConsoleDisclosure True M.empty Nothing}
+  | otherwise=case consoleDisclosure console of
+    ConsoleDisclosure _ owners old | not (M.null owners)->do
+      documents<-evaluate (buffers desktop) >>= makeStableName
+      configured<-evaluate (guestPrivatePaths desktop) >>= makeStableName
+      let unchanged=case old of Just (ConsolePrivacySnapshot before pathsBefore)->eqStableName documents before && eqStableName configured pathsBefore;_->False
+      if unchanged then pure console else do
+        let private=any (\(bid,path)->maybe False (protectedBufferWith paths desktop) bid || maybe False (protectedFilePath paths) path) (M.keys owners)
+        pure console {consoleDisclosure=ConsoleDisclosure private (if private then M.empty else owners) (Just (ConsolePrivacySnapshot documents configured))}
+    _->pure console
+
+protectConsoleDocument :: Console -> Desktop -> Desktop
+protectConsoleDocument console desktop
+  | privateConsole console,Just doc<-M.lookup (consoleBuffer console) (buffers desktop),not (documentPrivate doc)=
+      desktop {buffers=M.insert (consoleBuffer console) doc {documentPrivate=True} (buffers desktop)}
+  | otherwise=desktop
+
+-- Metadata-only owner step, also used after effect/policy transitions. Retired
+-- consoles participate because their retained output remains readable otherwise.
+refreshConsolePrivacy :: Consoles -> Desktop -> IO Desktop
+refreshConsolePrivacy (Consoles state) desktop=modifyMVar state $ \(counter,consoles)->do
+  let paths=privateFilePaths desktop
+  updated<-mapM (refreshDisclosure paths desktop) consoles
+  pure ((counter,updated),foldr protectConsoleDocument desktop updated)
+
+-- Current policy is checked at final publication, even if preparation captured
+-- a public page before its expression source became private or its view closed.
+publicConsoleAt :: Consoles -> Text -> Desktop -> IO (Desktop,Either Text ())
+publicConsoleAt (Consoles state) ident desktop=modifyMVar state $ \(counter,consoles)->case M.lookup ident consoles of
+  Nothing->pure ((counter,consoles),(desktop,Left "Unknown or released terminal"))
+  Just console->do
+    updated<-refreshDisclosure (privateFilePaths desktop) desktop console
+    pure ((counter,M.insert ident updated consoles),(protectConsoleDocument updated desktop,
+      if privateConsole updated then Left "Terminal output is private." else Right ()))
 
 -- The revision belongs to this Console's Terminal. Keep preparation at the
 -- polling owner, including polls made by output readers before desktop adoption.
@@ -78,7 +137,7 @@ prepareConsole unset config limit = mask_ $ do
         Left message -> closeTerminal terminal >> pure (Left message)
         Right snapshot -> do
           console<-evaluate (recordOutput snapshot
-            (Console terminal 0 (max 0 (min (16*1024*1024) limit)) BS.empty False snapshot (prepareScreen snapshot) Nothing False Nothing))
+            (Console terminal 0 (max 0 (min (16*1024*1024) limit)) BS.empty False snapshot (prepareScreen snapshot) Nothing False Nothing (ConsoleDisclosure False M.empty Nothing)))
           pure (Right (PreparedConsole console)))
       `onException` closeTerminal terminal
 
@@ -109,11 +168,14 @@ consoleProcessId consoles ident = updateConsole consoles ident $ \console -> do
 -- | Apply appearance/size changes, poll terminals and update existing views.
 tickConsoles :: Consoles -> Desktop -> IO Desktop
 tickConsoles (Consoles state) desktop = modifyMVar state $ \(counter,consoles) -> do
-  updated <- mapM (\console -> if consoleRetiring console then pure console else do
-    result<-setTerminalAppearance (consoleTerminal console) (darkAppearance desktop)
-    case result of
-      Left message -> pure console {consoleError=Just message}
-      Right () -> releaseLostCapture desktop console >>= resizeFor desktop >>= refresh) consoles
+  let paths=privateFilePaths desktop
+  updated <- mapM (\original -> do
+    console<-refreshDisclosure paths desktop original
+    if consoleRetiring console then pure console else do
+      result<-setTerminalAppearance (consoleTerminal console) (darkAppearance desktop)
+      case result of
+        Left message -> pure console {consoleError=Just message}
+        Right () -> releaseLostCapture desktop console >>= resizeFor desktop >>= refresh) consoles
   let projected=foldr showConsole (desktop {terminalMouseTracking=S.empty}) updated
       shown=case drag projected of
         Just (TerminalDragging wid _ _ _) | dialog projected/=Nothing || menu projected/=Nothing || contextMenu projected/=Nothing ||
@@ -125,14 +187,22 @@ tickConsoles (Consoles state) desktop = modifyMVar state $ \(counter,consoles) -
 
 -- | Refresh and return retained bytes, sticky truncation state and process exit status.
 consoleOutput :: Consoles -> Text -> IO (Either Text (ByteString,Bool,Maybe Int))
-consoleOutput consoles ident = updateConsole consoles ident $ \console -> do
+consoleOutput consoles ident = updateConsole consoles ident $ \console -> if privateConsole console then pure (console,Left "Terminal output is private.") else do
   updated <- refresh console
   pure (updated,case consoleError updated of
     Just message -> Left message
     Nothing -> Right (retainedOutput updated,outputTruncated updated,snapshotExitCode (latestSnapshot updated)))
 
 inputConsole :: Consoles -> Text -> ByteString -> IO (Either Text ())
-inputConsole consoles ident bytes = updateConsole consoles ident $ \console -> do
+inputConsole=inputConsoleWith True
+
+-- Native host keyboard input is distinct from the permissioned public service.
+-- Guest effects validate their exact existing public view before this host path.
+inputHumanConsole :: Consoles -> Text -> ByteString -> IO (Either Text ())
+inputHumanConsole=inputConsoleWith False
+
+inputConsoleWith :: Bool -> Consoles -> Text -> ByteString -> IO (Either Text ())
+inputConsoleWith public consoles ident bytes = updateConsole consoles ident $ \console -> if public && privateConsole console then pure (console,Left "Terminal output is private.") else do
   result <- if consoleRetiring console then pure (Left "Terminal has stopped") else maybe (writeTerminal (consoleTerminal console) bytes) (pure . Left) (consoleError console)
   pure (console,result)
 
@@ -172,19 +242,23 @@ releaseLostCapture desktop console=case consoleMouse console of
 -- | Stop normal polling and return cleanup to run outside the shared service lock.
 -- The returned cleanup still has to be executed.
 retireConsole :: Consoles -> Text -> IO (Either Text (IO ()))
-retireConsole (Consoles state) ident = modifyMVar state $ \(counter,consoles) -> case M.lookup ident consoles of
+retireConsole=retireConsoleWith False
+
+retireConsoleWith :: Bool -> Consoles -> Text -> IO (Either Text (IO ()))
+retireConsoleWith public (Consoles state) ident = modifyMVar state $ \(counter,consoles) -> case M.lookup ident consoles of
   Nothing -> pure ((counter,consoles),Left "Unknown or released terminal")
+  Just console | public && privateConsole console -> pure ((counter,consoles),Left "Terminal output is private.")
   Just console | consoleRetiring console -> pure ((counter,consoles),Right (pure ()))
   Just console -> do
     let cleanup=do
           killTerminal (consoleTerminal console)
           updated<-refresh console
           closeTerminal (consoleTerminal console)
-          modifyMVar_ state $ \(next,current) -> pure (next,M.adjust (const updated {consoleRetiring=True}) ident current)
+          modifyMVar_ state $ \(next,current) -> pure (next,M.adjust (\latest->updated {consoleRetiring=True,consoleDisclosure=consoleDisclosure latest}) ident current)
     pure ((counter,M.insert ident console {consoleRetiring=True} consoles),Right cleanup)
 
 killConsole :: Consoles -> Text -> IO (Either Text ())
-killConsole consoles ident = retireConsole consoles ident >>= either (pure . Left) (fmap Right)
+killConsole consoles ident = retireConsoleWith True consoles ident >>= either (pure . Left) (fmap Right)
 
 -- | Close the terminal and remove its console service entry.
 releaseConsole :: Consoles -> Text -> IO (Either Text ())
@@ -256,7 +330,7 @@ showConsole console desktop = case M.lookup bid (buffers desktop) of
         -- polls; no consumer can consume another view's pending screen update.
         document = original {documentBuffer=screenBuffer prepared,documentHighlight=screenStyles prepared,
           documentHasLayoutMetadata=False,documentWidth=snapshotColumns snapshot,
-          documentCursorVisible=snapshotCursor snapshot /= Nothing}
+          documentCursorVisible=snapshotCursor snapshot /= Nothing,documentPrivate=documentPrivate original || privateConsole console}
         buffer = documentBuffer document
         count = bufferLength buffer
         cursor = fmap (\(col,row) -> bufferLineOffset buffer row + columnOffset (bufferLineAt buffer row) col) (snapshotCursor snapshot)
@@ -295,4 +369,4 @@ snapshotStyles snapshot = intercalate [("\n",Plain)] (map styleRow (rows (snapsh
       | otherwise = [(if T.null (cellText value) then " " else cellText value,TerminalStyle (cellForeground value) (cellBackground value) (cellAttributes value))]
 
 listConsoles :: Consoles -> IO [(Text,Int,Maybe Int)]
-listConsoles (Consoles state)=withMVar state $ \(_,consoles) -> pure [(ident,consoleBuffer c,snapshotExitCode (latestSnapshot c)) | (ident,c)<-M.toAscList consoles]
+listConsoles (Consoles state)=withMVar state $ \(_,consoles) -> pure [(ident,consoleBuffer c,snapshotExitCode (latestSnapshot c)) | (ident,c)<-M.toAscList consoles,not (privateConsole c)]

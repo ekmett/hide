@@ -129,7 +129,7 @@ for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owne
                 event('initialized')
                 reply(req, dict(supportsConfigurationDoneRequest=True,
                       supportsBreakpointLocationsRequest=mode == 'locations',
-                      supportsFunctionBreakpoints=mode == 'functions' and session != 5,
+                      supportsFunctionBreakpoints=mode in ('functions', 'terminal-functions') and session != 5,
                       supportsExceptionInfoRequest=mode in ('exception', 'mcp'),
                       supportsConditionalBreakpoints=mode == 'rich-breakpoints' and session != 2,
                       supportsHitConditionalBreakpoints=mode == 'rich-breakpoints' and session != 2,
@@ -164,7 +164,7 @@ for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owne
                     if mode == 'rich-breakpoints':
                         event('output', dict(category='console', output='RICH_OUTPUT session=' + str(session) + '\n'))
             elif cmd == 'setFunctionBreakpoints':
-                assert mode == 'functions'
+                assert mode in ('functions', 'terminal-functions')
                 assert all(set(row) == {'name'} for row in args['breakpoints']), args
                 names = [row['name'] for row in args['breakpoints']]
                 def function_rows(request):

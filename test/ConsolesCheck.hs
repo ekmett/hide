@@ -8,11 +8,11 @@
 -- Stability   : experimental
 -- Portability : OverloadedStrings
 
-module ConsolesCheck (checks) where
+module ConsolesCheck (checks,privacyChecks) where
 
 import SourceWindowFixture (sourceFixtureBuffer)
 import Control.Concurrent (threadDelay)
-import Control.Exception (evaluate)
+import Control.Exception (evaluate,try,IOException)
 import Control.DeepSeq (force)
 import Control.Monad (unless,forM_,foldM)
 import GHC.Conc (getAllocationCounter)
@@ -36,7 +36,8 @@ import Hide.Consoles
 import Hide.Model
 import Hide.Syntax (Style(..))
 import Hide.Terminal
-import Hide.Render (renderKey)
+import Hide.Render (renderKey,snapshot)
+import Hide.GuestAccess (protectedBuffer,sanitizedBuffer,validateGuestEffects)
 import Hide.Unicode (graphemes)
 
 checks :: AllocationProfile -> IO ()
@@ -50,12 +51,66 @@ checks profile = withConsoles $ \consoles -> do
   unchanged <- tickConsoles consoles desktop
   check "empty collection leaves desktop unchanged" (unchanged == desktop)
   if terminalAvailable then do
+    privacyChecks
     idleChecks profile consoles
     (if os=="mingw32" then windowsChecks else nativeChecks) consoles desktop
   else do
     unavailable <- startConsole consoles (config "true") 4096 desktop
     check "unavailable backend does not create terminal" (isLeft unavailable)
   putStrLn "Consoles checks passed"
+
+-- Retained source ownership is independent of DAP rows and process cleanup.
+privacyChecks :: IO ()
+privacyChecks=if not terminalAvailable then pure () else withConsoles $ \consoles->do
+  shell<-maybe "cmd.exe" id <$> lookupEnv "COMSPEC"
+  let launch script windows=if os=="mingw32" then TerminalConfig shell ["/d","/c",windows] [] "." 80 10
+        else TerminalConfig "/bin/sh" ["-c",script] [] "." 80 10
+      first=addDocument Nothing (newBuffer "source A\n") (initialDesktop (82,25))
+      sourceA=maybe (error "missing source A") sourceFixtureBuffer (activeWindow first)
+      base=addDocument Nothing (newBuffer "source B\n") first
+      sourceB=maybe (error "missing source B") sourceFixtureBuffer (activeWindow base)
+      awaitHost label marker desktop=timeout 5000000 (loop desktop) >>= maybe (error label) pure
+        where loop current=do
+                next<-tickConsoles consoles current
+                if maybe False (T.isInfixOf marker . contents . documentBuffer) (activeDocument next) then pure next
+                  else threadDelay 1000 >> loop next
+  (ident,opened)<-startConsole consoles (launch "printf 'PUBLIC_LOG_RECEIPT\n'; IFS= read -r value; printf 'HOST_INPUT_OK:%s\n' $value" "echo PUBLIC_LOG_RECEIPT & set /p value= & echo HOST_INPUT_OK") 4096 base >>= requireRight
+  _<-waitOutput consoles ident (\(bytes,_,_)->"PUBLIC_LOG_RECEIPT" `BS.isInfixOf` bytes)
+  public<-tickConsoles consoles opened
+  let bid=maybe (error "missing private terminal") sourceFixtureBuffer (activeWindow public)
+  retainConsoleSources consoles ident [(Just sourceA,Nothing)] False
+  retainConsoleSources consoles ident [(Just sourceB,Nothing)] False
+  retainConsoleSources consoles ident [] False
+  (private,allowed)<-publicConsoleAt consoles ident public {buffers=M.adjust (\doc->doc {documentPrivate=True}) sourceA (buffers public)}
+  check "accumulated original source makes retained terminal private at publication" (isLeft allowed && protectedBuffer private bid && sanitizedBuffer private bid==Nothing)
+  check "human terminal rendering remains available while streamer output hides it"
+    ("PUBLIC_LOG_RECEIPT" `T.isInfixOf` snapshot private && not ("PUBLIC_LOG_RECEIPT" `T.isInfixOf` snapshot private {streamerMode=True}))
+  check "private terminal output is unavailable to shared readers" . isLeft =<< consoleOutput consoles ident
+  check "private terminal input is unavailable to shared callers" . isLeft =<< inputConsole consoles ident "agent\n"
+  check "private terminal is omitted from shared terminal listing" . all (\(tid,_,_)->tid/=ident) =<< listConsoles consoles
+  blocked<-try (validateGuestEffects private [ServiceAction "terminal-input" [ident,"agent\n"]]) :: IO (Either IOException ())
+  check "guest input cannot forge the native host terminal effect" (isLeft blocked)
+  inputHumanConsole consoles ident "host-private\n" >>= requireRight
+  human<-awaitHost "private host input receipt" "HOST_INPUT_OK" private
+  let marker=if os=="mingw32" then "HOST_INPUT_OK" else "HOST_INPUT_OK:host-private"
+  check "host input keeps its exact terminal authority" (maybe False (T.isInfixOf marker . contents . documentBuffer) (activeDocument human))
+  -- Retirement captures a public Console. A later privacy transition must not
+  -- be overwritten when that exact deferred cleanup adopts its final snapshot.
+  (retained,second)<-startConsole consoles (launch "printf RETIRED_LOG_RECEIPT" "echo RETIRED_LOG_RECEIPT") 4096 human >>= requireRight
+  _<-waitOutput consoles retained (\(_,_,code)->code/=Nothing)
+  retainConsoleSources consoles retained [(Just sourceB,Nothing)] False
+  cleanup<-retireConsole consoles retained >>= requireRight
+  marked<-refreshConsolePrivacy consoles second {buffers=M.adjust (\doc->doc {documentPrivate=True,documentBuffer=error "terminal privacy forced source payload"}) sourceB (buffers second)}
+  cleanup
+  check "cleanup preserves privacy acquired after transport retirement" . isLeft =<< consoleOutput consoles retained
+  (sticky,stillPrivate)<-publicConsoleAt consoles retained marked {buffers=M.adjust (\doc->doc {documentPrivate=False}) sourceB (buffers marked)}
+  check "retained terminal privacy cannot be downgraded by later public source policy" (isLeft stillPrivate)
+  let (closed,_)=runCommand Close sticky
+  check "closed retained terminal still refuses shared output" . isLeft =<< consoleOutput consoles retained
+  check "closing private terminal does not retain its view" (activeTerminal closed/=Just retained)
+  let spoofed=addReadOnly ("Terminal "<>retained) "unrelated generated source" closed
+  (_,spoofAccess)<-publicConsoleAt consoles retained spoofed
+  check "an unrelated public label cannot claim retained private terminal authority" (isLeft spoofAccess)
 
 -- Polling output tools and polling the desktop share one terminal owner. An
 -- intervening read must neither consume a screen update nor rebuild idle text.
@@ -72,15 +127,25 @@ idleChecks profile consoles = do
     (maybe False (T.isPrefixOf "prepared-screen" . contents . documentBuffer) (activeDocument ready))
   key<-renderKey ready
   before<-getAllocationCounter
-  idle<-foldM (\d _->do
-    _<-consoleOutput consoles ident >>= requireRight
-    next<-tickConsoles consoles d
-    nextKey<-renderKey next
-    check "idle console polling does not request a redraw" (key==nextKey)
-    pure next) ready [1..20::Int]
+  let idleLoop start=foldM (\d _->do
+        _<-consoleOutput consoles ident >>= requireRight
+        next<-tickConsoles consoles d
+        nextKey<-renderKey next
+        check "idle console polling does not request a redraw" (key==nextKey)
+        pure next) start [1..20::Int]
+  idle<-idleLoop ready
   after<-getAllocationCounter
   check ("idle terminal polling avoids screen-sized allocation: "++show (before-after))
     (withinBudget profile (before-after) 1000000)
+  retainConsoleSources consoles ident [(Just bid,Nothing)] False
+  trackedBefore<-getAllocationCounter
+  tracked<-idleLoop idle
+  trackedAfter<-getAllocationCounter
+  let baseline=before-after
+      provenance=trackedBefore-trackedAfter
+  check ("public source provenance preserves idle allocation baseline: "++show (baseline,provenance)) (provenance<=2*max 1 baseline)
+  trackedKey<-renderKey tracked
+  check "public provenance alone cannot invalidate terminal rendering" (trackedKey==key)
   _<-evaluate (force (P.frameRows idle))
   frameBefore<-getAllocationCounter
   _<-evaluate (force (P.frameRows idle {status="Terminal redraw"}))

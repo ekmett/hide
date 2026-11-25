@@ -867,19 +867,30 @@ drainDiffAttempts runtime@(Permissions _ _ ref _ retired _ _ _) initial=do
 
 startTerminalAttemptOwned :: Permissions -> Waiting -> TerminalSubmission -> Desktop -> IO Desktop
 startTerminalAttemptOwned runtime request (TerminalSubmission consoles directory terminal _ _ _ _ attempt) desktop=mask_ $ do
-  receipt<-readIORef (wardenReceipt request)
-  let admission=do
-        live<-readIORef (active request)
-        stopped<-sessionClosed runtime
-        caller<-patchCaller request
-        case caller of
-          Left err->pure (Left err)
-          Right () | not live || stopped->pure (Left "Terminal request expired before execution")
-                   | otherwise->maybe (pure (Right ())) checkWarden receipt
-  worker<-asyncWithUnmask (\_->mask_ (prepareTerminal admission consoles directory terminal `finally` signalPermissionWork runtime))
-  writeIORef attempt (Just worker)
-  writeIORef (policyStage request) TerminalPreparing
-  pure (closeReview request desktop)
+  current<-Consoles.refreshConsolePrivacy consoles desktop
+  (checked,permitted)<-case terminal of
+    OutputTerminal ident _ _->Consoles.publicConsoleAt consoles (Terminal.terminalIdText ident) current
+    InputTerminal ident _->Consoles.publicConsoleAt consoles (Terminal.terminalIdText ident) current
+    StopTerminalRequest ident->Consoles.publicConsoleAt consoles (Terminal.terminalIdText ident) current
+    _->pure (current,Right ())
+  case permitted of
+    Left err->finishOwned runtime request (Left err) >> pure (closeReview request checked)
+    Right ()->begin checked
+  where
+    begin checked=do
+      receipt<-readIORef (wardenReceipt request)
+      let admission=do
+            live<-readIORef (active request)
+            stopped<-sessionClosed runtime
+            caller<-patchCaller request
+            case caller of
+              Left err->pure (Left err)
+              Right () | not live || stopped->pure (Left "Terminal request expired before execution")
+                       | otherwise->maybe (pure (Right ())) checkWarden receipt
+      worker<-asyncWithUnmask (\_->mask_ (prepareTerminal admission consoles directory terminal `finally` signalPermissionWork runtime))
+      writeIORef attempt (Just worker)
+      writeIORef (policyStage request) TerminalPreparing
+      pure (closeReview request checked)
 
 -- Preparation owns a launch until the masked Async publication hands it to the
 -- ticket's attempt cell. All process, directory and exact-ID IO stays here.
@@ -960,16 +971,33 @@ adoptTerminalOwned runtime@(Permissions _ _ _ _ retired _ _ _) request desktop=c
     case outcome of
       Just (Right (Right prepared))->do
         (updated,response)<-case prepared of
-          PreparedTerminalReply result->pure (desktop,result)
+          PreparedTerminalReply result->publicTerminalResult consoles desktop result
           PreparedTerminalConsole console->do
             let bid=nextId desktop
             (ident,opened)<-Consoles.adoptConsole consoles console desktop
-            pure (opened,OpenedTerminal (Terminal.TerminalOpened (Terminal.TerminalId ident) bid))
+            pure (opened,Right (OpenedTerminal (Terminal.TerminalOpened (Terminal.TerminalId ident) bid)))
         writeIORef attempt Nothing
-        finishTerminalSubmissionOwned (wardenReceipt request) (terminalOutcome (Right response)) retired submission (Right response)
+        finishTerminalSubmissionOwned (wardenReceipt request) (terminalOutcome response) retired submission response
         pure updated
       _->finishOwned runtime request (Left "Terminal preparation is no longer available") >> pure desktop
   _->finishOwned runtime request (Left "Invalid terminal admission operation") >> pure desktop
+
+-- Copied bytes and listing metadata do not cross a later privacy transition.
+-- Inputs/stops already have their exact effect receipt; publication does not
+-- claim to undo an effect admitted before the source became private.
+publicTerminalResult :: Consoles.Consoles -> Desktop -> TerminalResult -> IO (Desktop,Either Text TerminalResult)
+publicTerminalResult consoles desktop result=case result of
+  OutputTerminalPage page->do
+    (checked,allowed)<-Consoles.publicConsoleAt consoles (Terminal.terminalIdText (Terminal.pageTerminal page)) desktop
+    pure (checked,result <$ allowed)
+  ListedTerminals listing->do
+    (checked,visible)<-foldM keep (desktop,[]) (Terminal.terminalEntries listing)
+    pure (checked,Right (ListedTerminals (listing {Terminal.terminalEntries=reverse visible})))
+  _->pure (desktop,Right result)
+  where
+    keep (current,visible) summary=do
+      (checked,allowed)<-Consoles.publicConsoleAt consoles (Terminal.terminalIdText (Terminal.summaryTerminal summary)) current
+      pure (checked,either (const visible) (const (summary:visible)) allowed)
 
 -- | Display the oldest live approval and withdraw stale or cancelled prompts.
 tickPermissions :: Permissions -> Desktop -> IO Desktop
@@ -992,7 +1020,7 @@ tickPermissions runtime@(Permissions _ _ ref _ _ _ _ _) original=do
 -- doc-artifact: tools/docs-screenshots.hs permission-diff -> docs/site/screenshots/permission-diff.png
 approvalReview :: Desktop -> Waiting -> Dialog
 approvalReview desktop request=Dialog "Agent permission" (PermissionDialog (approvalAction request)) reviewFields selected ["Allow once","Deny"]
-  ["Breakpoint conditions can execute arbitrary program code and perform I/O." | toolName request=="debug_configure_breakpoints"]
+  ["Breakpoint conditions and log expressions can execute arbitrary program code and perform I/O." | toolName request=="debug_configure_breakpoints"]
   where
     args=arguments request
     patches=diffFields request

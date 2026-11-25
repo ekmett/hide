@@ -460,7 +460,7 @@ richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(por
           _<-wait reply >>= either (error . T.unpack) pure
           pure done
       connect=send "connect" ["0","127.0.0.1",T.pack port]
-      rich condition=object ["line" .= (1::Int),"enabled" .= True,"condition" .= (condition::T.Text),"hitCondition" .= ("3"::T.Text)]
+      rich condition=object ["line" .= (1::Int),"enabled" .= True,"condition" .= (condition::T.Text),"hitCondition" .= ("3"::T.Text),"logMessage" .= ("counter={counter}"::T.Text)]
       edit desktop=do
         listed<-send "breakpoints" [] desktop {dialog=Nothing}
         case dialog listed of
@@ -491,9 +491,9 @@ richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(por
   malformedResult<-malformed
   malformedStatus<-current unchanged
   check "malformed rich fields cannot silently become unconditional" (unchanged==local && null (points malformedStatus) && either (const True) (const False) malformedResult)
-  (_,rejectedLog)<-debuggerTool runtime local "debug_configure_breakpoints" (object ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [object ["line" .= (1::Int),"logMessage" .= ("not-supported"::T.Text)]]])
+  (_,rejectedLog)<-debuggerTool runtime local "debug_configure_breakpoints" (object ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [object ["line" .= (1::Int),"format" .= ("not-supported"::T.Text)]]])
   logResult<-rejectedLog
-  check "logpoints are rejected until terminal privacy is supported" (either (const True) (const False) logResult)
+  check "unknown breakpoint fields are rejected before mutation" (either (const True) (const False) logResult)
   (stored,_)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [rich "counter > 1"]] local
   (invalid,invalidStatus)<-tool "debug_configure_breakpoints" ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [object ["line" .= (1::Int),"hitCondition" .= ("INVALID_FIXTURE_HIT"::T.Text)]]] stored
   invalidDrained<-barrier invalid
@@ -518,7 +518,7 @@ richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(por
     (length (points ordinary)==1 && field "condition" (row 1 ordinary)==Just ("counter > 1"::T.Text))
   disabled<-send "breakpoint" [] (moveTo False 0 changed)
   disabledStatus<-current disabled
-  check "rich toggle disables without erasing metadata" (field "enabled" (row 1 disabledStatus)==Just False && field "pending" (row 1 disabledStatus)==Just True)
+  check "rich toggle disables without erasing metadata" (field "enabled" (row 1 disabledStatus)==Just False && field "pending" (row 1 disabledStatus)==Just True && field "logMessage" (row 1 disabledStatus)==Just ("counter={counter}"::T.Text))
   (_,oldGrant)<-debuggerTool runtime disabled "debug_set_breakpoints" (object ["generation" .= epoch,"bufferId" .= bid,"breakpoints" .= [rich "counter > 99"]])
   oldRejected<-oldGrant
   check "old line-tool grant cannot introduce executable expressions" (either (const True) (const False) oldRejected)
@@ -570,7 +570,7 @@ richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(por
   let installed=[args | entry<-entries,field "session" entry==Just (2::Int),Just req<-[field "request" entry],field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req]]
       requested=[point | entry<-entries,Just req<-[field "request" entry],field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req],point<-fromMaybe [] (field "breakpoints" args)]::[Value]
   check "rich fields reach actual DAP and unsupported breakpoint never becomes unconditional"
-    (any (\p->field "condition" p==Just ("counter > 2"::T.Text) && field "hitCondition" p==Just ("3"::T.Text)) requested && not (null installed) && all ((==Just ([]::[Value])).field "breakpoints") installed)
+    (any (\p->field "condition" p==Just ("counter > 2"::T.Text) && field "hitCondition" p==Just ("3"::T.Text) && field "logMessage" p==Just ("counter={counter}"::T.Text)) requested && not (null installed) && all ((==Just ([]::[Value])).field "breakpoints") installed)
   currentEpoch<-generationOf <$> current reconnected
   (genericDraft,_)<-tool "debug_configure_breakpoints" ["generation" .= currentEpoch,"bufferId" .= bid,"breakpoints" .= [object ["line" .= (1::Int),"hitCondition" .= ("adapter-defined-count"::T.Text)]]] reconnected
   BL.writeFile (path<>".rich.json") (encode (object ["host" .= ("127.0.0.1"::T.Text),"port" .= (read port::Int),"adapterId" .= ("custom"::T.Text),"request" .= ("attach"::T.Text)]))
@@ -977,7 +977,7 @@ completionChecks=forM_ ["exit-first","exit-last","exit-missing"] $ \mode ->
         removeFile (path<>".release")
 
 terminalCheck :: IO ()
-terminalCheck = when Terminal.terminalAvailable $ mapM_ session ["terminal","terminal-stop","terminal-shell","terminal-invalid","terminal-missing"]
+terminalCheck = when Terminal.terminalAvailable $ mapM_ session ["terminal","terminal-stop","terminal-functions","terminal-shell","terminal-invalid","terminal-missing"]
   where
     session mode = bracket (fixture mode) cleanup $ \(port,logPath,_) -> C.withConsoles $ \consoles -> withDebuggerConsoles consoles $ \runtime -> do
       let core d _=pure (False,d)
@@ -1006,6 +1006,28 @@ terminalCheck = when Terminal.terminalAvailable $ mapM_ session ["terminal","ter
           _->False)
         pid<-C.consoleProcessId consoles ident
         check "terminal reports actual child process id" (either (const False) (>0) pid)
+        ready<-if mode/="terminal-functions" then pure ready else do
+          listed<-send "function-breakpoints" ready {dialog=Nothing}
+          picker<-maybe (error "missing function catalogue") pure (dialog listed)
+          let (chosen,effects)=submitDialog 0 picker listed
+          editing<-snd <$> debuggerEffects runtime core chosen effects
+          editor<-maybe (error "missing function name editor") pure (dialog editing)
+          let form=editor {fields=[Input "Function name" "Main.visit" 10,CheckBox "Enabled" True]}
+              (stored,actions)=submitDialog 0 form editing
+          queued<-snd <$> debuggerEffects runtime core stored actions
+          adopted<-await "literal function request delivery" (\_->do
+            rows<-map (fromMaybe Null . decodeStrictText) . T.lines <$> TIO.readFile logPath
+            pure (any (\entry->case field "request" entry of
+              Just request | field "command" request==Just ("setFunctionBreakpoints"::T.Text)->
+                (field "arguments" request >>= field "breakpoints"::Maybe[Value])==Just [object ["name" .= ("Main.visit"::T.Text)]]
+              _->False) rows)) queued
+          (_,privateReport)<-debuggerTool runtime adopted "debug_status" (object [])
+          report<-privateReport >>= either (error . T.unpack) pure
+          check "function names retain their DAP report privacy policy" (field "output" report==Just (""::T.Text) && isJust (field "outputUnavailable" report::Maybe T.Text))
+          visible<-C.consoleOutput consoles ident
+          check "function report taint cannot shut off an unrelated public program terminal"
+            (case visible of Right (bytes,_,_)->TE.encodeUtf8 "terminal ready λ" `BS.isInfixOf` bytes;_->False)
+          pure adopted
         requests<-map (fromMaybe Null . decodeStrictText) . T.lines <$> TIO.readFile logPath
         check "initialize advertises implemented terminal support" (any (\entry->
           (field "request" entry >>= field "arguments" >>= field "supportsRunInTerminalRequest")==Just True) requests)

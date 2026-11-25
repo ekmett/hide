@@ -155,6 +155,7 @@ outputPublic token=readIORef token >>= \value->pure $ case value of OutputShared
 
 refreshOutputPrivacy :: Debugger -> Desktop -> IO ()
 refreshOutputPrivacy runtime desktop=do
+  refreshTerminalSourcePrivacy runtime desktop
   token<-outputDisclosure runtime
   value<-readIORef token
   case value of
@@ -164,14 +165,16 @@ refreshOutputPrivacy runtime desktop=do
       let unchanged=case old of Just (OutputPrivacySnapshot oldDocuments oldPaths)->eqStableName documents oldDocuments && eqStableName configuredPaths oldPaths;_->False
       unless unchanged $ do
         let paths=privateFilePaths desktop
-            privateBuffer bid=maybe False (privateDocumentWith paths) (M.lookup bid (buffers desktop))
+            privateBuffer=protectedBufferWith paths desktop
             private=public && any (\((bid,path),captured)->captured || maybe False privateBuffer bid || maybe False (protectedFilePath paths) path) (M.toList owners)
             visible=public && not private
         writeIORef token $! OutputShared visible (if visible then owners else M.empty) (Just (OutputPrivacySnapshot documents configuredPaths)) (stamp+1)
+        state<-case runtime of Debugger ref _ _ _ _->readIORef ref
+        forM_ (debugConsoles state) (inheritConsoleSources runtime)
     _->pure ()
 
 retainOutputSource :: Debugger -> State -> Text -> Value -> [Breakpoint] -> IO ()
-retainOutputSource runtime state key source points=when (any richBreakpoint (activeBreakpoints state points)) $ do
+retainOutputSource runtime@(Debugger ref _ _ _ _) state key source points=when (any richBreakpoint (activeBreakpoints state points)) $ do
   token<-outputDisclosure runtime
   let BreakpointOwner contributors private=M.findWithDefault (BreakpointOwner (M.singleton (Nothing,T.unpack <$> (field "path" source::Maybe Text)) ()) False) key (breakpointOwners state)
   atomicModifyIORef' token $ \value->case value of
@@ -180,6 +183,31 @@ retainOutputSource runtime state key source points=when (any richBreakpoint (act
           visible=not private && M.size next<=1024
       in (OutputShared visible (if visible then next else M.empty) Nothing (stamp+1),())
     _->(value,())
+  modifyIORef' ref $ \current->
+    let next=M.union (terminalSources current) contributors
+        restricted=terminalSourcesPrivate current || private || M.size next>1024
+    in current {terminalSources=if restricted then M.empty else next,terminalSourcesPrivate=restricted,terminalPrivacy=Nothing}
+  forM_ (debugConsoles state) (inheritConsoleSources runtime)
+
+-- Function-name diagnostics taint the DAP report under their existing policy.
+-- Program terminals retain only demonstrated source-expression provenance.
+refreshTerminalSourcePrivacy :: Debugger -> Desktop -> IO ()
+refreshTerminalSourcePrivacy (Debugger ref _ _ _ _) desktop=do
+  state<-readIORef ref
+  unless (terminalSourcesPrivate state || M.null (terminalSources state)) $ do
+    documents<-evaluate (buffers desktop) >>= makeStableName
+    configured<-evaluate (guestPrivatePaths desktop) >>= makeStableName
+    let unchanged=case terminalPrivacy state of Just (before,pathsBefore)->eqStableName documents before && eqStableName configured pathsBefore;_->False
+    unless unchanged $ do
+      let paths=privateFilePaths desktop
+          private=any (\(bid,path)->maybe False (protectedBufferWith paths desktop) bid || maybe False (protectedFilePath paths) path) (M.keys (terminalSources state))
+      modifyIORef' ref (\current->current {terminalSources=if private then M.empty else terminalSources current,
+        terminalSourcesPrivate=private,terminalPrivacy=Just (documents,configured)})
+
+inheritConsoleSources :: Debugger -> Text -> IO ()
+inheritConsoleSources runtime@(Debugger ref _ _ _ _) ident=do
+  state<-readIORef ref
+  C.retainConsoleSources (debuggerConsoles runtime) ident (M.keys (terminalSources state)) (terminalSourcesPrivate state)
 
 outputReceipt :: IORef OutputDisclosure -> IO (Maybe Int)
 outputReceipt token=readIORef token >>= \value->pure $ case value of OutputShared _ _ _ stamp->Just stamp;_->Nothing
@@ -339,21 +367,21 @@ data CapturedLocalSource = CapturedLocalSource !FilePath !Int !Int !ContentVersi
 data SourceObservation = SourceObservation !Int !(Maybe FilePath)
 data Breakpoint = Breakpoint
   { bpLine :: !Int, bpEnabled :: !Bool, bpCondition :: !(Maybe Text)
-  , bpHitCondition :: !(Maybe Text), bpResult :: !Value } deriving (Eq,Show)
+  , bpHitCondition :: !(Maybe Text), bpLogMessage :: !(Maybe Text), bpResult :: !Value } deriving (Eq,Show)
 -- Source sets conservatively retain all contributing host identities. Duplicate
 -- views cannot transfer expression authority; overflow fails closed until clear.
 data BreakpointOwner = BreakpointOwner !(M.Map (Maybe Int,Maybe FilePath) ()) !Bool
 
 data BreakpointInput = BreakpointLine !Int | BreakpointRecord !Breakpoint
 plainBreakpoint :: Int -> Breakpoint
-plainBreakpoint row=Breakpoint row True Nothing Nothing Null
+plainBreakpoint row=Breakpoint row True Nothing Nothing Nothing Null
 breakpointFields :: Breakpoint -> Value
 breakpointFields point=object (["line" .= bpLine point]++
-  [key .= value | (key,Just value)<-[("condition",bpCondition point),("hitCondition",bpHitCondition point)]])
-breakpointConfig :: Breakpoint -> (Int,Bool,Maybe Text,Maybe Text)
-breakpointConfig point=(bpLine point,bpEnabled point,bpCondition point,bpHitCondition point)
+  [key .= value | (key,Just value)<-[("condition",bpCondition point),("hitCondition",bpHitCondition point),("logMessage",bpLogMessage point)]])
+breakpointConfig :: Breakpoint -> (Int,Bool,Maybe Text,Maybe Text,Maybe Text)
+breakpointConfig point=(bpLine point,bpEnabled point,bpCondition point,bpHitCondition point,bpLogMessage point)
 richBreakpoint :: Breakpoint -> Bool
-richBreakpoint point=any isJust [bpCondition point,bpHitCondition point]
+richBreakpoint point=any isJust [bpCondition point,bpHitCondition point,bpLogMessage point]
 
 breakpointUnavailable :: State -> Breakpoint -> Maybe Text
 breakpointUnavailable state point
@@ -362,6 +390,7 @@ breakpointUnavailable state point
   | not (ready state)=Just "Debugger capabilities are not available yet."
   | isJust (bpCondition point) && not (flag "supportsConditionalBreakpoints" (capabilities state))=Just "This debugger does not support breakpoint conditions."
   | isJust (bpHitCondition point) && not (flag "supportsHitConditionalBreakpoints" (capabilities state))=Just "This debugger does not support hit conditions."
+  | isJust (bpLogMessage point) && not (flag "supportsLogPoints" (capabilities state))=Just "This debugger does not support logpoints."
   | adapterId state=="hdb",Just value<-bpHitCondition point,not (positiveHitCount (toInteger (maxBound::Int)) (T.strip value))=Just "hdb requires a positive integer hit condition."
   | adapterId state=="graalvm",Just value<-bpHitCondition point,not (graalHitCondition value)=Just "Hit condition requires a positive count, optionally prefixed by >, >=, =, <, <= or %."
   | otherwise=Nothing
@@ -389,14 +418,15 @@ breakpointText value=do
   pure (if T.null (T.strip value) then Nothing else Just value)
 parseBreakpoint :: Value -> Parser Breakpoint
 parseBreakpoint=withObject "source breakpoint" $ \fields->do
-  unless (all (`elem` ["line","enabled","condition","hitCondition"]) (KM.keys fields)) (fail "Unknown source breakpoint field")
+  unless (all (`elem` ["line","enabled","condition","hitCondition","logMessage"]) (KM.keys fields)) (fail "Unknown source breakpoint field")
   row<-fields .: "line"
   unless (row>0) (fail "Breakpoint line must be positive")
   enabled<-if KM.member "enabled" fields then fields .: "enabled" else pure True
   let optionalExpression name=if KM.member name fields then fields .: name >>= breakpointText else pure Nothing
   condition<-optionalExpression "condition"
   hit<-optionalExpression "hitCondition"
-  pure (Breakpoint row enabled condition hit Null)
+  logMessage<-optionalExpression "logMessage"
+  pure (Breakpoint row enabled condition hit logMessage Null)
 -- A receipt is small immutable authority, not an adapter-supplied identity.
 data AssistanceReceipt=AssistanceReceipt !Text !Int !Int !Int !Int deriving Eq
 -- A completed step needs both its correlated successful reply and stopped event.
@@ -588,6 +618,9 @@ data State = State
   , functionResults :: Maybe (Either Text (Int,Int,[Text])), functionDialog :: Maybe FunctionDialog
   , breakpointOwners :: !(M.Map Text BreakpointOwner)
   , breakpointPrivacy :: !(Maybe (StableName (M.Map Int Document),StableName [FilePath]))
+  , terminalSources :: !(M.Map (Maybe Int,Maybe FilePath) ())
+  , terminalSourcesPrivate :: !Bool
+  , terminalPrivacy :: !(Maybe (StableName (M.Map Int Document),StableName [FilePath]))
   , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
   , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
   , sidebarThreads :: M.Map Int (), sidebarFrames :: M.Map (Int,Int) Value
@@ -604,7 +637,7 @@ emptyState :: State
 emptyState = State {systemOne=Nothing,assistance=Nothing,client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakpointDialog=Nothing,functionNames=M.empty,nextFunction=1,functionRevision=0,functionKind=False,functionSentRevision=(-1),functionRequest=Nothing,functionPreparing=Nothing,functionResults=Nothing,functionDialog=Nothing,breakpointOwners=M.empty,breakpointPrivacy=Nothing,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
+  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakpointDialog=Nothing,functionNames=M.empty,nextFunction=1,functionRevision=0,functionKind=False,functionSentRevision=(-1),functionRequest=Nothing,functionPreparing=Nothing,functionResults=Nothing,functionDialog=Nothing,breakpointOwners=M.empty,breakpointPrivacy=Nothing,terminalSources=M.empty,terminalSourcesPrivate=False,terminalPrivacy=Nothing,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -672,8 +705,9 @@ withDownloadsCommands host (Debugger _ _ (HdbRuntime _ _ _ _ _ _ view) _ _) acti
 debuggerEffects :: Debugger -> Core -> Core
 debuggerEffects runtime fallback desktop effects=do
   (quit,updated)<-foldM apply (False,desktop) effects
-  protected<-refreshBreakpointPrivacy runtime updated
-  refreshOutputPrivacy runtime protected
+  sourceProtected<-refreshBreakpointPrivacy runtime updated
+  refreshOutputPrivacy runtime sourceProtected
+  protected<-C.refreshConsolePrivacy (debuggerConsoles runtime) sourceProtected
   pure (quit,protected)
   where
     apply result@(True,_) _=pure result
@@ -1145,7 +1179,7 @@ debuggerToolAdmitted caller runtime@(Debugger ref _ _ _ _) d name arguments = do
           Just src | maybe False (protectedPath d . T.unpack) (field "path" src :: Maybe Text)->immediate d (Left "Debugger source is private.")
           Just src | breakpointPrivate s d (sourceKey src)->immediate d (Left "Debugger source is private.")
           Just src -> do
-            rememberBreakpointOwner ref d (Just bid) src
+            rememberBreakpointOwner runtime d (Just bid) src
             let key=sourceKey src
                 old=maybe [] snd (M.lookup key (breakpoints s))
                 rowOf input=case input of BreakpointLine row->row; BreakpointRecord point->bpLine point
@@ -1382,7 +1416,7 @@ debuggerStatus s=do
    "watchCount" .= M.size (watchExpressions s),"capabilities" .= capabilities s,"breakpoints" .=
      [object ["source" .= src,"line" .= bpLine bp,"verified" .= (not (breakpointSetPending s key) && bpEnabled bp && breakpointUnavailable s bp==Nothing && flag "verified" (bpResult bp)),
        "pending" .= (breakpointSetPending s key || (bpEnabled bp && breakpointUnavailable s bp==Nothing && bpResult bp==Null)),"result" .= bpResult bp,
-       "enabled" .= bpEnabled bp,"condition" .= bpCondition bp,"hitCondition" .= bpHitCondition bp,"unavailable" .= breakpointUnavailable s bp,
+       "enabled" .= bpEnabled bp,"condition" .= bpCondition bp,"hitCondition" .= bpHitCondition bp,"logMessage" .= bpLogMessage bp,"unavailable" .= breakpointUnavailable s bp,
        "sourceModified" .= M.findWithDefault False key (breakModified s),
        "owners" .= [object ["bufferId" .= bid,"origin" .= origin] | (bid,origin)<-M.keys contributors],"private" .= captured]
        | (key,src,bp)<-allBreakpoints s,let BreakpointOwner contributors captured=M.findWithDefault (BreakpointOwner M.empty False) key (breakpointOwners s)],
@@ -1545,18 +1579,19 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
     (watchAction,button:expression:_) | Just suffix<-T.stripPrefix "watch-edit:" watchAction,Just ident<-readMaybe (T.unpack suffix),Just (current,target)<-watchDialog s,ident==current->do
       modifyIORef' ref (\state->state {watchDialog=Nothing})
       if button/="0" then pure d else storeWatch runtime target expression Nothing False d
-    (editAction,button:condition:hit:enabled:_) | Just suffix<-T.stripPrefix "breakpoint-edit:" editAction,
+    (editAction,button:condition:hit:logMessage:enabled:_) | Just suffix<-T.stripPrefix "breakpoint-edit:" editAction,
       Just ident<-readMaybe (T.unpack suffix),Just (current,epoch,key,captured,template)<-breakpointDialog s,ident==current->do
         let retainDraft notice=pure d {status=notice,dialog=Just (template {fields=map restore (fields template)})}
             restore field=case field of
               Input "Condition" _ _->Input "Condition" condition (T.length condition)
               Input "Hit condition" _ _->Input "Hit condition" hit (T.length hit)
+              Input "Log message" _ _->Input "Log message" logMessage (T.length logMessage)
               CheckBox "Enabled" _->CheckBox "Enabled" (enabled=="true")
               _->field
         if button/="0" then modifyIORef' ref (\state->state {breakpointDialog=Nothing}) >> pure d else case M.lookup key (breakpoints s) of
           Just (src,points) | epoch==generation s,Just previous<-find ((==bpLine captured).bpLine) points,
             breakpointConfig previous==breakpointConfig captured->case parseEither parseBreakpoint (object
-              ["line" .= bpLine captured,"enabled" .= (enabled=="true"),"condition" .= condition,"hitCondition" .= hit]) of
+              ["line" .= bpLine captured,"enabled" .= (enabled=="true"),"condition" .= condition,"hitCondition" .= hit,"logMessage" .= logMessage]) of
               Left _->retainDraft "Breakpoint fields must contain at most 4096 characters without NUL."
               Right point->do
                 let changed=[if bpLine p==bpLine point then point else p | p<-points]
@@ -1988,9 +2023,12 @@ tickTerminalLaunch runtime@(Debugger ref _ _ _ _) d = do
             Just (Right console) -> do
               (terminal,opened)<-C.adoptConsole (debuggerConsoles runtime) console d
               modifyIORef' ref (\state -> state {debugConsoles=terminal:debugConsoles state})
+              refreshTerminalSourcePrivacy runtime d
+              inheritConsoleSources runtime terminal
+              protected<-C.refreshConsolePrivacy (debuggerConsoles runtime) opened
               pid<-C.consoleProcessId (debuggerConsoles runtime) terminal
               replyReverse runtime ident command (fmap (\value -> object ["processId" .= value]) pid)
-              pure opened {status="Debugger program input and output: Terminal "<>terminal}
+              pure protected {status="Debugger program input and output: Terminal "<>terminal}
             _ -> do
               let detail=case prepared of Just (Left err) -> err; _ -> "Debugger terminal preparation failed: "<>T.pack (show outcome)
               replyReverse runtime ident command (Left detail)
@@ -2790,18 +2828,22 @@ refreshBreakpointPrivacy (Debugger ref _ _ _ _) desktop=do
       modifyIORef' ref (\current->current {breakpointOwners=observed,breakpointPrivacy=Just (documents,configured)})
   pure captureDraft
 
-rememberBreakpointOwner :: IORef State -> Desktop -> Maybe Int -> Value -> IO ()
-rememberBreakpointOwner ref desktop bid source=modifyIORef' ref $ \state->
-  let key=sourceKey source
-      doc=bid >>= (\ident->M.lookup ident (buffers desktop))
-      origin=case doc >>= documentFile of
-        Just file->Just (filePath file)
-        Nothing->case doc >>= documentOrigin of Just path->Just path; Nothing->T.unpack <$> (field "path" source::Maybe Text)
-      BreakpointOwner previous capturedBefore=M.findWithDefault (BreakpointOwner M.empty False) key (breakpointOwners state)
-      contributors=M.insert (bid,origin) () previous
-      captured=capturedBefore || breakpointPrivate state desktop key || maybe False (protectedBuffer desktop) bid || maybe False (protectedPath desktop) origin || M.size contributors>64
-      owner=BreakpointOwner (if captured then M.empty else contributors) captured
-  in state {breakpointOwners=M.insert key owner (breakpointOwners state)}
+rememberBreakpointOwner :: Debugger -> Desktop -> Maybe Int -> Value -> IO ()
+rememberBreakpointOwner runtime@(Debugger ref _ _ _ _) desktop bid source=do
+  modifyIORef' ref $ \state->
+    let key=sourceKey source
+        doc=bid >>= (\ident->M.lookup ident (buffers desktop))
+        origin=case doc >>= documentFile of
+          Just file->Just (filePath file)
+          Nothing->case doc >>= documentOrigin of Just path->Just path; Nothing->T.unpack <$> (field "path" source::Maybe Text)
+        BreakpointOwner previous capturedBefore=M.findWithDefault (BreakpointOwner M.empty False) key (breakpointOwners state)
+        contributors=M.insert (bid,origin) () previous
+        captured=capturedBefore || breakpointPrivate state desktop key || maybe False (protectedBuffer desktop) bid || maybe False (protectedPath desktop) origin || M.size contributors>64
+        owner=BreakpointOwner (if captured then M.empty else contributors) captured
+    in state {breakpointOwners=M.insert key owner (breakpointOwners state)}
+  current<-readIORef ref
+  when (configured current && not (functionSourceInactive current)) $ forM_ (M.lookup (sourceKey source) (breakpoints current)) $ \(captured,points)->
+    retainOutputSource runtime current (sourceKey source) captured points
 
 editBreakpoint :: Debugger -> Text -> Value -> Breakpoint -> Desktop -> IO Desktop
 editBreakpoint (Debugger ref _ _ _ _) key source point desktop=do
@@ -2812,15 +2854,15 @@ editBreakpoint (Debugger ref _ _ _ _) key source point desktop=do
       input label value=Input label (fromMaybe "" value) (maybe 0 T.length value)
       form=Dialog "Edit breakpoint" (DebugBreakpointDialog ident (M.keys contributors) private)
         [ReadOnly "Source" (sourceLabel source<>":"<>tshow (bpLine point)),input "Condition" (bpCondition point),
-         input "Hit condition" (bpHitCondition point),CheckBox "Enabled" (bpEnabled point)]
-        1 ["Save","Cancel"] (["Conditions can execute program code.","Hit condition syntax belongs to the adapter; hdb uses a positive integer skip count."]++maybe [] pure (breakpointUnavailable state point))
+         input "Hit condition" (bpHitCondition point),input "Log message" (bpLogMessage point),CheckBox "Enabled" (bpEnabled point)]
+        1 ["Save","Cancel"] (["Conditions and log expressions can execute arbitrary code and I/O.","Hit condition syntax belongs to the adapter; hdb uses a positive integer skip count."]++maybe [] pure (breakpointUnavailable state point))
   modifyIORef' ref (\current->current {choiceId=ident,breakpointDialog=Just (ident,generation state,key,point {bpResult=Null},form)})
   pure desktop {dialog=Just form}
 
 toggleBreakpointSource :: Debugger -> Value -> Int -> Bool -> Desktop -> IO Desktop
 toggleBreakpointSource runtime@(Debugger ref _ _ _ _) source row modified d=do
   state<-readIORef ref
-  rememberBreakpointOwner ref d (activeWindow d >>= bufferId) source
+  rememberBreakpointOwner runtime d (activeWindow d >>= bufferId) source
   let key=sourceKey source
       old=maybe [] snd (M.lookup key (breakpoints state))
       previous=find ((==row).bpLine) old
