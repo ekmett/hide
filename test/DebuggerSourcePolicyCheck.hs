@@ -10,7 +10,7 @@
 
 module DebuggerSourcePolicyCheck (checks) where
 
-import Control.Concurrent (threadDelay)
+import Control.Concurrent (threadDelay,myThreadId,newEmptyMVar,putMVar,readMVar,tryPutMVar,tryReadMVar)
 import Control.Concurrent.Async (withAsync,poll,wait)
 import Control.Exception (bracket,finally)
 import Control.Monad (unless,when)
@@ -33,7 +33,6 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Hide.Files (loadFile)
 #ifndef mingw32_HOST_OS
-import Control.Concurrent.MVar (newEmptyMVar,readMVar,putMVar)
 import qualified GHC.IO.Device as Device
 import qualified GHC.IO.FD as FD
 import Text.Read (readMaybe)
@@ -52,7 +51,138 @@ import Hide.GuestAccess
 import Hide.Recovery
 
 checks :: IO ()
-checks=locationsCheck >> localSourceCheck >> missingLocalSourceCheck >> delayedLocalSourceCheck >> sourceHandleCheck >> generatedOriginCheck >> delayedPolicyCheck >> sourceStampCheck >> originCheck >> putStrLn "Debugger source policy checks passed"
+checks=inspectionPrivacyCheck >> locationsCheck >> localSourceCheck >> missingLocalSourceCheck >> delayedLocalSourceCheck >> sourceHandleCheck >> generatedOriginCheck >> delayedPolicyCheck >> sourceStampCheck >> originCheck >> putStrLn "Debugger source policy checks passed"
+
+-- Public inspection must retain the selected frame's source authority through
+-- scopes and descendants; a numeric adapter handle alone grants no access.
+inspectionPrivacyCheck :: IO ()
+inspectionPrivacyCheck=bracket (Fixture.fixture "inspection-policy") Fixture.cleanup $ \(port,path,_)->withDebugger $ \runtime->do
+  canonical<-canonicalizePath (path<>".hs")
+  let core d _=pure (False,d)
+      await predicate d=timeout 5000000 (loop d) >>= maybe (fail "inspection privacy fixture timed out") pure
+        where loop current=do next<-tickDebugger runtime current; yes<-predicate next; if yes then pure next else threadDelay 1000 >> loop next
+      inspect epoch request extra desktop=do
+        (queued,reply)<-debuggerTool runtime desktop "debug_inspect" (object (["generation" .= epoch,"request" .= (request::T.Text)]++extra))
+        withAsync reply $ \worker->do
+          _<-await (\_->maybe False (const True) <$> poll worker) queued
+          wait worker
+      reject label result=unless (either (const True) (const False) result) (fail label)
+  (_,connected)<-debuggerEffects runtime core (initialDesktop (80,25)) [DebugAction "connect" ["0","127.0.0.1",T.pack port]]
+  stopped<-await (pure . T.isPrefixOf "Stopped in " . status) connected
+  (_,stateReply)<-debuggerTool runtime stopped "debug_status" (object [])
+  snapshot<-stateReply >>= either (fail . T.unpack) pure
+  epoch<-maybe (fail "missing generation") pure (parseMaybe (withObject "status" (.:"generation")) snapshot :: Maybe Int)
+  let private=stopped {guestPrivatePaths=[canonical]}
+  inspect epoch "scopes" [] private >>= reject "Private selected frame leaked ordinary scopes"
+  (privateReveal,privateRevealReply)<-debuggerTool runtime private "debug_present" (object ["generation" .= epoch,"view" .= ("scopes"::T.Text)])
+  withAsync privateRevealReply $ \worker->do
+    unchanged<-await (\_->maybe False (const True) <$> poll worker) privateReveal
+    wait worker >>= reject "Agent scheduled private scope presentation"
+    unless (dialog unchanged==dialog private) (fail "Private scope reveal changed the visible inspector")
+  inspect epoch "scopes" ["frameId" .= (999::Int)] stopped >>= reject "Unobserved frame granted scope authority"
+  (_,humanRequested)<-debuggerEffects runtime core stopped [DebugAction "scopes" []]
+  humanScopes<-await (pure . maybe False ((=="Scopes").dialogTitle) . dialog) humanRequested
+  scopeDialog<-maybe (fail "Missing human scopes") pure (dialog humanScopes)
+  let retained=humanScopes {guestPrivatePaths=[canonical]}
+      bounds=dialogRect retained scopeDialog
+      x=left bounds+2; y=top bounds+2
+  token<-case purpose scopeDialog of DebugDialog action->pure action;_->fail "Missing scope action"
+  unless (guestModalBlocked retained && not (readableAt retained x y) && not (streamerReadableAt retained x y) &&
+    not (guestEffectsAllowed [DebugAction token ["0","0"]])) (fail "Retained scope chooser exposed private labels or expansion authority")
+  (_,humanExpanded)<-debuggerEffects runtime core retained {dialog=Nothing} [DebugAction token ["0","0"]]
+  _<-await (pure . maybe False ((=="Variables").dialogTitle) . dialog) humanExpanded
+  (do
+    BS.writeFile (path<>".inspection-fail") ""
+    (_,failedRequest)<-debuggerEffects runtime core private [DebugAction "scopes" []]
+    -- The sequential peer's following threads reply proves the scope error was
+    -- consumed; HUD text is the assertion, never the completion signal.
+    (queued,reply)<-debuggerTool runtime failedRequest "debug_inspect"
+      (object ["generation" .= epoch,"request" .= ("threads"::T.Text)])
+    failure<-withAsync reply $ \worker->do
+      consumed<-await (\_->maybe False (const True) <$> poll worker) queued
+      _<-wait worker >>= either (fail . T.unpack) pure
+      pure consumed
+    unless (status failure=="Debugger inspection failed; request scopes again.") (fail "Private inspection error escaped into the public HUD"))
+      `finally` removeFile (path<>".inspection-fail")
+  _<-inspect epoch "scopes" [] stopped >>= either (fail . T.unpack) pure
+  _<-inspect epoch "variables" ["variablesReference" .= (21::Int)] stopped >>= either (fail . T.unpack) pure
+  inspect epoch "variables" ["variablesReference" .= (21::Int)] private >>= reject "Private scope owner leaked variables"
+  inspect epoch "variables" ["variablesReference" .= (22::Int)] private >>= reject "Private frame provenance was lost by child variables"
+  pathless<-inspect epoch "scopes" ["frameId" .= (0::Int)] stopped >>= either (fail . T.unpack) pure
+  absent<-inspect epoch "scopes" ["frameId" .= (1::Int)] stopped >>= either (fail . T.unpack) pure
+  unless ("Pathless locals" `T.isInfixOf` T.pack (show pathless) && "Absent source locals" `T.isInfixOf` T.pack (show absent))
+    (fail "Public pathless frames lost their scope rows")
+  _<-inspect epoch "variables" ["variablesReference" .= (41::Int)] stopped >>= either (fail . T.unpack) pure
+  _<-inspect epoch "variables" ["variablesReference" .= (42::Int)] stopped >>= either (fail . T.unpack) pure
+  _<-inspect epoch "variables" ["variablesReference" .= (44::Int)] stopped >>= either (fail . T.unpack) pure
+  scoped<-inspect epoch "scopes" ["frameId" .= (0::Int)] private >>= either (fail . T.unpack) pure
+  unless ("Pathless locals" `T.isInfixOf` T.pack (show scoped) && not ("PRIVATE_" `T.isInfixOf` T.pack (show scoped))) (fail "Public frame disclosed a separately private scope source")
+  inspect epoch "variables" ["variablesReference" .= (42::Int)] private >>= reject "Private scope source was replaced by public frame authority"
+  inspect epoch "variables" ["variablesReference" .= (43::Int)] private >>= reject "Private scope source was lost by child expansion"
+  inspect epoch "variables" ["variablesReference" .= (44::Int)] private >>= reject "Known private scope source reference lost its backing path"
+  inspect epoch "variables" ["variablesReference" .= (45::Int)] private >>= reject "Known private scope source reference lost child provenance"
+  let variableArgs=object ["generation" .= epoch,"request" .= ("variables"::T.Text),"variablesReference" .= (22::Int)]
+      childRequests=length . filter (T.isInfixOf "\"variablesReference\": 22") . T.lines <$> TIO.readFile path
+      barrier desktop=debuggerTool runtime desktop "debug_inspect" (object ["generation" .= epoch,"request" .= ("threads"::T.Text)])
+  live<-newIORef True
+  let caller=readIORef live >>= \current->pure (if current then Right () else Left "retired")
+  (_,retired)<-debuggerToolWithCaller caller runtime stopped "debug_inspect" variableArgs
+  writeIORef live False
+  retired >>= reject "Retired caller admitted variable inspection"
+  writeIORef live True
+  -- Actual adapter receipt, rather than a sleep, places the privacy change and
+  -- caller retirement between request admission and the matching response.
+  mapM_ (\retireCaller->do
+    before<-childRequests
+    (queued,reply)<-debuggerToolWithCaller caller runtime stopped "debug_inspect" variableArgs
+    withAsync reply $ \worker->do
+      held<-await (\_->(>before) <$> childRequests) queued
+      when retireCaller (writeIORef live False)
+      (released,finished)<-barrier (if retireCaller then held else held {guestPrivatePaths=[canonical]})
+      _<-await (\_->maybe False (const True) <$> poll worker) released
+      wait worker >>= reject "Late private source or retired caller leaked child variables"
+      _<-finished
+      pure ()
+    writeIORef live True) [False,True]
+  -- Hold the existing caller capability's worker-side publication check after
+  -- the response is owned. A policy change must still retire that prepared reply.
+  ownerThread<-myThreadId
+  publication<-newIORef False
+  reached<-newEmptyMVar
+  release<-newEmptyMVar
+  let publicationCaller=do
+        currentThread<-myThreadId
+        held<-readIORef publication
+        when (held && currentThread/=ownerThread) $ do
+          _<-tryPutMVar reached ()
+          readMVar release
+        pure (Right ())
+  beforePublication<-childRequests
+  (publicationQueued,publicationReply)<-debuggerToolWithCaller publicationCaller runtime stopped "debug_inspect" variableArgs
+  withAsync publicationReply $ \worker->do
+    held<-await (\_->(>beforePublication) <$> childRequests) publicationQueued
+    writeIORef publication True
+    (released,finished)<-barrier held
+    published<-await (\_->maybe False (const True) <$> tryReadMVar reached) released
+    _<-tickDebugger runtime published {guestPrivatePaths=[canonical]}
+    putMVar release ()
+    _<-await (\_->maybe False (const True) <$> poll worker) published {guestPrivatePaths=[canonical]}
+    wait worker >>= reject "Prepared variables survived a later privacy change"
+    _<-finished
+    pure ()
+  -- The adapter reuses the same numeric frame after changing its source. That
+  -- new stack response precedes the old child response on the ordered channel.
+  before<-childRequests
+  (queued,reply)<-debuggerTool runtime stopped "debug_inspect" variableArgs
+  withAsync reply $ \worker->do
+    held<-await (\_->(>before) <$> childRequests) queued
+    (changed,stackReply)<-debuggerTool runtime held "debug_inspect" (object ["generation" .= epoch,"request" .= ("stackTrace"::T.Text)])
+    _<-await (\_->maybe False (const True) <$> poll worker) changed
+    wait worker >>= reject "Changed frame metadata revived an old child handle"
+    _<-stackReply >>= either (fail . T.unpack) pure
+    pure ()
+  inspect epoch "variables" ["variablesReference" .= (21::Int)] stopped >>= reject "Reused frame metadata revived old scope handles"
+  inspect epoch "variables" ["variablesReference" .= (45::Int)] stopped >>= reject "Reused source reference revived an old scope child"
 
 -- Use the existing DAP peer and real file owner, preserving regular file/save
 -- authority and already-open dirty text even when its disk path disappears.

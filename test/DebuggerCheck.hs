@@ -850,7 +850,17 @@ presentationCheck=bracket (fixture "basic") cleanup $ \(port,_,_) -> withDebugge
                 updated<-tickDebugger runtime state
                 snapshot<-current updated
                 if predicate updated snapshot then pure updated else threadDelay 1000 >> loop updated
-      reveal view gen d=tool "debug_present" ["generation" .= gen,"view" .= (view::T.Text)] d
+      reveal view gen d | view/="scopes"=tool "debug_present" ["generation" .= gen,"view" .= (view::T.Text)] d
+      reveal view gen d=do
+        (queued,finish)<-debuggerTool runtime d "debug_present" (object ["generation" .= gen,"view" .= (view::T.Text)])
+        withAsync finish $ \reply->do
+          let loop desktop=do
+                next<-tickDebugger runtime desktop
+                complete<-poll reply
+                if isJust complete then pure next else threadDelay 1000 >> loop next
+          settled<-timeout debuggerTimeout (loop queued) >>= maybe (error "presentation reply timed out") pure
+          result<-wait reply >>= either (error . T.unpack) pure
+          pure (settled,result)
       base=(addDocument Nothing (newBuffer "my editor work") (initialDesktop (80,25)))
         {dialog=Just (Dialog "Existing debugger view" (DebugDialog "existing") [] 0 ["Close"] [])}
   (quiet,configured)<-tool "debug_present" ["follow" .= False] base

@@ -38,7 +38,33 @@ import Hide.Plugin.SystemOne
 import Hide.SystemOne
 
 checks :: IO ()
-checks=projectionPrivacyCheck >> evidencePrivacyCheck >> stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck >> historyPrivacyCheck
+checks=scopePrivacyCheck >> projectionPrivacyCheck >> evidencePrivacyCheck >> stepBudgetCheck >> takeoverCheck >> stallRevealCheck >> timeBudgetCheck >> callerRetirementCheck >> historyPrivacyCheck
+
+-- A public frame can advertise an eager scope from another private source.
+-- Its locals must never be requested or included in the selected supplier input.
+scopePrivacyCheck :: IO ()
+scopePrivacyCheck=withSystemOne $ \owner->do
+  entered<-newEmptyMVar
+  let provider=DecisionProvider description $ \_ use->use (DecisionDriver $ \input _->do
+        void (tryPutMVar entered input)
+        pure (Right (choose "stop" input)))
+  void (selectDecisionProvider owner (Just provider) >>= right)
+  sessionWithMode "assist-scope-private" withDebugger (systemOneServices owner) $ \runtime path initial->do
+    canonical<-canonicalizePath (path<>".hs")
+    let private=initial {guestPrivatePaths=[canonical]}
+    before<-state runtime private
+    (started,accepted)<-tool runtime private "debug_assist"
+      ["command" .= ("start"::T.Text),"generation" .= generationOf before,"goal" .= ("Inspect public locals."::T.Text)]
+    run<-runIdOf accepted
+    _<-awaitState "filtered scope supplier completion" runtime
+      (\value->pure (sameRun run value && (assistance value >>= field "phase")==Just ("finished"::T.Text))) started
+    input<-barrier "public scope did not reach supplier" (takeMVar entered)
+    check "supplier receives public locals without the separately private scope"
+      ("<thunk>" `T.isInfixOf` decisionState input && not ("PRIVATE_" `T.isInfixOf` decisionState input))
+    sent<-requests path
+    check "separately private scope variables never reach the adapter"
+      (all (\request->commandOf request/=Just "variables" ||
+        (field "arguments" request >>= field "variablesReference") `notElem` [Just (42::Int),Just 44]) sent)
 
 -- Crop boundaries must not turn a complete known credential into a leaked
 -- prefix or suffix. Test the actual buffer/value projections used by the worker.

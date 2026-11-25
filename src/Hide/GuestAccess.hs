@@ -271,6 +271,7 @@ privateLocationsAction action=case T.splitOn ":" action of
 privateFrameChooserAction :: Text -> Bool
 privateFrameChooserAction action=case T.splitOn ":" action of
   ["select",_,_,"frame"]->True
+  ["select",_,_,"expand"]->True
   ["select",_,_,"edit-breakpoint"]->True
   _->False
 

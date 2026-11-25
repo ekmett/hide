@@ -39,7 +39,7 @@ import Hide.MenuCommands (MenuHost,MenuContext(..),MenuReply(..),menuContributio
 import Hide.Plugin.Command
 import qualified Hide.DownloadsWindow as DownloadsWindow
 import qualified Hide.HdbAcquisition as Hdb
-import Control.Monad (foldM, filterM, forM_, unless, when, void)
+import Control.Monad (filterM, foldM, forM_, unless, when, void)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither, parseMaybe)
 import qualified Data.ByteString as BS
@@ -343,15 +343,18 @@ data DebugPageBody = AdapterPage !Value | CachedPage !Int !Value
 data SidebarIngress = ReadDebugPage !DebugPageRequest !(TMVar (Either Text DebugPageBody)) | CacheDebugPage !DebugPageRequest !Value
   | ReadAssistance !AssistanceReceipt !Text !Value !(MVar (Either Text Value))
   | ReadDebugSource !Int !Int !Int !(Maybe FilePath) !(MVar (Either Text Value))
+  | PublishPublicScopes !Int !Int !FrameOwner ![FilePath] !(IO (Either Text ())) !(IORef OutputDisclosure) !(Maybe Int) !Value !(MVar (Either Text Value))
+  | ReadPublicInspection !Int !Bool !FrameOwner ![FilePath] !Text !Value !(IO (Either Text ())) !(MVar (Either Text Value))
   | ReadDebugLocations !Int !DebugSourceRequest !Value !Int !(Maybe Int) !(IO (Either Text ())) !(MVar (Either Text Value))
 data Pending = Init | Attach | Configure | Breaks Text [Int] | Exceptions | Threads Bool
-  | Stack Bool Int Int | Scopes Int | Variables Int | ExceptionDetails | Source Bool Int Int Value | Control Bool | Detach
+  | Stack Bool Int Int | Scopes Int (Maybe FrameOwner) | Variables Int (Maybe FrameOwner) | ExceptionDetails | Source Bool Int Int Value | Control Bool | Detach
   | AssistedControl !Text !Int !Text !Bool
-  | Inspection Text (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text DebugPageBody))
+  | PublicInspection !Bool !FrameOwner ![FilePath] !(IO (Either Text ())) !Text !Value !(MVar (Either Text Value))
+  | Inspection Text (Maybe FrameOwner) (MVar (Either Text Value)) | SourceInspection !Int !Int !(Maybe FilePath) (MVar (Either Text Value)) | SidebarRead DebugPageRequest (TMVar (Either Text DebugPageBody))
   | WatchRequest !WatchOperation !(Maybe Text) !FilePath ![FilePath]
   | LocationInspection !DebugSourceRequest !(MVar (Either Text Value))
   | FunctionBreaks !Int !Int !(MVar (Either Text Value))
-  deriving (Eq)
+
 data WatchMode = EvaluateWatch | ForceWatch !Int | ForceWatchChild !Int !Int !Int !Int deriving Eq
 data WatchOperation = WatchOperation !Int !Int !WatchFrame !WatchMode deriving Eq
 data PreparedWatch = PreparedWatch !Text !Int !Bool !(Maybe FilePath) !Bool !(Maybe Value)
@@ -364,6 +367,11 @@ data SourcePreparation = SourcePreparation !Int !Int !(Maybe (Int,Int)) !Bool !V
 data PreparedSource = AdapterSource !(Maybe FilePath) !Buffer !Int | LocalSource !Bool !FilePath !LocalSourceTarget !Int
 data LocalSourceTarget = ExistingSource !Int !Int !ContentVersion !Bool | NewSource !FileState !Buffer
 data CapturedLocalSource = CapturedLocalSource !FilePath !Int !Int !ContentVersion !BufferContent !DirtySnapshot
+-- Frame IDs and descendants belong to an observed source at this exact stop.
+-- Re-observing a changed backing rotates its stamp without comparing payloads.
+data FrameOwner = FrameOwner !Int !Int !(Maybe InspectionSource) deriving (Eq)
+data InspectionSource = InspectionSource !(Maybe FilePath) !Int !(Maybe (Int,Maybe FilePath)) deriving (Eq)
+data FrameObservation = FrameObservation !Int !InspectionSource
 data SourceObservation = SourceObservation !Int !(Maybe FilePath)
 data Breakpoint = Breakpoint
   { bpLine :: !Int, bpEnabled :: !Bool, bpCondition :: !(Maybe Text)
@@ -622,6 +630,7 @@ data State = State
   , terminalSourcesPrivate :: !Bool
   , terminalPrivacy :: !(Maybe (StableName (M.Map Int Document),StableName [FilePath]))
   , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
+  , inspectionFrames :: M.Map Int FrameObservation, variableOwners :: M.Map Int (Maybe FrameOwner), nextFrameObservation :: Int
   , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
   , sidebarThreads :: M.Map Int (), sidebarFrames :: M.Map (Int,Int) Value
   , sidebarReferences :: M.Map (ReferenceOwner,Int) Bool
@@ -637,7 +646,7 @@ emptyState :: State
 emptyState = State {systemOne=Nothing,assistance=Nothing,client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakpointDialog=Nothing,functionNames=M.empty,nextFunction=1,functionRevision=0,functionKind=False,functionSentRevision=(-1),functionRequest=Nothing,functionPreparing=Nothing,functionResults=Nothing,functionDialog=Nothing,breakpointOwners=M.empty,breakpointPrivacy=Nothing,terminalSources=M.empty,terminalSourcesPrivate=False,terminalPrivacy=Nothing,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
+  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakpointDialog=Nothing,functionNames=M.empty,nextFunction=1,functionRevision=0,functionKind=False,functionSentRevision=(-1),functionRequest=Nothing,functionPreparing=Nothing,functionResults=Nothing,functionDialog=Nothing,breakpointOwners=M.empty,breakpointPrivacy=Nothing,terminalSources=M.empty,terminalSourcesPrivate=False,terminalPrivacy=Nothing,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,inspectionFrames=M.empty,variableOwners=M.empty,nextFrameObservation=1,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -831,25 +840,55 @@ variablePage offset cachedOffset body=object ["variables" .= retained,"hasMore" 
 
 -- At most four small mailbox messages per tick. Backpressure belongs to provider
 -- workers; the session owner never waits for a producer or a DAP socket.
-drainSidebarReads :: Debugger -> Desktop -> IO ()
-drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue _) _) d=forM_ [1..4::Int] $ \_->do
-  next<-atomically (tryReadTBQueue queue)
-  forM_ next $ \ingress->do
+drainSidebarReads :: Debugger -> Desktop -> IO Desktop
+drainSidebarReads runtime@(Debugger ref _ _ (SidebarMailbox _ queue _) _) initial=foldM step initial [1..4::Int]
+  where
+  step d _=do
+    next<-atomically (tryReadTBQueue queue)
+    case next of
+      Nothing->pure d
+      Just (PublishPublicScopes captured sourceRevision owner canonical caller disclosure policy body reply)->do
+        admitted<-caller
+        s<-readIORef ref
+        refreshOutputPrivacy runtime d
+        currentPolicy<-outputReceipt disclosure
+        if either (const True) (const False) admitted || currentPolicy/=policy || generation s/=captured || nextSourceObservation s/=sourceRevision ||
+            not (publicInspectionCurrent s d owner canonical) || selectedInspectionOwner s/=Just owner
+          then void (tryPutMVar reply (Left "Debugger scope presentation expired.")) >> pure d
+          else do
+            modifyIORef' ref (\state->state {sidebarVisible=True})
+            shown<-showChoices runtime "Scopes" "expand" (items "scopes" body) (map (text "name") (items "scopes" body)) d
+            void (tryPutMVar reply (Right body))
+            pure shown
+      Just ingress->ordinary d ingress >> pure d
+  ordinary d ingress=do
     s<-readIORef ref
     watchLive<-watchProviderCurrent s
     let current request@(DebugPageRequest _ target _)=validSidebarRequest s request && case target of DebugWatchVariables{}->watchLive; _->True
     case ingress of
+      PublishPublicScopes{}->pure ()
       ReadAssistance receipt command args reply
         | not (assistanceReceiptCurrent s receipt) ->void (tryPutMVar reply (Left "Assisted debugger stop expired."))
         | command=="admit" ->do
           refreshOutputPrivacy runtime d
           disclosure<-outputDisclosure runtime >>= outputPublic
-          void (tryPutMVar reply (if not disclosure || any (protectedPath d) (fromMaybe [] (field "paths" args)) || any (protectedBuffer d) (fromMaybe [] (field "bufferIds" args))
+          let currentFrame=case (field "frameId" args,field "frameStamp" args) of
+                (Just fid,Just stamp)->selectedInspectionOwner s==Just (FrameOwner fid stamp Nothing) && field "sourceRevision" args==Just (nextSourceObservation s)
+                _->False
+          void (tryPutMVar reply (if not currentFrame || not disclosure || any (protectedPath d) (fromMaybe [] (field "paths" args)) || any (protectedBuffer d) (fromMaybe [] (field "bufferIds" args)) ||
+            any (`elem` privateSourceReferences s d) (fromMaybe [] (field "sourceReferences" args))
             then Left "Assisted observation became private." else Right Null))
-        | command=="variables" && M.lookup (integer "variablesReference" args) (variableRefs s)/=Just False ->void (tryPutMVar reply (Left "Lazy or expired variable handle."))
+        | command=="variables" && (M.lookup (integer "variablesReference" args) (variableRefs s)/=Just False || maybe True (not . frameOwnerCurrent s) (inspectionOwner s command args)) ->void (tryPutMVar reply (Left "Lazy or expired variable handle."))
         | command=="source" && not (M.member (integer "sourceReference" args) (sourceReferences s)) ->void (tryPutMVar reply (Left "Debugger source handle expired."))
         | command `notElem` ["scopes","variables","source"] ->void (tryPutMVar reply (Left "Unsupported assisted inspection."))
-        | otherwise->send runtime (Inspection command reply) command args
+        | otherwise->send runtime (Inspection command (inspectionOwner s command args) reply) command args
+      ReadPublicInspection captured reveal owner canonical command args caller reply->do
+        admitted<-caller
+        if either (const True) (const False) admitted || generation s/=captured || not (publicInspectionCurrent s d owner canonical && inspectionOwner s command args==Just owner && (not reveal || selectedInspectionOwner s==Just owner))
+          then void (tryPutMVar reply (Left "Debugger inspection source is private or expired."))
+          else if length [() | (PublicInspection{},_,_)<-M.elems (pending s)]>=4
+            then void (tryPutMVar reply (Left "Debugger inspection is busy."))
+            else send runtime (PublicInspection reveal owner canonical caller command args reply) command args
       ReadDebugSource captured reference stamp origin reply
         | generation s/=captured || not (stopped s && ready s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing) || not (sourceStampCurrent s reference stamp) || maybe False (protectedPath d) origin ->void (tryPutMVar reply (Left "Debugger source is private or expired."))
         | length [() | (SourceInspection{},_,_)<-M.elems (pending s)]>=4 ->void (tryPutMVar reply (Left "Debugger source inspection is busy."))
@@ -1018,6 +1057,7 @@ startWatch runtime@(Debugger ref _ _ _ _) ident revision receipt mode d=do
     base<-evaluate (root s)
     private<-evaluate (privateFilePaths d)
     writeIORef ref next
+    recordInspectionFrames ref (object ["stackFrames" .= frames s])
     let WatchFrame _ _ _ _ fid=fresh
         (command,args)=case mode of
           EvaluateWatch->("evaluate",object ["expression" .= maybe "" watchExpression (M.lookup ident (watchExpressions s)),"frameId" .= fid,"context" .= ("watch"::Text)])
@@ -1155,6 +1195,10 @@ debuggerToolAdmitted caller runtime@(Debugger ref _ _ _ _) d name arguments = do
       after<-readIORef ref
       if command=="start" && fmap assistanceId (assistance before)==fmap assistanceId (assistance after)
         then immediate desktop (Left (status desktop)) else snapshot desktop
+    run (ToolPresent following (Just "scopes"))=do
+      s<-readIORef ref
+      forM_ following (\enabled->modifyIORef' ref (\state->state {followSource=enabled}))
+      inspectPublic True "scopes" (object ["frameId" .= (frame s >>= field "id" :: Maybe Int)])
     run (ToolPresent following view)=do
       when (isJust view) (modifyIORef' ref (\state->state {sidebarVisible=True}))
       forM_ following (\enabled->modifyIORef' ref (\state->state {followSource=enabled}))
@@ -1237,10 +1281,11 @@ debuggerToolAdmitted caller runtime@(Debugger ref _ _ _ _) d name arguments = do
                   atomically (writeTBQueue queue (ReadDebugSource captured reference stamp canonical reply))
                   awaitInspection ref captured reply
                 pure $ maybe (Left "Debugger source inspection timed out.") (>>= \body->boundedResult (object ["generation" .= captured,"request" .= ("source"::Text),"body" .= body])) result)
+    run (ToolInspect command args) | command `elem` ["scopes","variables"] = inspectPublic False command args
     run (ToolInspect command args)=do
       s<-readIORef ref
       reply<-newEmptyMVar
-      send runtime (Inspection command reply) command args
+      send runtime (Inspection command (inspectionOwner s command args) reply) command args
       pure (d,do
         result<-timeout 16000000 (awaitInspection ref (generation s) reply)
         prepared<-case result of
@@ -1250,6 +1295,63 @@ debuggerToolAdmitted caller runtime@(Debugger ref _ _ _ _) d name arguments = do
                             | otherwise->pure (Right body)
         pure $ prepared >>= \body -> boundedResult (object
           ["generation" .= generation s,"request" .= command,"body" .= body]))
+    inspectPublic reveal command args=do
+      s<-readIORef ref
+      case inspectionOwner s command args of
+        Nothing->immediate d (Left "Debugger frame or variable source is unknown or expired.")
+        Just owner@(FrameOwner fid _ _)->case M.lookup fid (inspectionFrames s) of
+          Nothing->immediate d (Left "Debugger frame expired.")
+          Just (FrameObservation _ backing)->do
+            captured<-evaluate (generation s)
+            base<-evaluate (root s)
+            private<-evaluate (privateFilePaths d)
+            disclosure<-outputDisclosure runtime
+            policy<-outputReceipt disclosure
+            reply<-newEmptyMVar
+            active<-newIORef True
+            let currentCaller=readIORef active >>= \live->if live then caller else pure (Left "Debugger inspection cancelled.")
+            pure (d,(do
+              paths<-mapM (canonicalSourcePath base) (inspectionSourcePaths backing++case owner of FrameOwner _ _ (Just extra)->inspectionSourcePaths extra;_->[])
+              let origin=mapMaybe id <$> sequence paths
+              admitted<-currentCaller
+              case (admitted,origin) of
+                (Left _,_)->pure (Left "Debugger inspection caller retired.")
+                (_,Left err)->pure (Left err)
+                (_,Right canonical) | any (protectedFilePath private) canonical->pure (Left "Debugger source is private.")
+                (_,Right canonical)->do
+                  let Debugger _ _ _ (SidebarMailbox _ queue _) _=runtime
+                  result<-timeout 16000000 $ do
+                    atomically (writeTBQueue queue (ReadPublicInspection captured reveal owner canonical command args currentCaller reply))
+                    awaitInspection ref captured reply
+                  observed<-readIORef ref
+                  visible<-case result of
+                    Just (Right body) | command=="scopes"->do
+                      Just <$> publicScopes observed base private (privateSourceReferences observed d) body
+                    _->pure result
+                  published<-case visible of
+                    Just (Right body) | reveal->do
+                      preparedBody<-evaluate (boundedResult body)
+                      case preparedBody of
+                        Left err->pure (Just (Left err))
+                        Right payload->do
+                          shown<-newEmptyMVar
+                          timeout 16000000 $ do
+                            atomically (writeTBQueue queue (PublishPublicScopes captured (nextSourceObservation observed) owner canonical currentCaller disclosure policy payload shown))
+                            awaitInspection ref captured shown
+                    _->pure visible
+                  prepared<-case published of
+                    Just (Right _) | reveal->do
+                      presented<-readIORef ref >>= debuggerStatus
+                      protectOutputResult disclosure policy (publicDebuggerStatus base private (protectedBuffer d) (merge (object ["accepted" .= True]) presented))
+                    _->evaluate $ maybe (Left "Debugger inspection timed out; refresh debug_status.")
+                      (>>= \body->boundedResult (object ["generation" .= captured,"request" .= command,"body" .= body])) published
+                  live<-currentCaller
+                  current<-readIORef ref
+                  latestPolicy<-outputReceipt disclosure
+                  pure $ if either (const True) (const False) live || latestPolicy/=policy || not (frameOwnerCurrent current owner) || generation current/=captured ||
+                      inspectionOwner current command args/=Just owner || (command=="scopes" && nextSourceObservation current/=nextSourceObservation observed) || (reveal && selectedInspectionOwner current/=Just owner) || not (stopped current && isJust (client current) && endedAt current==Nothing && disconnectAt current==Nothing)
+                    then Left "Debugger inspection source or caller expired."
+                    else prepared) `finally` writeIORef active False)
 
 data ToolRequest = ToolStatus | ToolStart Text [Text] | ToolControl Text
   | ToolAssist Text (Maybe Text) Int Int
@@ -1269,7 +1371,8 @@ parseTool s name = withObject "debugger tool arguments" $ \o -> do
         pure port
       positive key=do
         value<-o .:? key
-        forM_ value (\n -> unless (n>0) (fail (T.unpack (K.toText key)<>" must be positive")))
+        forM_ value (\n -> unless (if key=="frameId" then n>=0 else n>0)
+          (fail (T.unpack (K.toText key)<>if key=="frameId" then " must be nonnegative" else " must be positive")))
         pure (value :: Maybe Int)
       required key selected=positive key >>= maybe (maybe (fail (T.unpack (K.toText key)<>" is required")) pure selected) pure
   case name of
@@ -1449,15 +1552,20 @@ publicDebuggerStatus base private privateBuffer value=case boundedResult value o
     publicObservation observation=do
       selected<-visibleRow base private (fromMaybe Null (field "location" observation))
       stack<-mapM (visibleRow base private) (items "stack" observation)
-      pure (selected && and stack && not (maybe False privateBuffer (field "sourceBufferId" observation)))
+      scopes<-mapM (visibleBacking base private) (items "scopeSources" observation)
+      pure (selected && and stack && and scopes && not (maybe False privateBuffer (field "sourceBufferId" observation)) &&
+        not (any privateBuffer (fromMaybe [] (field "scopeSourceBufferIds" observation))))
 
 publicStack :: FilePath -> [FilePath] -> Value -> IO (Either Text Value)
-publicStack base private value=do
-  prepared<-prepareStackPaths base value
+publicStack=publicSourceRows "stackFrames"
+
+publicSourceRows :: Text -> FilePath -> [FilePath] -> Value -> IO (Either Text Value)
+publicSourceRows key base private value=do
+  prepared<-prepareSourceRows key base value
   case prepared of
     Right body@(Object objectValue)->do
-      rows<-filterM (visibleRow base private) (items "stackFrames" body)
-      pure (Right (Object (KM.insert "stackFrames" (toJSON rows) objectValue)))
+      let rows=filter (\row->not (maybe False (protectedFilePath private . T.unpack) (field "source" row >>= field "path"))) (items key body)
+      pure (Right (Object (KM.insert (K.fromText key) (toJSON rows) objectValue)))
     _->pure prepared
 
 visibleRow :: FilePath -> [FilePath] -> Value -> IO Bool
@@ -1470,18 +1578,23 @@ visibleBacking base private source=do
 -- Sidebar page metadata carries canonical resource provenance to the ordinary
 -- shared tree privacy projection. No filesystem work runs during row painting.
 prepareStackPaths :: FilePath -> Value -> IO (Either Text Value)
-prepareStackPaths base value=case boundedResult value of
+prepareStackPaths=prepareSourceRows "stackFrames"
+
+prepareSourceRows :: Text -> FilePath -> Value -> IO (Either Text Value)
+prepareSourceRows key base value=case boundedResult value of
   Left err->pure (Left err)
   Right (Object objectValue)->do
-    prepared<-mapM prepare (take 1000 (items "stackFrames" value))
+    prepared<-mapM prepare (take 1000 (items key value))
     pure $ do
       rows<-sequence prepared
-      Right (Object (KM.insert "stackFrames" (toJSON rows) objectValue))
+      Right (Object (KM.insert (K.fromText key) (toJSON rows) objectValue))
   Right other->pure (Right other)
   where
     prepare row@(Object rowValue)=case field "source" row of
       Just (Object sourceValue)->do
-        canonical<-canonicalSourcePath base (T.unpack <$> (field "path" (Object sourceValue) :: Maybe Text))
+        canonical<-case inspectionSource (Object sourceValue) of
+          Nothing->pure (Left "Invalid debugger source metadata.")
+          Just (InspectionSource backing _ _)->canonicalSourcePath base backing
         pure $ fmap (\origin->case origin of
           Nothing->row
           Just path->Object (KM.insert "source" (Object (KM.insert "path" (toJSON path) sourceValue)) rowValue)) canonical
@@ -1492,11 +1605,15 @@ boundedResult :: Value -> Either Text Value
 boundedResult value | BL.length (encode value)>=1024*1024 = Left "Debugger response exceeds 1 MiB; request a smaller page."
                     | otherwise = Right value
 
+startupPending :: Pending -> Bool
+startupPending kind=case kind of Init->True; Attach->True; Configure->True; _->False
+
 completeInspection :: Pending -> Either Text Value -> IO ()
 completeInspection (FunctionBreaks _ _ reply) result=void(tryPutMVar reply result)
 completeInspection (LocationInspection _ reply) result=void(tryPutMVar reply result)
 completeInspection (SourceInspection _ _ _ reply) result=void (tryPutMVar reply result)
-completeInspection (Inspection _ reply) result=tryPutMVar reply result >> pure ()
+completeInspection (PublicInspection _ _ _ _ _ _ reply) result=void (tryPutMVar reply result)
+completeInspection (Inspection _ _ reply) result=tryPutMVar reply result >> pure ()
 completeInspection (SidebarRead _ reply) result=atomically (void (tryPutTMVar reply (AdapterPage <$> result)))
 completeInspection _ _=pure ()
 
@@ -1623,7 +1740,7 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
     ("threads",_) | configured s -> send runtime (Threads True) "threads" (object []) >> pure d {status="Loading threads..."}
     ("stack",_) | stopped s, Just tid<-thread s -> sendStack runtime True tid >> pure d {status="Loading call stack..."}
     ("scopes",_) | stopped s, Just selected<-frame s,Just ident<-(field "id" selected :: Maybe Int) ->
-      send runtime (Scopes (frameRevision s)) "scopes" (object ["frameId" .= ident]) >> pure d {status="Loading scopes..."}
+      send runtime (Scopes (frameRevision s) (selectedInspectionOwner s)) "scopes" (object ["frameId" .= ident]) >> pure d {status="Loading scopes..."}
     (command,_) | command `elem` ["continue","next","stepIn","stepOut"],functionSynchronizing s->pure d {status="Wait for the function breakpoint update or reconnect before resuming."}
     (command,_) | command `elem` ["continue","next","stepIn","stepOut","pause"],ready s,Just tid<-thread s,
                   (command=="pause" && not (stopped s)) || (command/="pause" && stopped s) -> do
@@ -1765,7 +1882,7 @@ tickAssistance runtime@(Debugger ref clock _ _ _) desktop=do
                 sourceBuffer=case candidate of Just (bid,doc) | not (protectedBuffer desktop bid)->Just (bid,documentBuffer doc);_->Nothing
                 sourcePrivate=maybe False (protectedBuffer desktop . fst) candidate
             atomically (writeTVar (assistanceTicket run) Nothing)
-            worker<-async (if sourcePrivate then pure (Left "private-source") else observeAssistance runtime services state run receipt sourceBuffer private forced (fromInteger (max 1 ((assistanceDeadline run-now) `div` 1000000))))
+            worker<-async (if sourcePrivate then pure (Left "private-source") else observeAssistance runtime services state run receipt sourceBuffer private (privateSourceReferences state desktop) forced (fromInteger (max 1 ((assistanceDeadline run-now) `div` 1000000))))
             modifyIORef' ref (\s->s {assistance=fmap (\a->a {assistanceWorker=Just (receipt,worker),assistancePhase="deciding",assistanceStalls=stalls,assistanceLocation=Just location}) (assistance s)})
             pure desktop
           _->pure desktop
@@ -1783,8 +1900,8 @@ adoptAssistedAction runtime@(Debugger ref _ _ _ _) action desktop=do
     Just _->revokeAssistance runtime "finished" (if action=="stop" then "supplier-stop" else action) >> pure desktop {status="Assisted debugger ended: "<>action<>". Reveal its observations to inspect the evidence."}
     _->pure desktop
 
-observeAssistance :: Debugger -> SystemOneServices -> State -> Assistance -> AssistanceReceipt -> Maybe (Int,Buffer) -> [FilePath] -> Maybe Text -> Int -> IO (Either Text A.AssistanceResult)
-observeAssistance runtime services state run receipt opened private forced budget=do
+observeAssistance :: Debugger -> SystemOneServices -> State -> Assistance -> AssistanceReceipt -> Maybe (Int,Buffer) -> [FilePath] -> [Int] -> Maybe Text -> Int -> IO (Either Text A.AssistanceResult)
+observeAssistance runtime services state run receipt opened private privateReferences forced budget=do
   disclosure<-outputDisclosure runtime
   environment<-getEnvironment
   let selected=fromMaybe Null (frame state)
@@ -1797,10 +1914,18 @@ observeAssistance runtime services state run receipt opened private forced budge
     Right canonical | maybe False (protectedFilePath private) canonical->pure (Left "private-source")
     Right canonical->do
       stack<-publicStack (root state) private (object ["stackFrames" .= take 8 (frames state)])
-      scopes<-readAssistance runtime run receipt "scopes" (object ["frameId" .= integer "id" selected])
+      rawScopes<-readAssistance runtime run receipt "scopes" (object ["frameId" .= integer "id" selected])
+      scopes<-case rawScopes of
+        Left err->pure (Left err)
+        Right body->publicScopes state (root state) private privateReferences body
       let scopeRows=either (const []) (take 3 . items "scopes") scopes
           eager row=integer "variablesReference" row>0 && not (flag "expensive" row) && not (maybe False (flag "lazy") (field "presentationHint" row)) && not (sensitiveLabel (text "name" row))
-      pages<-mapM (\scope->readAssistance runtime run receipt "variables" (object ["variablesReference" .= integer "variablesReference" scope,"start" .= (0::Int),"count" .= (8::Int)])) (filter eager scopeRows)
+          inspectedScopes=filter eager scopeRows
+          scopeSources=mapMaybe (field "source") inspectedScopes :: [Value]
+          scopeReferences=[integer "sourceReference" source | source<-scopeSources,integer "sourceReference" source>0]
+          scopeBuffers=[bid | (bid,(epoch,stamp,source))<-M.toList (sources state),epoch==generation state,
+            integer "sourceReference" source `elem` scopeReferences,sourceStampCurrent state (integer "sourceReference" source) stamp]
+      pages<-mapM (\scope->readAssistance runtime run receipt "variables" (object ["variablesReference" .= integer "variablesReference" scope,"start" .= (0::Int),"count" .= (8::Int)])) inspectedScopes
       nearby<-case opened of
         Just (_,buffer)->pure (A.sourceExcerpt secrets (integer "line" selected) buffer)
         Nothing | integer "sourceReference" source>0->do
@@ -1819,7 +1944,7 @@ observeAssistance runtime services state run receipt opened private forced budge
             _->selected
           actions=["inspect","next","stepIn"]++["stepOut" | length (take 2 (frames state))>1]++["continue","stop","hypothesis"]
           observation=object ["session" .= sidebarSession state,"threadId" .= thread state,"generation" .= generation state,"frameRevision" .= frameRevision state,
-            "sourceBufferId" .= fmap fst opened,"location" .= A.compactFrame selectedPublic,"source" .= either (\reason->object ["unavailable" .= reason]) id nearby,
+            "sourceBufferId" .= fmap fst opened,"scopeSources" .= scopeSources,"scopeSourceBufferIds" .= scopeBuffers,"location" .= A.compactFrame selectedPublic,"source" .= either (\reason->object ["unavailable" .= reason]) id nearby,
             "stack" .= either (const []) (map A.compactFrame . take 8 . items "stackFrames") stack,
             "locals" .= concatMap (either (const []) (mapMaybe (A.compactVariable secrets) . take 8 . items "variables")) pages,
             "output" .= T.copy (T.takeEnd 2048 (output state)),"outputExcerpt" .= True,
@@ -1827,12 +1952,15 @@ observeAssistance runtime services state run receipt opened private forced budge
           identity=assistanceId run<>":"<>tshow (sidebarSession state)<>":"<>tshow (generation state)<>":"<>tshow (fromMaybe 0 (thread state))<>":"<>tshow (frameRevision state)<>":"<>tshow (assistanceDecisions run)
       current<-assistanceCaller run
       let observationPaths value=mapMaybe (\row->field "source" row >>= field "path")
-            (fromMaybe Null (field "location" value):items "stack" value) :: [FilePath]
+            (fromMaybe Null (field "location" value):items "stack" value)++mapMaybe (field "path") (items "scopeSources" value) :: [FilePath]
           includedPaths=concatMap observationPaths (observation:take 4 (assistanceEvidence run))
           privateRaw=A.hasPrivateText secrets (output state) || A.hasPrivateValue secrets selected ||
             either (const False) (A.hasPrivateValue secrets) stack || any (either (const False) (A.hasPrivateValue secrets)) (scopes:pages)
-          includedBuffers=mapMaybe (field "sourceBufferId") (observation:take 4 (assistanceEvidence run)) :: [Int]
-      admission<-readAssistance runtime run receipt "admit" (object ["paths" .= includedPaths,"bufferIds" .= includedBuffers])
+          includedBuffers=concatMap (\value->maybeToList (field "sourceBufferId" value)++fromMaybe [] (field "scopeSourceBufferIds" value))
+            (observation:take 4 (assistanceEvidence run)) :: [Int]
+          (observedFrame,observedStamp)=case selectedInspectionOwner state of Just (FrameOwner fid stamp _)->(fid,stamp);_->(-1,-1)
+      admission<-readAssistance runtime run receipt "admit" (object ["paths" .= includedPaths,"bufferIds" .= includedBuffers,"sourceReferences" .= scopeReferences,
+        "frameId" .= observedFrame,"frameStamp" .= observedStamp,"sourceRevision" .= nextSourceObservation state])
       outputVisible<-outputPublic disclosure
       case (current,admission) of
         (Left _,_)->pure (Left "caller-retired")
@@ -2036,7 +2164,7 @@ tickTerminalLaunch runtime@(Debugger ref _ _ _ _) d = do
 
 -- Frame and variable handles are scoped to a suspended execution state.
 invalidate :: State -> State
-invalidate s=s {locationDialog=Nothing,generation=generation s+1,frameRevision=frameRevision s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty}
+invalidate s=s {locationDialog=Nothing,generation=generation s+1,frameRevision=frameRevision s+1,stopped=False,frame=Nothing,frames=[],choices=M.empty,variableRefs=M.empty,inspectionFrames=M.empty,variableOwners=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty}
 
 send :: Debugger -> Pending -> Text -> Value -> IO ()
 send (Debugger ref clock _ _ _) kind command arguments = do
@@ -2062,8 +2190,8 @@ tickDebugger :: Debugger -> Desktop -> IO Desktop
 tickDebugger runtime original = do
   updated<-tickDebuggerOwner runtime original
   publishSidebarEpoch runtime
-  drainSidebarReads runtime updated
-  located<-tickLocations runtime updated
+  inspected<-drainSidebarReads runtime updated
+  located<-tickLocations runtime inspected
   updatedFunctions<-tickFunctions runtime located
   tickAssistance runtime updatedFunctions
 
@@ -2085,7 +2213,7 @@ tickDebuggerOwner runtime@(Debugger ref clock _ _ _) original = do
   updated<-tickOutputOwner runtime received
   now<-clock
   current<-readIORef ref
-  let deadline kind=if kind==Attach && fst (startRequest current)=="launch" then 120000000000 else 15000000000
+  let deadline kind=case kind of Attach | fst (startRequest current)=="launch"->120000000000; _->15000000000
       expired=M.filter (\(kind,_,sent) -> now-sent>deadline kind) (pending current)
   let detachExpired=maybe False (\sent -> now-sent>1000000000) (disconnectAt current)
       timedOut=not (M.null expired)
@@ -2169,9 +2297,10 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
           threads=allAreas || "threads" `elem` areas
           stacks=threads || "stacks" `elem` areas
       if not (stacks || "variables" `elem` areas) then pure d else do
-        modifyIORef' ref (\state -> state {generation=generation state+1,frameRevision=frameRevision state+1,choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty,
+        modifyIORef' ref (\state -> state {generation=generation state+1,frameRevision=frameRevision state+1,choices=M.empty,variableRefs=M.empty,inspectionFrames=M.empty,variableOwners=M.empty,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty,
           thread=if threads then Nothing else thread state,
           frame=if stacks then Nothing else frame state,frames=if stacks then [] else frames state})
+        when (not stacks) (recordInspectionFrames ref (object ["stackFrames" .= frames s]))
         if threads then send runtime (Threads False) "threads" (object [])
         else when (stacks && stopped s) $ forM_ (thread s) (\tid -> sendStack runtime False tid)
         pure (retireBackgroundDialog d) {status="Debugger values changed; request scopes again."}
@@ -2183,11 +2312,12 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
       -- new epoch; no stale child page can revive an exited thread.
       when (stopped s) $ modifyIORef' ref (\state->state
         { generation=generation state+1,frameRevision=frameRevision state+1
-        , choices=M.empty,variableRefs=M.empty,sidebarPages=M.empty
+        , choices=M.empty,variableRefs=M.empty,inspectionFrames=M.empty,variableOwners=M.empty,sidebarPages=M.empty
         , sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,sourceReferences=M.empty
         , thread=if exitedSelection then Nothing else thread state
         , frame=if exitedSelection then Nothing else frame state
         , frames=if exitedSelection then [] else frames state })
+      when (stopped s && not exitedSelection) (recordInspectionFrames ref (object ["stackFrames" .= frames s]))
       when (configured s) (send runtime (Threads False) "threads" (object []))
       pure d
       where exitedSelection=text "reason" body=="exited" && field "threadId" body==thread s
@@ -2198,7 +2328,7 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
       -- Some adapters send exited (or a failed launch response) after terminated.
       -- Stop accepting controls now, but drain those final facts for at most 1s.
       modifyIORef' ref (\state -> (invalidate state) {endedAt=Just (fromMaybe now (endedAt state)),
-        pending=M.filter (\(kind,_,_) -> kind==Init || kind==Attach || kind==Configure) (pending state),
+        pending=M.filter (\(kind,_,_) -> startupPending kind) (pending state),
         ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
       pure (automaticDesktop s d) {status="Debug session ended."}
     D.Notification "exited" body -> do
@@ -2246,9 +2376,19 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
             case target of DebugStack{}->forM_ result (recordSourceReferences ref); _->pure ()
             atomically (void (tryPutTMVar reply (AdapterPage <$> result)))
             pure d
-          Inspection command reply -> do
+          PublicInspection reveal owner canonical caller command args reply->do
+            admitted<-caller
+            if either (const True) (const False) admitted || not (publicInspectionCurrent s d owner canonical && inspectionOwner s command args==Just owner && (not reveal || selectedInspectionOwner s==Just owner))
+              then void (tryPutMVar reply (Left "Debugger inspection source is private or expired.")) >> pure d
+              else do
+                -- Register only bounded scalar provenance here. Payload bounds
+                -- and scope/source preparation belong to the waiting worker.
+                forM_ result (recordOwnedVariables ref (Just owner) command)
+                void (tryPutMVar reply result)
+                pure d
+          Inspection command owner reply -> do
             forM_ result $ \body->do
-              recordVariables ref command body
+              recordOwnedVariables ref owner command body
               when (command=="stackTrace") (recordSourceReferences ref body)
             _<-tryPutMVar reply (result >>= boundedResult)
             pure d
@@ -2259,7 +2399,7 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
             pure (automaticDesktop s d) {status=notice}
           _ -> case result of
            Left err -> do
-             when (kind==Init || kind==Attach || kind==Configure) $ do
+             when (startupPending kind) $ do
                stopTransport runtime s
                modifyIORef' ref (\state -> (invalidate state) {client=Nothing,connected=False,pending=M.empty,ready=False,configured=False,disconnectAt=Nothing,failure=Nothing})
              case kind of
@@ -2267,17 +2407,22 @@ receive runtime@(Debugger ref clock _ _ _) d event = do
                  modifyIORef' ref (\state -> state {stopped=True})
                  forM_ (thread s) (\tid -> sendStack runtime False tid)
                _ -> pure ()
-             pure (automaticDesktop s d) {status="DAP: "<>err}
+             let notice=case kind of
+                   Scopes{}->"Debugger inspection failed; request scopes again."
+                   Variables{}->"Debugger inspection failed; request scopes again."
+                   _->"DAP: "<>err
+             pure (automaticDesktop s d) {status=notice}
            Right body -> if isJust (endedAt s) then pure d else response runtime kind body d
   where
-    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; WatchRequest{} -> True; LocationInspection{} -> True; _ -> False
+    stale kind=case kind of Threads{} -> True; Control{} -> True; Stack{} -> True; Scopes{} -> True; Variables{} -> True; ExceptionDetails -> True; Source{} -> True; Inspection{} -> True; PublicInspection{} -> True; SourceInspection{} -> True; SidebarRead{} -> True; WatchRequest{} -> True; LocationInspection{} -> True; _ -> False
 
 -- Selection controls presentation/source follow only. Stopped handles remain
 -- valid for sibling frames until the stop epoch itself expires.
 selectionExpired :: State -> Pending -> Bool
 selectionExpired s kind=case kind of
-  Scopes revision -> revision/=frameRevision s
-  Variables revision -> revision/=frameRevision s
+  Scopes revision owner -> revision/=frameRevision s || maybe False (not . frameOwnerCurrent s) owner
+  Variables revision owner -> revision/=frameRevision s || maybe False (not . frameOwnerCurrent s) owner
+  Inspection _ owner _ -> maybe False (not . frameOwnerCurrent s) owner
   Source _ revision _ _ -> revision/=frameRevision s
   WatchRequest (WatchOperation ident revision receipt _) _ _ _->not (watchCurrent s ident revision receipt)
   _ -> False
@@ -2314,7 +2459,9 @@ sourceInspectionExpired _ _ _=False
 -- A changed backing path rotates the scalar stamp; no adapter payload equality
 -- participates in identity. Canonical path preparation is a worker operation.
 recordSourceReferences :: IORef State -> Value -> IO ()
-recordSourceReferences ref body=modifyIORef' ref $ \s->foldl' observe s (take 1000 (items "stackFrames" body))
+recordSourceReferences ref body=do
+  modifyIORef' ref $ \s->foldl' observe s (take 1000 (items "stackFrames" body))
+  recordInspectionFrames ref body
   where
     observe s row=case field "source" row of
       Just source | reference>0,validPath, M.member reference (sourceReferences s) || M.size (sourceReferences s)<32768 ->
@@ -2328,16 +2475,132 @@ recordSourceReferences ref body=modifyIORef' ref $ \s->foldl' observe s (take 10
           validPath=maybe True (\value->T.compareLength value 4096/=GT && not (T.any (=='\0') value)) rawPath
       _->s
 
+selectedInspectionOwner :: State -> Maybe FrameOwner
+selectedInspectionOwner s=do
+  fid<-frame s >>= field "id"
+  FrameObservation stamp _<-M.lookup fid (inspectionFrames s)
+  pure (FrameOwner fid stamp Nothing)
+
+inspectionOwner :: State -> Text -> Value -> Maybe FrameOwner
+inspectionOwner s "scopes" args=do
+  let fid=integer "frameId" args
+  FrameObservation stamp _<-M.lookup fid (inspectionFrames s)
+  pure (FrameOwner fid stamp Nothing)
+inspectionOwner s "variables" args=M.lookup (integer "variablesReference" args) (variableOwners s) >>= id
+inspectionOwner _ _ _=Nothing
+
+frameOwnerCurrent :: State -> FrameOwner -> Bool
+frameOwnerCurrent s owner@(FrameOwner fid stamp _)=case M.lookup fid (inspectionFrames s) of
+  Just (FrameObservation current source)->current==stamp && inspectionSourceCurrent s source &&
+    (case owner of FrameOwner _ _ extra->maybe True (inspectionSourceCurrent s) extra)
+  _->False
+
+publicInspectionCurrent :: State -> Desktop -> FrameOwner -> [FilePath] -> Bool
+publicInspectionCurrent s d owner@(FrameOwner fid _ _) canonical=
+  stopped s && ready s && configured s && isJust (client s) && endedAt s==Nothing && disconnectAt s==Nothing &&
+  frameOwnerCurrent s owner && not (any (protectedPath d) canonical) && not privateGenerated
+  where
+    references=(case M.lookup fid (inspectionFrames s) of Just (FrameObservation _ (InspectionSource _ ident _))->[ident];_->[])++
+      (case owner of FrameOwner _ _ (Just (InspectionSource _ reference _))->[reference];_->[])
+    privateGenerated=any (`elem` references) (privateSourceReferences s d)
+
+privateSourceReferences :: State -> Desktop -> [Int]
+privateSourceReferences s d=[reference | (bid,(epoch,stamp,source))<-M.toList (sources s),
+  let reference=integer "sourceReference" source,epoch==generation s,reference>0,
+  sourceStampCurrent s reference stamp,protectedBuffer d bid]
+
+-- Scope sources can refer to already observed adapter-owned sources without a
+-- path. Retain that observation and canonicalize both names off the UI owner.
+publicScopes :: State -> FilePath -> [FilePath] -> [Int] -> Value -> IO (Either Text Value)
+publicScopes state base private privateReferences value=case boundedResult value of
+  Left err->pure (Left err)
+  Right (Object fields)->do
+    rows<-mapM prepare (take 1000 (items "scopes" value))
+    pure (Right (Object (KM.insert "scopes" (toJSON (mapMaybe id rows)) fields)))
+  Right other->pure (Right other)
+  where
+    prepare row@(Object fields)=case field "source" row of
+      Nothing->pure (Just row)
+      Just source->case captureInspectionSource state <$> inspectionSource source of
+        Nothing->pure Nothing
+        Just origin@(InspectionSource _ reference _)->do
+          resolved<-mapM (canonicalSourcePath base) (inspectionSourcePaths origin)
+          let paths=mapMaybe id <$> sequence resolved
+          pure $ case paths of
+            Right canonical | reference `notElem` privateReferences && all (not . protectedFilePath private) canonical &&
+                (case canonical of []->True;first:rest->all (==first) rest)->case (source,canonical) of
+                  (Object backing,path:_)->Just (Object (KM.insert "source" (Object (KM.insert "path" (toJSON path) backing)) fields))
+                  _->Just row
+            _->Nothing
+    prepare row=pure (Just row)
+
+inspectionSourcePaths :: InspectionSource -> [Maybe FilePath]
+inspectionSourcePaths (InspectionSource path _ observed)=path:maybe [] (\(_,backing)->[backing]) observed
+
+captureInspectionSource :: State -> InspectionSource -> InspectionSource
+captureInspectionSource s (InspectionSource path reference _)=InspectionSource path reference $ case M.lookup reference (sourceReferences s) of
+  Just (SourceObservation stamp backing)->Just (stamp,backing)
+  _->Nothing
+
+inspectionSourceCurrent :: State -> InspectionSource -> Bool
+inspectionSourceCurrent s (InspectionSource _ reference observed)=reference<=0 ||
+  fmap (\(SourceObservation stamp _)->stamp) (M.lookup reference (sourceReferences s))==fmap fst observed
+
+inspectionSource :: Value -> Maybe InspectionSource
+inspectionSource (Object fields)=do
+  backing<-case KM.lookup "path" fields of
+    Nothing->Just Nothing
+    Just Null->Just Nothing
+    Just (String value) | T.compareLength value 4096/=GT && not (T.any (=='\0') value)->Just (if T.null value then Nothing else Just (T.unpack value))
+    _->Nothing
+  let reference=fromMaybe 0 (field "sourceReference" (Object fields))
+  if reference<0 then Nothing else Just (InspectionSource backing reference Nothing)
+inspectionSource Null=Just (InspectionSource Nothing 0 Nothing)
+inspectionSource _=Nothing
+
+recordInspectionFrames :: IORef State -> Value -> IO ()
+recordInspectionFrames ref body=modifyIORef' ref $ \s->foldl' observe s (take 1000 (items "stackFrames" body))
+  where
+    observe s row
+      | fid<0=s
+      | not validPath=s {inspectionFrames=M.delete fid (inspectionFrames s)}
+      | not (M.member fid (inspectionFrames s)) && M.size (inspectionFrames s)>=32768=s
+      | otherwise=case M.lookup fid (inspectionFrames s) of
+          Just (FrameObservation _ old) | Just old==observed->s
+          _->s {inspectionFrames=M.insert fid (FrameObservation (nextFrameObservation s) (fromMaybe (InspectionSource Nothing 0 Nothing) observed)) (inspectionFrames s),nextFrameObservation=nextFrameObservation s+1}
+      where
+        fid=fromMaybe (-1) (field "id" row)
+        observed=captureInspectionSource s <$> (case field "source" row of Nothing->Just (InspectionSource Nothing 0 Nothing);Just source->inspectionSource source)
+        validPath=isJust observed
+
 -- DAP lazy handles are executable: hdb forces a thunk when its children are
 -- requested. Track provenance for both UI and MCP; never guess a reference.
-recordVariables :: IORef State -> Text -> Value -> IO ()
-recordVariables ref command body
+recordOwnedVariables :: IORef State -> Maybe FrameOwner -> Text -> Value -> IO ()
+recordOwnedVariables ref owner command body
   | command `elem` ["scopes","variables"] = do
+      observed<-readIORef ref
       let refs=M.fromListWith (||)
             [(ident,command=="variables" && maybe False (flag "lazy") (field "presentationHint" row))
-            | row<-items command body,let ident=integer "variablesReference" row,ident>0]
-      modifyIORef' ref (\state -> state {variableRefs=M.unionWith (||) refs (variableRefs state)})
+            | row<-take 1000 (items command body),let ident=integer "variablesReference" row,ident>0]
+          owners=M.fromListWith sameOwner
+            [(ident,rowOwner observed row) | row<-take 1000 (items command body),let ident=integer "variablesReference" row,ident>0]
+      modifyIORef' ref (\state -> state {variableRefs=retainBounded (||) refs (variableRefs state),
+        variableOwners=retainBounded sameOwner owners (variableOwners state)})
   | otherwise = pure ()
+  where
+    rowOwner state row=case (command,owner,field "source" row :: Maybe Value) of
+      ("scopes",Just (FrameOwner fid stamp _),Just source)->case inspectionSource source of
+        Just backing->Just (FrameOwner fid stamp (Just (captureInspectionSource state backing)))
+        Nothing->Nothing
+      _->owner
+    -- Never evict a remembered lazy/ambiguous handle within this stop: a later
+    -- alias without a lazy hint must not regain read-only expansion authority.
+    retainBounded combine incoming previous=M.foldlWithKey' retain previous incoming
+      where retain known ident value=case M.lookup ident known of
+              Just old->M.insert ident (combine value old) known
+              Nothing | M.size known<32768->M.insert ident value known
+              _->known
+    sameOwner a b=if a==b then a else Nothing
 
 configure :: Debugger -> IO ()
 configure runtime@(Debugger ref _ _ _ _) = do
@@ -2392,12 +2655,12 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
       if showPicker then showChoices runtime "Call stack" "frame" rows (map frameLabel rows) d
       else if not (followSource s) then pure d
       else maybe (pure d {status="Stopped; no source frame supplied."}) (openFrame runtime False Nothing d) (listToMaybe rows)
-    Scopes _ -> do
-      recordVariables ref "scopes" body
+    Scopes _ owner -> do
+      recordOwnedVariables ref owner "scopes" body
       let rows=items "scopes" body
       showChoices runtime "Scopes" "expand" rows (map (text "name") rows) d
-    Variables _ -> do
-      recordVariables ref "variables" body
+    Variables _ owner -> do
+      recordOwnedVariables ref owner "variables" body
       let rows=items "variables" body
       showChoices runtime "Variables" "expand" rows (map variableLabel rows) d
     Source explicit revision stamp selected
@@ -2428,8 +2691,9 @@ response runtime@(Debugger ref _ _ _ _) kind body d = do
     FunctionBreaks _ _ reply->void(tryPutMVar reply (Right body)) >> pure d
     LocationInspection _ reply->void(tryPutMVar reply (Right body)) >> pure d
     SourceInspection _ _ _ reply->void (tryPutMVar reply (Right body)) >> pure d
-    Inspection command reply -> do
-      recordVariables ref command body
+    PublicInspection{}->pure d
+    Inspection command owner reply -> do
+      recordOwnedVariables ref owner command body
       when (command=="stackTrace") (recordSourceReferences ref body)
       _<-tryPutMVar reply (boundedResult body)
       pure d
@@ -2469,7 +2733,7 @@ select runtime@(Debugger ref _ _ _ _) fullToken action values d = do
       openFrame runtime True Nothing d chosen
     "expand" | stopped s,Just chosen<-selected >>= at rows,let ident=integer "variablesReference" chosen,ident>0 ->
       case M.lookup ident (variableRefs s) of
-        Just False -> send runtime (Variables (frameRevision s)) "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
+        Just False -> send runtime (Variables (frameRevision s) (M.lookup ident (variableOwners s) >>= id)) "variables" (object ["variablesReference" .= ident]) >> pure d {status="Loading variables..."}
         Just True -> pure d {status="Lazy variable requires explicit evaluation; expansion does not force it."}
         Nothing -> pure d {status="Debugger value expired; request scopes again."}
     "exceptions" -> do

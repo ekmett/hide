@@ -222,6 +222,9 @@ for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owne
                     details=dict(typeName='IOException', message='permission denied', stackTrace='Main.hs:6',
                                  innerException=[dict(typeName='Inner', message='nested cause')])) )
             elif cmd == 'threads':
+                if mode == 'inspection-policy' and pending_variables:
+                    reply(pending_variables, dict(variables=[dict(name='private child', value='secret', variablesReference=23)]))
+                    pending_variables = None
                 thread_count += 1
                 if pending_function:
                     reply(pending_function, function_rows(pending_function))
@@ -253,8 +256,16 @@ for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owne
                     rows[0]['line'] = 2 + assistance_steps
                 if mode == 'assist-history':
                     rows[0]['source']['path'] = sys.argv[1] + ('.hs' if assistance_steps == 0 else '')
-                if mode.startswith('source-') or mode in ('watches-private', 'watches-child-policy'):
+                if mode.startswith('source-') or mode in ('watches-private', 'watches-child-policy', 'inspection-policy'):
                     rows[0]['source']['path'] = sys.argv[1] + ('.changed.hs' if mode == 'source-stamp' and stack_count > 1 else '.hs')
+                if mode == 'inspection-policy':
+                    if stack_count > 1:
+                        rows[0]['source']['path'] = sys.argv[1] + '.changed.hs'
+                    rows.append(dict(id=0, name='public pathless frame', line=1, column=1, source=None))
+                    rows.append(dict(id=1, name='public absent source', line=1, column=1))
+                if mode in ('inspection-policy', 'assist-scope-private'):
+                    rows.append(dict(id=13, name='other source frame', line=1, column=1,
+                                     source=dict(sourceReference=13, path=sys.argv[1] + ('.changed.hs' if stack_count > 1 else '.hs'))))
                 if mode == 'local-source':
                     rows[0].update(column=5, source=dict(name='Local.hs', path=sys.argv[1] + '.hs', sourceReference=0))
                 if mode in ('sidebar', 'sidebar-exit'):
@@ -265,6 +276,9 @@ for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owne
                     rows.append(dict(id=12, name='other frame', line=1, column=1,
                                      source=dict(name='Other.hs', sourceReference=10)))
                 reply(req, dict(stackFrames=rows, totalFrames=len(rows)))
+                if mode == 'inspection-policy' and pending_variables:
+                    reply(pending_variables, dict(variables=[dict(name='STALE child', value='secret', variablesReference=23)]))
+                    pending_variables = None
                 if mode == 'source-stamp' and pending_source:
                     reply(pending_source, dict(content='STALE reused source handle'))
                     pending_source = None
@@ -288,7 +302,9 @@ for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owne
                                     mimeType='text/x-haskell'))
             elif cmd == 'scopes':
                 scope_count += 1
-                if mode in ('sidebar', 'sidebar-exit'):
+                if mode == 'inspection-policy' and os.path.exists(sys.argv[1] + '.inspection-fail'):
+                    send(dict(type='response', request_seq=req['seq'], command=cmd, success=False, message='PRIVATE_SCOPE_ERROR', body={}))
+                elif mode in ('sidebar', 'sidebar-exit'):
                     fid = args['frameId']
                     if mode == 'sidebar-exit' and fid == 21:
                         thread_exited = True
@@ -303,6 +319,16 @@ for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owne
                         sidebar_pair(sidebar_scopes, req, 'frameId', scopes)
                     else:
                         reply(req, dict(scopes=[dict(name='Locals %d' % fid, variablesReference=200+fid, expensive=False)]))
+                elif mode == 'assist-scope-private':
+                    reply(req, dict(scopes=[dict(name='Locals', variablesReference=21, expensive=False),
+                                           dict(name='PRIVATE_SCOPE_LABEL', variablesReference=42, expensive=False, source=dict(path=sys.argv[1] + '.hs')),
+                                           dict(name='PRIVATE_REFERENCE_LABEL', variablesReference=44, expensive=False, source=dict(sourceReference=13))]))
+                elif mode == 'inspection-policy' and args['frameId'] == 1:
+                    reply(req, dict(scopes=[dict(name='Absent source locals', variablesReference=61, expensive=False)]))
+                elif mode == 'inspection-policy' and args['frameId'] == 0:
+                    reply(req, dict(scopes=[dict(name='Pathless locals', variablesReference=41, expensive=False),
+                                           dict(name='PRIVATE_SCOPE_LABEL', variablesReference=42, expensive=False, source=dict(path=sys.argv[1] + '.hs')),
+                                           dict(name='PRIVATE_REFERENCE_LABEL', variablesReference=44, expensive=False, source=dict(sourceReference=13))]))
                 elif mode == 'frame':
                     assert args['frameId'] == 11
                     pending_scopes = req
@@ -364,6 +390,12 @@ for session in range(1, 6 if mode == 'functions' else 4 if mode in ('output-owne
                     reply(req, dict(variables=[dict(name='FORCED lazy alias', value='wrong', variablesReference=0)]))
                 elif reference == 21:
                     reply(req, dict(variables=[dict(name='value', value='<thunk>', type='Thunk', variablesReference=22, presentationHint=dict(lazy=mode == 'lazy'))]))
+                elif mode in ('inspection-policy', 'assist-scope-private') and reference == 44:
+                    reply(req, dict(variables=[dict(name='PRIVATE_REFERENCE_VALUE', value='secret', variablesReference=45)]))
+                elif mode in ('inspection-policy', 'assist-scope-private') and reference == 42:
+                    reply(req, dict(variables=[dict(name='PRIVATE_SCOPE_VALUE', value='secret', variablesReference=43)]))
+                elif mode == 'inspection-policy' and reference == 41:
+                    reply(req, dict(variables=[dict(name='public', value='42', variablesReference=0)]))
                 elif reference == 31:
                     reply(req, dict(variables=[dict(name='WRONG_SCOPE', value='wrong row', variablesReference=0)]))
                 else:
