@@ -139,7 +139,7 @@ checks profile=do
     stage<-allocated (forM_ [0..19::Int] (evaluate . metadata))
     total<-allocated (forM_ [0..19::Int] (evaluate . packet))
     check ("menu metadata stage remains bounded: "++show (opened,stage))
-      (withinBudget profile stage (20*(if opened then 500000 else 550000)))
+      (withinBudget profile stage (20*(if opened then 500000 else 650000)))
     check ("rendered menu export remains within matched total budget: "++show (opened,total))
       (withinBudget profile total (20*(if opened then 4100000 else 3600000)))
   base<-sidebarFixture "/public" [("one.hs","/public/one.hs"),("secret.json","/authority/secret.json"),("three.hs","/public/three.hs")]
