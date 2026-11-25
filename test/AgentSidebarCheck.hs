@@ -135,7 +135,22 @@ checks=withInspector $ \inspector->withSystemOne $ \systemOne->bracket temporary
         ensure "completion model settings remain separate from Primary" (null (agentSettings configured))
         let staleSubmission=handleEvent (V.EvKey V.KEnter []) choose
         stale<-refuseReplay configured (snd staleSubmission)
-        initialRename<-act (chooseMenu "Primary  idle" stale) >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
+        -- A settings save is not a sidebar publication receipt. Exercise the
+        -- real directory refresh before its new rows have been projected.
+        let primaryRow=maybe (error "Missing Primary row") id (rowAt (index "Primary  idle" stale) (tree stale))
+            primaryKey=keyOf (rowHit primaryRow)
+            primaryHit=maybe (error "Missing Primary node") (nodeHit primaryKey) (M.lookup primaryKey (treeNodes (tree stale)))
+            P.TreeHit agentTreeOwner agentTreeRoot _=maybe (error "Missing Agents row") rowHit (rowAt (index "Agents" stale) (tree stale))
+        refreshing<-refreshTreeFromHost host agentTreeOwner agentTreeRoot stale
+        unprojected<-await tick (\desktop->nodeAt primaryHit (tree desktop)==Nothing &&
+          treeProjectionRevision (tree desktop)/=treeRevision (tree desktop)) refreshing
+        let (ignored,ignoredEffects)=chooseMenu "Primary  idle" unprojected
+        ensure "unprojected sidebar choice dispatches no stale action"
+          (null ignoredEffects && status ignored==status unprojected && contextMenu ignored==Nothing)
+        renameReady<-await tick (menuReady "Primary  idle" "Rename") unprojected
+        let rename=chooseMenu "Primary  idle" renameReady
+        ensure "current rename dispatches its own sidebar action" (case snd rename of [InvokeTree{}]->True;_->False)
+        initialRename<-act rename >>= await tick (maybe False ((=="Rename agent").dialogTitle) . dialog)
         sourceVersion<-captureVersion (maybe (error "Missing source") documentBuffer (activeDocument initialRename))
         let originalSelection=selection <$> activeWindow initialRename
             formRef desktop=case dialog desktop of
@@ -474,6 +489,10 @@ checks=withInspector $ \inspector->withSystemOne $ \systemOne->bracket temporary
           y=2+target-treeScroll (tree d)
       in fst (handleEvent (V.EvMouseDown 5 y V.BRight []) d)
     chooseMenu=chooseMenuAt 0
+    menuReady label title d=any ((==label).P.infoLabel.rowInfo.snd) (visibleRows 0 32768 (tree d)) &&
+      case contextItemsFor (popupFor label d) of
+        (name,command):_->name==title && commandEnabled d command
+        _->False
     chooseMenuAt selected label d=
       let popup=popupFor label d
           selectedPopup=popup {contextMenu=fmap (\(rectangle,_)->(rectangle,selected)) (contextMenu popup)}
