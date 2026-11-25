@@ -51,7 +51,6 @@ int main(void) {
         assert(published==(strcmp(command,"INVALID\n")!=0));
         puts(published?"PUBLISHED":"REJECTED");
     }
-    thc_ax_platform_menu_close();
     if (!window_closed) thc_close();
     return 0;
 }

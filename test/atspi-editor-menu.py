@@ -49,11 +49,13 @@ with tempfile.TemporaryDirectory(prefix="hide-atspi-editor-") as directory:
         candidates = list(Path(env["HIDE_ATSPI_VULKAN_ICD_DIR"]).glob("*lvp*.json"))
         assert len(candidates) == 1, "one software Vulkan ICD is required"
         env["VK_DRIVER_FILES"] = env["VK_ICD_FILENAMES"] = str(candidates[0])
+    capture = work / "first-frame.bmp"
+    env["THC_EDIT_CAPTURE"] = str(capture)
     session = secrets.token_hex(24)
     owned = []
     with (work / "editor.log").open("w+") as log:
         try:
-            daemon = subprocess.Popen([executable, "--remote-daemon", session, "--scene", "menu"],
+            daemon = subprocess.Popen([executable, "--remote-daemon", session],
                                       cwd=directory, env=env, stdout=log, stderr=log)
             owned.append(daemon)
             record = work / "data" / "thc-edit" / "sessions" / (session + ".json")
@@ -62,19 +64,26 @@ with tempfile.TemporaryDirectory(prefix="hide-atspi-editor-") as directory:
                                         cwd=directory, env=env, stdout=log, stderr=log)
             owned.append(frontend)
             root = await_value("installed editor window missing from AT-SPI", lambda: next(roots(), None))
-            menu = await_value("actual Haskell File menu missing", lambda: next(
-                (node for node in children(root) if node.get_name() == "File"), None))
-            assert menu.get_role() == Atspi.Role.MENU
-            assert any("Open" in row.get_name() for row in children(menu))
-            for row in children(menu):
-                action = row.get_action_iface()
-                assert action is None or action.get_n_actions() == 0
+            # The existing renderer capture is an actual completed-frame
+            # receipt; do not assume an initial scene survives attach/resize.
+            await_value("installed editor did not render its initial frame", lambda:
+                        capture.exists() and capture.stat().st_size > 54)
             window = subprocess.check_output(["xdotool", "search", "--onlyvisible", "--pid", str(frontend.pid)],
                                              text=True, timeout=5).splitlines()[0]
 
             def key(value):
                 subprocess.run(["xdotool", "key", "--window", window, value], check=True, timeout=5)
 
+            key("F10")
+            menu = await_value("actual Haskell File menu missing", lambda: next(
+                (node for node in children(root) if node.get_name() == "File"), None))
+            assert menu.get_role() == Atspi.Role.MENU
+            assert any("Open" in row.get_name() for row in children(menu))
+            selected = [row for row in children(menu) if row.get_state_set().contains(Atspi.StateType.SELECTED)]
+            assert len(selected) == 1 and selected[0].get_name() == "New"
+            for row in children(menu):
+                action = row.get_action_iface()
+                assert action is None or action.get_n_actions() == 0
             key("Escape")
             await_value("Haskell menu close not published", lambda: root.get_child_count() == 0)
             await_value("Haskell menu retained reference survived close", lambda:
