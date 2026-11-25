@@ -1,5 +1,5 @@
 -- SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP, OverloadedStrings #-}
 -- |
 -- Module      : BuildCheck
 -- Copyright   : (c) 2026 Edward Kmett
@@ -34,9 +34,23 @@ import qualified Hide.Plugin.Window as W
 import Hide.Plugin.BufferHost (captureVersion)
 import Hide.PluginWindowHost (adoptWindowUpdate)
 import qualified Hide.Plugin.Menu as P
+#ifdef darwin_HOST_OS
+import Control.Concurrent.Async (withAsync,wait,asyncThreadId)
+import Control.Concurrent.MVar (newEmptyMVar,putMVar,readMVar)
+import Control.Exception (bracket_)
+import qualified Data.ByteString as BS
+import GHC.Conc (threadStatus,ThreadStatus(ThreadBlocked))
+import System.Posix.Files (createNamedPipe)
+import System.Posix.IO (openFd,closeFd,fdWrite,OpenMode(ReadWrite),defaultFileFlags,nonBlock,cloexec)
+import qualified System.Posix.IO.ByteString as PosixBytes
+import System.IO.Error (tryIOError,isFullError)
+#endif
 
 checks :: AllocationProfile -> IO ()
 checks profile = bracket temporary removePathForcibly $ \root -> do
+#ifdef darwin_HOST_OS
+  configPipeEOF root
+#endif
   let initial=initialDesktop (80,25)
       ghc=B.BuildConfig B.GHC "ghc" "" "" "" []
       thc=B.BuildConfig B.THC "thc with spaces" "exe:hello world;literal" "compiler root" "runtime path" ["one two"]
@@ -236,6 +250,38 @@ checks profile = bracket temporary removePathForcibly $ \root -> do
       projectRan<-await jobs projectRunning (finished jobs)
       check "real Cabal project run" (status projectRan=="Run completed." && "cabal-check" `T.isInfixOf` output projectRan)
 
+
+#ifdef darwin_HOST_OS
+-- Close the sole writer only after the real configuration reader has consumed
+-- every byte and parked. EOF must wake it without a last readable payload byte.
+configPipeEOF :: FilePath -> IO ()
+configPipeEOF root=bracket_ (createNamedPipe path 0o600) (removeFile path) $ do
+  armed<-newEmptyMVar
+  withAsync (readMVar armed >> B.loadBuildConfig root root) $ \reader->do
+    -- Close the writer before withAsync joins, including on assertion failure.
+    bracket (openFd path ReadWrite defaultFileFlags {nonBlock=True,cloexec=True}) closeFd $ \writer->do
+      putMVar armed ()
+      let consumed byte=do
+            result<-tryIOError (PosixBytes.fdRead writer 1)
+            case result of
+              Left err | isFullError err->pure ()
+                       | otherwise->ioError err
+              Right bytes | BS.length bytes==1->fdWrite writer [byte] >> threadDelay 1000 >> consumed byte
+              _->fail "Configuration FIFO lost its writer"
+          parked=do
+            state<-threadStatus (asyncThreadId reader)
+            case state of ThreadBlocked _->pure ();_->threadDelay 1000 >> parked
+      forM_ ("{\"toolchain\":\"GHC\"} "::String) $ \byte->do
+        _<-fdWrite writer [byte]
+        done<-timeout 1000000 (consumed byte)
+        check "configuration reader consumes each FIFO byte" (done==Just ())
+      waiting<-timeout 1000000 parked
+      check "configuration reader waits before final writer closes" (waiting==Just ())
+    loaded<-timeout 1000000 (wait reader)
+    config<-maybe (fail "drained configuration FIFO did not reach EOF") pure loaded
+    check "configuration FIFO retains GHC instead of fallback" (B.buildToolchain config==B.GHC)
+  where path=root </> "run.json"
+#endif
 
 check :: String -> Bool -> IO ()
 check label ok=unless ok (error label)

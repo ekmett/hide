@@ -31,6 +31,7 @@ import System.Environment (lookupEnv)
 import System.FilePath ((</>), isAbsolute, takeFileName, takeExtension, takeDirectory)
 import Hide.Model (Desktop(..), Document(..), Toolchain(..), BuildAction(..), startingDirectory, windowDocument)
 import Hide.Files (filePath)
+import Hide.FileIO (readFileBytes)
 
 data BuildConfig = BuildConfig
   { buildToolchain :: Toolchain, buildExecutable :: FilePath, buildTarget :: Text
@@ -72,7 +73,7 @@ isProject root = do
 -- | Load toolchain settings, reusing the saved target only for its matching cwd.
 loadBuildConfig :: FilePath -> FilePath -> IO BuildConfig
 loadBuildConfig directory root = do
-  loaded<-try (BS.readFile (directory </> "run.json")) :: IO (Either IOException BS.ByteString)
+  loaded<-try (readFileBytes (directory </> "run.json")) :: IO (Either IOException BS.ByteString)
   thcRoot<-T.pack . fromMaybe "" <$> lookupEnv "THC_ROOT"
   let fallback=BuildConfig THC "thc" "" thcRoot "" []
       parse=withObject "build target" $ \o -> do

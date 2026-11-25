@@ -51,6 +51,7 @@ import Hide.PackageSidebar (packageBuildManifestCurrent)
 import Hide.MCPPermissions (AdmittedBuild, reserveAdmittedBuild, stepAdmittedBuild, cancelAdmittedBuild)
 import Hide.Plugin.BufferHost (ContentVersion, captureVersion, versionCurrent)
 import Hide.Files (filePath)
+import Hide.FileIO (readFileBytes)
 import qualified Hide.Plugin.Window as W
 import qualified Data.Vector as V
 import Hide.Model
@@ -144,7 +145,7 @@ persist path value = do
 -- merely to switch backend. Legacy flat run.json becomes the first saved choice.
 readRunSettings :: FilePath -> IO Value
 readRunSettings directory = do
-  result<-try (BS.readFile (directory </> "run.json")) :: IO (Either IOException BS.ByteString)
+  result<-try (readFileBytes (directory </> "run.json")) :: IO (Either IOException BS.ByteString)
   pure (either (const (object [])) (fromMaybe (object []) . decodeStrict') result)
 
 buildChoices :: Value -> M.Map Text Value
