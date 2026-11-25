@@ -64,6 +64,9 @@ extra-source-files:
   , cbits/accessibility-accesskit.h
   , test/native-accessibility-unix.c
   , test/native-menu-snapshot.c
+  , test/native-accessibility-windows.c
+  , test/uia-menu-client.cs
+  , test/uia-property.c
   , test/atspi-menu.py
   , test/atspi-editor-menu.py
   , test/atspi-menu.sh
@@ -353,6 +356,12 @@ library
       c-sources: cbits/accessibility-unix.c, cbits/accessibility-accesskit.c
       pkgconfig-depends: accesskit-c ==0.23.2
       extra-libraries: pthread, dl
+    if flag(accesskit) && os(windows)
+      cpp-options: -DWITH_ACCESSKIT
+      cc-options: -DWITH_ACCESSKIT
+      c-sources: cbits/accessibility-windows.c, cbits/accessibility-accesskit.c
+      pkgconfig-depends: accesskit-c ==0.23.2
+      extra-libraries: oleaut32, uiautomationcore, userenv, ntdll, bcrypt
     if os(windows)
       c-sources: cbits/file-drag-windows.c
       extra-libraries:

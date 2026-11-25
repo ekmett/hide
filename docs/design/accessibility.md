@@ -432,3 +432,28 @@ reset retire old names and links. AppKit derives screen coordinates from the
 actual SDL content view and renderer cell edges. The adapter has no actions or
 setters and does not override application accessibility focus. Native windows,
 dialogs and document text still need their own semantic projections.
+
+### Windows menu provider (initial slice)
+
+The optional `accesskit` build flag also attaches the pinned AccessKit C 0.23.2
+Windows adapter to SDL's borrowed HWND before the window is first shown. It
+consumes the same copied, bounded, read-only menu snapshot as Linux. Callback
+userdata is a scalar attachment receipt; retired callbacks return an empty tree
+and never read an SDL window or editor state. Clearing a projection withdraws
+children while keeping the adapter attached; window destruction retires the
+attachment before releasing it. No accessibility request executes an editor
+command.
+
+The pin maps menu radio checks to UIA RadioButton/SelectionItem state. Its UIA
+backend omits ordinary menu current-row and keyboard-shortcut properties, so the
+Windows converter also publishes those as bounded read-only FullDescription
+text. This keeps the painted current row independent of the default-view check.
+
+An owned noninteractive Windows run discovered the custom provider through an
+external UIA client and read its menu labels and disabled state. The committed
+UIA fixture additionally exercises live identity, checks, current descriptions,
+bounds and retained references; full dynamic qualification is still pending.
+This is a menu-provider draft, not Narrator, source TextPattern, multi-DPI,
+protected-dialog or full-editor qualification. Windows builds need the matching
+C-binding development package exposed as `accesskit-c` through pkg-config; the
+normal build does not download a library or modify the user's profile.

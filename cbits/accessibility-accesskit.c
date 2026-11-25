@@ -1,6 +1,9 @@
 /* SPDX-FileCopyrightText: 2026 Edward Kmett
  * SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 */
 #include "accessibility-accesskit.h"
+#ifdef _WIN32
+#include <stdio.h>
+#endif
 
 static accesskit_role node_role(thc_ax_menu_role role) {
     switch (role) {
@@ -25,6 +28,16 @@ accesskit_tree_update *thc_ax_menu_accesskit_tree(const thc_ax_menu_snapshot *s)
         accesskit_node_set_label(node,r->name);
         accesskit_node_set_read_only(node);
         if (*r->shortcut) accesskit_node_set_keyboard_shortcut(node,r->shortcut);
+#ifdef _WIN32
+        /* The pinned UIA backend exposes radio checks through SelectionItem,
+         * but ignores menu current/keyboard_shortcut properties. Preserve them
+         * as read-only FullDescription, independently of the radio check. */
+        if (r->current || *r->shortcut) {
+            char description[512];
+            snprintf(description,sizeof(description),"%s%s%s",r->current?"Current in editor. ":"",*r->shortcut?"Shortcut: ":"",r->shortcut);
+            accesskit_node_set_description(node,description);
+        }
+#endif
         if (!r->enabled) accesskit_node_set_disabled(node);
         accesskit_node_set_selected(node,r->current!=0);
         if (r->checked>=0) accesskit_node_set_toggled(node,r->checked?ACCESSKIT_TOGGLED_TRUE:ACCESSKIT_TOGGLED_FALSE);
