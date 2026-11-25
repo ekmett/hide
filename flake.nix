@@ -63,9 +63,10 @@
             optimize = "ReleaseFast";
             revision = "76895d97";
           };
+          accesskitC = pkgs.callPackage ./nix/accesskit-c.nix {};
           hide = import ./nix/package.nix {
             inherit (pkgs) lib haskell utf8proc sdl3 pango;
-            inherit ghosttyVt haskellPackages;
+            inherit ghosttyVt haskellPackages accesskitC;
           };
         in {
           packages = { inherit hide; default = hide; };

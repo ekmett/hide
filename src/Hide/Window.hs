@@ -18,7 +18,7 @@ module Hide.Window (runWindow, nativeMenuShortcut, nativeChordShortcut, nativeMe
 #ifdef WITH_WINDOW
   , check, utf8, nativeMenus, nativeMenusFor, installNativeMenus, updateDockWindows
   , c_accessibility, c_cancel_file_drag, c_arm_file_drag, c_system_dark, c_open, c_mode, c_scale, c_title, c_raise, c_close, c_size
-  , emptySourceAccessibility, emptyDialogAccessibility, emptyMenuAccessibility, installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
+  , emptySourceAccessibility, emptyDialogAccessibility, emptyMenuAccessibility, installNativeMenuAccessibility, installNativeCanvas, c_canvas_reset, c_canvas_begin, c_canvas_chunk, c_canvas_release, c_canvas_clear
   , c_begin, c_clip, c_glyph, c_unicode, c_pixelate_unicode, c_cursor, c_cursor_blink
   , c_crt_filter, c_power_mode, c_power_mode_burst, c_present, c_wait, c_event_age_ns, c_wake, c_text, c_clipboard, c_set_clipboard
 #ifdef darwin_HOST_OS
@@ -45,6 +45,11 @@ import Data.Aeson (object,(.=),encode,eitherDecodeStrict')
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as BL
 import qualified Hide.Plugin.Canvas as Canvas
+#ifdef WITH_ACCESSKIT
+import Data.Aeson (Value,withObject,(.:))
+import Data.Aeson.Types (Parser)
+import Control.Exception (onException)
+#endif
 import Hide.RemoteEndpoint (randomIdentity)
 import Control.Exception (bracket_)
 import Control.Monad (forM_, when, unless, foldM)
@@ -106,6 +111,13 @@ foreign import ccall unsafe "thc_mode" c_mode :: CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_scale" c_scale :: CInt -> IO CInt
 foreign import ccall unsafe "thc_raise" c_raise :: IO ()
 foreign import ccall unsafe "thc_accessibility" c_accessibility :: CString -> CSize -> IO CInt
+#ifdef WITH_ACCESSKIT
+foreign import ccall unsafe "thc_accessibility_menu_begin" c_ax_menu_begin :: CInt -> CInt -> CInt -> IO CInt
+foreign import ccall unsafe "thc_accessibility_menu_item" c_ax_menu_item :: CString -> CInt -> CInt -> CString -> CString -> CInt -> CInt -> CInt -> CInt -> CInt -> CInt -> CInt -> IO CInt
+foreign import ccall unsafe "thc_accessibility_menu_end" c_ax_menu_end :: IO CInt
+foreign import ccall unsafe "thc_accessibility_menu_clear" c_ax_menu_clear :: IO ()
+
+#endif
 foreign import ccall unsafe "thc_cancel_file_drag" c_cancel_file_drag :: IO ()
 foreign import ccall unsafe "thc_arm_file_drag" c_arm_file_drag :: CString -> CInt -> CInt -> CInt -> CInt -> IO CInt
 foreign import ccall unsafe "thc_title" c_title :: CString -> IO ()
@@ -174,6 +186,64 @@ emptySourceAccessibility="{\"source\":{\"present\":false,\"readOnly\":true},\"si
 -- | Complete dismissed menu snapshot; clearing it never changes SDL focus.
 emptyMenuAccessibility :: BS.ByteString
 emptyMenuAccessibility="{\"menu\":{\"present\":false,\"readOnly\":true,\"truncated\":false,\"nodes\":[]},\"size\":[40,12]}"
+
+#ifdef WITH_ACCESSKIT
+-- Menu-only native transport. The model and remote validator own the checked
+-- projection; C copies each bounded field before returning. macOS retains its
+-- existing Cocoa JSON adapter, while AccessKit receives no unrelated snapshots.
+data NativeMenuItem = NativeMenuItem T.Text CInt CInt T.Text T.Text (Int,Int,Int,Int) Bool Bool (Maybe Bool)
+
+nativeMenuItems :: Value -> Parser (Bool,[NativeMenuItem])
+nativeMenuItems=withObject "native menu" $ \o->do
+  present<-o .: "present"
+  readOnly<-o .: "readOnly"
+  _<-(o .: "truncated" :: Parser Bool)
+  rows<-o .: "nodes" :: Parser [Value]
+  unless (readOnly && length (take 257 rows)<=256 && (present || null rows)) (fail "Invalid native menu")
+  values<-mapM item rows
+  -- The admitted remote format permits any row order; the flat C boundary
+  -- installs its one root first and keeps the remaining presentation order.
+  let isRoot (NativeMenuItem _ parent _ _ _ _ _ _ _)=parent<0
+  pure (present,filter isRoot values++filter (not . isRoot) values)
+  where
+    item=withObject "native menu item" $ \o->do
+      ident<-o .: "id" :: Parser [T.Text]
+      parent<-o .: "parent" :: Parser (Maybe [T.Text])
+      role<-o .: "role" :: Parser T.Text
+      kind<-case lookup role [("menu",0),("menuitem",1),("menuitemradio",2),("separator",3)] of
+        Just value->pure value
+        Nothing->fail "Invalid native menu role"
+      NativeMenuItem (TE.decodeUtf8 (BL.toStrict (encode ident))) (maybe (-1) (const 0) parent) kind
+        <$> o .: "name" <*> o .: "shortcut" <*> o .: "bounds" <*> o .: "enabled" <*> o .: "current" <*> o .: "checked"
+
+publishNativeMenuAccessibility :: (Int,Int) -> Value -> IO ()
+publishNativeMenuAccessibility size@(cols,rows) value
+  | os=="darwin"=do
+      let bytes=BL.toStrict (encode (object ["menu" .= value,"size" .= size]))
+      BS.useAsCStringLen bytes $ \(ptr,len)->check "Update local menu accessibility" (c_accessibility ptr (fromIntegral len))
+  | otherwise=case parseEither nativeMenuItems value of
+      Left _->c_ax_menu_clear >> ioError (userError "Invalid native menu metadata")
+      Right (present,values)->(do
+        check "Begin native menu accessibility" (c_ax_menu_begin (boolean present) (fromIntegral cols) (fromIntegral rows))
+        forM_ values $ \(NativeMenuItem ident parent role name shortcut (x,y,w,h) enabled selected checked)->
+          utf8 ident $ \key->utf8 name $ \label->utf8 shortcut $ \binding->check "Copy native menu accessibility"
+            (c_ax_menu_item key parent role label binding (fromIntegral x) (fromIntegral y) (fromIntegral w) (fromIntegral h)
+              (boolean enabled) (boolean selected) (maybe (-1) boolean checked))
+        check "Publish native menu accessibility" c_ax_menu_end) `onException` c_ax_menu_clear
+  where boolean True=1;boolean False=0
+
+#endif
+
+installNativeMenuAccessibility :: BS.ByteString -> IO ()
+#ifdef darwin_HOST_OS
+installNativeMenuAccessibility bytes=BS.useAsCStringLen bytes $ \(ptr,len)->check "Update menu accessibility" (c_accessibility ptr (fromIntegral len))
+#elif defined(WITH_ACCESSKIT)
+installNativeMenuAccessibility bytes=case eitherDecodeStrict' bytes >>= parseEither (withObject "native menu wrapper" (\o->(,) <$> o .: "size" <*> o .: "menu")) of
+  Left _->c_ax_menu_clear >> ioError (userError "Invalid native menu metadata")
+  Right (size,value)->publishNativeMenuAccessibility size value
+#else
+installNativeMenuAccessibility _=pure ()
+#endif
 
 -- | Complete dismissed modal snapshot.
 emptyDialogAccessibility :: BS.ByteString
@@ -322,9 +392,13 @@ draw font canvasOwner d = allocaArray 16 $ \scratch -> do
   let modal=dialog d/=Nothing
       dialogBytes=BL.toStrict (encode (object ["dialog" .= dialogSemantics OwnerSemantics d,"size" .= screenSize d,"hapticFeedback" .= hapticFeedback d]))
   BS.useAsCStringLen dialogBytes $ \(ptr,len)->check "Update local dialog accessibility" (c_accessibility ptr (fromIntegral len))
+#ifdef darwin_HOST_OS
   let menuBytes=if menu d==Nothing || modal || contextMenu d/=Nothing then emptyMenuAccessibility
         else BL.toStrict (encode (object ["menu" .= menuSemantics OwnerSemantics d,"size" .= screenSize d]))
-  BS.useAsCStringLen menuBytes $ \(ptr,len)->check "Update local menu accessibility" (c_accessibility ptr (fromIntegral len))
+  installNativeMenuAccessibility menuBytes
+#elif defined(WITH_ACCESSKIT)
+  publishNativeMenuAccessibility (screenSize d) (menuSemantics OwnerSemantics d)
+#endif
   updateNativeCanvas canvasOwner modal (screenSize d) scene
   let sourceBytes=BL.toStrict (encode (object ["source" .= sourceSemantics OwnerSemantics d,"size" .= screenSize d]))
   BS.useAsCStringLen sourceBytes $ \(ptr,len)->check "Update local source accessibility" (c_accessibility ptr (fromIntegral len))

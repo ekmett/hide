@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Edward Kmett
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{ lib, haskell, haskellPackages, ghosttyVt, utf8proc, sdl3, pango }:
+{ lib, haskell, haskellPackages, ghosttyVt, utf8proc, sdl3, pango, accesskitC }:
 
 let
   package = haskell.lib.justStaticExecutables
-    (haskellPackages.callCabal2nix "hide" (lib.cleanSource ../.) {
+    (haskellPackages.callCabal2nixWithOptions "hide" (lib.cleanSource ../.) "-faccesskit" {
       libutf8proc = utf8proc;
       libghostty-vt = ghosttyVt;
+      accesskit-c = accesskitC;
       inherit sdl3 pango;
     });
   # Cabal queries private pkg-config dependencies even for shared native libraries.

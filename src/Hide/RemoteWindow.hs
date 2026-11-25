@@ -759,7 +759,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
         let current=remoteMenu value
         when (previous/=Just current) $ do
           let bytes=fromMaybe emptyMenuAccessibility current
-          BS.useAsCStringLen bytes $ \(ptr,len)->check "Update menu accessibility" (c_accessibility ptr (fromIntegral len))
+          installNativeMenuAccessibility bytes
           writeIORef installedMenu (Just current)
           writeIORef installedSource Nothing
           writeIORef installedSidebar Nothing

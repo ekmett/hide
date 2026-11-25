@@ -7,7 +7,8 @@ Status: the visible sidebar, current modal dialogs, open ordinary menus and focu
 view have read-only projections for browser ARIA and macOS accessibility. Image
 views also expose Fit Image, Actual Size, Zoom In and Zoom Out actions.
 `editor_screen` uses the same host projections with the agent privacy policy. These snapshots carry no input authority. The wider desktop
-bridge, offscreen text requests and Windows/Linux adapters remain proposed.
+bridge and offscreen text requests remain proposed. Linux has an optional
+read-only painted-menu adapter described below; other native coverage remains proposed.
 
 `semanticSidebar` carries at most 256 viewport rows and 512 nodes, including
 required ancestors. Identity combines the opaque provider registration, sidebar
@@ -331,6 +332,48 @@ adapters. It adds a Rust-built dependency and platform integration that must be
 pinned and packaged; do not assume its text semantics or large-document costs
 fit without measurement. Keep this decision behind the shared projection.
 [AccessKit](https://accesskit.dev/)
+
+### First Linux menu adapter
+
+Graphical Linux builds can enable `-faccesskit` after providing the AccessKit C
+bindings 0.23.2 through `pkg-config` as `accesskit-c`. The flag is off by default
+for ordinary Cabal builds; disabled builds do not parse or copy native menu
+metadata. The Nix graphical package enables it and builds the pinned source and
+locked Rust dependencies. Headless builds do not require AccessKit. There is no
+runtime download. macOS continues to use its existing Cocoa adapter.
+
+This slice consumes the existing bounded, read-only menu projection. It exposes
+menu/item roles, names, shortcuts, current and disabled state, radio checks and
+client-pixel bounds. Separators are omitted, matching the Cocoa child list.
+No action is advertised or forwarded to SDL. Closed, replaced, invalid or
+privacy-hidden snapshots retire their old AT-SPI nodes; closing the frontend
+retires its root. Native callbacks read only copied metadata under a small
+publication lock. Callback userdata is a scalar attachment incarnation, so a
+late callback cannot dereference an owner freed after asynchronous adapter removal.
+
+The focused qualification uses the production software-renderer SDL entrypoint,
+shared native menu transport and an independent AT-SPI client on disposable
+Xvfb and D-Bus sessions. It checks discovery, Unicode labels, states, bounds,
+absence of actions, retained-reference retirement and startup without an
+accessibility bus. To reproduce with SDL3, Pango, utf8proc and the pinned
+AccessKit C package available:
+
+```sh
+cc -O2 -DWITH_ACCESSKIT -Icbits \
+  $(pkg-config --cflags sdl3 pangocairo libutf8proc accesskit-c) \
+  cbits/window.c cbits/unicode.c cbits/unicode-window.c \
+  cbits/accessibility-menu.c cbits/accessibility-accesskit.c \
+  cbits/accessibility-unix.c test/native-accessibility-unix.c \
+  $(pkg-config --libs sdl3 pangocairo libutf8proc accesskit-c) \
+  -lpthread -ldl -lm -o /tmp/hide-atspi-menu
+test/atspi-menu.sh /tmp/hide-atspi-menu
+```
+
+The client requires Python GI/AT-SPI, Xvfb, `gdbus` and `dbus-run-session`. Its
+settings and display belong to the test, not an existing desktop session.
+This establishes X11 menu inspection at scale one, not Orca usability or complete
+Linux accessibility. Wayland global positioning, high-DPI geometry, source text,
+dialog/sidebar adapters, editing and assistive actions remain unqualified.
 
 For the browser, prefer actual buttons, inputs and lists to an ARIA label on the
 canvas. A visually unobtrusive semantic layer must remain in the accessibility
