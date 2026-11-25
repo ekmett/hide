@@ -19,7 +19,7 @@
 -- variants; each fresh admission captures current paths again.
 module Hide.GuestAccess
   ( InputOrigin(..), CellAccess(..), cellAccess, cellAccessWith, readableAt, readableAtWith, pointerAllowedAt
-  , streamerReadableAt, streamerReadableAtWith, privateDialogField, privateDialogFieldWith, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, protectedWindow, privateDocument, sanitizedBuffer, sanitizedBufferContent, sanitizedPreparedContent
+  , streamerReadableAt, streamerReadableAtWith, privateDialogField, privateDialogFieldWith, sensitiveLabel, sanitizedStatus, protectedPath, protectedFilePath, protectedPathParent, protectedBuffer, protectedBufferWith, protectedWindow, privateDocument, sanitizedBuffer, sanitizedBufferContent, sanitizedPreparedContent
   , validateGuestEffects, guestCommandAllowed, guestCommandAllowedIn, guestEffectsAllowed, guestKeyboardAllowed, guestKeyAllowed, guestKeyCombinations
   , guestModalBlocked, guestTransitionAllowed, beginGuestInput, endGuestInput
   ) where

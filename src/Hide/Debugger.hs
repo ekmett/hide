@@ -52,7 +52,7 @@ import System.Environment (getEnvironment)
 import Data.Unique (newUnique,hashUnique)
 import qualified Data.Text.Encoding as TE
 import Data.IORef
-import Data.List (find)
+import Data.List (find,foldl')
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, isJust, listToMaybe, maybeToList, mapMaybe)
 import Data.Text (Text)
@@ -77,7 +77,7 @@ import qualified Hide.Terminal as Terminal
 import qualified Hide.DAP as D
 import Hide.Files (FileState(..),loadFile)
 import Hide.Plugin.BufferHost (ContentVersion,captureVersion,versionCurrent)
-import Hide.GuestAccess (protectedBuffer,protectedPath,protectedFilePath,sensitiveLabel)
+import Hide.GuestAccess (protectedBuffer,protectedBufferWith,protectedPath,protectedFilePath,sensitiveLabel)
 import qualified Hide.LSP as L
 import Hide.Model
 import Hide.BufferView (BufferView(..))
@@ -251,7 +251,8 @@ revealOutput runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ _ _ _)) desktop=d
 -- Idle ticks inspect the exact owned slot, a publication receipt and bounded
 -- expression-source privacy metadata; no payloads or histories participate.
 tickOutputOwner :: Debugger -> Desktop -> IO Desktop
-tickOutputOwner runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ latest _ _)) desktop=do
+tickOutputOwner runtime@(Debugger ref _ _ _ (OutputOwner _ slot _ latest _ _)) original=do
+  desktop<-refreshBreakpointPrivacy runtime original
   refreshOutputPrivacy runtime desktop
   OutputSlot epoch revision target requestedOpen focus frozen<-readIORef slot
   next<-atomically (tryTakeTMVar latest)
@@ -585,7 +586,8 @@ data State = State
   , functionKind :: Bool, functionSentRevision :: Int, functionRequest :: Maybe Int
   , functionPreparing :: Maybe (Int,Int,Async (Either Text (Int,Int,[Text])))
   , functionResults :: Maybe (Either Text (Int,Int,[Text])), functionDialog :: Maybe FunctionDialog
-  , breakpointOwners :: M.Map Text BreakpointOwner
+  , breakpointOwners :: !(M.Map Text BreakpointOwner)
+  , breakpointPrivacy :: !(Maybe (StableName (M.Map Int Document),StableName [FilePath]))
   , breakModified :: M.Map Text Bool, variableRefs :: M.Map Int Bool
   , sidebarVisible :: Bool, sidebarSession :: Int, sidebarPages :: M.Map DebugPageRequest Value
   , sidebarThreads :: M.Map Int (), sidebarFrames :: M.Map (Int,Int) Value
@@ -602,7 +604,7 @@ emptyState :: State
 emptyState = State {systemOne=Nothing,assistance=Nothing,client=Nothing,connected=False,capabilities=Null,ready=False,configured=False,pending=M.empty,generation=0,frameRevision=0,
   stopped=False,thread=Nothing,frame=Nothing,frames=[],followSource=True,exceptionFilters=[],breakpoints=M.empty,sources=M.empty,
   root=".",endpoint=("127.0.0.1",4711),output="",failure=Nothing,disconnectAt=Nothing,endedAt=Nothing,programExitCode=Nothing,
-  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakpointDialog=Nothing,functionNames=M.empty,nextFunction=1,functionRevision=0,functionKind=False,functionSentRevision=(-1),functionRequest=Nothing,functionPreparing=Nothing,functionResults=Nothing,functionDialog=Nothing,breakpointOwners=M.empty,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
+  debugCradle=Nothing,hdbLauncher=Nothing,debugEnvironment=[],debugConsoles=[],terminalLaunch=Nothing,outputShown=False,outputPending=False,choices=M.empty,choiceId=0,breakRequests=M.empty,breakpointDialog=Nothing,functionNames=M.empty,nextFunction=1,functionRevision=0,functionKind=False,functionSentRevision=(-1),functionRequest=Nothing,functionPreparing=Nothing,functionResults=Nothing,functionDialog=Nothing,breakpointOwners=M.empty,breakpointPrivacy=Nothing,breakModified=M.empty,startRequest=("attach",object []),managed=False,adapterId="",variableRefs=M.empty,sidebarVisible=False,sidebarSession=0,sidebarPages=M.empty,sidebarThreads=M.empty,sidebarFrames=M.empty,sidebarReferences=M.empty,watchProvider=Nothing,watchPreparing=Nothing,sourcePreparing=Nothing,locationPreparing=Nothing,locationDialog=Nothing,sourceReferences=M.empty,nextSourceObservation=1,watchExpressions=M.empty,watchCatalogueRevision=0,nextWatch=1,watchDialog=Nothing,sourceWatchDialog=Nothing}
 
 withDebugger :: (Debugger -> IO a) -> IO a
 withDebugger action = C.withConsoles (\consoles -> withDebuggerConsoles consoles action)
@@ -669,9 +671,10 @@ withDownloadsCommands host (Debugger _ _ (HdbRuntime _ _ _ _ _ _ view) _ _) acti
 
 debuggerEffects :: Debugger -> Core -> Core
 debuggerEffects runtime fallback desktop effects=do
-  result@(_,updated)<-foldM apply (False,desktop) effects
-  refreshOutputPrivacy runtime updated
-  pure result
+  (quit,updated)<-foldM apply (False,desktop) effects
+  protected<-refreshBreakpointPrivacy runtime updated
+  refreshOutputPrivacy runtime protected
+  pure (quit,protected)
   where
     apply result@(True,_) _=pure result
     apply (_,d) (DebugAction action values) = do
@@ -1072,7 +1075,12 @@ debuggerTool=debuggerToolWithCaller (pure (Right ()))
 -- | Retain the initiating connection's currentness check for every later action.
 -- Tool JSON cannot provide or replace this capability.
 debuggerToolWithCaller :: IO (Either Text ()) -> Debugger -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
-debuggerToolWithCaller caller runtime@(Debugger ref _ _ _ _) d name arguments = do
+debuggerToolWithCaller caller runtime desktop name arguments=do
+  current<-refreshBreakpointPrivacy runtime desktop
+  debuggerToolAdmitted caller runtime current name arguments
+
+debuggerToolAdmitted :: IO (Either Text ()) -> Debugger -> Desktop -> Text -> Value -> IO (Desktop, IO (Either Text Value))
+debuggerToolAdmitted caller runtime@(Debugger ref _ _ _ _) d name arguments = do
   refreshOutputPrivacy runtime d
   s<-readIORef ref
   case parseEither (parseTool s name) arguments of
@@ -1083,7 +1091,8 @@ debuggerToolWithCaller caller runtime@(Debugger ref _ _ _ _) d name arguments = 
       pure $ either (\(err::IOException) -> (d,pure (Left ("DAP: "<>T.pack (show err))))) id result
   where
     immediate desktop result=pure (desktop,pure (result >>= boundedResult))
-    snapshot desktop=do
+    snapshot original=do
+      desktop<-refreshBreakpointPrivacy runtime original
       current<-readIORef ref
       value<-debuggerStatus current
       refreshOutputPrivacy runtime desktop
@@ -1551,7 +1560,9 @@ perform runtime@(Debugger ref clock _ _ _) action values d = do
               Left _->retainDraft "Breakpoint fields must contain at most 4096 characters without NUL."
               Right point->do
                 let changed=[if bpLine p==bpLine point then point else p | p<-points]
-                modifyIORef' ref (\state->state {breakpointDialog=Nothing,breakpoints=M.insert key (src,changed) (breakpoints state)})
+                let privateExpression=breakpointPrivate s d key || case purpose template of DebugBreakpointDialog _ _ capturedPrivate->capturedPrivate;_->False
+                modifyIORef' ref (\state->state {breakpointDialog=Nothing,breakpoints=M.insert key (src,changed) (breakpoints state),
+                  breakpointOwners=if privateExpression then M.insert key (BreakpointOwner M.empty True) (breakpointOwners state) else breakpointOwners state})
                 when (configured s) (sendBreakpoints runtime key src changed)
                 pure d {status=maybe "Breakpoint saved." ("Breakpoint saved; "<>) (breakpointUnavailable s point)}
           _->retainDraft "Breakpoint changed; copy your draft before reopening."
@@ -2739,9 +2750,45 @@ sourceAction runtime@(Debugger ref _ _ _ _) request d=do
 -- Expressions retain host-owned provenance even when an adapter-only source
 -- closes. Neither tool records nor adapter replies may downgrade that privacy.
 breakpointPrivate :: State -> Desktop -> Text -> Bool
-breakpointPrivate state desktop key=case M.lookup key (breakpointOwners state) of
-  Just (BreakpointOwner contributors captured)->captured || any (\(bid,origin)->maybe False (protectedBuffer desktop) bid || maybe False (protectedPath desktop) origin) (M.keys contributors)
+breakpointPrivate state desktop=breakpointPrivateWith (privateFilePaths desktop) state desktop
+
+breakpointPrivateWith :: [FilePath] -> State -> Desktop -> Text -> Bool
+breakpointPrivateWith paths state desktop key=case M.lookup key (breakpointOwners state) of
+  Just (BreakpointOwner contributors captured)->captured || any (\(bid,origin)->maybe False (protectedBufferWith paths desktop) bid || maybe False (protectedFilePath paths) origin) (M.keys contributors)
   Nothing->False
+
+-- Observing a private contributor is an ownership fact, not merely a filter on
+-- this reply. Keep view-role privacy after closure and on a retained human draft. Only
+-- immutable metadata identities invalidate this bounded source-owner projection.
+refreshBreakpointPrivacy :: Debugger -> Desktop -> IO Desktop
+refreshBreakpointPrivacy (Debugger ref _ _ _ _) desktop=do
+  state<-readIORef ref
+  let paths=privateFilePaths desktop
+      captureDraft=case dialog desktop of
+        Just dg | DebugBreakpointDialog ident owners False<-purpose dg,
+          any (\(bid,origin)->maybe False (protectedBufferWith paths desktop) bid || maybe False (protectedFilePath paths) origin) owners->
+            desktop {dialog=Just dg {purpose=DebugBreakpointDialog ident owners True}}
+        _->desktop
+  case (dialog captureDraft,breakpointDialog state) of
+    (Just dg,Just (ident,epoch,key,point,template)) | DebugBreakpointDialog current owners True<-purpose dg,current==ident,
+      DebugBreakpointDialog _ _ False<-purpose template->
+        modifyIORef' ref (\latest->latest {breakpointDialog=Just (ident,epoch,key,point,template {purpose=DebugBreakpointDialog ident owners True})})
+    _->pure ()
+  unless (M.null (breakpointOwners state)) $ do
+    documents<-evaluate (buffers desktop) >>= makeStableName
+    configured<-evaluate (guestPrivatePaths desktop) >>= makeStableName
+    let unchanged=case breakpointPrivacy state of Just (before,pathsBefore)->eqStableName documents before && eqStableName configured pathsBefore;_->False
+    unless unchanged $ do
+      -- File-path policy remains live. A private host view is durable source
+      -- provenance; expressions saved under private policy capture it as well.
+      let intrinsic bid=case M.lookup bid (buffers desktop) of
+            Just doc->(documentPrivate doc || documentLabel doc/=Nothing) && protectedBufferWith paths desktop bid
+            Nothing->False
+          privateViews=M.foldrWithKey (\key (BreakpointOwner owners captured) keys->
+            if not captured && any (maybe False intrinsic . fst) (M.keys owners) then key:keys else keys) [] (breakpointOwners state)
+      observed<-evaluate $ foldl' (\owners key->M.insert key (BreakpointOwner M.empty True) owners) (breakpointOwners state) privateViews
+      modifyIORef' ref (\current->current {breakpointOwners=observed,breakpointPrivacy=Just (documents,configured)})
+  pure captureDraft
 
 rememberBreakpointOwner :: IORef State -> Desktop -> Maybe Int -> Value -> IO ()
 rememberBreakpointOwner ref desktop bid source=modifyIORef' ref $ \state->

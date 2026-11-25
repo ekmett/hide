@@ -662,26 +662,29 @@ duplicateBreakpointProvenanceCheck=bracket (fixture "rich-breakpoints") cleanup 
   let private=editing {buffers=M.adjust (\doc->doc {documentLabel=Just "Git diff"}) original (buffers editing)}
   check "duplicate fixture changes only original source role"
     (original/=second && protectedBuffer private original && not (protectedBuffer private second) && null (privateFilePaths private))
-  hidden<-state private
+  (observedPrivate,hidden)<-tool "debug_status" [] private
   check "line-only duplicate cannot replace retained expression provenance"
     (null (fromMaybe [] (field "breakpoints" hidden)::[Value]))
   check "open duplicate expression form follows original source privacy"
     (condition dg=="ORIGINAL_OWNER_EXPRESSION" && all (privateDialogField private dg) [f|f@Input{}<-fields dg])
-  (_,attempt)<-debuggerTool runtime private "debug_configure_breakpoints" (object ["generation" .= epoch,"bufferId" .= second,"breakpoints" .= [object ["line" .= (1::Int),"condition" .= ("PUBLIC_DUPLICATE_REPLACEMENT"::T.Text)]]])
+  (_,attempt)<-debuggerTool runtime observedPrivate "debug_configure_breakpoints" (object ["generation" .= epoch,"bufferId" .= second,"breakpoints" .= [object ["line" .= (1::Int),"condition" .= ("PUBLIC_DUPLICATE_REPLACEMENT"::T.Text)]]])
   refused<-attempt
   check "public duplicate cannot admit edits to retained private expressions" (refused==Left "Debugger source is private.")
+  let (closedAfterRead,_)=Hide.Model.runCommand Close (focusWindow originalWindow observedPrivate)
+  closedStatus<-state closedAfterRead
+  closedForm<-maybe (error "source closure discarded the retained expression form") pure (dialog closedAfterRead)
+  check "observed private source closure cannot publish retained expressions"
+    (M.notMember original (buffers closedAfterRead) && null (fromMaybe [] (field "breakpoints" closedStatus)::[Value]))
+  check "retained form keeps observed privacy after its original source closes"
+    (all (privateDialogField closedAfterRead closedForm) [f|f@Input{}<-fields closedForm])
   -- Ordinary membership edits and human disable/re-enable retain the same owner.
-  toggled<-send "breakpoint" [] (moveTo False 4 private {dialog=Nothing}) >>= send "breakpoint" [] . moveTo False 0 >>= send "breakpoint" []
+  toggled<-send "breakpoint" [] (moveTo False 4 closedAfterRead {dialog=Nothing}) >>= send "breakpoint" [] . moveTo False 0 >>= send "breakpoint" []
   again<-edit toggled
   kept<-maybe (error "missing retained private expression form") pure (dialog again)
   after<-state again
   check "human toggles preserve private expression provenance and contents"
     (condition kept=="ORIGINAL_OWNER_EXPRESSION" && all (privateDialogField again kept) [f|f@Input{}<-fields kept] &&
      null (fromMaybe [] (field "breakpoints" after)::[Value]))
-  let (closedOriginal,_)=Hide.Model.runCommand Close (focusWindow originalWindow again {dialog=Nothing})
-  retained<-state closedOriginal
-  check "captured private provenance survives original view closure"
-    (M.notMember original (buffers closedOriginal) && null (fromMaybe [] (field "breakpoints" retained)::[Value]))
 
 fixture :: String -> IO (String,FilePath,ProcessHandle)
 fixture mode=do
