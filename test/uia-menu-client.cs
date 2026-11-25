@@ -36,7 +36,7 @@ class Client {
 
    int[] identity=item.GetRuntimeId();Command("rename",1);Require(item.Current.Name=="Renamed","same live node updates");
    Require(identity.SequenceEqual(Named(root,"Renamed").GetRuntimeId()),"live runtime identity");
-   Command("clear",2);Retired(item,"hidden item");Retired(radio,"hidden radio");Require(root.FindAll(TreeScope.Children,Condition.TrueCondition).Count==0,"cleared root children");
+   Command("clear",2);Retired(item,"hidden item");Retired(radio,"hidden radio");Require(root.FindFirst(TreeScope.Descendants,new PropertyCondition(AutomationElement.NameProperty,"Owned menu"))==null,"cleared menu root");
    Command("reopen",4);var nextRoot=AutomationElement.FromHandle(hwnd);var next=Named(nextRoot,"New attachment");Require(!identity.SequenceEqual(next.GetRuntimeId()),"new node incarnation after hide");
    Command("close",3);Retired(next,"closed adapter item");Command("reopen",4);var finalRoot=AutomationElement.FromHandle(hwnd);var final=Named(finalRoot,"New attachment");Retired(next,"old attachment after reopen");
    Command("invalid",5);Retired(final,"invalid snapshot item");

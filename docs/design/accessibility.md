@@ -449,11 +449,15 @@ backend omits ordinary menu current-row and keyboard-shortcut properties, so the
 Windows converter also publishes those as bounded read-only FullDescription
 text. This keeps the painted current row independent of the default-view check.
 
-An owned noninteractive Windows run discovered the custom provider through an
-external UIA client and read its menu labels and disabled state. The committed
-UIA fixture additionally exercises live identity, checks, current descriptions,
-bounds and retained references; full dynamic qualification is still pending.
-This is a menu-provider draft, not Narrator, source TextPattern, multi-DPI,
-protected-dialog or full-editor qualification. Windows builds need the matching
+An owned noninteractive Windows run passed the external UIA fixture: custom
+provider discovery distinct from the HWND caption, disabled state, radio check,
+current/shortcut FullDescription, exact client-to-screen bounds, stable live
+identity, and retained elements becoming unavailable through clear,
+close/reopen and invalid replacement. Windows' own nonclient chrome may remain
+when the custom menu is absent. The fixture requires modern UIA client SDK
+headers; older MinGW headers can omit the COM client interfaces entirely.
+This is a menu-provider slice on an owned hidden SDL host, not qualification of
+the complete editor open/show path, Narrator, source TextPattern, multi-DPI or
+protected dialogs. Windows builds need the matching
 C-binding development package exposed as `accesskit-c` through pkg-config; the
 normal build does not download a library or modify the user's profile.
