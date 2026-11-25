@@ -4,6 +4,14 @@
 let
   menuCheck = import ./native-menu-check.nix { inherit pkgs accesskitC; };
   atspiPython = pkgs.python3.withPackages (ps: [ ps.pygobject3 ]);
+  # DBus-1.0 is a bundled gobject-introspection typelib, not part of at-spi2.
+  # Keep one complete client environment for both independent consumers.
+  atspiEnvironment = "env GI_TYPELIB_PATH="
+    + pkgs.lib.makeSearchPath "lib/girepository-1.0"
+      (map pkgs.lib.getLib [ pkgs.at-spi2-core pkgs.glib pkgs.gobject-introspection ])
+    + " LD_LIBRARY_PATH="
+    + pkgs.lib.makeLibraryPath [ pkgs.at-spi2-core pkgs.glib pkgs.dbus pkgs.vulkan-loader ]
+    + " XDG_DATA_DIRS=${pkgs.at-spi2-core}/share";
 in
 
 pkgs.testers.runNixOSTest {
@@ -37,18 +45,14 @@ pkgs.testers.runNixOSTest {
     # Actual SDL frontend glue and independent AT-SPI client on a disposable
     # display/bus, including retained references and no-bus startup.
     machine.succeed(
-        "env GI_TYPELIB_PATH=${pkgs.lib.makeSearchPath "lib/girepository-1.0" [ (pkgs.lib.getLib pkgs.at-spi2-core) (pkgs.lib.getLib pkgs.glib) ]}"
-        + " LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.at-spi2-core pkgs.glib pkgs.vulkan-loader ]}"
-        + " XDG_DATA_DIRS=${pkgs.at-spi2-core}/share"
+        "${atspiEnvironment}"
         + " ${menuCheck}/libexec/hide-atspi-menu/atspi-menu.sh ${menuCheck}/bin/hide-atspi-menu-host"
     )
 
     # The packaged Haskell frontend must publish its real menu projection too;
     # the C fixture above does not stand in for this owner/remote path.
     machine.succeed(
-        "env GI_TYPELIB_PATH=${pkgs.lib.makeSearchPath "lib/girepository-1.0" [ (pkgs.lib.getLib pkgs.at-spi2-core) (pkgs.lib.getLib pkgs.glib) ]}"
-        + " LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.at-spi2-core pkgs.glib pkgs.vulkan-loader ]}"
-        + " XDG_DATA_DIRS=${pkgs.at-spi2-core}/share HIDE_ATSPI_EDITOR=1"
+        "${atspiEnvironment} HIDE_ATSPI_EDITOR=1"
         + " HIDE_ATSPI_VULKAN_ICD_DIR=${pkgs.mesa.drivers}/share/vulkan/icd.d"
         + " ${menuCheck}/libexec/hide-atspi-menu/atspi-menu.sh ${hide}/bin/hide"
     )
