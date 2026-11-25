@@ -337,7 +337,12 @@ sourceActionCheck host metadata path=withDebugger $ \runtime->do
   let breakpointLines=case parseEither (withObject "status" (.:"breakpoints")) info of Right values->[line | value<-values,Right line<-[parseEither (withObject "breakpoint" (.:"line")) value]]; Left _->[] :: [Int]
   check "breakpoint uses clicked row rather than selection caret" (breakpointLines==[1])
   queued<-queue "Toggle breakpoint" base
-  let replaced=queued {buffers=M.map (\doc->doc {documentBuffer=newBuffer "alpha beta\ngamma delta\n"}) (buffers queued)}
+  -- Different text guarantees a distinct immutable payload when -O2 shares
+  -- pure constructor expressions; the numeric revision must remain equal.
+  let replacement=newBuffer "replacement\nsource"
+      replaced=queued {buffers=M.map (\doc->doc {documentBuffer=replacement}) (buffers queued)}
+  check "source replacement fixture keeps the same numeric revision"
+    (maybe False ((==B.revision replacement) . B.revision . documentBuffer) (activeDocument queued))
   stale<-waitResult replaced
   check "equal-revision replacement refuses prepared source action" ("changed" `T.isInfixOf` status stale)
   watch<-run "Add watch…" base
