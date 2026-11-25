@@ -19,7 +19,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Base64 as B64
 import Hide.RemoteWindow
-import Hide.Accessibility (SemanticAudience(..),dialogSemantics,sourceSemantics)
+import Hide.Accessibility (SemanticAudience(..),dialogSemantics,menuSemantics,sourceSemantics)
 import Hide.FrameTiming
 import Hide.Window (nativeMenuEvent,nativeCommands)
 import Hide.Buffer (newBuffer,Selection(..))
@@ -49,6 +49,21 @@ checks = do
       row = toJSON [(0::Int,0xffffff::Int,0::Int,0::Int,[String "abc",toJSON ("界"::T.Text,2::Int,False,0::Int,2::Int)])]
       rows = row : replicate 24 (toJSON ([]::[Value]))
       valid = either (const False) (const True) . parseRemoteFrame meta
+  let menuProjection=menuSemantics OwnerSemantics (Model.initialDesktop (80,25)) {Model.menu=Just (0,2)}
+      withMenu projection=case meta of Object fields->Object (KM.insert "semanticMenu" projection fields);_->meta
+      replaceMenu key replaceMenument value=case value of Object fields->Object (KM.insert key replaceMenument fields);_->value
+      rewriteNodes f value=case value of
+        Object fields->case KM.lookup "nodes" fields of
+          Just (Array nodes)->replaceMenu "nodes" (toJSON (f (foldr (:) [] nodes))) value
+          _->value
+        _->value
+      badMenu projection=either (const True) (const False) (parseRemoteFrame (withMenu projection) rows)
+  check "remote menu validates and copies the shared host projection"
+    (either (const False) (maybe False (not . BS.null) . remoteMenu) (parseRemoteFrame (withMenu menuProjection) rows))
+  check "remote menu rejects invalid role checks, duplicate identity and offscreen bounds"
+    (badMenu (rewriteNodes (\nodes->nodes++take 1 nodes) menuProjection) &&
+     badMenu (rewriteNodes (map (replaceMenu "bounds" (toJSON ([0,0,81,1]::[Int])))) menuProjection) &&
+     badMenu (rewriteNodes (map (replaceMenu "checked" (Bool True))) menuProjection))
   let epoch=T.replicate 48 "a"
       otherEpoch=T.replicate 48 "b"
       resource=T.replicate 48 "c"
@@ -100,22 +115,23 @@ checks = do
      either (const True) (const False) (frame (scene [surface 1 [0,0,2,2]] BS.empty)))
   let connection online switching=object ["type" .= ("connection"::T.Text),"connected" .= online,"switching" .= switching]
       retainedSource=sourceSemantics OwnerSemantics (Model.addDocument Nothing (newBuffer "handoff source excerpt") (Model.initialDesktop (80,25)))
-      retainedMetadata=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"canvas" .= validScene,"semanticSource" .= retainedSource]
+      retainedMetadata=object ["size" .= ([80,25]::[Int]),"bindings" .= ([]::[(T.Text,T.Text)]),"canvas" .= validScene,"semanticSource" .= retainedSource,"semanticMenu" .= menuProjection]
       transition online switching state=either error id (remoteConnectionState (connection online switching) retainedMetadata state)
       (preparingMetadata,preparingState)=transition False True partial
       (resumedMetadata,resumedState)=either error id (remoteConnectionState (connection True False) preparingMetadata preparingState)
       (targetMetadata,targetState)=transition True False finished
       (disconnectedMetadata,disconnectedState)=transition False False partial
       retainedCanvas metadata=case parseRemoteFrame metadata rows of Right value->maybe False ((==[91]) . map canvasWindow . canvasSurfaces) (remoteCanvas value); _->False
+      menuPresent metadata=case parseRemoteFrame metadata rows of Right value->remoteMenu value/=Nothing; _->False
       sourcePresent metadata=case parseRemoteFrame metadata rows of Right value->remoteSource value/=Nothing; _->False
   check "native handoff preparation and rollback retain source and canvas metadata and the exact upload cursor"
-    (retainedCanvas preparingMetadata && retainedCanvas resumedMetadata && sourcePresent preparingMetadata && sourcePresent resumedMetadata &&
+    (menuPresent preparingMetadata && menuPresent resumedMetadata && retainedCanvas preparingMetadata && retainedCanvas resumedMetadata && sourcePresent preparingMetadata && sourcePresent resumedMetadata &&
      not (rejects preparingState (chunk epoch 3 13)) && not (rejects resumedState (chunk epoch 3 13)))
   check "native target online notice preserves source and uploaded resources before later canvas controls"
     (retainedCanvas targetMetadata && sourcePresent targetMetadata && rejects targetState (begin 2 2 16) && not (rejects targetState release))
   check "native actual disconnect retires source and canvas metadata and receive admission"
     (case parseRemoteFrame disconnectedMetadata rows of
-      Right value->remoteCanvas value==Nothing && remoteSource value==Nothing && rejects disconnectedState (chunk epoch 3 13) && rejects disconnectedState (begin 2 2 16)
+      Right value->remoteCanvas value==Nothing && remoteSource value==Nothing && remoteMenu value==Nothing && rejects disconnectedState (chunk epoch 3 13) && rejects disconnectedState (begin 2 2 16)
       _->False)
   check "canvas scene rejects malformed mask bytes, absent owners and duplicate slots"
     (all (either (const True) (const False) . frame)

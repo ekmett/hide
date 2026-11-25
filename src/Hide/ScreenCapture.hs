@@ -31,7 +31,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as Vec
 import qualified Graphics.Vty as V
-import Hide.Accessibility (SemanticAudience(GuestSemantics), sidebarSemantics, dialogSemantics, sourceSemantics)
+import Hide.Accessibility (SemanticAudience(GuestSemantics), sidebarSemantics, dialogSemantics, menuSemantics, sourceSemantics)
 import Hide.Font
 import Hide.Frontend (modeHeight)
 import Hide.Commands (commandIdentifier)
@@ -45,7 +45,7 @@ import Hide.Unicode (CellSpan(..), Script(..), clusterWidth, terminalProjection,
 screenTool :: Value
 screenTool=object
   ["name" .= ("editor_screen"::Text),
-   "description" .= ("Capture the guest-readable editor frame as colorless text and optional PNG. Private cells are redacted in both outputs. Includes read-only structured visible sidebar and dialog metadata, independent readable/clickable cell masks, key combinations and command permissions; excludes OS chrome, CRT effects and native Unicode shaping."::Text),
+   "description" .= ("Capture the guest-readable editor frame as colorless text and optional PNG. Private cells are redacted in both outputs. Includes read-only structured visible sidebar, dialog, menu and source metadata, independent readable/clickable cell masks, key combinations and command permissions; excludes OS chrome, CRT effects and native Unicode shaping."::Text),
    "inputSchema" .= object ["type" .= ("object"::Text),"properties" .= object
      ["image" .= object ["type" .= ("boolean"::Text),"default" .= False]],"additionalProperties" .= False],
    "annotations" .= object ["readOnlyHint" .= True,"destructiveHint" .= False,"openWorldHint" .= False]]
@@ -120,6 +120,7 @@ capture font desktop includeImage
       "commandPermissions" .= commands,
       "semanticSidebar" .= sidebarSemantics GuestSemantics desktop,
       "semanticDialog" .= dialogSemantics GuestSemantics desktop,
+      "semanticMenu" .= menuSemantics GuestSemantics desktop,
       "semanticSource" .= sourceSemantics GuestSemantics desktop,
       "semanticCanvas" .= [object ["id" .= canvasId surface,"role" .= ("image"::Text),
         "name" .= canvasName surface,"description" .= canvasDescription surface,"bounds" .= canvasRect surface]

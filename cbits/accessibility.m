@@ -131,6 +131,8 @@ static BOOL readOnlySelector(SEL selector) {
 @end
 static HideAXCanvas *canvasHost;
 static BOOL dialogPresent;
+static BOOL menuPresent;
+static void clearMenuAccessibility(void);
 static NSDictionary *imageControls(NSDictionary *record) {
     id value=record[@"controls"];return [value isKindOfClass:NSDictionary.class] ? value : nil;
 }
@@ -516,7 +518,7 @@ static int updateDialogAccessibility(void *native_window,NSDictionary *wrapper) 
             if (parent!=root) goto invalid;
         }
         dialogPresent=[snapshot[@"present"] boolValue];
-        if (dialogPresent) { clearSidebarAccessibility();clearCanvasAccessibility();clearSourceAccessibility(); }
+        if (dialogPresent) { clearMenuAccessibility();menuPresent=NO;clearSidebarAccessibility();clearCanvasAccessibility();clearSourceAccessibility(); }
         if (!values.count) { clearDialogAccessibility();return 1; }
         NSWindow *window=(__bridge NSWindow *)native_window;
         if (dialogHost && dialogHost.window!=window) clearDialogAccessibility();
@@ -543,16 +545,161 @@ static int updateDialogAccessibility(void *native_window,NSDictionary *wrapper) 
         NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification);return 1;
     }
 invalid:
-    clearDialogAccessibility();clearSidebarAccessibility();clearCanvasAccessibility();clearSourceAccessibility();dialogPresent=YES;return 0;
+    clearDialogAccessibility();clearMenuAccessibility();menuPresent=NO;clearSidebarAccessibility();clearCanvasAccessibility();clearSourceAccessibility();dialogPresent=YES;return 0;
+}
+
+/* Only the painted dropdown is represented here. Real NSMenus keep their own
+ * AppKit accessibility. These objects have no action, focus or mutation route. */
+@class HideAXMenu;
+@interface HideAXMenuItem : NSAccessibilityElement
+@property(weak) HideAXMenu *host;
+@property(copy) NSDictionary *record;
+- (void)retire;
+@end
+@interface HideAXMenu : NSView
+@property(copy) NSDictionary *record;
+@property(copy) NSArray<HideAXMenuItem *> *items;
+@property(copy) NSDictionary<NSArray *,HideAXMenuItem *> *nodes;
+@property BOOL truncated;
+@end
+static HideAXMenu *menuHost;
+@implementation HideAXMenuItem
+- (BOOL)isAccessibilityElement { return self.record!=nil; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityMenuItemRole; }
+- (NSString *)accessibilityLabel { return self.record[@"name"]; }
+- (id)accessibilityParent { return self.host; }
+- (NSRect)accessibilityFrame { return screenFrame(self.host,self.record[@"bounds"]); }
+- (BOOL)isAccessibilityEnabled { return [self.record[@"enabled"] boolValue]; }
+- (BOOL)isAccessibilitySelected { return [self.record[@"current"] boolValue]; }
+- (BOOL)isAccessibilityFocused { return NO; }
+- (id)accessibilityValue { id value=self.record[@"checked"];return value==NSNull.null ? nil : value; }
+- (NSString *)accessibilityHelp {
+    if (!self.record) return nil;
+    NSMutableArray *parts=[NSMutableArray arrayWithObject:@"Read-only menu item; use editor controls to activate."];
+    if ([self.record[@"current"] boolValue]) [parts addObject:@"Current in editor."];
+    if (self.record[@"checked"]!=NSNull.null) [parts addObject:[self.record[@"checked"] boolValue] ? @"Checked default buffer view." : @"Unchecked default buffer view."];
+    if ([self.record[@"shortcut"] length]) [parts addObject:[@"Shortcut: " stringByAppendingString:self.record[@"shortcut"]]];
+    return [parts componentsJoinedByString:@" "];
+}
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector { return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector]; }
+/* AppKit has no modern property for the standard AXMenuItemMarkChar attribute.
+ * Publish that read-only menu trait as well as its bounded spoken description. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+- (NSArray *)accessibilityAttributeNames {
+    NSArray *names=[super accessibilityAttributeNames] ?: @[];
+    return self.record && self.record[@"checked"]!=NSNull.null ? [names arrayByAddingObject:@"AXMenuItemMarkChar"] : names;
+}
+- (id)accessibilityAttributeValue:(NSString *)attribute {
+    if ([attribute isEqual:@"AXMenuItemMarkChar"]) return self.record && self.record[@"checked"]!=NSNull.null ? ([self.record[@"checked"] boolValue] ? @"●" : @"") : nil;
+    return [super accessibilityAttributeValue:attribute];
+}
+- (BOOL)accessibilityIsAttributeSettable:(NSString *)attribute { (void)attribute;return NO; }
+- (NSArray *)accessibilityActionNames { return @[]; }
+- (void)accessibilityPerformAction:(NSString *)action { (void)action; }
+#pragma clang diagnostic pop
+- (void)retire { self.record=nil;self.host=nil; }
+@end
+@implementation HideAXMenu
+- (BOOL)isFlipped { return YES; }
+- (BOOL)acceptsFirstResponder { return NO; }
+- (NSView *)hitTest:(NSPoint)point { (void)point;return nil; }
+- (BOOL)isAccessibilityElement { return self.record!=nil; }
+- (NSAccessibilityRole)accessibilityRole { return NSAccessibilityMenuRole; }
+- (NSString *)accessibilityLabel { return self.record[@"name"]; }
+- (NSString *)accessibilityHelp { return self.truncated ? @"Read-only open menu. Some menu items are not included." : @"Read-only open menu; use editor controls to activate items."; }
+- (NSRect)accessibilityFrame { return screenFrame(self,self.record[@"bounds"]); }
+- (NSArray *)accessibilityChildren { return self.items; }
+- (NSArray *)accessibilitySelectedChildren {
+    NSMutableArray *selected=[NSMutableArray new];for (HideAXMenuItem *item in self.items) if (item.isAccessibilitySelected) [selected addObject:item];return selected;
+}
+- (BOOL)isAccessibilityFocused { return NO; }
+- (BOOL)isAccessibilitySelectorAllowed:(SEL)selector { return readOnlySelector(selector) && [super isAccessibilitySelectorAllowed:selector]; }
+@end
+static void clearMenuAccessibility(void) {
+    NSView *parent=menuHost.superview;
+    for (HideAXMenuItem *item in menuHost.nodes.allValues) [item retire];
+    menuHost.items=nil;menuHost.nodes=nil;menuHost.record=nil;[menuHost removeFromSuperview];menuHost=nil;
+    if (parent) NSAccessibilityPostNotification(parent,NSAccessibilityLayoutChangedNotification);
+}
+static BOOL menuText(id value,NSUInteger limit) {
+    if (!text(value,limit,NO)) return NO;
+    for (NSUInteger i=0;i<[value length];++i) { unichar c=[value characterAtIndex:i];if (c<32 || (c>=127 && c<=159)) return NO; }
+    return YES;
+}
+static BOOL menuOrdinal(id value) {
+    return text(value,3,YES) && ([value isEqual:@"0"] || ![value hasPrefix:@"0"]) &&
+        [value rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789"] invertedSet]].location==NSNotFound;
+}
+static BOOL menuIdentity(id value) {
+    if (![value isKindOfClass:NSArray.class] || [value count]<2 || [value count]>6 || ![value[0] isEqual:@"menu"] ||
+        ![@[@"file",@"edit",@"search",@"run",@"compile",@"debug",@"tools",@"options",@"window",@"help"] containsObject:value[1]]) return NO;
+    if ([value count]==2) return YES;
+    if (!menuOrdinal([value lastObject])) return NO;
+    if ([value count]==4) return [value[2] isEqual:@"separator"];
+    if ([value count]==5) return [value[2] isEqual:@"builtin"] && text(value[3],128,YES) &&
+        [value[3] rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyz0123456789.-"] invertedSet]].location==NSNotFound;
+    return [value count]==6 && [value[2] isEqual:@"contribution"] && text(value[3],48,YES) && [value[3] length]==48 &&
+        [value[3] rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"] invertedSet]].location==NSNotFound && text(value[4],20,YES) && ![value[4] hasPrefix:@"0"] &&
+        [value[4] rangeOfCharacterFromSet:[[NSCharacterSet characterSetWithCharactersInString:@"0123456789"] invertedSet]].location==NSNotFound;
+}
+static int updateMenuAccessibility(void *native_window,NSDictionary *wrapper,size_t length) {
+    NSArray *size=wrapper[@"size"];NSDictionary *snapshot=wrapper[@"menu"];
+    if (length>262144 || ![size isKindOfClass:NSArray.class] || size.count!=2 || !integer(size[0],512) || !integer(size[1],256) ||
+        [size[0] integerValue]<1 || [size[1] integerValue]<1 || ![snapshot isKindOfClass:NSDictionary.class] ||
+        !boolean(snapshot[@"present"]) || !boolean(snapshot[@"readOnly"]) || ![snapshot[@"readOnly"] boolValue] || !boolean(snapshot[@"truncated"])) goto invalid;
+    @autoreleasepool {
+        NSArray *values=snapshot[@"nodes"];if (![values isKindOfClass:NSArray.class] || values.count>256 || (![snapshot[@"present"] boolValue] && values.count)) goto invalid;
+        NSMutableDictionary *records=[NSMutableDictionary new];NSDictionary *root=nil;NSUInteger budget=0,current=0;
+        for (NSDictionary *node in values) {
+            if (![node isKindOfClass:NSDictionary.class] || !menuIdentity(node[@"id"]) ||
+                ![@[@"menu",@"menuitem",@"menuitemradio",@"separator"] containsObject:node[@"role"]] ||
+                !menuText(node[@"name"],256) || !menuText(node[@"shortcut"],64) || !boolean(node[@"current"]) || !boolean(node[@"enabled"]) ||
+                !nullableBoolean(node[@"checked"]) || ([node[@"role"] isEqual:@"menuitemradio"]!=(node[@"checked"]!=NSNull.null)) ||
+                node[@"bounds"]==NSNull.null || !bounds(node[@"bounds"],[size[0] integerValue],[size[1] integerValue]) || records[node[@"id"]]) goto invalid;
+            budget+=scalarCount(node[@"name"])+scalarCount(node[@"shortcut"]);current+=[node[@"current"] boolValue];if (budget>32768 || current>1) goto invalid;
+            records[node[@"id"]]=node;
+            if ([node[@"role"] isEqual:@"menu"]) {
+                if (root || [node[@"id"] count]!=2 || node[@"parent"]!=NSNull.null || [node[@"current"] boolValue] || ![node[@"enabled"] boolValue]) goto invalid;
+                root=node;
+            } else if ([node[@"id"] count]<=2 || [node[@"role"] isEqual:@"separator"]!=[node[@"id"][2] isEqual:@"separator"] || ([node[@"role"] isEqual:@"separator"] && ([node[@"current"] boolValue] || [node[@"enabled"] boolValue]))) goto invalid;
+        }
+        if (values.count && !root) goto invalid;
+        for (NSDictionary *node in values) if (node!=root) {
+            NSArray *r=root[@"bounds"],*b=node[@"bounds"];
+            if (!menuIdentity(node[@"parent"]) || ![node[@"parent"] isEqual:root[@"id"]] || ![node[@"id"][1] isEqual:root[@"id"][1]] || [node[@"id"] count]<=2 ||
+                [b[3] integerValue]!=1 || [b[0] integerValue]<[r[0] integerValue] || [b[1] integerValue]<[r[1] integerValue] ||
+                [b[0] integerValue]+[b[2] integerValue]>[r[0] integerValue]+[r[2] integerValue] || [b[1] integerValue]+1>[r[1] integerValue]+[r[3] integerValue]) goto invalid;
+        }
+        menuPresent=[snapshot[@"present"] boolValue];
+        if (menuPresent) { clearSidebarAccessibility();clearCanvasAccessibility();clearSourceAccessibility(); }
+        if (!values.count) { clearMenuAccessibility();return 1; }
+        NSWindow *window=(__bridge NSWindow *)native_window;
+        if (menuHost && (menuHost.window!=window || ![menuHost.record[@"id"] isEqual:root[@"id"]])) clearMenuAccessibility();
+        if (!menuHost) { menuHost=[[HideAXMenu alloc] initWithFrame:window.contentView.bounds];menuHost.autoresizingMask=NSViewWidthSizable|NSViewHeightSizable;[window.contentView addSubview:menuHost]; }
+        BOOL changed=![menuHost.record isEqual:root] || menuHost.truncated!=[snapshot[@"truncated"] boolValue];
+        NSMutableDictionary *nodes=[NSMutableDictionary new];NSMutableArray *items=[NSMutableArray new];
+        for (NSDictionary *node in values) if (node!=root && ![node[@"role"] isEqual:@"separator"]) {
+            HideAXMenuItem *item=menuHost.nodes[node[@"id"]] ?: [HideAXMenuItem new];if (![item.record isEqual:node]) changed=YES;
+            item.record=node;item.host=menuHost;nodes[node[@"id"]]=item;[items addObject:item];
+        }
+        if (nodes.count!=menuHost.nodes.count) changed=YES;
+        for (NSArray *key in menuHost.nodes) if (!nodes[key]) [menuHost.nodes[key] retire];
+        menuHost.record=root;menuHost.nodes=nodes;menuHost.items=items;menuHost.truncated=[snapshot[@"truncated"] boolValue];
+        if (changed) NSAccessibilityPostNotification(menuHost,NSAccessibilityLayoutChangedNotification);return 1;
+    }
+invalid:
+    clearMenuAccessibility();clearSidebarAccessibility();clearCanvasAccessibility();clearSourceAccessibility();menuPresent=YES;return 0;
 }
 void thc_accessibility_close(void) {
-    clearDialogAccessibility();dialogPresent=NO;clearCanvasAccessibility();clearSidebarAccessibility();clearSourceAccessibility();
+    clearDialogAccessibility();dialogPresent=NO;clearMenuAccessibility();menuPresent=NO;clearCanvasAccessibility();clearSidebarAccessibility();clearSourceAccessibility();
 }
 void thc_accessibility_geometry_changed(void) {
     if (host.rows.count) NSAccessibilityPostNotification(host,NSAccessibilityLayoutChangedNotification);
     if (canvasHost.images.count) NSAccessibilityPostNotification(canvasHost,NSAccessibilityLayoutChangedNotification);
     if (sourceHost.record) NSAccessibilityPostNotification(sourceHost,NSAccessibilityLayoutChangedNotification);
     if (dialogHost.record) { [dialogHost updateTrackingAreas];NSAccessibilityPostNotification(dialogHost,NSAccessibilityLayoutChangedNotification); }
+    if (menuHost.record) NSAccessibilityPostNotification(menuHost,NSAccessibilityLayoutChangedNotification);
 }
 int thc_accessibility_update(void *native_window, const char *json, size_t length) {
     if (!NSThread.isMainThread) return 0;
@@ -560,8 +707,11 @@ int thc_accessibility_update(void *native_window, const char *json, size_t lengt
     if (!native_window || !json || length>2097152) goto invalid;
     @autoreleasepool {
         NSDictionary *snapshot=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:json length:length] options:0 error:nil];
+        if (![snapshot isKindOfClass:NSDictionary.class]) goto invalid;
         if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"dialog"]) return updateDialogAccessibility(native_window,snapshot);
         if (dialogPresent) return 1;
+        if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"menu"]) return updateMenuAccessibility(native_window,snapshot,length);
+        if (menuPresent) return 1;
         if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"source"]) return updateSourceAccessibility(native_window,snapshot,length);
         if ([snapshot isKindOfClass:NSDictionary.class] && snapshot[@"images"]) return updateCanvasAccessibility(native_window,snapshot);
         if (![snapshot isKindOfClass:NSDictionary.class] || !boolean(snapshot[@"readOnly"]) || ![snapshot[@"readOnly"] boolValue] || !integer(snapshot[@"revision"],9007199254740991)) goto invalid;

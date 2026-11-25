@@ -725,22 +725,29 @@ menuItems :: Int -> [MenuItem]
 menuItems i = let (_,_,xs) = menus !! (i `mod` length menus) in xs
 
 menuItemsFor :: Desktop -> Int -> [MenuItem]
-menuItemsFor d i
-  | browserFrontend d && i==0 = take 4 items ++ [MenuItem "Download" "" Download] ++ drop 4 items
+menuItemsFor d = map snd . menuEntriesFor d
+
+-- | Keep the original command identity alongside its painted replacement. An
+-- unavailable built-in still names the same read-only menu item; registered
+-- replacements carry their actual registration lifetime instead.
+menuEntriesFor :: Desktop -> Int -> [(Command,MenuItem)]
+menuEntriesFor d i
+  | browserFrontend d && i==0 = take 4 items ++ [(Download,MenuItem "Download" "" Download)] ++ drop 4 items
   | otherwise = items
   where
+    pair item@(MenuItem _ _ command)=(command,item)
     original=menuItems i
     slot=let (title,_,_)=menus !! (i `mod` length menus) in T.toLower title
     additions=[MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item) | item<-contributedMenus d,Plugin.menuSlot item==slot,Plugin.menuName (Plugin.menuReference item) `notElem` ["hide.agents.new","hide.agents.resume","hide.agents.model","hide.agents.open","hide.agents.provider","hide.agents.context","hide.agents.copy","hide.agents.cancel"]]
     helpEntry=[item | item@(MenuItem _ _ (RegisteredMenu ref _))<-additions,Plugin.menuName ref=="hide.help.contents"]
     sourceEntry=find ((=="hide.debug.toggle-breakpoint") . Plugin.menuName . Plugin.menuReference) (contributedMenus d)
-    replaceSource (MenuItem title key (DebugCommand "breakpoint"))=case sourceEntry of
-      Just item->MenuItem title key (contributionCommand d item)
-      Nothing->MenuItem title key (if menusActive d then Disabled "Breakpoint command is unavailable." else DebugCommand "breakpoint")
+    replaceSource (MenuItem title key cmd@(DebugCommand "breakpoint"))=case sourceEntry of
+      Just item->pair (MenuItem title key (contributionCommand d item))
+      Nothing->(cmd,MenuItem title key (if menusActive d then Disabled "Breakpoint command is unavailable." else cmd))
     replaceSource (MenuItem title key cmd) | cmd `elem` [AgentNew,AgentResume,AgentChoose,Conversation,AgentOptions,AgentGuidance,AgentCopyRaw,AgentCancel]=case find ((==sessionCommandName cmd) . Plugin.menuName . Plugin.menuReference) (contributedMenus d) of
-      Just item->MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item)
-      Nothing->MenuItem title key (Disabled "Conversation session command is unavailable.")
-    replaceSource item=item
+      Just item->pair (MenuItem (Plugin.menuTitle item) (Plugin.menuKey item) (contributionCommand d item))
+      Nothing->(cmd,MenuItem title key (Disabled "Conversation session command is unavailable."))
+    replaceSource item=pair item
     items=map replaceSource $ case helpEntry of
       first:_ -> [if cmd==Help then first else item | item@(MenuItem _ _ cmd)<-original]++[item | item<-additions,item/=first]
       [] -> original++additions
@@ -851,11 +858,19 @@ menuCommandAvailable d cmd = commandEnabled d cmd && canInvoke
                   (problemsVisible d && problemsFocused d && cmd==Copy) ||
                   (case cmd of RegisteredMenu{}->True; TreeCommand{}->True; _->False) || cmd `elem` [ReloadBindings,InspectBindings,New,Open,ChangeDir,Quit,Help,About,Gallery,EditorOptions,EnvironmentOptions,ChatInputOptions,ProjectBrowser,RunTarget,RunOptions,CompileTarget,MakeTarget,StopBuild,OpenTerminal,StopTerminal,AgentDirectory,AgentOptions,AgentPermissions,AgentGuidance,Conversation,AgentCancel,AgentResume,AgentNew,AgentCopyRaw,ToggleTree,GitDiff,GitCommit,GitFetch,GitPull,GitMerge,Problems,NextMessage,PreviousMessage,ToolchainOptions,AutocompleteCommand "settings",DebugCommand "attach",DebugCommand "launch",DebugCommand "downloads"])
 
+-- | One bounded transient catalogue supplies geometry and semantic labels.
+-- Sharing the prepared shortcuts avoids rebuilding bindings for every consumer.
+menuLayoutFor :: Desktop -> Int -> (Rect,[(Command,MenuItem,Text)])
+menuLayoutFor d i=(Rect (min x (max 0 (sw-w))) 1 w (length entries+2),entries)
+  where
+    entries=[(identity,item,menuShortcut d item) | (identity,item)<-menuEntriesFor d i]
+    x=fst (menuPositions !! i)
+    sw=fst (screenSize d)
+    w=min sw (maximum [keyLabelWidth title+keyLabelWidth shortcut+5+(case command of SetBufferView _->4;_->0)
+      | (_,MenuItem title _ command,shortcut)<-entries])
+
 menuRect :: Desktop -> Int -> Rect
-menuRect d i = Rect (min x (max 0 (sw-w))) 1 w (length (menuItemsFor d i)+2)
-  where x = fst (menuPositions !! i)
-        sw = fst (screenSize d)
-        w = min sw (maximum [keyLabelWidth t + keyLabelWidth (menuShortcut d entry) + 5 + (case command of SetBufferView _ -> 4; _ -> 0) | entry@(MenuItem t _ command) <- menuItemsFor d i])
+menuRect d i=fst (menuLayoutFor d i)
 
 initialDesktop :: (Int,Int) -> Desktop
 initialDesktop size = Desktop size [] M.empty M.empty S.empty 1 Nothing Nothing Nothing "" Nothing ModernEditing Nothing "" Nothing "" Nothing "" False Nothing Nothing Nothing "" Nothing Nothing Nothing [] False 0 0 False Nothing 0 0 Nothing SourceContext Nothing M.empty MountedInput False False 0 True False False False Nothing Nothing [] 8 Nothing [] False SystemMode True [] Nothing [] False Nothing "" M.empty False (0,Nothing) [] Nothing CurrentView QuerySubmit Nothing 0 M.empty Nothing Nothing False False M.empty [] [] False Nothing False M.empty 0 (0,Nothing) S.empty False 0 Nothing "." [] Nothing Nothing

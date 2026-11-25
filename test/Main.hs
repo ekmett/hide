@@ -212,7 +212,7 @@ tests = askOption $ \profile->withResource
   , testCase "WorkerDiff" (WorkerDiffCheck.checks profile)
   , testCase "BufferEdits" BufferEditsCheck.checks
   , testCase "PluginBuffer" PluginBufferCheck.checks
-  , testCase "Accessibility" AccessibilityCheck.checks
+  , testCase "Accessibility" (AccessibilityCheck.checks profile)
   , testCase "PluginTree" PluginTreeCheck.checks
   , testCase "Sidebar" SidebarCheck.checks
   , testCase "SidebarScroll" SidebarScrollCheck.checks

@@ -3,7 +3,7 @@ SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0 -->
 
 # Accessibility for the native and browser frontends
 
-Status: the visible sidebar, current modal dialogs and focused ordinary source
+Status: the visible sidebar, current modal dialogs, open ordinary menus and focused ordinary source
 view have read-only projections for browser ARIA and macOS accessibility. Image
 views also expose Fit Image, Actual Size, Zoom In and Zoom Out actions.
 `editor_screen` uses the same host projections with the agent privacy policy. These snapshots carry no input authority. The wider desktop
@@ -23,6 +23,34 @@ Dialog values follow central privacy policy before serialization. Text areas
 read only measured visible rows; preparation never flattens a source buffer or
 Undo history. Keep the existing renderer and derive semantics from the model,
 not painted character cells.
+
+`semanticMenu` describes the displayed ordinary dropdown: its menu title, visible
+items and clipped cell bounds, current painted row, availability, shortcut and
+radio checks. The Window menu's radio check is the default buffer view painted
+there, independent of the current row. Disabled rows can still be current;
+separators are never current or enabled. The browser's read-only menu region
+supports local Arrow Up/Down and Home/End reading without moving the host menu
+selection or sending input. macOS exposes a menu and read-only menu items with
+selected, enabled and checked traits. The existing native application menubar
+continues to use AppKit's own semantics; this projection covers painted editor
+dropdowns only. Context popups and nested native submenus are not duplicated.
+
+The menu snapshot has at most 256 nodes, 256 label scalars and 64 shortcut scalars
+per node, 32,768 combined text scalars and 256 KiB encoded size. Only displayed
+rows are included. Central owner/guest privacy admission runs before publication;
+covered source/sidebar/image projections remain hidden, including when a present
+menu has no exposed rows. Modal dialogs and context popups suppress ordinary
+menus. Absence, reset, detach, invalid metadata and observed menu replacement
+retire old labels and child references. Reading focus is retained within the
+same menu without becoming editor input focus.
+
+Inert menu IDs combine the fixed menu slot with an existing built-in command tag
+or opaque contribution registration epoch and generation, plus a bounded occurrence
+number for repeated presentations of the same entry. They are not command
+packets or action capabilities. A close and reopen coalesced between frames is
+not a new observable lifetime; adding menu actions still requires the explicit
+host menu-instance tokens below. These read-only adapters are not a claim of
+complete VoiceOver or screen-reader qualification.
 
 `semanticSource` names the focused source view and its buffer, with the displayed
 line span, horizontal display offset and clipped cell bounds. Use the browser's

@@ -20,7 +20,7 @@ module Hide.RemoteWindow
   , remoteConnectionState
   , nativeKeyInput, nativeEventInput, remoteBindingInput, remoteMenuInput, remoteNativeMenuInput, remoteDockWindowInput, remoteMenuLayout, sanitizeDownloadName
   , remoteInputAllowed, remoteCloseDetaches, remoteDetachShortcut, nativeRepaint) where
-import Control.Monad (unless)
+import Control.Monad (unless,forM_)
 import Hide.Commands (commandIdentifier)
 import Hide.Bindings (readChord, chordName)
 import Data.Aeson hiding (withArray)
@@ -42,6 +42,7 @@ import Hide.TextStyle
 import Hide.Model (Command(..), MenuItem(..), menus, menuContributionSlots)
 import Data.Char (isControl)
 import Data.List (elemIndex, nub)
+import Data.Maybe (isJust)
 import qualified Data.IntSet as IS
 import Hide.Window (nativeCommands, nativeMenuToken, nativeChordShortcut, nativeDockWindow)
 import Hide.Remote (RemotePeer)
@@ -52,7 +53,7 @@ import Data.Maybe (fromMaybe)
 import Control.Concurrent.Async (withAsync, poll)
 import Control.Concurrent.STM hiding (check)
 import Control.Exception (bracket, bracket_, throwIO, IOException, catch, finally)
-import Control.Monad (forM_, forever, when, foldM)
+import Control.Monad (forever, when, foldM)
 import Foreign (nullPtr, alloca, allocaArray, peek, peekArray, pokeArray)
 import Foreign.C
 import Data.IORef
@@ -99,6 +100,7 @@ data RemoteFrame = RemoteFrame
   , remotePixelated :: Bool, remoteTerminal :: Bool, remoteWordStar :: Bool
   , remoteCanvas :: Maybe RemoteCanvas
   , remoteSource :: Maybe BS.ByteString
+  , remoteMenu :: Maybe BS.ByteString
   , remoteDialog :: Maybe BS.ByteString
   , remoteSidebar :: BS.ByteString, remoteExportView :: [Integer], remoteBindings :: [(T.Text,T.Text)]
   , remoteWindows :: [(Int,T.Text,Bool,Bool)]
@@ -152,6 +154,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   unless (BS.length sidebarBytes<=2097152) (fail "Oversized sidebar semantics")
   haptics <- o .:? "hapticFeedback" .!= False
   modal <- o .:? "semanticDialog" >>= maybe (pure Nothing) (parseRemoteDialog size haptics)
+  menu <- o .:? "semanticMenu" >>= maybe (pure Nothing) (parseRemoteMenu size)
   source <- o .:? "semanticSource" >>= maybe (pure Nothing) (parseRemoteSource size)
   bindings <- o .: "bindings"
   unless (length bindings<=8192 && all validBinding bindings) (fail "Invalid binding projection")
@@ -168,7 +171,7 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
   unless (IS.size (IS.fromList [ident | (ident,_,_,_)<-windows])==length windows && length [() | (_,_,True,_)<-windows]<=1) (fail "Invalid editor window catalogue")
   canvas <- o .:? "canvas" >>= traverse (parseRemoteCanvas size)
   cells <- concat <$> sequence [parseRow cols y row | (y,row) <- zip [0..] rows]
-  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar canvas source modal sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
+  pure (RemoteFrame size mode title cursor blink crt pixelated terminal wordstar canvas source menu modal sidebarBytes exportView bindings windows contributions (enabled++map contributionEnabled contributions) cells)) metadata
   where
     validBinding (chord,name)=T.length name<=256 && case readChord chord of Right (key,mods)->chordName key mods==Just chord; _->False
     parseContribution=withObject "menu contribution" $ \o->do
@@ -213,6 +216,48 @@ parseRemoteFrame metadata rows = parseEither (withObject "frame metadata" $ \o -
         start>=0 && start<w && shown>0 && shown<=w-start && shown<=cols-at &&
         (if stretched then w==2 && clusterWidth text<2 else clusterWidth text==w)) (fail "Invalid grapheme")
       foldRuns cols y paint (at+shown) (RemoteGlyph at y paint text w start shown:acc) rest
+
+-- | Validate the complete inert menu projection before native adoption. Current
+-- painted item, availability and default-view checks are independent states.
+parseRemoteMenu :: (Int,Int) -> Value -> Parser (Maybe BS.ByteString)
+parseRemoteMenu size@(cols,rows) value=withObject "menu semantics" (\o->do
+  present<-o .: "present";readOnly<-o .: "readOnly";(_::Bool)<-o .: "truncated"
+  values<-o .: "nodes" :: Parser [Value]
+  unless (readOnly && length (take 257 values)<=256 && (present || null values)) (fail "Invalid menu projection")
+  nodes<-mapM node values
+  let roots=[(ident,bounds) | (ident,Nothing,_,bounds,_,_)<-nodes]
+      ids=[ident | (ident,_,_,_,_,_)<-nodes]
+  unless (length (nub ids)==length ids && sum [n | (_,_,n,_,_,_)<-nodes]<=32768 &&
+    length [() | (_,_,_,_,True,_)<-nodes]<=1 && (null nodes || length roots==1)) (fail "Invalid menu tree")
+  forM_ nodes $ \(ident,parent,_,(x,y,w,h),_,_)->case parent of
+    Nothing->pure ()
+    Just owner->case roots of
+      [(root,(rx,ry,rw,rh))] | owner==root && take 2 ident==root && h==1 && x>=rx && y>=ry && w<=rx+rw-x && h<=ry+rh-y->pure ()
+      _->fail "Invalid menu parent or bounds"
+  let bytes=BL.toStrict (BL.take 262145 (encode (object ["menu" .= value,"size" .= size])))
+  unless (BS.length bytes<=262144) (fail "Oversized menu semantics")
+  pure (if present then Just bytes else Nothing)) value
+  where
+    validIdentity ("menu":slot:parts)=slot `elem` ["file","edit","search","run","compile","debug","tools","options","window","help"] && case parts of
+      []->True
+      ["separator",row]->ordinal row
+      ["builtin",tag,occurrence]->ordinal occurrence && not (T.null tag) && T.length tag<=128 && T.all (\c->c>='a' && c<='z' || c>='0' && c<='9' || c `elem` (".-"::String)) tag
+      ["contribution",epoch,generation,occurrence]->ordinal occurrence && validCanvasIdentity epoch && not (T.null generation) && T.length generation<=20 && T.head generation/='0' && T.all (\c->c>='0' && c<='9') generation
+      _->False
+    validIdentity _=False
+    ordinal label=not (T.null label) && T.length label<=3 && (label=="0" || T.head label/='0') && T.all (\c->c>='0' && c<='9') label
+    text limit label=T.length (T.take (limit+1) label)<=limit && not (T.any (\c->c<' ' || c>='\DEL' && c<='\x9f') label)
+    node=withObject "menu node" $ \o->do
+      ident<-o .: "id";parent<-o .: "parent";role<-o .: "role" :: Parser T.Text
+      name<-o .: "name";shortcut<-o .: "shortcut"
+      bounds@(x,y,w,h)<-o .: "bounds" :: Parser (Int,Int,Int,Int)
+      current<-o .: "current";enabled<-o .: "enabled";checked<-o .: "checked" :: Parser (Maybe Bool)
+      unless (validIdentity ident && text 256 name && text 64 shortcut && role `elem` ["menu","menuitem","menuitemradio","separator"] &&
+        ((role=="menuitemradio")==isJust checked) &&
+        (if length ident==2 then role=="menu" && parent==Nothing && not current && enabled
+         else role/="menu" && parent/=Nothing && ((role=="separator")== (take 1 (drop 2 ident)==["separator"])) && (role/="separator" || not current && not enabled)) &&
+        x>=0 && y>=0 && w>0 && h>0 && x<cols && y<rows && w<=cols-x && h<=rows-y) (fail "Invalid menu node")
+      pure (ident,parent,T.length name+T.length shortcut,bounds,current,enabled)
 
 -- | A focused source excerpt is a complete bounded replacement, not an editable
 -- document. Validate all text and geometry before installing copied native data.
@@ -369,7 +414,7 @@ remoteConnectionState :: Value -> Value -> CanvasReceiveState -> Either String (
 remoteConnectionState connection metadata canvasState=do
   (connected,switching)<-parseEither (withObject "connection" $ \o->
     (,) <$> o .: "connected" <*> (o .:? "switching" .!= False)) connection
-  let retiredMetadata=case metadata of Object fields->Object (KM.delete "semanticSource" (KM.delete "semanticDialog" (KM.delete "canvas" fields))); _->metadata
+  let retiredMetadata=case metadata of Object fields->Object (KM.delete "semanticMenu" (KM.delete "semanticSource" (KM.delete "semanticDialog" (KM.delete "canvas" fields)))); _->metadata
   pure $ if not connected && not switching then (retiredMetadata,emptyCanvasReceiveState)
     else (metadata,canvasState)
 
@@ -606,7 +651,7 @@ receiveFrames exports peer queue = go [] (object []) Nothing 0 emptyCanvasReceiv
         Nothing -> do
           received<-getMonotonicTimeNSec
           (delta,newRows) <- decodeFrame rows bytes
-          let merged = case (delta,metadata) of (Object new,Object old) -> Object (KM.union new (if KM.lookup "reset" new==Just (Bool True) then KM.delete "semanticSource" old else old)); _ -> delta
+          let merged = case (delta,metadata) of (Object new,Object old) -> Object (KM.union new (if KM.lookup "reset" new==Just (Bool True) then KM.delete "semanticMenu" (KM.delete "semanticSource" old) else old)); _ -> delta
           frame <- either (ioError . userError) pure (parseRemoteFrame merged newRows)
           emit (Frame demand received frame)
           go newRows merged Nothing demand canvasState
@@ -687,6 +732,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
   exportGesture <- newIORef Nothing
   installedSource <- newIORef Nothing
   installedDialog <- newIORef Nothing
+  installedMenu <- newIORef Nothing
   installedSidebar <- newIORef Nothing
   installedCanvas <- newIORef Nothing
   canvasEpochRef <- newIORef Nothing
@@ -694,6 +740,7 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
         check "Clear sidebar accessibility" (c_accessibility nullPtr 0)
         writeIORef installedSource Nothing
         writeIORef installedDialog Nothing
+        writeIORef installedMenu Nothing
         writeIORef installedSidebar Nothing
         writeIORef installedCanvas Nothing
       installDialog value=do
@@ -703,6 +750,17 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           let bytes=fromMaybe emptyDialogAccessibility current
           BS.useAsCStringLen bytes $ \(ptr,len)->check "Update dialog accessibility" (c_accessibility ptr (fromIntegral len))
           writeIORef installedDialog (Just current)
+          writeIORef installedMenu Nothing
+          writeIORef installedSource Nothing
+          writeIORef installedSidebar Nothing
+          writeIORef installedCanvas Nothing
+      installMenu value=do
+        previous<-readIORef installedMenu
+        let current=remoteMenu value
+        when (previous/=Just current) $ do
+          let bytes=fromMaybe emptyMenuAccessibility current
+          BS.useAsCStringLen bytes $ \(ptr,len)->check "Update menu accessibility" (c_accessibility ptr (fromIntegral len))
+          writeIORef installedMenu (Just current)
           writeIORef installedSource Nothing
           writeIORef installedSidebar Nothing
           writeIORef installedCanvas Nothing
@@ -715,11 +773,10 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           writeIORef installedSource (Just current)
       installSidebar value=do
         previous<-readIORef installedSidebar
-        let bytes=remoteSidebar value
+        let bytes=if BS.null (remoteSidebar value) then "{\"readOnly\":true,\"revision\":0,\"layout\":[40,12,0,0,0,0,0],\"visibleStart\":0,\"visibleCount\":0,\"logicalRows\":0,\"nodes\":[]}" else remoteSidebar value
         when (previous/=Just bytes) $ do
           BS.useAsCStringLen bytes $ \(ptr,len)->check "Update sidebar accessibility" (c_accessibility ptr (fromIntegral len))
           writeIORef installedSidebar (Just bytes)
-          when (BS.null bytes) (writeIORef installedCanvas Nothing >> writeIORef installedSource Nothing)
       installCanvas value=do
         epoch<-readIORef canvasEpochRef
         let bytes=case remoteCanvas value of
@@ -886,7 +943,11 @@ runRemoteWindow backend scale (cols,rows) mode host peer = withFileExports $ \ex
           installDialog value
           case remoteDialog value of
             Just _->pure ()
-            Nothing->installSidebar value >> installCanvas value >> installSource value
+            Nothing->do
+              installMenu value
+              case remoteMenu value of
+                Just _->pure ()
+                Nothing->installSidebar value >> installCanvas value >> installSource value
           pure (Just value,atlas,connection,True,closed)
         Control value -> do
           kind <- parseIO (withObject "control" (.: "type")) value :: IO T.Text

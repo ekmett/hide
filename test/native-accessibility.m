@@ -364,12 +364,55 @@ int main(int argc,char **argv) {
     assert(publish(sourceWrapper));id closingSource=findRole(window,NSAccessibilityStaticTextRole,[NSMutableSet new]);assert(closingSource);
     assert(thc_accessibility(NULL,0));assert(![closingSource isAccessibilityElement] && ![closingSource accessibilityValue]);
     assert(!window.visible && !window.keyWindow);
+    NSArray *menuId=@[@"menu",@"window"];
+    NSDictionary *menuRoot=@{@"id":menuId,@"parent":NSNull.null,@"role":@"menu",@"name":@"Window",@"shortcut":@"",@"bounds":@[@1,@1,@30,@7],@"current":@NO,@"enabled":@YES,@"checked":NSNull.null};
+    NSMutableDictionary *menuEntry=[@{@"id":@[@"menu",@"window",@"builtin",@"hide.window.close",@"0"],@"parent":menuId,@"role":@"menuitem",@"name":@"Close λ <script>",@"shortcut":@"Alt+F3",@"bounds":@[@2,@2,@28,@1],@"current":@YES,@"enabled":@NO,@"checked":NSNull.null} mutableCopy];
+    NSMutableDictionary *menuRadio=[menuEntry mutableCopy];
+    [menuRadio addEntriesFromDictionary:@{@"id":@[@"menu",@"window",@"builtin",@"hide.view.current",@"0"],@"role":@"menuitemradio",@"name":@"Current",@"shortcut":@"",@"bounds":@[@2,@3,@28,@1],@"current":@NO,@"enabled":@YES,@"checked":@YES}];
+    NSMutableDictionary *menuSnapshot=[@{@"present":@YES,@"readOnly":@YES,@"truncated":@NO,@"nodes":@[menuRoot,menuEntry,menuRadio]} mutableCopy];
+    NSDictionary *menuWrapper=@{@"size":@[@(cols),@(rows)],@"menu":menuSnapshot};
+    assert(publish(sourceWrapper));id menuCoveredSource=sourceExcerpt(window);assert(menuCoveredSource);
+    assert(publish(menuWrapper));id menuElement=findRole(window,NSAccessibilityMenuRole,[NSMutableSet new]);assert(menuElement);
+    assert([[menuElement accessibilityLabel] isEqual:@"Window"] && [[menuElement accessibilityChildren] count]==2);
+    id menuCurrent=[menuElement accessibilityChildren][0],menuChecked=[menuElement accessibilityChildren][1];
+    assert([menuCurrent isAccessibilitySelected] && ![menuCurrent isAccessibilityEnabled] && ![menuCurrent accessibilityValue]);
+    assert(![menuChecked isAccessibilitySelected] && [menuChecked isAccessibilityEnabled] && [[menuChecked accessibilityValue] isEqual:@YES]);
+    assert(![menuCoveredSource isAccessibilityElement] && ![menuCoveredSource accessibilityValue]);
+    assert([[menuElement accessibilitySelectedChildren] isEqual:@[menuCurrent]]);
+    assert(![menuElement acceptsFirstResponder] && [menuElement hitTest:NSMakePoint(2,2)]==nil && window.firstResponder==firstResponder);
+    for (id item in @[menuElement,menuCurrent,menuChecked]) for (NSString *selector in @[@"setAccessibilityValue:",@"setAccessibilitySelected:",@"setAccessibilityFocused:",@"accessibilityPerformPress",@"accessibilityPerformPick",@"accessibilityPerformShowMenu"])
+        assert(![item isAccessibilitySelectorAllowed:NSSelectorFromString(selector)]);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    assert([[menuChecked accessibilityAttributeValue:@"AXMenuItemMarkChar"] isEqual:@"●"] && ![menuChecked accessibilityIsAttributeSettable:@"AXMenuItemMarkChar"]);
+    assert(![[menuChecked accessibilityActionNames] count]);
+#pragma clang diagnostic pop
+    assert(thc_accessibility_cell_rect(2,3,28,1,rect));
+    expected=[window convertRectToScreen:NSMakeRect(rect[0],NSHeight(window.contentView.bounds)-rect[1]-rect[3],rect[2],rect[3])];actual=[menuChecked accessibilityFrame];
+    near(actual.origin.x,expected.origin.x);near(actual.origin.y,expected.origin.y);near(actual.size.width,expected.size.width);near(actual.size.height,expected.size.height);
+    menuEntry[@"name"]=@"Renamed";assert(publish(menuWrapper));assert([menuElement accessibilityChildren][0]==menuCurrent && [[menuCurrent accessibilityLabel] isEqual:@"Renamed"]);
+    assert(window.firstResponder==firstResponder && ![menuCurrent isAccessibilityFocused]);
+    assert(publish(sourceWrapper));assert(!sourceExcerpt(window));
+    for (NSDictionary *bad in @[@{@"current":@1},@{@"checked":@YES},@{@"parent":@[@"menu",@"file"]},@{@"bounds":@[@(cols),@2,@1,@1]}]) {
+        NSMutableDictionary *badItem=[menuEntry mutableCopy];[badItem addEntriesFromDictionary:bad];menuSnapshot[@"nodes"]=@[menuRoot,badItem];
+        assert(!publish(menuWrapper));assert(![menuCurrent isAccessibilityElement] && ![menuCurrent accessibilityLabel] && ![menuCurrent accessibilityParent]);
+        assert(publish(sourceWrapper));assert(!sourceExcerpt(window));
+        menuSnapshot[@"nodes"]=@[menuRoot,menuEntry,menuRadio];assert(publish(menuWrapper));
+    }
+    id retiredMenu=findRole(window,NSAccessibilityMenuRole,[NSMutableSet new]);id retiredMenuItem=[retiredMenu accessibilityChildren][0];
+    menuSnapshot[@"nodes"]=@[];assert(publish(menuWrapper));assert(![retiredMenuItem isAccessibilityElement] && ![retiredMenuItem accessibilityLabel]);
+    assert(publish(sourceWrapper));assert(!sourceExcerpt(window)); // A hidden menu still covers source.
+    menuSnapshot[@"present"]=@NO;assert(publish(menuWrapper));assert(publish(sourceWrapper));assert(sourceExcerpt(window));
+    menuSnapshot[@"present"]=@YES;menuSnapshot[@"nodes"]=@[menuRoot,menuEntry,menuRadio];assert(publish(menuWrapper));
+    id reopenedMenu=findRole(window,NSAccessibilityMenuRole,[NSMutableSet new]);assert(reopenedMenu!=retiredMenu);
+    assert(publish(@{@"size":@[@(cols),@(rows)],@"dialog":emptyModal}));assert(![reopenedMenu isAccessibilityElement]);
+    assert(thc_accessibility(NULL,0));assert(window.firstResponder==firstResponder);
     assert(publish(sourceWrapper));id windowClosingSource=sourceExcerpt(window);assert(windowClosingSource);
     assert(publish(actionCanvas));
     NSArray<NSAccessibilityCustomAction *> *closingActions=[findRole(window,NSAccessibilityImageRole,[NSMutableSet new]) accessibilityCustomActions];assert(closingActions.count==4 && closingActions[0].handler());
     thc_close();assert(!closingActions[0].handler() && !thc_post_canvas_action("{}",2));
     assert(![windowClosingSource isAccessibilityElement] && ![windowClosingSource accessibilityValue] && ![windowClosingSource accessibilityParent]);
-    printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only sidebar/source/modal selectors, exact image action receipts and retirement checks passed\n",backend,(double)pw/ww);
+    printf("%s hidden SDL accessibility discovery, hierarchy, identity, bounds (density %.3f), read-only sidebar/source/modal/menu selectors, exact image action receipts and retirement checks passed\n",backend,(double)pw/ww);
  }
  return 0;
 }

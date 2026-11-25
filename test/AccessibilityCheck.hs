@@ -10,6 +10,10 @@
 
 module AccessibilityCheck (checks) where
 
+import Control.Exception (evaluate)
+import Control.DeepSeq (force)
+import GHC.Conc (getAllocationCounter)
+import AllocationProfile (AllocationProfile,withinBudget)
 import Control.Monad (unless,forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -18,6 +22,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import qualified Data.Map.Strict as M
 import qualified Data.Map.Lazy as Lazy
+import Data.List (nub)
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -25,14 +30,118 @@ import Hide.Buffer (newBuffer,Selection(..),Buffer(saved,undoStack,redoStack))
 import Hide.BufferView (BufferView(..))
 import Hide.Browser (Entry(..))
 import Hide.Accessibility
+import qualified Hide.Protocol as Protocol
 import Hide.Model
 import Hide.Plugin.Command (withRegistry)
+import qualified Hide.Plugin.Menu as Menu
 import Hide.Plugin.Tree
 import Hide.Sidebar
 import SidebarFixture
 
-checks :: IO ()
-checks=do
+checks :: AllocationProfile -> IO ()
+checks profile=do
+  let openFile=(initialDesktop (80,25)) {menu=Just (0,0)}
+  check "ordinary open menu has a read-only frame projection"
+    (case field "semanticMenu" (object (Protocol.frameMetadata "." openFile)) of
+      Just snapshot->field "present" snapshot==Just True && field "readOnly" snapshot==Just True
+      Nothing->False)
+  let menuView audience=menuSemantics audience
+      fileMenu=menuView OwnerSemantics openFile
+      findMenu name value=fromMaybe (error ("missing menu item "++T.unpack name))
+        (lookup name [(nameOf item,item) | item<-items value])
+      save=findMenu "Save" (menuView OwnerSemantics openFile {menu=Just (0,2)})
+      windowMenu=menuView OwnerSemantics openFile {menu=Just (8,8),defaultBufferView=ChangesView}
+      current=findMenu "Current" windowMenu
+      changes=findMenu "Changes" windowMenu
+      close=findMenu "Close" windowMenu
+      separator=[node | node<-items windowMenu,field "role" node==Just ("separator"::T.Text)]
+  check "menu current, disabled and radio check states follow independent painted state"
+    (field "current" save==Just True && field "enabled" save==Just False &&
+     field "current" close==Just True && field "enabled" close==Just False &&
+     field "checked" current==Just (Just False::Maybe Bool) && field "checked" changes==Just (Just True::Maybe Bool) &&
+     field "current" changes==Just False && length separator==1)
+  check "separator is never a selected actionable row"
+    (all (\node->field "current" node==Just False && field "enabled" node==Just False)
+      [node | node<-items (menuView OwnerSemantics openFile {menu=Just (8,9)}),field "role" node==Just ("separator"::T.Text)])
+  check "browser insertion does not shift existing inert menu identities"
+    (field "id" (findMenu "Close" fileMenu)==(field "id" (findMenu "Close" (menuView OwnerSemantics openFile {browserFrontend=True}))::Maybe [T.Text]))
+  check "unavailable session commands retain their original built-in identities"
+    (field "id" (findMenu "New conversation" (menuView OwnerSemantics openFile {menu=Just (6,0)}))==Just (["menu","tools","builtin","hide.agents.new","0"]::[T.Text]))
+  check "closed and covered menus publish absent replacements"
+    (field "present" (menuView OwnerSemantics openFile {menu=Nothing})==Just False &&
+     field "present" (menuView OwnerSemantics openFile {contextMenu=Just (Rect 0 1 10 3,0)})==Just False)
+  let clippedMenu=menuView OwnerSemantics openFile {screenSize=(12,4)}
+  check "only displayed menu rows have clipped positive bounds"
+    (length (items clippedMenu)==3 && all (\node->case field "bounds" node::Maybe [Int] of
+      Just [x,y,w,h]->x>=0 && y>=0 && w>0 && h>0 && x+w<=12 && y+h<=4
+      _->False) (items clippedMenu))
+  check "menu projection follows the central owner and guest overlay privacy policy"
+    (menuView GuestSemantics openFile==fileMenu && menuView OwnerSemantics openFile {streamerMode=True}==fileMenu)
+  forM_ [False,True] $ \browser->forM_ [0..length menus-1] $ \slot->do
+    let shown=(initialDesktop (512,256)) {menu=Just (slot,0),browserFrontend=browser}
+        projected=items (menuView OwnerSemantics shown)
+        ids=[ident | item<-projected,Just ident<-[field "id" item::Maybe [T.Text]]]
+    check "every built-in displayed menu row has one distinct stable projection"
+      (length projected==1+length (menuItemsFor shown slot) && length (nub ids)==length projected)
+  Menu.withMenus ["help"] $ \registry->do
+    let definition ident=Menu.MenuDef ident "help" "reader" 0 "Same label" "" False Menu.cancelConversationAction :: Menu.MenuDef () ()
+        require=either (error . show) id
+        projected entries=menuView OwnerSemantics openFile {menu=Just (9,0),contributedMenus=entries}
+        identifiers snapshot=[ident | node<-items snapshot,Just ident<-[field "id" node::Maybe [T.Text]]]
+    first<-require <$> Menu.contributeMenu registry (definition "example.first")
+    _<-require <$> Menu.contributeMenu registry (definition "example.second")
+    entries<-Menu.menuSnapshot registry
+    let before=identifiers (projected entries)
+    check "same-label contributions have distinct opaque registration identities" (length before==5 && length (nub before)==5)
+    _<-Menu.retireMenu registry first
+    _<-require <$> Menu.contributeMenu registry (definition "example.first")
+    replacement<-Menu.menuSnapshot registry
+    let after=identifiers (projected replacement)
+    check "retired contribution cannot reuse a new reader identity" (length after==5 && length [key | key<-before,key `notElem` after]==1)
+  Menu.withMenus ["debug"] $ \registry->do
+    let definition=Menu.MenuDef "hide.debug.toggle-breakpoint" "debug" "reader" 0 "Registered breakpoint" "" False Menu.cancelConversationAction :: Menu.MenuDef () ()
+    _<-either (error . show) pure =<< Menu.contributeMenu registry definition
+    entries<-Menu.menuSnapshot registry
+    let shown=openFile {screenSize=(512,256),menu=Just (5,0),contributedMenus=entries}
+        nodes=items (menuView OwnerSemantics shown)
+        ids=[ident | node<-nodes,Just ident<-[field "id" node::Maybe [T.Text]]]
+    check "repeated presentation of a registered breakpoint has distinct inert occurrence IDs"
+      (length nodes==1+length (menuItemsFor shown 5) && length (nub ids)==length ids)
+  check "closed menu projection never reads catalogue, bindings or buffers"
+    (field "present" (menuView OwnerSemantics openFile {menu=Nothing,
+      contributedMenus=error "closed menu forced contributions",keyBindings=error "closed menu forced bindings",buffers=error "closed menu forced buffers"})==Just False)
+  let largeMenu=addDocument Nothing (newBuffer (T.replicate 100000 "source line\n"))
+        openFile {screenSize=(160,50),browserFrontend=True}
+      poisonedMenu=largeMenu {buffers=M.map (\doc->doc {documentBuffer=(documentBuffer doc)
+        {saved=error "menu forced saved contents",undoStack=error "menu forced undo history",redoStack=error "menu forced redo history"}}) (buffers largeMenu)}
+  check "ordinary menu semantics do not read unrelated buffer histories"
+    (BL.length (encode (menuView OwnerSemantics poisonedMenu))>0)
+  let measured=largeMenu {screenSize=(160,50),browserFrontend=True}
+  _<-evaluate (BL.length (encode (object (Protocol.frameMetadata "." measured))))
+  let allocated action=do
+        before<-getAllocationCounter
+        action
+        after<-getAllocationCounter
+        pure (before-after)
+      view opened i=if opened then measured {menu=Just (0,i `mod` 10)} else moveTo False (i `mod` 10) measured {menu=Nothing}
+  -- Fixed matched scenario: 160x50, 100000 source rows, cycling File selection
+  -- or source caret. Metadata has a separately attributed bounded menu tree;
+  -- the total guard includes scene/cell composition and compressed export.
+  -- This buys reader access to visible items, shortcuts and independent checks.
+  forM_ [True,False] $ \opened->do
+    let metadata i=BL.length (encode (object (Protocol.frameMetadata "." (view opened i))))
+        previous=Protocol.frameRows (view opened 0)
+        packet i=BL.length (Protocol.framePacket False previous (Protocol.frameRows (view opened i))
+          (Protocol.frameMetadata "." (view opened i)))
+    _<-evaluate (metadata 0)
+    _<-evaluate (force previous)
+    _<-evaluate (packet 0)
+    stage<-allocated (forM_ [0..19::Int] (evaluate . metadata))
+    total<-allocated (forM_ [0..19::Int] (evaluate . packet))
+    check ("menu metadata stage remains bounded: "++show (opened,stage))
+      (withinBudget profile stage (20*(if opened then 500000 else 550000)))
+    check ("rendered menu export remains within matched total budget: "++show (opened,total))
+      (withinBudget profile total (20*(if opened then 4100000 else 3600000)))
   base<-sidebarFixture "/public" [("one.hs","/public/one.hs"),("secret.json","/authority/secret.json"),("three.hs","/public/three.hs")]
     (initialDesktop (80,25)) {guestPrivatePaths=["/authority"],streamerMode=False}
   let tree=fromMaybe (error "missing fixture tree") (sideTree base)

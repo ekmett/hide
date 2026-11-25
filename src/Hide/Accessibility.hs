@@ -15,12 +15,13 @@
 module Hide.Accessibility
   ( SemanticAudience(..)
   , sidebarSemantics
+  , menuSemantics
   , dialogSemantics
   , sourceSemantics
   ) where
 
 import Data.Aeson (Value, object, (.=))
-import qualified Data.List as List (foldl',sortOn)
+import qualified Data.List as List (foldl',sortOn,mapAccumL)
 import qualified Data.Map.Strict as M
 import Data.Maybe (isJust)
 import qualified Data.Sequence as S
@@ -29,9 +30,12 @@ import qualified Data.Text as T
 import qualified Data.Text.Unsafe as TU
 import Hide.GuestAccess (protectedFilePath,privateDialogFieldWith,readableAtWith,streamerReadableAtWith)
 import Hide.Model (Desktop(..), Dialog(..), Field(..), Purpose(..), Rect(..), problemsHeight, treeContentRows,
+  Command(..),MenuItem(..),menus,menuLayoutFor,menuCommandAvailable,
   dialogRect,fieldRects,fileListRows,buttonRects,textAreaRect,openComboBox,comboBoxRect,inside,
   Document(..),Window(..),activeWindow,windowFocused,bufferId,windowDocument,
   syntaxDocument,windowPresentation,windowTitle,windowContentRows,treeWidthOf,privateDocument,privateFilePaths)
+import Hide.Commands (commandIdentifier)
+import qualified Hide.Plugin.Menu as Menu
 import Hide.BufferView (BufferView(..))
 import qualified Hide.Buffer as Buffer
 import Hide.Buffer (caret,displayColumn,bufferContent,contentSourceLinesFrom,sourceLineWindow,sourceLineLength)
@@ -301,6 +305,68 @@ dialogSemantics audience desktop=case dialog desktop of
       | left<=0 || size>budget=([],True)
       | otherwise=let (values,cut)=bounded (left-1) (budget-size) rest in (value:values,shortened || cut)
 
+
+-- | Only the displayed ordinary dropdown, with host selection independent of
+-- reader focus and radio checks matching the painted default-view marker. IDs
+-- identify inert presentation nodes, not invocable menu actions. The admitted
+-- menu catalogue is bounded; no document text or undo history is traversed.
+absentMenuSemantics :: Value
+absentMenuSemantics=object ["present" .= False,"readOnly" .= True,"truncated" .= False,"nodes" .= ([]::[Value])]
+
+menuSemantics :: SemanticAudience -> Desktop -> Value
+menuSemantics audience d
+  | isJust (dialog d) || isJust (contextMenu d)=absentMenuSemantics
+  | Just (slot,selected)<-menu d,slot>=0,slot<length menus=
+      let (rect@(Rect x y w _),layout) = menuLayoutFor d slot
+          (title,_,_)=menus !! slot
+          root=["menu",T.toLower title]
+          permitted=case audience of
+            OwnerSemantics | not (streamerMode d)->True
+            OwnerSemantics->streamerReadableAtWith (privateFilePaths d) d x y
+            GuestSemantics->readableAtWith (privateFilePaths d) d x y
+          entry seen (index,(identity,MenuItem name _ command,shortcut))=
+            let separator=T.null name && case command of Disabled{}->True; _->False
+                checked=case command of SetBufferView mode->Just (defaultBufferView d==mode); _->Nothing
+                base=if separator then Just (root++["separator"]) else case identity of
+                  RegisteredMenu ref _->Just (root++["contribution",Menu.menuEpoch ref,T.pack (show (Menu.menuGeneration ref))])
+                  _->fmap (\tag->root++["builtin",tag]) (commandIdentifier identity)
+            in case base of
+              Nothing->(seen,Nothing)
+              Just key->let occurrence=M.findWithDefault (0::Int) key seen
+                            ident=key++[T.pack (show occurrence)]
+                            value=do
+                              at<-clip (Rect (x+1) (y+1+index) (max 0 (w-2)) 1)
+                              pure (node ident (Just root) (if separator then "separator" else if isJust checked then "menuitemradio" else "menuitem")
+                                name shortcut at (not separator && index==selected) (not separator && menuCommandAvailable d command) checked)
+                        in (M.insert key (occurrence+1) seen,value)
+          entries=[value | Just value<-snd (List.mapAccumL entry M.empty (zip [0..] layout))]
+      in case clip rect of
+        Just at | permitted->let (values,cut)=bounded 255 (32768-T.length title) entries
+                            in snapshot True cut (third (node root Nothing "menu" title "" at False True Nothing):values)
+        _->snapshot True False []
+  | otherwise=absentMenuSemantics
+  where
+    (cols,rows)=screenSize d
+    clip (Rect x y w h)
+      | cw<=0 || ch<=0=Nothing
+      | otherwise=Just (Rect cx cy cw ch)
+      where cx=max 0 x;cy=max 0 y;cw=min cols (x+w)-cx;ch=min rows (y+h)-cy
+    snapshot present cut nodes=object ["present" .= present,"readOnly" .= True,"truncated" .= cut,"nodes" .= (nodes::[Value])]
+    third (_,_,value)=value
+    node ident parent role name shortcut (Rect x y w h) current enabled checked=
+      let title=clean 256 name
+          key=clean 64 shortcut
+          cut=T.length (T.take 257 name)>256 || T.length (T.take 65 shortcut)>64
+      in (T.length title+T.length key,cut,object
+        ["id" .= (ident::[Text]),"parent" .= (parent::Maybe [Text]),"role" .= (role::Text),
+         "name" .= title,"shortcut" .= key,"bounds" .= [x,y,w,h],"current" .= current,"enabled" .= enabled,"checked" .= (checked::Maybe Bool)])
+    clean limit value=let shown=T.take limit value
+                      in if T.any isControl shown then T.filter (not . isControl) shown else shown
+    bounded :: Int -> Int -> [(Int,Bool,Value)] -> ([Value],Bool)
+    bounded _ _ []=([],False)
+    bounded count budget ((size,cut,value):rest)
+      | count<=0 || size>budget=([],True)
+      | otherwise=let (values,limited)=bounded (count-1) (budget-size) rest in (value:values,cut || limited)
 
 -- | Read-only excerpt of the focused ordinary source view. Privacy and view
 -- admission precede title or content reads. One measured line seek is followed

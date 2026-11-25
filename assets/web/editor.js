@@ -11,6 +11,7 @@ const resourceAction = document.querySelector('#open-resource');
 const downloadAction = document.querySelector('#download-file');
 const sidebarAccess = document.querySelector('#semantic-sidebar');
 const dialogAccess = document.querySelector('#semantic-dialog');
+const menuAccess = document.querySelector('#semantic-menu');
 const sourceAccess = document.querySelector('#semantic-source');
 const sourceText = document.querySelector('#semantic-source-text');
 const imageAccess = document.querySelector('#semantic-images');
@@ -424,7 +425,7 @@ function receiveSource(value){
    !Number.isSafeInteger(lastLine)||!Array.isArray(r)||r.length!==4||!r.every(integer)||
    r[2]<1||r[3]<1||r[0]+r[2]>cols||r[1]+r[3]>lines||value.lineCount>r[3]||
    !textWithin(value.name,256)||!textWithin(value.value,32768,true,value.lineCount))invalid();
- if(sourceCovered){clearSource();return;}
+ if(sourceCovered||menuCovered){clearSource();return;}
  const name=value.name||'Source';
  const description=`Read-only visible source excerpt. Lines ${value.firstLine} to ${lastLine}, display column offset ${value.firstColumn}. Limited to 256 lines, 2,048 characters per line and 32,768 characters total. `+
    (value.truncated?'More source text is not included. ':'Only the visible excerpt is included. ')+'Use editor controls to edit.';
@@ -437,8 +438,7 @@ function receiveSource(value){
 // A complete current-modal projection grants reading, never editor actions.
 function clearDialog(){
  dialogAccess.replaceChildren();dialogAccess.hidden=true;dialogAccess.removeAttribute('aria-label');
- sourceCovered=false;sourceAccess.removeAttribute('aria-hidden');
- sidebarAccess.removeAttribute('aria-hidden');imageAccess.removeAttribute('aria-hidden');
+ sourceCovered=false;semanticCovering();
 }
 function receiveDialog(value){
  const invalid=()=>{clearDialog();clearSource();throw new Error('Invalid dialog metadata');};
@@ -468,8 +468,7 @@ function receiveDialog(value){
  if(!value.present){clearDialog();return;}
  const reading=dialogAccess.contains(document.activeElement)&&document.activeElement.tagName==='TEXTAREA'?document.activeElement:null;
  if(!root)clearDialog();
- sourceCovered=true;clearSource();sourceAccess.setAttribute('aria-hidden','true');
- sidebarAccess.setAttribute('aria-hidden','true');imageAccess.setAttribute('aria-hidden','true');
+ clearMenu();sourceCovered=true;clearSource();semanticCovering();
  if(!root)return; // A private modal still covers the underlying semantic surface.
  const elements=new Map(),containers=new Map(),rootItems=[];let retainedRoot=null;containers.set('["dialog"]',dialogAccess);
  for(const [index,node] of value.nodes.entries())if(node!==root){
@@ -503,6 +502,84 @@ function receiveDialog(value){
  dialogAccess.setAttribute('aria-description','Read-only current dialog. Use editor controls to edit or activate.'+(value.truncated?' More dialog content is not included.':''));
  dialogAccess.hidden=false;
 }
+// The painted dropdown is a read-only menu. Reader focus is local; host-current,
+// disabled and checked states are separate facts and never authorize activation.
+let menuCovered=false,menuReadingKey=null,menuScope=null,menuElements=new Map();
+function retireMenuItem(item){
+ item.textContent='';item.id='';delete item.dataset.menuKey;
+ for(const name of ['role','aria-label','aria-description','aria-current','aria-checked','aria-disabled'])item.removeAttribute(name);
+}
+function semanticCovering(){
+ for(const element of [sourceAccess,sidebarAccess,imageAccess]){
+   if(sourceCovered||menuCovered)element.setAttribute('aria-hidden','true');else element.removeAttribute('aria-hidden');
+ }
+}
+function clearMenu(){
+ for(const item of menuElements.values())retireMenuItem(item);
+ menuAccess.replaceChildren();menuAccess.hidden=true;menuAccess.removeAttribute('aria-label');menuAccess.removeAttribute('aria-activedescendant');
+ menuCovered=false;menuReadingKey=null;menuScope=null;menuElements=new Map();semanticCovering();
+}
+function readMenuItem(item){
+ if(!item)return;menuReadingKey=item.dataset.menuKey;menuAccess.setAttribute('aria-activedescendant',item.id);
+}
+function receiveMenu(value){
+ const invalid=()=>{clearMenu();menuCovered=true;clearSource();semanticCovering();throw new Error('Invalid menu metadata');};
+ const integer=n=>Number.isSafeInteger(n)&&n>=0;
+ const text=(s,limit)=>typeof s==='string'&&s.length<=2*limit&&Array.from(s).length<=limit&&!/[\u0000-\u001f\u007f-\u009f\ud800-\udfff]/u.test(s);
+ const ordinal=s=>typeof s==='string'&&/^(0|[1-9][0-9]{0,2})$/.test(s);
+ const slots=['file','edit','search','run','compile','debug','tools','options','window','help'];
+ const validId=id=>Array.isArray(id)&&id[0]==='menu'&&slots.includes(id[1])&&(id.length===2||
+   id.length===4&&id[2]==='separator'&&ordinal(id[3])||id.length===5&&ordinal(id[4])&&id[2]==='builtin'&&text(id[3],128)&&/^[a-z0-9.-]+$/.test(id[3])||
+   id.length===6&&ordinal(id[5])&&id[2]==='contribution'&&typeof id[3]==='string'&&/^[0-9a-f]{48}$/.test(id[3])&&typeof id[4]==='string'&&/^[1-9][0-9]{0,19}$/.test(id[4]));
+ if(value===null){clearMenu();return;}
+ if(!value||value.readOnly!==true||typeof value.present!=='boolean'||typeof value.truncated!=='boolean'||
+   !Array.isArray(value.nodes)||value.nodes.length>256||!value.present&&value.nodes.length)invalid();
+ const nodes=new Map();let size=0,current=0,root=null;
+ for(const node of value.nodes){
+   if(!node||!validId(node.id)||!['menu','menuitem','menuitemradio','separator'].includes(node.role)||
+     !text(node.name,256)||!text(node.shortcut,64)||typeof node.current!=='boolean'||typeof node.enabled!=='boolean'||
+     !(node.checked===null||typeof node.checked==='boolean')||(node.role==='menuitemradio')!==(node.checked!==null))invalid();
+   const r=node.bounds;if(!Array.isArray(r)||r.length!==4||!r.every(integer)||r[2]<1||r[3]<1||r[0]+r[2]>cols||r[1]+r[3]>lines)invalid();
+   size+=Array.from(node.name).length+Array.from(node.shortcut).length;current+=Number(node.current);
+   const key=JSON.stringify(node.id);if(nodes.has(key)||size>32768||current>1)invalid();nodes.set(key,node);
+   if(node.role==='menu'){if(root||node.id.length!==2||node.parent!==null||node.current||!node.enabled)invalid();root=node;}
+   else if((node.role==='separator')!==(node.id[2]==='separator')||node.role==='separator'&&(node.current||node.enabled))invalid();
+ }
+ if(value.nodes.length&&!root)invalid();
+ for(const node of value.nodes)if(node!==root){
+   if(!validId(node.parent)||JSON.stringify(node.parent)!==JSON.stringify(root.id)||node.id[1]!==root.id[1]||node.id.length<=2||node.bounds[3]!==1)invalid();
+   const [x,y,w,h]=root.bounds,[a,b,c,e]=node.bounds;if(a<x||b<y||a+c>x+w||b+e>y+h)invalid();
+ }
+ if(!value.present||sourceCovered){clearMenu();return;}
+ const scope=root?JSON.stringify(root.id):null;
+ if(scope!==menuScope)clearMenu();
+ menuCovered=true;clearSource();semanticCovering();
+ if(!root){clearMenu();menuCovered=true;semanticCovering();return;}
+ const next=new Map(),children=[];
+ for(const node of value.nodes)if(node!==root){
+   const key=JSON.stringify(node.id),item=menuElements.get(key)||document.createElement('div');
+   item.dataset.menuKey=key;item.id='menu-item-'+node.id.map(encodeURIComponent).join('-');item.setAttribute('role',node.role);
+   item.textContent=node.name;item.setAttribute('aria-label',node.name);
+   for(const state of ['current','checked','disabled'])item.removeAttribute('aria-'+state);
+   if(node.role!=='separator')item.setAttribute('aria-disabled',!node.enabled);
+   if(node.current)item.setAttribute('aria-current','true');
+   if(node.checked!==null)item.setAttribute('aria-checked',node.checked);
+   item.setAttribute('aria-description',[node.current?'Current in editor':'',node.shortcut?'Shortcut: '+node.shortcut:'',node.checked!==null?'Default buffer view':''].filter(Boolean).join('. '));
+   next.set(key,item);children.push(item);
+ }
+ for(const [key,item] of menuElements)if(!next.has(key))retireMenuItem(item);
+ menuAccess.replaceChildren(...children);menuElements=next;menuScope=scope;
+ menuAccess.setAttribute('aria-label',root.name);menuAccess.hidden=false;
+ menuAccess.setAttribute('aria-description','Read-only open menu. Arrow keys browse; use editor controls to activate an item.'+(value.truncated?' More menu items are not included.':''));
+ readMenuItem(next.get(menuReadingKey)||children.find(item=>item.getAttribute('aria-current')==='true')||children.find(item=>item.getAttribute('role')!=='separator'));
+}
+menuAccess.addEventListener('keydown',event=>{
+ if(!['ArrowUp','ArrowDown','Home','End'].includes(event.key))return;
+ const items=[...menuElements.values()].filter(item=>item.getAttribute('role')!=='separator');if(!items.length)return;
+ const index=items.findIndex(item=>item.dataset.menuKey===menuReadingKey);
+ const next=event.key==='Home'?0:event.key==='End'?items.length-1:event.key==='ArrowUp'?Math.max(0,index-1):Math.min(items.length-1,index+1);
+ event.preventDefault();readMenuItem(items[next]);
+});
 // Authorized download bytes arrive over the authenticated socket, never a host
 // path. Chromium's DownloadURL is synchronous; keep an explicit click fallback.
 let preparedDownload=null,draggedDownload=null;
@@ -597,11 +674,11 @@ function connect(){
    }else if(message.type==='remote'){remoteHost=message.host;sessionFrontend=true;peerAttachment=message.attachment;
    }else if(message.type==='session'){
      closeInference();
-     peerAttachment=message.attachment;attachmentEpoch++;ready=false;hasFrame=false;platformSent=false;frame=null;rows=[];wireRows.length=0;serial=acknowledged=pendingEdit=0;clipboard='';nativeCopies=[];leftDown=false;mouse=[-1,-1];lastSize='';clearClipboardRequest();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;
+     peerAttachment=message.attachment;attachmentEpoch++;ready=false;hasFrame=false;platformSent=false;frame=null;rows=[];wireRows.length=0;serial=acknowledged=pendingEdit=0;clipboard='';nativeCopies=[];leftDown=false;mouse=[-1,-1];lastSize='';clearClipboardRequest();clearSidebar();clearDialog();clearMenu();clearSource();images.clear();dirty=true;
    }else if(message.type==='connection'){
-     transportConnected=message.connected;peerAttachment=message.attachment??peerAttachment;ready=message.connected&&glyphs.size>0&&(!sessionFrontend||hasFrame);if(!message.connected){closeInference();platformSent=false;attachmentEpoch++;clearClipboardRequest();if(!message.switching){clearSidebar();clearDialog();clearSource();images.clear();}dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');publishFrontend();
+     transportConnected=message.connected;peerAttachment=message.attachment??peerAttachment;ready=message.connected&&glyphs.size>0&&(!sessionFrontend||hasFrame);if(!message.connected){closeInference();platformSent=false;attachmentEpoch++;clearClipboardRequest();if(!message.switching){clearSidebar();clearDialog();clearMenu();clearSource();images.clear();}dirty=true;}status.textContent=message.message|| (ready?'Connected':'Reconnecting…');publishFrontend();
    }else if(message.type==='assets'){
-     attachmentEpoch++;clearSidebar();clearDialog();clearSource();images.clear();dirty=true;
+     attachmentEpoch++;clearSidebar();clearDialog();clearMenu();clearSource();images.clear();dirty=true;
      if(!glyphs.size)scale=initialScale=message.scale||2;glyphs=new Map(message.glyphs.map(([c,w,rs])=>[c,[w,rs]]));tiles.clear();atlasEntries.clear();hasFrame=false;ready=!sessionFrontend;status.textContent=ready?'Connected':'Connecting…';lastSize='';if(ready)send({type:'theme',dark:systemTheme.matches});
    }else if(message.type==='frame'){
      message.rows=decodeRows(message.rows);
@@ -610,6 +687,8 @@ function connect(){
      frame={...frame,...message};updateTitle();unsaved=frame.dirty;guardLeave();[cols,lines]=frame.size;mode=frame.mode||3;clipboard=frame.selection;
      if(Object.hasOwn(message,'semanticDialog'))receiveDialog(message.semanticDialog);
      else if(message.reset)clearDialog();
+     if(Object.hasOwn(message,'semanticMenu'))receiveMenu(message.semanticMenu);
+     else if(message.reset)clearMenu();
      if(Object.hasOwn(message,'semanticSource'))receiveSource(frame.semanticSource);
      else if(message.reset)clearSource();
      if(Object.hasOwn(message,'semanticSidebar'))receiveSidebar(message.semanticSidebar);
@@ -634,16 +713,16 @@ function connect(){
    }else if(message.type==='ack'){
      acknowledged=Math.max(acknowledged,message.seq);if(Object.hasOwn(message,"dirty"))unsaved=message.dirty;guardLeave();
    }else if(message.type==='detached'){
-     attachmentEpoch++;detached=true;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
+     attachmentEpoch++;detached=true;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();clearMenu();clearSource();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Session detached. Resume from your terminal with hide --resume.';
      navigator.keyboard?.unlock?.();socket.close();
    }else if(message.type==='closed'){
-     attachmentEpoch++;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
+     attachmentEpoch++;closed=true;ready=false;clearDownload();clearSidebar();clearDialog();clearMenu();clearSource();images.clear();dirty=true;guardLeave();fullscreen.disabled=true;
      status.textContent='Editor closed. You can close this tab.';
      navigator.keyboard?.unlock?.();socket.close();window.close();
    }
  };
- socket.onclose=event=>{stopped=true;closeInference();if(connection!==socket)return;attachmentEpoch++;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();clearSource();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
+ socket.onclose=event=>{stopped=true;closeInference();if(connection!==socket)return;attachmentEpoch++;console.info('Editor connection closed',event.code,event.reason);ready=false;downloadInfo=null;clearClipboardRequest();clearSidebar();clearDialog();clearMenu();clearSource();images.clear();dirty=true;mouse=[-1,-1];dirty=true;if(!closed){detaching=false;status.textContent='Disconnected — reconnecting…';setTimeout(connect,1000);}};
  socket.onerror=()=>{status.textContent='Connection unavailable';};
 }
 connect();
@@ -660,7 +739,7 @@ canvas.addEventListener('wheel',e=>{e.preventDefault();mouseEvent(e.deltaY<0?'wh
 function release(){send({type:'blur'});leftDown=false;mouse=[-1,-1];dirty=true;}
 window.addEventListener('blur',release);document.addEventListener('visibilitychange',()=>{if(document.hidden)release();});
 window.addEventListener('resize',resize);new ResizeObserver(resize).observe(screen);
-function semanticReadingTarget(target){return sidebarAccess.contains(target)||dialogAccess.contains(target)||sourceAccess.contains(target)||imageAccess.contains(target);}
+function semanticReadingTarget(target){return sidebarAccess.contains(target)||dialogAccess.contains(target)||menuAccess.contains(target)||sourceAccess.contains(target)||imageAccess.contains(target);}
 window.addEventListener('keydown',e=>{
  if(semanticReadingTarget(e.target))return;
  if(sessionFrontend&&e.key===']'&&e.ctrlKey&&!e.metaKey&&!e.altKey&&!e.shiftKey){

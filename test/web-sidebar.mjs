@@ -20,12 +20,14 @@ class Element {
   contains(target){return target===this||this.children.some(child=>child.contains(target));}
   querySelectorAll(){return this.children.flatMap(child=>[...(child.getAttribute('role')==='treeitem'?[child]:[]),...child.querySelectorAll()]);}
 }
-const sidebarAccess=new Element(),dialogAccess=new Element(),imageAccess=new Element(),sourceAccess=new Element(),sourceText=new Element('textarea'),document={activeElement:{},createElement:tag=>new Element(tag)};
+const sidebarAccess=new Element(),dialogAccess=new Element(),menuAccess=new Element(),imageAccess=new Element(),sourceAccess=new Element(),sourceText=new Element('textarea'),document={activeElement:{},createElement:tag=>new Element(tag)};
 sourceAccess.append(sourceText);sourceAccess.hidden=true;
 assert.match(fs.readFileSync('assets/web/index.html','utf8'),/id="semantic-sidebar"[^>]*role="tree"[^>]*aria-description="Read-only visible sidebar/);
 sidebarAccess.setAttribute('role','tree');sidebarAccess.hidden=true;
+assert.match(fs.readFileSync('assets/web/index.html','utf8'),/id="semantic-menu"[^>]*role="menu"/);
+menuAccess.setAttribute('role','menu');menuAccess.hidden=true;
 const packets=[];
-const context=vm.createContext({sidebarAccess,dialogAccess,imageAccess,sourceAccess,sourceText,document,status:{textContent:''},cols:80,lines:25,send:packet=>packets.push(packet)});
+const context=vm.createContext({sidebarAccess,dialogAccess,menuAccess,imageAccess,sourceAccess,sourceText,document,status:{textContent:''},cols:80,lines:25,send:packet=>packets.push(packet)});
 vm.runInContext(source.slice(start,source.indexOf('// Authorized download bytes',start)),context);
 const token='a'.repeat(48),id=name=>['tree',token,name];
 const root={id:['sidebar'],parent:null,role:'tree',name:'Sidebar',bounds:null,selected:false,focused:false,expanded:null,loading:false,childrenKnown:1,moreChildren:false,index:null,generation:1,level:0,posInSet:0,setSize:1};
@@ -263,3 +265,42 @@ vm.runInContext("send({type:'key',key:'y'})",context);
 assert.equal(JSON.parse(switchingSocket.sent.at(-1)).attachment,3);
 assert.equal(sockets.length,socketCount);assert.equal(sockets.at(-1),switchingSocket);
 console.log('Browser session handoff retains its socket, gates keys until RESET, resends current settings after failed preparation and revokes old upload/semantic state');
+
+const menuRoot={id:['menu','window'],parent:null,role:'menu',name:'Window',shortcut:'',bounds:[1,1,30,7],current:false,enabled:true,checked:null};
+const menuItem={...menuRoot,id:['menu','window','builtin','hide.window.close','0'],parent:menuRoot.id,role:'menuitem',name:'Close <script>',shortcut:'Alt+F3',bounds:[2,2,28,1],current:true,enabled:false};
+const radioItem={...menuItem,id:['menu','window','builtin','hide.view.current','0'],role:'menuitemradio',name:'Current',shortcut:'',bounds:[2,3,28,1],current:false,enabled:true,checked:true};
+const openMenu={present:true,readOnly:true,truncated:false,nodes:[menuRoot,menuItem,radioItem]};
+function menuSnapshot(value){context.value=value;vm.runInContext('receiveMenu(value)',context);}
+vm.runInContext('clearDialog();clearMenu();',context);
+const beforeMenuPackets=packets.length;
+menuSnapshot(openMenu);assert.equal(menuAccess.hidden,false);assert.equal(menuAccess.getAttribute('role'),'menu');
+const oldMenuItem=menuAccess.children[0],oldRadio=menuAccess.children[1];
+assert.equal(oldMenuItem.textContent,'Close <script>');assert.equal(oldMenuItem.getAttribute('aria-disabled'),'true');
+assert.equal(oldMenuItem.getAttribute('aria-current'),'true');assert.equal(oldMenuItem.getAttribute('aria-checked'),null);
+assert.equal(oldRadio.getAttribute('aria-checked'),'true');assert.equal(oldRadio.getAttribute('aria-current'),null);
+document.activeElement=menuAccess;
+menuAccess.events.get('keydown')({key:'ArrowDown',preventDefault(){}});
+assert.equal(menuAccess.getAttribute('aria-activedescendant'),oldRadio.id);
+menuSnapshot({...openMenu,nodes:[menuRoot,{...menuItem,name:'Changed'},radioItem]});
+assert.equal(menuAccess.children[0],oldMenuItem);assert.equal(menuAccess.children[1],oldRadio);
+assert.equal(document.activeElement,menuAccess);assert.equal(menuAccess.getAttribute('aria-activedescendant'),oldRadio.id);
+assert.equal(packets.length,beforeMenuPackets);
+sourceExcerpt(excerpt);assert.equal(sourceText.value,'');assert.equal(sourceAccess.getAttribute('aria-hidden'),'true');
+menuSnapshot({present:false,readOnly:true,truncated:false,nodes:[]});
+assert.equal(menuAccess.hidden,true);assert.equal(oldMenuItem.textContent,'');assert.equal(oldMenuItem.getAttribute('aria-label'),null);
+assert.equal(oldMenuItem.parentElement,null);assert.equal(sourceText.value,'');
+for(const bad of [{...openMenu,nodes:[menuRoot,menuItem,menuItem]},
+ {...openMenu,nodes:[menuRoot,{...menuItem,bounds:[99,2,1,1]}]},
+ {...openMenu,nodes:[menuRoot,{...menuItem,checked:true}]},
+ {...openMenu,nodes:[menuRoot,{...menuItem,parent:['menu','file']}]},
+ {...openMenu,nodes:[menuRoot,{...menuItem,name:'x'.repeat(257)}]}]){
+ menuSnapshot(openMenu);const retired=menuAccess.children[0];assert.throws(()=>menuSnapshot(bad),/Invalid menu/);
+ assert.equal(retired.textContent,'');assert.equal(menuAccess.hidden,true);assert.equal(sourceAccess.getAttribute('aria-hidden'),'true');
+}
+await message({type:'frame',rows:[],semanticMenu:openMenu});
+await message({type:'frame',rows:[]});assert.equal(menuAccess.hidden,false);
+await message({type:'frame',rows:[],reset:true});assert.equal(menuAccess.hidden,true);
+await message({type:'frame',rows:[],semanticMenu:openMenu});
+await message({type:'connection',connected:false});assert.equal(menuAccess.hidden,true);
+menuSnapshot(openMenu);vm.runInContext('receiveDialog(value)',Object.assign(context,{value:modal}));assert.equal(menuAccess.hidden,true);
+console.log('Browser menu reading preserves current/disabled/checked state, local focus, retired labels and overlay/reset/disconnect lifetimes without packets');
