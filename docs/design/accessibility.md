@@ -371,7 +371,13 @@ test/atspi-menu.sh /tmp/hide-atspi-menu
 
 The client requires Python GI/AT-SPI, Xvfb, `gdbus` and `dbus-run-session`. Its
 settings and display belong to the test, not an existing desktop session.
-This establishes X11 menu inspection at scale one, not Orca usability or complete
+The NixOS installed-package check also launches the actual Haskell editor on a
+software Vulkan driver, inspects its File menu independently, closes/reopens it
+through normal SDL keyboard input, and checks retained-reference retirement and
+clean session exit. This package-level check is separate from the C provider
+fixture and requires CI qualification.
+
+The locally exercised C path establishes X11 menu inspection at scale one, not Orca usability or complete
 Linux accessibility. Wayland global positioning, high-DPI geometry, source text,
 dialog/sidebar adapters, editing and assistive actions remain unqualified.
 

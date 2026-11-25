@@ -65,6 +65,7 @@ extra-source-files:
   , test/native-accessibility-unix.c
   , test/native-menu-snapshot.c
   , test/atspi-menu.py
+  , test/atspi-editor-menu.py
   , test/atspi-menu.sh
   , cbits/unicode.h
   , tools/convert-font.py

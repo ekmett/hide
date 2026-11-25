@@ -70,7 +70,7 @@
           };
         in {
           packages = { inherit hide; default = hide; };
-          checks.nixos = import ./nix/check.nix { inherit pkgs hide; };
+          checks.nixos = import ./nix/check.nix { inherit pkgs hide accesskitC; };
           apps.default = {
             type = "app";
             program = "${hide}/bin/hide";

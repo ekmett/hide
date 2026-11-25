@@ -1,11 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Edward Kmett
 # SPDX-License-Identifier: BSD-2-Clause OR Apache-2.0
-{ pkgs, hide }:
+{ pkgs, hide, accesskitC }:
+let
+  menuCheck = import ./native-menu-check.nix { inherit pkgs accesskitC; };
+  atspiPython = pkgs.python3.withPackages (ps: [ ps.pygobject3 ]);
+in
 
 pkgs.testers.runNixOSTest {
   name = "hide";
   nodes.machine = {
-    environment.systemPackages = [ hide pkgs.python3 pkgs.curl ];
+    environment.systemPackages = [ hide atspiPython pkgs.curl pkgs.dbus pkgs.glib pkgs.xorg.xorgserver pkgs.at-spi2-core pkgs.xdotool ];
     environment.etc."hide-remote-check.py".source = ../test/remote-session.py;
     virtualisation.memorySize = 2048;
   };
@@ -28,6 +32,25 @@ pkgs.testers.runNixOSTest {
     machine.succeed(
         "env hide_datadir=" + shlex.quote(data)
         + " python3 /etc/hide-remote-check.py ${hide}/bin/hide"
+    )
+
+    # Actual SDL frontend glue and independent AT-SPI client on a disposable
+    # display/bus, including retained references and no-bus startup.
+    machine.succeed(
+        "env GI_TYPELIB_PATH=${pkgs.lib.makeSearchPath "lib/girepository-1.0" [ (pkgs.lib.getLib pkgs.at-spi2-core) (pkgs.lib.getLib pkgs.glib) ]}"
+        + " LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.at-spi2-core pkgs.glib pkgs.vulkan-loader ]}"
+        + " XDG_DATA_DIRS=${pkgs.at-spi2-core}/share"
+        + " ${menuCheck}/libexec/hide-atspi-menu/atspi-menu.sh ${menuCheck}/bin/hide-atspi-menu-host"
+    )
+
+    # The packaged Haskell frontend must publish its real menu projection too;
+    # the C fixture above does not stand in for this owner/remote path.
+    machine.succeed(
+        "env GI_TYPELIB_PATH=${pkgs.lib.makeSearchPath "lib/girepository-1.0" [ (pkgs.lib.getLib pkgs.at-spi2-core) (pkgs.lib.getLib pkgs.glib) ]}"
+        + " LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath [ pkgs.at-spi2-core pkgs.glib pkgs.vulkan-loader ]}"
+        + " XDG_DATA_DIRS=${pkgs.at-spi2-core}/share HIDE_ATSPI_EDITOR=1"
+        + " HIDE_ATSPI_VULKAN_ICD_DIR=${pkgs.mesa.drivers}/share/vulkan/icd.d"
+        + " ${menuCheck}/libexec/hide-atspi-menu/atspi-menu.sh ${hide}/bin/hide"
     )
 
     # Leave hide_datadir unset here so the executable must find its own data.

@@ -30,4 +30,6 @@ export DISPLAY
 for property in IsEnabled ScreenReaderEnabled; do
     gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus --method org.freedesktop.DBus.Properties.Set org.a11y.Status "$property" '<true>' >/dev/null
 done
-python3 "$(dirname "$0")/atspi-menu.py" "$@"
+client=atspi-menu.py
+if [ "${HIDE_ATSPI_EDITOR:-0}" = 1 ]; then client=atspi-editor-menu.py;fi
+python3 "$(dirname "$0")/$client" "$@"
