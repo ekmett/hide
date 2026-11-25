@@ -72,6 +72,14 @@ until program-terminal logpoint output has source privacy tracking. Retained
 DAP output becomes unavailable to tools and assistance when a contributing
 expression source becomes private; other debug status fields remain available.
 
+If source privacy changes while a status snapshot is prepared, its source,
+frame, breakpoint, output, assistance and adapter metadata fields are omitted.
+`sourceMetadataUnavailable` explains that the caller should refresh status.
+Small control facts remain available, including session/generation and active,
+stopped, finishing and exit state. Mutation replies retain `accepted: true` when
+the command was admitted; withheld inspection metadata does not turn an accepted
+command into a failed operation or invite repeating it.
+
 `debug_present` controls visibility independently of execution. Set `follow: false`
 for background stops, then reveal `source`, `stack`, `scopes` or `output` using
 the current generation. Set `follow: true` to follow future stops. The user and

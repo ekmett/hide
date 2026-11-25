@@ -448,6 +448,10 @@ richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(por
       row :: Int -> Value -> Value
       row n value=case filter ((==Just n).field "line") (points value) of p:_->p; _->error "missing breakpoint"
       check label ok=unless ok (error label)
+      withheld answer=case answer of
+        Right value->field "sourceMetadataUnavailable" value==Just ("Source privacy context changed; refresh status."::T.Text) &&
+          all (\key->(field key value::Maybe Value)==Nothing) ["breakpoints","frame","source","output","assistance","error","capabilities"]
+        _->False
       barrier desktop=do
         epoch<-generationOf <$> current desktop
         (queued,finish)<-debuggerTool runtime desktop "debug_inspect" (object ["generation" .= epoch,"request" .= ("threads"::T.Text)])
@@ -555,7 +559,7 @@ richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(por
   (_,privateStatus)<-tool "debug_status" [] refused {guestPrivatePaths=[canonical]}
   secondPrivacy<-alreadyTainted
   check "already-tainted output cannot release another newly private source snapshot"
-    (secondPrivacy==Left "Debugger source privacy changed; request status again.")
+    (withheld secondPrivacy)
   check "private breakpoint expressions do not appear in MCP readback" (null (points privateStatus))
   let dismissed=fst (submitDialog 1 retryStale refused)
   disabledRestart<-send "breakpoint" [] (moveTo False 0 dismissed) >>= barrier
@@ -573,7 +577,7 @@ richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(por
   (_,retiringOutput)<-debuggerTool runtime genericDraft "debug_status" (object [])
   generic<-send "launch-config" ["1",T.pack (path<>".rich.json")] genericDraft >>= await "generic third session" (pure . T.isInfixOf "session = 3" . activeText) >>= barrier
   oldOutput<-retiringOutput
-  check "replacement retires already-admitted old output" (oldOutput==Left "Debugger source privacy changed; request status again.")
+  check "replacement retires already-admitted old output" (withheld oldOutput)
   genericStatus<-current generic
   genericEntries<-map (fromMaybe (error "invalid generic breakpoint log") . decodeStrictText) . T.lines <$> TIO.readFile path
   let genericPoints=[point | entry<-genericEntries,field "session" entry==Just (3::Int),Just req<-[field "request" entry],field "command" req==Just ("setBreakpoints"::T.Text),Just args<-[field "arguments" req],point<-fromMaybe [] (field "breakpoints" args)]::[Value]
@@ -583,14 +587,23 @@ richBreakpointFixtureChecks=bracket (fixture "rich-breakpoints") cleanup $ \(por
   idleStatus<-current idle
   check "rich-source idle privacy checks inspect metadata without forcing payloads" (generationOf idleStatus==generationOf genericStatus)
   outputReady<-await "rich output on actual DAP stream" (\desktop->current desktop >>= pure . maybe False (T.isInfixOf "RICH_OUTPUT session=3") . field "output") generic
+  (_,publicReceipt)<-debuggerTool runtime outputReady "debug_set_breakpoints" (object ["generation" .= generationOf genericStatus,"bufferId" .= bid,"lines" .= ([1]::[Int])])
+  publicAnswer<-publicReceipt >>= either (error . T.unpack) pure
+  check "ordinary public mutation keeps its accepted receipt and full metadata"
+    (field "accepted" publicAnswer==Just True && (field "sourceMetadataUnavailable" publicAnswer::Maybe T.Text)==Nothing && not (null (points publicAnswer)))
+  (_,mutationReceipt)<-debuggerTool runtime outputReady "debug_set_breakpoints" (object ["generation" .= generationOf genericStatus,"bufferId" .= bid,"lines" .= ([1]::[Int])])
   (_,inFlight)<-debuggerTool runtime outputReady "debug_status" (object [])
   (removed,_)<-tool "debug_set_breakpoints" ["generation" .= generationOf genericStatus,"bufferId" .= bid,"lines" .= ([]::[Int])] outputReady
   drained<-barrier removed
   privateOutput<-tick drained {guestPrivatePaths=[canonical]}
   late<-inFlight
+  mutationAnswer<-mutationReceipt
+  check "privacy withholding preserves actual mutation acceptance and generation"
+    (withheld mutationAnswer && (mutationAnswer >>= maybe (Left "missing acceptance") Right . field "accepted")==Right True &&
+     (mutationAnswer >>= maybe (Left "missing generation") Right . field "generation")==Right (generationOf genericStatus))
   privateRead<-current privateOutput
   check "retained output tracks removed source privacy and protects in-flight status"
-    (late==Left "Debugger source privacy changed; request status again." && field "output" privateRead==Just (""::T.Text) &&
+    (withheld late && field "output" privateRead==Just (""::T.Text) &&
      field "outputUnavailable" privateRead==Just ("Debugger output is private or retired."::T.Text) &&
      generationOf privateRead==generationOf genericStatus && field "active" privateRead==Just True)
   publicAgain<-current privateOutput {guestPrivatePaths=[]}

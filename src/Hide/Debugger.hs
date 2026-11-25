@@ -190,7 +190,10 @@ protectOutputResult token captured prepare=do
   current<-readIORef token
   pure $ case current of
     OutputShared public _ _ stamp | captured==Just stamp->if public then result else fmap hideOutput result
-    _->Left "Debugger source privacy changed; request status again."
+    _->case result of
+      Right (Object fields)->Right (Object (KM.insert "sourceMetadataUnavailable" (String "Source privacy context changed; refresh status.")
+        (KM.filterWithKey (\key _->key `elem` ["accepted","session","generation","active","terminated","finishing","exitCode","connected","ready","configured","stopped","follow","threadId","watchCount"]) fields)))
+      _->Left "Source privacy context changed; request status again."
   where
     hideOutput (Object fields)=Object (KM.insert "output" (String "") $ KM.insert "outputUnavailable" (String "Debugger output is private or retired.") $
       maybe fields (\value->KM.insert "assistance" (hideObservations value) fields) (KM.lookup "assistance" fields))
