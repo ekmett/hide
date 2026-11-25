@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 #define THC_AX_MENU_MAX_NODES 256
-#define THC_AX_MENU_MAX_TEXT_BYTES 131072
+#define THC_AX_MENU_MAX_TEXT_BYTES 262144
 /* These are inert presentation roles, never action permissions. */
 typedef enum {
     THC_AX_MENU_ROOT=0, THC_AX_MENU_ITEM=1,

@@ -69,7 +69,7 @@ invalid:
 static thc_ax_menu_snapshot *pending_menu,*live_menu;
 static uint64_t next_menu_token=2;
 static size_t pending_capacity;
-static int pending_failed;
+static size_t pending_text_budget;
 static double last_width=1,last_height=1;
 static int publish_menu(const thc_ax_menu_snapshot *value) {
 #ifdef WITH_ACCESSKIT
@@ -79,13 +79,13 @@ static int publish_menu(const thc_ax_menu_snapshot *value) {
 #endif
 }
 void thc_ax_menu_clear(void) {
-    thc_ax_menu_snapshot_free(pending_menu);pending_menu=NULL;pending_capacity=0;pending_failed=0;
+    thc_ax_menu_snapshot_free(pending_menu);pending_menu=NULL;pending_capacity=0;pending_text_budget=THC_AX_MENU_MAX_TEXT_BYTES;
     thc_ax_menu_snapshot_free(live_menu);live_menu=NULL;
     thc_ax_menu_snapshot empty={0,last_width,last_height,0,NULL};
     (void)publish_menu(&empty);
 }
 int thc_ax_menu_begin(int present,double width,double height) {
-    thc_ax_menu_snapshot_free(pending_menu);pending_menu=NULL;pending_capacity=0;pending_failed=0;
+    thc_ax_menu_snapshot_free(pending_menu);pending_menu=NULL;pending_capacity=0;pending_text_budget=THC_AX_MENU_MAX_TEXT_BYTES;
     if (!isfinite(width) || !isfinite(height) || width<=0 || height<=0) { thc_ax_menu_clear();return 0; }
     pending_menu=calloc(1,sizeof(*pending_menu));
     if (!pending_menu) { thc_ax_menu_clear();return 0; }
@@ -94,24 +94,28 @@ int thc_ax_menu_begin(int present,double width,double height) {
 }
 int thc_ax_menu_item(const char *id,int parent,int role,const char *name,const char *shortcut,
                     double x,double y,double width,double height,int enabled,int current,int checked) {
-    if (!pending_menu || pending_failed) return 0;
-    if (!pending_menu->present || pending_menu->count==THC_AX_MENU_MAX_NODES) { pending_failed=1;return 0; }
+    if (!pending_menu) { thc_ax_menu_clear();return 0; }
+    if (!pending_menu->present || pending_menu->count==THC_AX_MENU_MAX_NODES) { thc_ax_menu_clear();return 0; }
     if (pending_menu->count==pending_capacity) {
         size_t capacity=pending_capacity?pending_capacity*2:16;
         void *nodes=realloc((void *)pending_menu->nodes,capacity*sizeof(thc_ax_menu_node));
-        if (!nodes) { pending_failed=1;return 0; }
+        if (!nodes) { thc_ax_menu_clear();return 0; }
         pending_menu->nodes=nodes;pending_capacity=capacity;
     }
     thc_ax_menu_node *node=(thc_ax_menu_node *)pending_menu->nodes+pending_menu->count++;
-    memset(node,0,sizeof(*node));size_t budget=THC_AX_MENU_MAX_TEXT_BYTES;
-    node->id=copy_text(id,1024,&budget);node->name=copy_text(name,1024,&budget);node->shortcut=copy_text(shortcut,256,&budget);
+    memset(node,0,sizeof(*node));
+    node->id=copy_text(id,1024,&pending_text_budget);node->name=copy_text(name,1024,&pending_text_budget);node->shortcut=copy_text(shortcut,256,&pending_text_budget);
     node->parent=parent;node->role=(thc_ax_menu_role)role;node->bounds=(thc_ax_rect){x,y,width,height};
     node->enabled=!!enabled;node->current=!!current;node->checked=checked;
-    if (!node->id || !node->name || !node->shortcut) { pending_failed=1;return 0; }
+    if (!node->id || !node->name || !node->shortcut) { thc_ax_menu_clear();return 0; }
     return 1;
 }
 int thc_ax_menu_end(void) {
-    if (!pending_menu || pending_failed) { thc_ax_menu_clear();return 0; }
+    if (!pending_menu) { thc_ax_menu_clear();return 0; }
+    if (!pending_menu->present && !pending_menu->count && live_menu && !live_menu->present && !live_menu->count &&
+        pending_menu->width==live_menu->width && pending_menu->height==live_menu->height) {
+        thc_ax_menu_snapshot_free(pending_menu);pending_menu=NULL;pending_capacity=0;return 1;
+    }
     for (size_t i=0;i<pending_menu->count;++i) {
         thc_ax_menu_node *node=(thc_ax_menu_node *)pending_menu->nodes+i;
         if (live_menu) for (size_t j=0;j<live_menu->count;++j) {
