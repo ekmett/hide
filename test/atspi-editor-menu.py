@@ -92,7 +92,9 @@ with tempfile.TemporaryDirectory(prefix="hide-atspi-editor-") as directory:
             await_value("Haskell menu reopen not published", lambda: root.get_child_count() > 0)
             assert menu.get_state_set().contains(Atspi.StateType.DEFUNCT)
             key("Escape")
-            key("alt+x")
+            # Quit destroys the window on key press, before xdotool could send
+            # its releases. This display belongs to the test and is retired below.
+            subprocess.run(["xdotool", "keydown", "--window", window, "alt+x"], check=True, timeout=5)
             assert frontend.wait(timeout=8) == 0
             assert daemon.wait(timeout=8) == 0
             print("Installed Haskell editor menu discovery, read-only state and retirement passed")
